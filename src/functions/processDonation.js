@@ -301,7 +301,8 @@ app.http('ProcessDonation', {
             return {
                 status: 200,
                 jsonBody: {
-                    id: session.id
+                    id: session.id,
+                    url: session.url
                 }
             };
             
