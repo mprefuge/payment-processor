@@ -1,0 +1,19 @@
+{
+  "name": "payment-processing-function",
+  "version": "1.0.0",
+  "description": "Azure Function for payment processing with Stripe integration",
+  "main": "src/functions/*.js",
+  "scripts": {
+    "start": "func start",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "stripe": "^14.7.0",
+    "@sendgrid/mail": "^8.1.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "node-fetch": "^2.7.0"
+  }
+}

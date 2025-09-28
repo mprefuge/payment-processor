@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "STRIPE_TEST_SECRET_KEY": "sk_test_YOUR_TEST_KEY_HERE",
+    "STRIPE_LIVE_SECRET_KEY": "sk_live_YOUR_LIVE_KEY_HERE",
+    "SENDGRID_API_KEY": "YOUR_SENDGRID_API_KEY_HERE",
+    "NOTIFICATION_EMAIL_TEST": "micah@refugeintl.org",
+    "NOTIFICATION_EMAIL_LIVE": "info@refugeintl.org",
+    "SUCCESS_URL": "https://refugeintl.org/thankyou"
+  }
+}
