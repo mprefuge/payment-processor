@@ -3,8 +3,11 @@ module.exports = {
   passWithNoTests: true,
   // Skip the main test.js file from Jest 
   testPathIgnorePatterns: ['/node_modules/', 'test.js'],
+  // Include the root level test files
+  testMatch: ['**/*.test.js'],
   collectCoverageFrom: [
-    'src/**/*.js',
+    '*.js',
+    'processDonation/**/*.js',
     '!**/node_modules/**'
   ],
   // Configure test environment

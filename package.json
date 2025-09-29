@@ -2,7 +2,7 @@
   "name": "payment-processing-function",
   "version": "1.0.0",
   "description": "Azure Function for payment processing with Stripe integration",
-  "main": "src/functions/*.js",
+  "main": "processDonation/index.js",
   "scripts": {
     "start": "func start",
     "test": "jest"
