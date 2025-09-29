@@ -121,7 +121,16 @@ az functionapp config appsettings set \
   "NOTIFICATION_EMAIL_TEST=micah@refugeintl.org" \
   "NOTIFICATION_EMAIL_LIVE=info@refugeintl.org" \
   "SUCCESS_URL=https://refugeintl.org/thankyou"
+
+# Deployment Configuration (Required for GitHub Actions)
+az functionapp config appsettings set \
+  --name payment-processing-function \
+  --resource-group payment-processing-rg \
+  --settings \
+  "WEBSITE_RUN_FROM_PACKAGE=1"
 ```
+
+**Important:** The `WEBSITE_RUN_FROM_PACKAGE=1` setting is crucial for GitHub Actions deployment. Do not remove this setting as it will cause the function to stop appearing in the Azure Portal.
 
 ### Step 6: Deploy Function Code
 
@@ -269,6 +278,30 @@ az webapp log tail --name payment-processing-function --resource-group payment-p
 1. **Function not starting**: Check that all required environment variables are set
 2. **Stripe errors**: Verify API keys are correct and have proper permissions
 3. **Email failures**: Ensure SendGrid API key is valid and sender is verified
+4. **Function not visible in Azure Portal**: This usually means `WEBSITE_RUN_FROM_PACKAGE=1` is missing
+
+### Function Not Appearing in Azure Portal
+
+If your function disappears from the Azure Portal after deployment, it's likely because the `WEBSITE_RUN_FROM_PACKAGE` setting was removed. This setting is required for GitHub Actions deployment.
+
+**Quick Fix:**
+```bash
+# Run the fix script
+./fix-deployment.sh
+
+# Or manually restore the setting
+az functionapp config appsettings set \
+  --name payment-processing-function \
+  --resource-group payment-processing-rg \
+  --settings "WEBSITE_RUN_FROM_PACKAGE=1"
+
+# Restart the function app
+az functionapp restart \
+  --name payment-processing-function \
+  --resource-group payment-processing-rg
+```
+
+**Prevention:** Never delete the `WEBSITE_RUN_FROM_PACKAGE` setting when using GitHub Actions for deployment.
 4. **CORS errors**: Add your domain to allowed origins
 
 ### Debugging

@@ -335,6 +335,35 @@ Create alerts for:
    - Check sender verification
    - Review SendGrid activity logs
 
+5. **Function not visible in Azure Portal**
+   - This usually indicates `WEBSITE_RUN_FROM_PACKAGE=1` setting is missing
+   - Run `./fix-deployment.sh` to restore the setting
+   - Never delete `WEBSITE_RUN_FROM_PACKAGE` when using GitHub Actions deployment
+
+### Fix Function Visibility Issue
+
+If your function disappears from Azure Portal after running:
+```bash
+az functionapp config appsettings delete --name payment-processing-function --resource-group payment-processing-rg --setting-names WEBSITE_RUN_FROM_PACKAGE
+```
+
+**Solution:**
+```bash
+# Use the provided fix script
+./fix-deployment.sh
+
+# Or manually restore the setting
+az functionapp config appsettings set \
+  --name payment-processing-function \
+  --resource-group payment-processing-rg \
+  --settings "WEBSITE_RUN_FROM_PACKAGE=1"
+
+# Restart the function app
+az functionapp restart \
+  --name payment-processing-function \
+  --resource-group payment-processing-rg
+```
+
 ### Diagnostic Commands
 
 ```bash

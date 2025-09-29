@@ -64,6 +64,15 @@ az functionapp create \
 
 echo "🔧 Function app created successfully!"
 
+# Configure essential deployment settings
+echo "⚙️ Configuring deployment settings..."
+az functionapp config appsettings set \
+  --name $FUNCTION_APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --settings \
+  "WEBSITE_RUN_FROM_PACKAGE=1" \
+  --output table
+
 # Get function app details
 echo "📊 Function app details:"
 az functionapp show --name $FUNCTION_APP_NAME --resource-group $RESOURCE_GROUP --query "{name:name, location:location, state:state, defaultHostName:defaultHostName}" --output table

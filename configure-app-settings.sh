@@ -67,6 +67,15 @@ az functionapp config appsettings set \
   --output table
 
 echo ""
+echo "🔧 Configuring deployment settings..."
+az functionapp config appsettings set \
+  --name $FUNCTION_APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --settings \
+  "WEBSITE_RUN_FROM_PACKAGE=1" \
+  --output table
+
+echo ""
 echo "✅ Configuration completed successfully!"
 echo ""
 echo "Current app settings:"
