@@ -5,9 +5,16 @@
     "FUNCTIONS_WORKER_RUNTIME": "node",
     "STRIPE_TEST_SECRET_KEY": "sk_test_YOUR_TEST_KEY_HERE",
     "STRIPE_LIVE_SECRET_KEY": "sk_live_YOUR_LIVE_KEY_HERE",
+    "STRIPE_WEBHOOK_SECRET_TEST": "whsec_YOUR_TEST_WEBHOOK_SECRET_HERE",
+    "STRIPE_WEBHOOK_SECRET_LIVE": "whsec_YOUR_LIVE_WEBHOOK_SECRET_HERE",
     "SENDGRID_API_KEY": "YOUR_SENDGRID_API_KEY_HERE",
     "NOTIFICATION_EMAIL_TEST": "micah@refugeintl.org",
     "NOTIFICATION_EMAIL_LIVE": "info@refugeintl.org",
-    "SUCCESS_URL": "https://refugeintl.org/thankyou"
+    "SUCCESS_URL": "https://refugeintl.org/thankyou",
+    "CRM_PROVIDER": "salesforce",
+    "SALESFORCE_USERNAME": "your-salesforce-username@example.com",
+    "SALESFORCE_PASSWORD": "your-salesforce-password",
+    "SALESFORCE_SECURITY_TOKEN": "your-salesforce-security-token",
+    "SALESFORCE_LOGIN_URL": "https://login.salesforce.com"
   }
 }
