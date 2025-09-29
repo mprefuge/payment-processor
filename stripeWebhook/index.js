@@ -1,5 +1,14 @@
 const Stripe = require('stripe');
 const CrmFactory = require('../services/crm/crmFactory');
+const { ContactMatcher } = require('../services/contactMatcher');
+const ReviewTaskService = require('../services/reviewTaskService');
+const IdempotencyService = require('../services/idempotencyService');
+const MetricsService = require('../services/metricsService');
+const { loadConfig, validateConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
+
+// Global service instances
+const idempotencyService = new IdempotencyService();
+const metricsService = new MetricsService();
 
 /**
  * Stripe Webhook Handler for Payment Confirmations
@@ -69,14 +78,20 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             return;
         }
 
+        // Load and validate matching configuration
+        const matchingConfig = loadConfig();
+        validateConfig(matchingConfig);
+
         // Validate CRM configuration
         const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
         if (!validation.isValid) {
             throw new Error(`CRM configuration invalid: ${validation.error}`);
         }
 
-        // Create CRM service instance
+        // Create services
         const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+        const contactMatcher = new ContactMatcher(matchingConfig);
+        const reviewTaskService = new ReviewTaskService(crmService, matchingConfig.review);
 
         // Extract customer information from payment intent
         const customerId = paymentIntent.customer;
@@ -92,72 +107,180 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             throw new Error(`Customer not found: ${customerId}`);
         }
 
-        context.log(`Processing payment for customer: ${customer.name} (${customer.email})`);
+        context.log(`Processing payment for customer: ${customer.name || 'Unknown'} (${customer.email})`);
 
-        // Prepare search criteria for CRM
-        const searchCriteria = {
+        // Prepare transaction data for matching
+        const transactionData = {
+            transactionId: paymentIntent.id,
+            amount: paymentIntent.amount,
+            currency: paymentIntent.currency,
+            timestamp: new Date(paymentIntent.created * 1000).toISOString(), // Add timestamp for idempotency
             email: customer.email,
             phone: customer.phone,
             firstName: customer.name ? customer.name.split(' ')[0] : null,
-            lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null
+            lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null,
+            address: customer.address,
+            // Extract category from metadata if available
+            category: paymentIntent.metadata?.category || paymentIntent.metadata?.fund || null,
+            description: paymentIntent.description,
+            frequency: paymentIntent.metadata?.frequency || 'onetime'
         };
 
-        // Search for existing contact in CRM
-        const existingContacts = await crmService.searchContact(searchCriteria);
-        
-        let contact;
-        if (existingContacts.length === 0) {
-            context.log('No existing contact found, creating new contact');
-            
-            // Create new contact
-            const contactData = {
-                email: customer.email,
-                firstName: searchCriteria.firstName,
-                lastName: searchCriteria.lastName,
-                phone: customer.phone,
-                address: customer.address
-            };
-            
-            contact = await crmService.createContact(contactData);
-        } else {
-            // Select best matching contact
-            contact = crmService.selectBestMatch(existingContacts, searchCriteria);
-            context.log(`Using existing contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+        // Process with idempotency checking
+        const startTime = Date.now();
+        const result = await idempotencyService.processWithIdempotency(transactionData, async (txnData) => {
+            return await contactMatcher.processMatch(txnData, async (normalized) => {
+                const searchCriteria = {
+                    email: normalized.email,
+                    phone: normalized.phone,
+                    firstName: normalized.firstName,
+                    lastName: normalized.lastName
+                };
+                
+                return await crmService.searchContact(searchCriteria);
+            });
+        });
+        const processingTime = Date.now() - startTime;
+
+        // Check if this was processed from cache
+        if (result.fromCache) {
+            context.log(`Transaction ${paymentIntent.id} already processed: ${result.message}`);
+            metricsService.recordDecision(result.summary, processingTime, true);
+            return;
         }
 
-        // Create completed task for the donation
-        const taskData = {
-            subject: 'Donation Received',
-            description: `Payment received via Stripe. Amount: $${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}. Transaction ID: ${paymentIntent.id}`,
-            type: 'Donation',
-            status: 'Completed'
-        };
+        const matchResult = result;
 
-        const task = await crmService.createTask(contact.Id, taskData);
-        context.log(`Created task: ${task.Id}`);
+        // Record metrics
+        metricsService.recordDecision(matchResult.decision, processingTime, false);
 
-        // Create transaction record
-        const transactionData = {
-            amount: paymentIntent.amount,
-            currency: paymentIntent.currency,
-            paymentMethod: 'Credit Card', // Could be enhanced to detect actual payment method
-            transactionId: paymentIntent.id,
-            status: 'Completed',
-            description: `Stripe payment: ${paymentIntent.id}`,
-            frequency: 'onetime', // This could be enhanced to detect subscription vs one-time
-            category: 'General Donation' // This could be enhanced with metadata
-        };
+        context.log('ContactMatcher decision:', {
+            action: matchResult.decision.action,
+            reason: matchResult.decision.reason,
+            score: matchResult.decision.bestScore,
+            candidates: matchResult.candidates.length
+        });
 
-        const transaction = await crmService.createTransaction(contact.Id, transactionData);
-        context.log(`Created transaction: ${transaction.Id}`);
+        let contact = null;
+
+        if (matchResult.decision.action === 'associate') {
+            // High confidence match - use the selected contact
+            contact = matchResult.decision.candidate;
+            context.log(`High confidence match: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+            
+        } else if (matchResult.decision.action === 'review') {
+            // Uncertain or no match - create review task
+            if (matchingConfig.review.enabled) {
+                const reviewTask = await reviewTaskService.createReviewTask(
+                    matchResult, 
+                    transactionData, 
+                    paymentIntent
+                );
+                context.log(`Created review task: ${reviewTask.taskId} for ${matchResult.decision.reason}`);
+            }
+
+            // For low/uncertain matches, we can still create the transaction but without contact association
+            // OR we can create a new contact if no candidates were found
+            if (matchResult.candidates.length === 0) {
+                context.log('No candidates found, creating new contact');
+                
+                const contactData = {
+                    email: customer.email,
+                    firstName: transactionData.firstName,
+                    lastName: transactionData.lastName,
+                    phone: customer.phone,
+                    address: customer.address
+                };
+                
+                contact = await crmService.createContact(contactData);
+            } else {
+                // Use best candidate but mark for review
+                contact = matchResult.decision.candidate;
+                context.log(`Using best candidate for review: ${contact.FirstName} ${contact.LastName} (Score: ${matchResult.decision.bestScore})`);
+            }
+        }
+
+        if (contact) {
+            // Normalize category and generate proper transaction name
+            const normalizedCategory = normalizeTransactionCategory(transactionData.category, matchingConfig);
+            const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
+                amount: `$${(paymentIntent.amount / 100).toFixed(2)}`,
+                date: new Date().toLocaleDateString(),
+                id: paymentIntent.id
+            });
+
+            // Create completed task for the donation
+            const taskData = {
+                subject: 'Donation Received',
+                description: `Payment received via Stripe. Amount: $${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}. Transaction ID: ${paymentIntent.id}. Match Score: ${matchResult.decision.bestScore.toFixed(3)}`,
+                type: 'Donation',
+                status: 'Completed'
+            };
+
+            const task = await crmService.createTask(contact.Id, taskData);
+            context.log(`Created task: ${task.Id}`);
+
+            // Create transaction record with proper naming
+            const enhancedTransactionData = {
+                amount: paymentIntent.amount,
+                currency: paymentIntent.currency,
+                paymentMethod: determinePaymentMethod(paymentIntent),
+                transactionId: paymentIntent.id,
+                status: 'Completed',
+                description: transactionName, // Use new naming format
+                frequency: transactionData.frequency,
+                category: normalizedCategory,
+                name: transactionName // Explicit name field
+            };
+
+            const transaction = await crmService.createTransaction(contact.Id, enhancedTransactionData);
+            context.log(`Created transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
+        }
 
         context.log('CRM integration completed successfully');
 
+        // Log metrics summary periodically
+        if (metricsService.getMetrics().totalTransactions % 10 === 0) {
+            context.log('Metrics Summary:', metricsService.generateSummaryReport());
+        }
+
     } catch (error) {
-        context.log('Error in CRM integration:', error.message);
+        const errorMessage = error.message || 'Unknown error';
+        const errorType = error.name || 'CRM Integration Error';
+        
+        metricsService.recordError(errorType, errorMessage);
+        
+        context.log('Error in CRM integration:', {
+            error: errorMessage,
+            type: errorType,
+            transactionId: paymentIntent?.id,
+            customerId: paymentIntent?.customer,
+            stack: error.stack
+        });
+        
         // Don't throw here - we don't want CRM errors to cause webhook failures
         // Stripe will retry webhooks that return non-2xx status codes
     }
+};
+
+// Helper function to determine payment method from Stripe payment intent
+const determinePaymentMethod = (paymentIntent) => {
+    if (paymentIntent.charges && paymentIntent.charges.data.length > 0) {
+        const charge = paymentIntent.charges.data[0];
+        if (charge.payment_method_details) {
+            if (charge.payment_method_details.card) return 'Credit Card';
+            if (charge.payment_method_details.ach_debit) return 'ACH';
+            if (charge.payment_method_details.paypal) return 'PayPal';
+        }
+    }
+    
+    // Fallback based on payment method types
+    if (paymentIntent.payment_method_types) {
+        if (paymentIntent.payment_method_types.includes('card')) return 'Credit Card';
+        if (paymentIntent.payment_method_types.includes('us_bank_account')) return 'ACH';
+    }
+    
+    return 'Unknown';
 };
 
 // Process checkout session completed event
