@@ -57,6 +57,17 @@ npm start
 
 The function will be available at `http://localhost:7071/api/donation`
 
+## Quick Fix for Function Visibility Issue
+
+**Problem:** Function disappeared from Azure Portal after removing `WEBSITE_RUN_FROM_PACKAGE` setting.
+
+**Solution:** Run the fix script:
+```bash
+./fix-deployment.sh
+```
+
+This script will restore the required setting and restart the function app. Wait 2-3 minutes after running the script, then check the Azure Portal.
+
 ## Azure Deployment Guide
 
 ### Step 1: Login to Azure
