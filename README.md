@@ -9,9 +9,13 @@ This Azure Function app processes donations through Stripe, handling customer ma
 - Email notifications via SendGrid
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
-- **CRM integration with Salesforce (extensible to other CRMs)**
-- **Automatic contact creation and management in CRM**
-- **Task and transaction recording in CRM**
+- **Enhanced CRM integration with robust customer-contact association**
+- **Intelligent contact matching with normalization and fuzzy logic**
+- **Configurable scoring thresholds for auto-association vs manual review**
+- **Comprehensive review workflow for uncertain matches**
+- **Improved transaction naming: "Transaction - {Category}" format**
+- **Idempotency checking to prevent duplicate processing**
+- **Metrics and observability for matching performance**
 
 ## Prerequisites
 
@@ -95,6 +99,28 @@ func azure functionapp publish payment-processing-function
 | `SALESFORCE_SECURITY_TOKEN` | Salesforce security token | `abc123` |
 | `SALESFORCE_LOGIN_URL` | Salesforce login URL | `https://login.salesforce.com` |
 
+### Contact Matching Configuration (Optional)
+
+The system includes advanced customer-contact association with configurable matching logic:
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `CONTACT_MATCH_THRESHOLD_HIGH` | High confidence threshold (auto-associate) | `0.90` | `0.95` |
+| `CONTACT_MATCH_THRESHOLD_LOW` | Low confidence threshold (below = no match) | `0.60` | `0.50` |
+| `CONTACT_MATCH_WEIGHT_EMAIL_EXACT` | Scoring weight for exact email match | `0.7` | `0.8` |
+| `CONTACT_MATCH_WEIGHT_PHONE_EXACT` | Scoring weight for exact phone match | `0.6` | `0.7` |
+| `CONTACT_MATCH_WEIGHT_NAME_EXACT` | Scoring weight for exact name match | `0.5` | `0.4` |
+| `CONTACT_MATCH_WEIGHT_NAME_FUZZY` | Maximum weight for fuzzy name match | `0.35` | `0.3` |
+| `CONTACT_MATCH_WEIGHT_ZIP_EXACT` | Scoring weight for ZIP code match | `0.2` | `0.15` |
+| `CONTACT_MATCH_EMAIL_STRIP_PLUS_TAGS` | Remove +tags from emails (user+tag@domain.com) | `true` | `false` |
+| `CONTACT_MATCH_DEFAULT_COUNTRY_CODE` | Default country for phone normalization | `US` | `CA` |
+| `CONTACT_MATCH_NAME_FUZZY_THRESHOLD` | Minimum similarity for fuzzy name matching | `0.8` | `0.75` |
+| `TRANSACTION_CATEGORIES` | Comma-separated list of allowed categories | See default | `Giving,Building,Missions` |
+| `TRANSACTION_DEFAULT_CATEGORY` | Fallback category for uncategorized transactions | `Uncategorized` | `General` |
+| `TRANSACTION_NAME_TEMPLATE` | Template for transaction display names | `Transaction - {category}` | `Donation - {category}` |
+| `CONTACT_MATCH_REVIEW_ENABLED` | Enable review task creation for uncertain matches | `true` | `false` |
+| `REVIEW_DEEP_LINK_BASE_URL` | Base URL for deep links in review tasks | `https://example.com/admin` | Your admin URL |
+
 ## API Usage
 
 ### Donation Processing Endpoint
@@ -159,6 +185,37 @@ This endpoint receives payment confirmations from Stripe and automatically:
 
 ## CRM Integration
 
+### Enhanced Customer-Contact Association
+
+The system includes a sophisticated contact matching engine that:
+
+**🧠 Intelligent Matching:**
+- **Normalization**: Cleans email (removes +tags), normalizes phone numbers to E.164 format, standardizes name casing
+- **Fuzzy Matching**: Uses Jaro-Winkler algorithm for name similarity detection
+- **Multi-signal Scoring**: Considers email, phone, name, ZIP code, and prior transaction history
+- **Configurable Thresholds**: Customizable confidence levels for auto-association vs manual review
+
+**⚖️ Decision Engine:**
+- **High Confidence (≥0.90)**: Automatically associates transaction with contact
+- **Medium Confidence (0.60-0.89)**: Creates review task for manual verification
+- **Low Confidence (<0.60)**: Creates review task with "no viable candidates" context
+
+**📋 Review Workflow:**
+- **Comprehensive Context**: Review tasks include full transaction details, normalized data, candidate analysis, and scoring breakdown
+- **Deep Links**: Direct links to transaction records and candidate contacts
+- **Audit Trail**: Complete decision history for compliance and debugging
+
+**🏷️ Transaction Naming:**
+- **Improved Format**: "Transaction - {Category}" instead of internal IDs
+- **Controlled Vocabulary**: Configurable list of allowed categories with fallback to "Uncategorized"
+- **Template System**: Customizable naming templates with variable substitution
+
+**🔒 Reliability & Performance:**
+- **Idempotency**: Prevents duplicate processing of the same transaction
+- **Metrics & Observability**: Tracks auto-link vs review rates, processing times, and error rates
+- **PII Protection**: Automatic redaction of sensitive data in logs
+- **Error Handling**: Graceful degradation without disrupting payment processing
+
 ### Salesforce Setup
 
 1. **Create a Connected App** (optional, for OAuth):
@@ -174,6 +231,7 @@ This endpoint receives payment confirmations from Stripe and automatically:
 3. **Custom Transaction Object** (optional):
    ```sql
    -- Create custom object Transaction__c with these fields:
+   Name (Text) -- Standard Name field for transaction display name
    Contact__c (Lookup to Contact)
    Amount__c (Currency)
    Currency__c (Text)

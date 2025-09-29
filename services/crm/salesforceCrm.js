@@ -180,13 +180,15 @@ class SalesforceCrmService extends BaseCrmService {
             status = 'Completed',
             description,
             frequency,
-            category
+            category,
+            name // New field for proper transaction naming
         } = transactionData;
 
         // Try creating a custom Transaction record first
         // If it fails, fall back to creating an Opportunity
         try {
             const transactionRecord = {
+                Name: name || description || `Transaction - ${category || 'Uncategorized'}`, // Add Name field
                 Contact__c: contactId, // Assuming custom lookup field
                 Amount__c: amount / 100, // Convert cents to dollars
                 Currency__c: currency,
@@ -228,11 +230,12 @@ class SalesforceCrmService extends BaseCrmService {
             transactionId,
             description,
             frequency,
-            category
+            category,
+            name // New field for proper transaction naming
         } = transactionData;
 
         const opportunityRecord = {
-            Name: `Donation - ${transactionId}`,
+            Name: name || description || `Transaction - ${category || 'Uncategorized'}`, // Use new naming format
             ContactId: contactId,
             Amount: amount / 100, // Convert cents to dollars
             StageName: 'Closed Won',
