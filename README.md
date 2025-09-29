@@ -129,7 +129,20 @@ az functionapp config appsettings set \
 func azure functionapp publish payment-processing-function
 ```
 
-### Step 7: Configure CORS (Optional)
+### Step 7: Test the Deployment
+
+After deployment, test the function to ensure it's working correctly:
+
+```bash
+# Test with the provided test script
+node test-deployment.js https://payment-processing-function.azurewebsites.net/api/donation YOUR_FUNCTION_KEY
+
+# Or test locally during development
+npm start
+node test-deployment.js http://localhost:7071/api/donation
+```
+
+### Step 8: Configure CORS (Optional)
 
 If you need to call this function from a web browser:
 
