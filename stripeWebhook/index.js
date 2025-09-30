@@ -133,6 +133,14 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             extractedFrequency: transactionData.frequency
         });
 
+        // Early idempotency check - if this transaction was already processed, skip everything
+        const idempotencyKey = idempotencyService.generateKey(transactionData);
+        const existingResult = idempotencyService.getProcessedResult(idempotencyKey);
+        if (existingResult && !idempotencyService.inputsChanged(idempotencyKey, transactionData)) {
+            context.log(`Transaction ${paymentIntent.id} already processed (idempotency check) - skipping duplicate processing`);
+            return;
+        }
+
         // Check if transaction already exists in CRM to prevent duplicates
         const existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
         if (existingTransaction) {
@@ -325,9 +333,10 @@ const processCheckoutSessionCompleted = async (context, session) => {
         
         // Get the payment intent from the session
         if (session.payment_intent) {
-            const stripe = initializeStripe(session.livemode);
-            const paymentIntent = await stripe.paymentIntents.retrieve(session.payment_intent);
-            await processPaymentSuccess(context, paymentIntent);
+            // Don't process payment_intent here - let the payment_intent.succeeded event handle it
+            // This prevents duplicate processing when both events fire
+            context.log(`Checkout session has payment_intent ${session.payment_intent} - skipping processing, will be handled by payment_intent.succeeded event`);
+            return;
         } else if (session.subscription) {
             // Handle subscription-based payments
             context.log('Subscription payment detected, processing...');
