@@ -1,5 +1,30 @@
 # Summary of Changes
 
+## Latest Update: Transaction Duplication Fix
+
+### Issue
+After implementing the two-stage transaction lifecycle, a race condition could cause duplicate transactions:
+- If `payment_intent.succeeded` fired before `checkout.session.completed`, it would create a transaction without storing the session ID
+- When `checkout.session.completed` fired later, it couldn't find the existing transaction and created a duplicate
+
+### Solution
+Two complementary fixes were implemented:
+
+1. **Store session ID in all transactions** (stripeWebhook/index.js):
+   - When `processPaymentSuccess` creates a transaction, it now includes the `sessionId` if available
+   - This allows future lookups to find the transaction by either session ID or payment intent ID
+
+2. **Enhanced duplicate detection** (stripeWebhook/index.js):
+   - `processCheckoutSessionCompleted` now checks for existing transactions by BOTH session ID and payment intent ID
+   - This catches transactions created by `payment_intent.succeeded` even if they don't have a session ID stored
+
+### Result
+- No duplicate transactions regardless of webhook event order
+- Maintains backward compatibility with all existing flows
+- Single transaction record throughout the entire lifecycle
+
+---
+
 ## Overview
 Implemented a two-stage transaction lifecycle that creates transactions when checkout sessions complete and updates them when payments succeed, providing better visibility and tracking.
 

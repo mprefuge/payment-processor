@@ -72,7 +72,8 @@ If using Opportunity as fallback, the session ID is stored in the Description fi
 
 #### `processCheckoutSessionCompleted()`
 - Now creates pending transactions when CRM is configured
-- Includes duplicate protection (checks if transaction already exists for session)
+- Includes duplicate protection (checks if transaction already exists for session ID OR payment intent ID)
+- Prevents duplicate creation even if `payment_intent.succeeded` fires first
 - Performs contact matching and creates/associates contacts
 - Stores category and all transaction metadata from checkout session
 
@@ -81,6 +82,7 @@ If using Opportunity as fallback, the session ID is stored in the Description fi
 - Retrieves checkout session ID from payment intent
 - Updates pending transaction if found
 - Falls back to creating new transaction if no pending one exists
+- **Stores session ID in newly created transactions** (for duplicate prevention)
 
 #### `prepareTransactionDataFromSession()` (New Helper)
 - Extracts transaction data from checkout session
@@ -137,15 +139,21 @@ System skips transaction creation (no CRM)
 
 ## Duplicate Event Protection
 
-The system handles duplicate webhook events:
+The system handles duplicate webhook events and race conditions:
 
 1. **Duplicate checkout.session.completed**: 
    - Checks if transaction already exists for session ID
-   - Skips creation if found
+   - Also checks if transaction already exists for payment intent ID (handles race conditions)
+   - Skips creation if found by either method
 
 2. **Duplicate payment_intent.succeeded**:
    - Checks if transaction already exists with payment intent ID
    - Skips processing if found
+
+3. **Race Condition Handling**:
+   - When `payment_intent.succeeded` fires first, stores session ID in transaction (if available)
+   - When `checkout.session.completed` fires later, checks both session ID and payment intent ID
+   - This prevents duplicate transactions regardless of webhook event order
 
 ## Benefits
 
