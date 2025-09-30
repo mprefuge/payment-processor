@@ -593,7 +593,7 @@ const processCheckoutSessionCompleted = async (context, session) => {
                         amount: transactionData.amount,
                         currency: transactionData.currency,
                         paymentMethod: 'Pending', // Will be updated when payment completes
-                        transactionId: null, // Will be updated when payment completes
+                        transactionId: session.payment_intent, // Store payment intent ID for lookup
                         sessionId: session.id, // Store session ID for lookup
                         status: 'Pending',
                         description: transactionName,
