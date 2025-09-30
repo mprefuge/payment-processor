@@ -186,9 +186,9 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         let contact = null;
 
         if (matchResult.decision.action === 'associate') {
-            // High confidence match - use the selected contact
+            // Exact match on all fields - use the selected contact
             contact = matchResult.decision.candidate;
-            context.log(`High confidence match: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+            context.log(`Exact match found: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
             
             // Update contact with new address information if available
             if (customer.address) {
@@ -207,7 +207,8 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             }
             
         } else if (matchResult.decision.action === 'review') {
-            // Uncertain or no match - create review task
+            // Partial match requiring manual review
+            // This happens when: email+phone match but name differs, OR name matches but email/phone differ
             if (matchingConfig.review.enabled) {
                 const reviewTask = await reviewTaskService.createReviewTask(
                     matchResult, 
@@ -217,41 +218,34 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 context.log(`Created review task: ${reviewTask.taskId} for ${matchResult.decision.reason}`);
             }
 
-            // For low/uncertain matches, we can still create the transaction but without contact association
-            // OR we can create a new contact if no candidates were found
-            if (matchResult.candidates.length === 0) {
-                context.log('No candidates found, creating new contact');
-                
-                const contactData = {
-                    email: customer.email,
-                    firstName: transactionData.firstName,
-                    lastName: transactionData.lastName,
-                    phone: customer.phone,
-                    address: customer.address
-                };
-                
-                contact = await crmService.createContact(contactData);
-            } else {
-                // Use best candidate but mark for review
-                contact = matchResult.decision.candidate;
-                context.log(`Using best candidate for review: ${contact.FirstName} ${contact.LastName} (Score: ${matchResult.decision.bestScore})`);
-                
-                // Update contact with new address information if available
-                if (customer.address) {
-                    try {
-                        const updatedContact = await crmService.updateContact(contact.Id, {
-                            address: customer.address
-                        });
-                        if (updatedContact) {
-                            contact = updatedContact;
-                            context.log(`Updated contact address for review candidate: ${contact.FirstName} ${contact.LastName}`);
-                        }
-                    } catch (error) {
-                        context.log(`Failed to update contact address: ${error.message}`);
-                        // Continue processing - don't fail the transaction for address update issues
-                    }
-                }
-            }
+            // Create new contact for the transaction to ensure data isn't overwritten
+            context.log('Creating new contact due to partial match requiring review');
+            
+            const contactData = {
+                email: customer.email,
+                firstName: transactionData.firstName,
+                lastName: transactionData.lastName,
+                phone: customer.phone,
+                address: customer.address
+            };
+            
+            contact = await crmService.createContact(contactData);
+            context.log(`Created new contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+            
+        } else if (matchResult.decision.action === 'create') {
+            // No match or insufficient match - create new contact
+            context.log('No sufficient match found, creating new contact');
+            
+            const contactData = {
+                email: customer.email,
+                firstName: transactionData.firstName,
+                lastName: transactionData.lastName,
+                phone: customer.phone,
+                address: customer.address
+            };
+            
+            contact = await crmService.createContact(contactData);
+            context.log(`Created new contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
         }
 
         if (contact) {
