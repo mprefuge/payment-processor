@@ -339,6 +339,11 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 name: transactionName // Explicit name field
             };
 
+            // Include sessionId if we found one (for duplicate prevention)
+            if (checkoutSessionId) {
+                enhancedTransactionData.sessionId = checkoutSessionId;
+            }
+
             const transaction = await crmService.createTransaction(contact.Id, enhancedTransactionData);
             context.log(`Created transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
         }
@@ -526,6 +531,15 @@ const processCheckoutSessionCompleted = async (context, session) => {
                 if (existingTransaction) {
                     context.log(`Transaction already exists for session ${session.id}: ${existingTransaction.Id} - skipping duplicate processing`);
                     return;
+                }
+
+                // Also check if transaction already exists for the payment intent (handles race condition)
+                if (session.payment_intent) {
+                    const existingPaymentTransaction = await crmService.findTransactionByStripeId(session.payment_intent);
+                    if (existingPaymentTransaction) {
+                        context.log(`Transaction already exists for payment intent ${session.payment_intent}: ${existingPaymentTransaction.Id} - skipping duplicate processing`);
+                        return;
+                    }
                 }
 
                 // Prepare transaction data from session
