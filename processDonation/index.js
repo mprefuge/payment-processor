@@ -165,17 +165,28 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
 // Create new Stripe customer
 const createStripeCustomer = async (stripe, customerData) => {
     try {
-        const customer = await stripe.customers.create({
-            email: customerData.email,
-            name: `${customerData.firstname} ${customerData.lastname}`,
-            phone: customerData.phone || null,
-            address: {
+        // Handle both nested address object and flat address fields
+        const addressData = customerData.address && typeof customerData.address === 'object' 
+            ? {
+                line1: customerData.address.line1 || null,
+                city: customerData.address.city || null,
+                state: customerData.address.state || null,
+                postal_code: customerData.address.postal_code || null,
+                country: customerData.address.country || 'US'
+            }
+            : {
                 line1: customerData.address || null,
                 city: customerData.city || null,
                 state: customerData.state || null,
                 postal_code: customerData.zipcode || null,
                 country: 'US'
-            }
+            };
+
+        const customer = await stripe.customers.create({
+            email: customerData.email,
+            name: `${customerData.firstname} ${customerData.lastname}`,
+            phone: customerData.phone || null,
+            address: addressData
         });
         return customer;
     } catch (error) {
@@ -192,15 +203,27 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
             phone: customerData.phone || null
         };
 
+        // Handle both nested address object and flat address fields
+        const hasNestedAddress = customerData.address && typeof customerData.address === 'object';
+        const hasFlatAddress = customerData.address || customerData.city || customerData.state || customerData.zipcode;
+        
         // Only include address if at least one field is provided
-        if (customerData.address || customerData.city || customerData.state || customerData.zipcode) {
-            updateData.address = {
-                line1: customerData.address || null,
-                city: customerData.city || null,
-                state: customerData.state || null,
-                postal_code: customerData.zipcode || null,
-                country: 'US'
-            };
+        if (hasNestedAddress || hasFlatAddress) {
+            updateData.address = hasNestedAddress
+                ? {
+                    line1: customerData.address.line1 || null,
+                    city: customerData.address.city || null,
+                    state: customerData.address.state || null,
+                    postal_code: customerData.address.postal_code || null,
+                    country: customerData.address.country || 'US'
+                }
+                : {
+                    line1: customerData.address || null,
+                    city: customerData.city || null,
+                    state: customerData.state || null,
+                    postal_code: customerData.zipcode || null,
+                    country: 'US'
+                };
         }
 
         const customer = await stripe.customers.update(customerId, updateData);
