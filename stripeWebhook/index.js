@@ -521,6 +521,13 @@ const processCheckoutSessionCompleted = async (context, session) => {
                     expand: ['line_items']
                 });
 
+                // Check if transaction already exists for this session (duplicate event protection)
+                const existingTransaction = await crmService.findTransactionBySessionId(session.id);
+                if (existingTransaction) {
+                    context.log(`Transaction already exists for session ${session.id}: ${existingTransaction.Id} - skipping duplicate processing`);
+                    return;
+                }
+
                 // Prepare transaction data from session
                 const { transactionData, customer, normalizedCategory, transactionName } = 
                     await prepareTransactionDataFromSession(context, expandedSession, stripe, matchingConfig);
