@@ -1,5 +1,6 @@
 const Stripe = require('stripe');
 const sgMail = require('@sendgrid/mail');
+const CrmFactory = require('../services/crm/crmFactory');
 
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
@@ -11,6 +12,126 @@ const initializeServices = (isLiveMode) => {
     sgMail.setApiKey(process.env.SENDGRID_API_KEY);
     
     return { stripe };
+};
+
+// Get CRM configuration from environment variables
+const getCrmConfig = () => {
+    const provider = process.env.CRM_PROVIDER;
+    
+    if (!provider) {
+        console.log('No CRM provider configured, skipping CRM integration');
+        return null;
+    }
+
+    switch (provider.toLowerCase()) {
+        case 'salesforce':
+            return {
+                provider: 'salesforce',
+                config: {
+                    username: process.env.SALESFORCE_USERNAME,
+                    password: process.env.SALESFORCE_PASSWORD,
+                    securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
+                    loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com'
+                }
+            };
+        
+        default:
+            console.error(`Unsupported CRM provider: ${provider}`);
+            return null;
+    }
+};
+
+// Sync contact to CRM after checkout session is created
+const syncContactToCrm = async (context, customerData) => {
+    try {
+        const crmConfig = getCrmConfig();
+        
+        if (!crmConfig) {
+            context.log('CRM integration disabled - skipping contact sync');
+            return null;
+        }
+
+        // Validate CRM configuration
+        const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+        if (!validation.isValid) {
+            context.log(`CRM configuration invalid: ${validation.error}`);
+            return null;
+        }
+
+        // Create CRM service
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        // Prepare search criteria
+        const searchCriteria = {
+            email: customerData.email,
+            firstName: customerData.firstname,
+            lastName: customerData.lastname,
+            phone: customerData.phone
+        };
+
+        context.log('Searching for existing contact in CRM...');
+        const existingContacts = await crmService.searchContact(searchCriteria);
+
+        let contact = null;
+        
+        if (existingContacts && existingContacts.length > 0) {
+            // Contact exists - update with new information
+            contact = existingContacts[0];
+            context.log(`Found existing contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+            
+            // Update contact with address information if available
+            const addressData = {
+                line1: customerData.address,
+                city: customerData.city,
+                state: customerData.state,
+                postal_code: customerData.zipcode,
+                country: 'US'
+            };
+            
+            // Only update if we have address data
+            if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
+                try {
+                    const updatedContact = await crmService.updateContact(contact.Id, {
+                        address: addressData
+                    });
+                    if (updatedContact) {
+                        contact = updatedContact;
+                        context.log(`Updated contact address for: ${contact.FirstName} ${contact.LastName}`);
+                    }
+                } catch (error) {
+                    context.log(`Failed to update contact address: ${error.message}`);
+                    // Continue - don't fail for address update issues
+                }
+            }
+        } else {
+            // Contact doesn't exist - create new contact
+            context.log('No existing contact found, creating new contact...');
+            
+            const contactData = {
+                email: customerData.email,
+                firstName: customerData.firstname,
+                lastName: customerData.lastname,
+                phone: customerData.phone,
+                address: {
+                    line1: customerData.address,
+                    city: customerData.city,
+                    state: customerData.state,
+                    postal_code: customerData.zipcode,
+                    country: 'US'
+                }
+            };
+            
+            contact = await crmService.createContact(contactData);
+            context.log(`Created new contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+        }
+
+        return contact;
+    } catch (error) {
+        // Log error but don't fail the checkout process
+        context.log(`Error syncing contact to CRM: ${error.message}`);
+        console.error('CRM sync error details:', error);
+        return null;
+    }
 };
 
 // Validate required request parameters
@@ -59,6 +180,33 @@ const createStripeCustomer = async (stripe, customerData) => {
         return customer;
     } catch (error) {
         console.error('Error creating Stripe customer:', error);
+        throw error;
+    }
+};
+
+// Update existing Stripe customer
+const updateStripeCustomer = async (stripe, customerId, customerData) => {
+    try {
+        const updateData = {
+            name: `${customerData.firstname} ${customerData.lastname}`,
+            phone: customerData.phone || null
+        };
+
+        // Only include address if at least one field is provided
+        if (customerData.address || customerData.city || customerData.state || customerData.zipcode) {
+            updateData.address = {
+                line1: customerData.address || null,
+                city: customerData.city || null,
+                state: customerData.state || null,
+                postal_code: customerData.zipcode || null,
+                country: 'US'
+            };
+        }
+
+        const customer = await stripe.customers.update(customerId, updateData);
+        return customer;
+    } catch (error) {
+        console.error('Error updating Stripe customer:', error);
         throw error;
     }
 };
@@ -262,11 +410,19 @@ module.exports = async function (context, req) {
         } else {
             context.log('Using existing Stripe customer');
             customerId = existingCustomers[0].id;
+            
+            // Update existing customer with latest information
+            context.log('Updating existing Stripe customer with latest information');
+            await updateStripeCustomer(stripe, customerId, body);
         }
         
         // Create checkout session
         context.log('Creating Stripe checkout session');
         const session = await createCheckoutSession(stripe, customerId, body);
+        
+        // Sync contact to CRM (Salesforce) if configured
+        // This happens after checkout session creation to not block the payment flow
+        await syncContactToCrm(context, body);
         
         // Send notification email
         await sendNotificationEmail(body, session.url);

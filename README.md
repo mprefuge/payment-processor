@@ -9,6 +9,7 @@ This Azure Function app processes donations through Stripe, handling customer ma
 - Email notifications via SendGrid
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
+- **Salesforce contact sync on checkout session creation**
 - **Enhanced CRM integration with robust customer-contact association**
 - **Intelligent contact matching with normalization and fuzzy logic**
 - **Configurable scoring thresholds for auto-association vs manual review**
@@ -183,6 +184,22 @@ This endpoint receives payment confirmations from Stripe and automatically:
 4. Copy the webhook signing secret to your environment variables
 
 ## CRM Integration
+
+### Contact Synchronization
+
+The system integrates with Salesforce CRM at two key points in the donation flow:
+
+**1. Checkout Session Creation (`/api/donation`)**
+- When a checkout session is created, the system immediately syncs contact information to Salesforce
+- **If contact exists**: Updates address information with the latest data
+- **If contact doesn't exist**: Creates a new contact with all provided information
+- **Error handling**: CRM sync errors are logged but don't prevent checkout from completing
+- This ensures contact data is available in Salesforce even if the payment isn't completed
+
+**2. Payment Confirmation (`/api/stripe/webhook`)**
+- When a payment is confirmed via Stripe webhook, the system performs advanced contact matching
+- Associates the transaction with the correct contact in Salesforce
+- Creates transaction records and tasks for donation tracking
 
 ### Enhanced Customer-Contact Association
 
