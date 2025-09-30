@@ -4,8 +4,11 @@ const { ContactMatcher } = require('../services/contactMatcher');
 const ReviewTaskService = require('../services/reviewTaskService');
 const IdempotencyService = require('../services/idempotencyService');
 const MetricsService = require('../services/metricsService');
+const PledgeService = require('../services/pledgeService');
+const PledgeMatcher = require('../services/pledgeMatcher');
 const { sendPaymentSuccessEmail } = require('../services/emailService');
 const { loadConfig, validateConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
+const { loadPledgeConfig, validatePledgeConfig, generatePledgeTransactionName } = require('../config/pledgeConfig');
 
 // Global service instances
 const idempotencyService = new IdempotencyService();
@@ -206,6 +209,44 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                     
                     context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
                     
+                    // ===== PLEDGE INTEGRATION FOR EXISTING PENDING TRANSACTION =====
+                    try {
+                        const pledgeConfig = loadPledgeConfig();
+                        const pledgeEnabled = process.env.PLEDGE_FEATURE_ENABLED !== 'false';
+                        
+                        if (pledgeEnabled) {
+                            context.log('Checking for pledge allocation on existing pending transaction...');
+                            
+                            const pledgeService = new PledgeService(crmService, pledgeConfig);
+                            const reviewTaskService = new ReviewTaskService(crmService);
+                            const pledgeMatcher = new PledgeMatcher(pledgeService, reviewTaskService, pledgeConfig);
+                            
+                            const pledgeTransaction = {
+                                id: updatedTransaction.Id,
+                                contactId: existingTransaction.Contact__c,
+                                amount: paymentIntent.amount,
+                                currency: paymentIntent.currency,
+                                timestamp: new Date().toISOString(),
+                                category: existingTransaction.Category__c || transactionData.category,
+                                description: existingTransaction.Description__c || existingTransaction.Name,
+                                memo: paymentIntent.description || '',
+                                metadata: paymentIntent.metadata || {}
+                            };
+                            
+                            const pledgeResult = await pledgeMatcher.processTransaction(pledgeTransaction);
+                            
+                            if (pledgeResult.processed && pledgeResult.pledgeAllocation) {
+                                context.log(`✅ Pledge allocation successful on existing transaction`);
+                                await crmService.updateTransaction(updatedTransaction.Id, {
+                                    pledgeId: pledgeResult.decision.pledgeId
+                                });
+                            }
+                        }
+                    } catch (pledgeError) {
+                        context.log('Error processing pledge allocation (non-fatal):', pledgeError.message);
+                    }
+                    // ===== END PLEDGE INTEGRATION =====
+                    
                     // Record metrics and exit
                     metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
                     context.log('CRM integration completed successfully - updated pending transaction');
@@ -281,6 +322,45 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                     });
                     
                     context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
+                    
+                    // ===== PLEDGE INTEGRATION FOR UPDATED TRANSACTION =====
+                    try {
+                        const pledgeConfig = loadPledgeConfig();
+                        const pledgeEnabled = process.env.PLEDGE_FEATURE_ENABLED !== 'false';
+                        
+                        if (pledgeEnabled) {
+                            context.log('Checking for pledge allocation on updated transaction...');
+                            
+                            const pledgeService = new PledgeService(crmService, pledgeConfig);
+                            const reviewTaskService = new ReviewTaskService(crmService);
+                            const pledgeMatcher = new PledgeMatcher(pledgeService, reviewTaskService, pledgeConfig);
+                            
+                            // Need to get contact ID from the transaction
+                            const pledgeTransaction = {
+                                id: updatedTransaction.Id,
+                                contactId: updatedTransaction.Contact__c || pendingTransaction.Contact__c,
+                                amount: paymentIntent.amount,
+                                currency: paymentIntent.currency,
+                                timestamp: new Date().toISOString(),
+                                category: updatedTransaction.Category__c || transactionData.category,
+                                description: updatedTransaction.Description__c || updatedTransaction.Name,
+                                memo: paymentIntent.description || '',
+                                metadata: paymentIntent.metadata || {}
+                            };
+                            
+                            const pledgeResult = await pledgeMatcher.processTransaction(pledgeTransaction);
+                            
+                            if (pledgeResult.processed && pledgeResult.pledgeAllocation) {
+                                context.log(`✅ Pledge allocation successful on updated transaction`);
+                                await crmService.updateTransaction(updatedTransaction.Id, {
+                                    pledgeId: pledgeResult.decision.pledgeId
+                                });
+                            }
+                        }
+                    } catch (pledgeError) {
+                        context.log('Error processing pledge allocation (non-fatal):', pledgeError.message);
+                    }
+                    // ===== END PLEDGE INTEGRATION =====
                     
                     // Record metrics and exit early
                     metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
@@ -421,6 +501,70 @@ const processPaymentSuccess = async (context, paymentIntent) => {
 
             const transaction = await crmService.createTransaction(contact.Id, enhancedTransactionData);
             context.log(`Created transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
+
+            // ===== PLEDGE INTEGRATION =====
+            // Try to match and allocate to pledge if enabled
+            try {
+                const pledgeConfig = loadPledgeConfig();
+                
+                // Check if pledge feature is enabled (can be disabled via env var)
+                const pledgeEnabled = process.env.PLEDGE_FEATURE_ENABLED !== 'false'; // default true
+                
+                if (pledgeEnabled) {
+                    context.log('Checking for pledge allocation...');
+                    
+                    // Create pledge services
+                    const pledgeService = new PledgeService(crmService, pledgeConfig);
+                    const reviewTaskService = new ReviewTaskService(crmService);
+                    const pledgeMatcher = new PledgeMatcher(pledgeService, reviewTaskService, pledgeConfig);
+                    
+                    // Build transaction object for pledge matching
+                    const pledgeTransaction = {
+                        id: transaction.Id,
+                        contactId: contact.Id,
+                        amount: paymentIntent.amount,
+                        currency: paymentIntent.currency,
+                        timestamp: new Date().toISOString(),
+                        category: normalizedCategory,
+                        description: transactionName,
+                        memo: paymentIntent.description || '',
+                        metadata: paymentIntent.metadata || {}
+                    };
+                    
+                    // Process transaction for pledge allocation
+                    const pledgeResult = await pledgeMatcher.processTransaction(pledgeTransaction);
+                    
+                    if (pledgeResult.processed && pledgeResult.pledgeAllocation) {
+                        context.log(`✅ Pledge allocation successful:`, {
+                            pledgeId: pledgeResult.decision.pledgeId,
+                            allocations: pledgeResult.allocation.allocations.length,
+                            pledgeBalance: pledgeResult.allocation.pledgeBalance,
+                            pledgeStatus: pledgeResult.allocation.pledgeStatus
+                        });
+                        
+                        // Update transaction to link it to the pledge
+                        await crmService.updateTransaction(transaction.Id, {
+                            pledgeId: pledgeResult.decision.pledgeId
+                        });
+                        
+                        context.log(`Updated transaction ${transaction.Id} with pledge link`);
+                        
+                    } else if (pledgeResult.needsReview) {
+                        context.log(`⚠️  Pledge match uncertain - review task created`, {
+                            decision: pledgeResult.decision.decision,
+                            confidence: pledgeResult.decision.confidence,
+                            reason: pledgeResult.decision.reason
+                        });
+                    } else {
+                        context.log('No pledge allocation - processed as regular transaction');
+                    }
+                }
+            } catch (pledgeError) {
+                // Don't fail the whole transaction for pledge errors
+                context.log('Error processing pledge allocation (non-fatal):', pledgeError.message);
+                console.error('Pledge allocation error details:', pledgeError);
+            }
+            // ===== END PLEDGE INTEGRATION =====
         }
 
         context.log('CRM integration completed successfully');
