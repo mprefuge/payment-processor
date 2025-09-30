@@ -139,12 +139,19 @@ function runTests() {
         assertEqual(scores.breakdown.phone, 'exact');
     });
     
-    // Test decision making
-    test('Decision making - high confidence', () => {
+    // Test decision making with new exact match logic
+    test('Decision making - exact match all fields', () => {
         const matcher = new ContactMatcher();
         const candidatesWithScores = [{
             candidate: { Id: '123', FirstName: 'John', LastName: 'Doe' },
-            scores: { total: 0.95 }
+            scores: { 
+                total: 1.8,
+                breakdown: {
+                    email: 'exact',
+                    phone: 'exact',
+                    name: 'exact'
+                }
+            }
         }];
         
         const decision = matcher.decide(candidatesWithScores, {});
@@ -153,11 +160,18 @@ function runTests() {
         assertEqual(decision.reviewRequired, false);
     });
     
-    test('Decision making - medium confidence', () => {
+    test('Decision making - email+phone match, name differs', () => {
         const matcher = new ContactMatcher();
         const candidatesWithScores = [{
             candidate: { Id: '123', FirstName: 'John', LastName: 'Doe' },
-            scores: { total: 0.75 }
+            scores: { 
+                total: 1.3,
+                breakdown: {
+                    email: 'exact',
+                    phone: 'exact',
+                    name: 'fuzzy(0.5)'
+                }
+            }
         }];
         
         const decision = matcher.decide(candidatesWithScores, {});
@@ -166,25 +180,32 @@ function runTests() {
         assertEqual(decision.reviewRequired, true);
     });
     
-    test('Decision making - low confidence', () => {
+    test('Decision making - insufficient match', () => {
         const matcher = new ContactMatcher();
         const candidatesWithScores = [{
             candidate: { Id: '123', FirstName: 'John', LastName: 'Doe' },
-            scores: { total: 0.30 }
+            scores: { 
+                total: 0.7,
+                breakdown: {
+                    email: 'exact',
+                    phone: undefined,
+                    name: undefined
+                }
+            }
         }];
         
         const decision = matcher.decide(candidatesWithScores, {});
-        assertEqual(decision.action, 'review');
+        assertEqual(decision.action, 'create');
         assertEqual(decision.confidence, 'low');
-        assertEqual(decision.reviewRequired, true);
+        assertEqual(decision.reviewRequired, false);
     });
     
     test('Decision making - no candidates', () => {
         const matcher = new ContactMatcher();
         const decision = matcher.decide([], {});
-        assertEqual(decision.action, 'review');
-        assertEqual(decision.reason, 'no_viable_candidates');
-        assertEqual(decision.reviewRequired, true);
+        assertEqual(decision.action, 'create');
+        assertEqual(decision.reason, 'no_candidates_found');
+        assertEqual(decision.reviewRequired, false);
     });
     
     // Summary

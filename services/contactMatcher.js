@@ -316,12 +316,12 @@ class ContactMatcher {
     decide(candidatesWithScores, normalized) {
         if (!candidatesWithScores || candidatesWithScores.length === 0) {
             return {
-                action: 'review',
-                reason: 'no_viable_candidates',
+                action: 'create',
+                reason: 'no_candidates_found',
                 contactId: null,
                 bestScore: 0,
                 confidence: 'none',
-                reviewRequired: true
+                reviewRequired: false
             };
         }
         
@@ -340,28 +340,45 @@ class ContactMatcher {
             scores: best.scores
         };
         
-        // Apply thresholds
-        if (best.scores.total >= this.config.thresholds.high) {
+        // Check for exact matches on email, phone, and name
+        const hasExactEmail = best.scores.breakdown.email === 'exact';
+        const hasExactPhone = best.scores.breakdown.phone === 'exact';
+        const hasExactName = best.scores.breakdown.name === 'exact';
+        
+        // Rule 1: All three match exactly → associate
+        if (hasExactEmail && hasExactPhone && hasExactName) {
             decision.action = 'associate';
-            decision.reason = 'high_confidence_match';
+            decision.reason = 'exact_match_all_fields';
             decision.confidence = 'high';
-        } else if (best.scores.total >= this.config.thresholds.low) {
+            decision.reviewRequired = false;
+        }
+        // Rule 2: Email AND phone match, but name doesn't → review
+        else if (hasExactEmail && hasExactPhone && !hasExactName) {
             decision.action = 'review';
-            decision.reason = 'uncertain_match';
+            decision.reason = 'email_phone_match_name_differs';
             decision.confidence = 'medium';
             decision.reviewRequired = true;
-        } else {
+        }
+        // Rule 3: Name matches, but email OR phone don't → review
+        else if (hasExactName && (!hasExactEmail || !hasExactPhone)) {
             decision.action = 'review';
-            decision.reason = 'low_confidence_match';
-            decision.confidence = 'low';
+            decision.reason = 'name_match_contact_info_differs';
+            decision.confidence = 'medium';
             decision.reviewRequired = true;
+        }
+        // Rule 4: No sufficient match → create new contact
+        else {
+            decision.action = 'create';
+            decision.reason = 'insufficient_match';
+            decision.confidence = 'low';
+            decision.reviewRequired = false;
         }
         
         this.logger.log('ContactMatcher: Decision made', {
             action: decision.action,
             reason: decision.reason,
             score: decision.bestScore,
-            thresholds: this.config.thresholds,
+            exactMatches: { email: hasExactEmail, phone: hasExactPhone, name: hasExactName },
             candidatesConsidered: candidatesWithScores.length
         });
         
