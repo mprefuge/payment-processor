@@ -7,9 +7,18 @@ const MetricsService = require('../services/metricsService');
 const { sendPaymentSuccessEmail } = require('../services/emailService');
 const { loadConfig, validateConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
 
+// Accounting sync services
+const AccountingSyncConfig = require('../services/accountingSyncConfig');
+const AccountingProviderFactory = require('../services/accounting/accountingProviderFactory');
+const PayoutSyncService = require('../services/payoutSyncService');
+const WebhookEventStore = require('../services/webhookEventStore');
+const SyncLedger = require('../services/syncLedger');
+
 // Global service instances
 const idempotencyService = new IdempotencyService();
 const metricsService = new MetricsService();
+const webhookEventStore = new WebhookEventStore();
+const syncLedger = new SyncLedger();
 
 /**
  * Stripe Webhook Handler for Payment Confirmations
@@ -796,6 +805,206 @@ const processCheckoutSessionCompleted = async (context, session) => {
     }
 };
 
+// Process payout.paid event - main payout sync workflow
+const processPayoutPaid = async (context, payout, stripeAccountId = null) => {
+    try {
+        context.log(`Processing payout.paid: ${payout.id}`);
+
+        // Check if accounting sync is enabled
+        const accountingConfig = new AccountingSyncConfig();
+        if (!accountingConfig.isEnabled()) {
+            context.log('Accounting sync disabled - skipping payout processing');
+            return;
+        }
+
+        // Validate configuration
+        const validation = accountingConfig.validate();
+        if (!validation.isValid) {
+            context.log('Accounting configuration invalid:', validation.errors);
+            await webhookEventStore.updateEventStatus(context.invocationId, 'needs_review', {
+                error: `Configuration invalid: ${validation.errors.join(', ')}`
+            });
+            return;
+        }
+
+        // Check if already synced (idempotency)
+        const existingSync = await syncLedger.getSync(stripeAccountId, payout.id);
+        if (existingSync && existingSync.status === 'posted') {
+            context.log(`Payout already synced: ${payout.id}`);
+            return;
+        }
+
+        // Initialize accounting provider
+        const providerConfig = accountingConfig.getProviderConfig();
+        const accountingProvider = AccountingProviderFactory.createProvider(
+            accountingConfig.getConfig().provider,
+            providerConfig
+        );
+
+        // Initialize payout sync service
+        const payoutSyncService = new PayoutSyncService(
+            accountingConfig,
+            accountingProvider,
+            syncLedger,
+            null // ReviewTaskService integration can be added later
+        );
+
+        // Enqueue job for async processing
+        // In production, this would use Azure Queue, Service Bus, or Durable Functions
+        // For now, process synchronously but with timeout protection
+        context.log('Processing payout synchronously (production should use async queue)');
+
+        await processPayoutJob(context, payout.id, stripeAccountId, payoutSyncService);
+
+    } catch (error) {
+        context.log('Error processing payout.paid:', error.message);
+        await webhookEventStore.updateEventStatus(context.invocationId, 'failed', {
+            error: error.message
+        });
+    }
+};
+
+// Process payout.failed event
+const processPayoutFailed = async (context, payout, stripeAccountId = null) => {
+    try {
+        context.log(`Processing payout.failed: ${payout.id}`);
+
+        // Update sync ledger status if exists
+        const existingSync = await syncLedger.getSync(stripeAccountId, payout.id);
+        if (existingSync) {
+            await syncLedger.updateStatus(stripeAccountId, payout.id, 'failed', {
+                error: `Payout failed: ${payout.failure_message || 'Unknown reason'}`
+            });
+            context.log(`Updated sync status to failed for payout: ${payout.id}`);
+        }
+
+        // Create review task if payout was previously posted
+        if (existingSync && existingSync.status === 'posted') {
+            context.log('Previously posted payout failed - manual review required');
+            // In production, create a review task here
+        }
+
+    } catch (error) {
+        context.log('Error processing payout.failed:', error.message);
+    }
+};
+
+// Process payout.canceled event
+const processPayoutCanceled = async (context, payout, stripeAccountId = null) => {
+    try {
+        context.log(`Processing payout.canceled: ${payout.id}`);
+
+        // Update sync ledger status if exists
+        const existingSync = await syncLedger.getSync(stripeAccountId, payout.id);
+        if (existingSync) {
+            await syncLedger.updateStatus(stripeAccountId, payout.id, 'canceled', {
+                error: 'Payout was canceled'
+            });
+            context.log(`Updated sync status to canceled for payout: ${payout.id}`);
+        }
+
+        // Create review task if payout was previously posted
+        if (existingSync && existingSync.status === 'posted') {
+            context.log('Previously posted payout canceled - manual review required');
+            // In production, create a review task here
+        }
+
+    } catch (error) {
+        context.log('Error processing payout.canceled:', error.message);
+    }
+};
+
+// Async job processor for payout sync
+const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncService) => {
+    try {
+        context.log(`[PayoutJob] Processing payout: ${payoutId}`);
+
+        // 1. Pull payout and balance transactions from Stripe
+        const { payout, balanceTransactions } = await payoutSyncService.pullPayout(payoutId, stripeAccountId);
+        context.log(`[PayoutJob] Pulled payout with ${balanceTransactions.length} transactions`);
+
+        // 2. Summarize activity
+        const summary = payoutSyncService.summarize(balanceTransactions);
+        context.log('[PayoutJob] Summary:', {
+            charges: summary.charges.count,
+            refunds: summary.refunds.count,
+            total: summary.total
+        });
+
+        // 3. Validate totals
+        const validation = payoutSyncService.validateTotals(summary, payout);
+        if (!validation.isValid) {
+            context.log('[PayoutJob] Validation failed - totals mismatch');
+            
+            // Create review task
+            await payoutSyncService.createReviewTask({
+                payoutId,
+                stripeAccountId,
+                error: 'Totals mismatch',
+                validationResults: validation,
+                summary
+            });
+
+            // Update event status
+            await webhookEventStore.updateEventStatus(context.invocationId, 'needs_review', {
+                error: `Totals mismatch: ${validation.difference} difference`,
+                payoutId
+            });
+
+            return;
+        }
+
+        // 4. Generate posting instructions
+        const postingInstructions = payoutSyncService.generatePostingInstructions(
+            payout,
+            summary,
+            stripeAccountId
+        );
+        context.log(`[PayoutJob] Generated ${postingInstructions.documents.length} documents`);
+
+        // 5. Check for drift (if already synced with different instructions)
+        const drift = await syncLedger.checkDrift(stripeAccountId, payoutId, postingInstructions);
+        if (drift.hasDrift) {
+            context.log('[PayoutJob] Posting drift detected - instructions changed');
+            // In production, handle according to policy (skip, review, or reverse-and-repost)
+        }
+
+        // 6. Post to accounting system
+        const providerDocIds = await payoutSyncService.postToAccounting(postingInstructions);
+        context.log('[PayoutJob] Posted to accounting:', providerDocIds);
+
+        // 7. Record in sync ledger
+        await payoutSyncService.recordLedger(stripeAccountId, payoutId, postingInstructions, providerDocIds);
+        context.log('[PayoutJob] Recorded in sync ledger');
+
+        // 8. Update event status
+        await webhookEventStore.updateEventStatus(context.invocationId, 'completed', {
+            payoutId,
+            providerDocIds
+        });
+
+        context.log('[PayoutJob] Payout sync completed successfully');
+
+    } catch (error) {
+        context.log('[PayoutJob] Error:', error.message);
+
+        // Create review task on error
+        await payoutSyncService.createReviewTask({
+            payoutId,
+            stripeAccountId,
+            error: error.message
+        });
+
+        // Update event status
+        await webhookEventStore.updateEventStatus(context.invocationId, 'failed', {
+            error: error.message,
+            payoutId
+        });
+
+        throw error;
+    }
+};
+
 // Main webhook handler
 module.exports = async function (context, req) {
     try {
@@ -820,6 +1029,29 @@ module.exports = async function (context, req) {
 
         const event = req.body;
         context.log(`Processing webhook event: ${event.type}`);
+
+        // Extract Stripe account ID for Connect accounts
+        const stripeAccountId = req.headers['stripe-account'] || null;
+        if (stripeAccountId) {
+            context.log(`Processing event for Stripe Connect account: ${stripeAccountId}`);
+        }
+
+        // Record event in webhook store for idempotency
+        const hasExistingEvent = await webhookEventStore.hasEvent(event.id);
+        if (hasExistingEvent) {
+            context.log(`Event already processed: ${event.id}`);
+            context.res = {
+                status: 200,
+                body: JSON.stringify({
+                    received: true,
+                    eventType: event.type,
+                    status: 'duplicate'
+                })
+            };
+            return;
+        }
+
+        await webhookEventStore.recordEvent(event);
 
         // Handle different event types
         switch (event.type) {
@@ -847,6 +1079,24 @@ module.exports = async function (context, req) {
                     const paymentIntent = await stripe.paymentIntents.retrieve(invoice.payment_intent);
                     await processPaymentSuccess(context, paymentIntent);
                 }
+                break;
+
+            // Payout events for accounting sync
+            case 'payout.paid':
+                await processPayoutPaid(context, event.data.object, stripeAccountId);
+                break;
+
+            case 'payout.failed':
+                await processPayoutFailed(context, event.data.object, stripeAccountId);
+                break;
+
+            case 'payout.canceled':
+                await processPayoutCanceled(context, event.data.object, stripeAccountId);
+                break;
+
+            case 'payout.created':
+                // Optional: stage/pre-warm but do not post until paid
+                context.log(`Payout created: ${event.data.object.id} - will post when paid`);
                 break;
 
             default:
