@@ -3,8 +3,90 @@ const sgMail = require('@sendgrid/mail');
 // Initialize SendGrid
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
+/**
+ * Determine if an email notification should be sent based on configuration
+ * @param {Object} stripe - Stripe instance
+ * @param {Object} customer - Stripe customer object
+ * @param {number} amount - Payment amount in cents
+ * @param {string} notificationPolicy - Policy from env var (e.g., 'FIRST', 'ALL', 'ABOVE 100')
+ * @returns {Promise<boolean>} - Whether to send the notification
+ */
+const shouldSendNotification = async (stripe, customer, amount, notificationPolicy) => {
+    if (!notificationPolicy) {
+        // Default to ALL if not configured
+        return true;
+    }
+
+    const policy = notificationPolicy.trim().toUpperCase();
+
+    // Handle NONE policy
+    if (policy === 'NONE') {
+        return false;
+    }
+
+    // Handle ALL policy
+    if (policy === 'ALL') {
+        return true;
+    }
+
+    // Handle FIRST policy - only send on first successful payment
+    if (policy === 'FIRST') {
+        try {
+            // List all successful payment intents for this customer
+            const paymentIntents = await stripe.paymentIntents.list({
+                customer: customer.id,
+                limit: 2 // We only need to know if there's more than one
+            });
+
+            // Filter for succeeded payments only
+            const succeededPayments = paymentIntents.data.filter(pi => pi.status === 'succeeded');
+            
+            // If this is the first successful payment, send notification
+            return succeededPayments.length <= 1;
+        } catch (error) {
+            console.error('Error checking payment history for FIRST policy:', error);
+            // On error, default to sending the notification
+            return true;
+        }
+    }
+
+    // Handle ABOVE # policy - only send if amount exceeds threshold
+    if (policy.startsWith('ABOVE ')) {
+        const thresholdStr = policy.substring(6).trim();
+        const threshold = parseFloat(thresholdStr);
+        
+        if (isNaN(threshold)) {
+            console.error(`Invalid ABOVE threshold: ${thresholdStr}, defaulting to send notification`);
+            return true;
+        }
+
+        // Amount is in cents, threshold is in dollars
+        const amountInDollars = amount / 100;
+        return amountInDollars > threshold;
+    }
+
+    // Handle MINIMUM # policy - only send if amount meets or exceeds threshold
+    if (policy.startsWith('MINIMUM ')) {
+        const thresholdStr = policy.substring(8).trim();
+        const threshold = parseFloat(thresholdStr);
+        
+        if (isNaN(threshold)) {
+            console.error(`Invalid MINIMUM threshold: ${thresholdStr}, defaulting to send notification`);
+            return true;
+        }
+
+        // Amount is in cents, threshold is in dollars
+        const amountInDollars = amount / 100;
+        return amountInDollars >= threshold;
+    }
+
+    // Unknown policy, default to sending notification
+    console.warn(`Unknown notification policy: ${notificationPolicy}, defaulting to ALL`);
+    return true;
+};
+
 // Send notification email for successful payment
-const sendPaymentSuccessEmail = async (donationData, paymentIntent) => {
+const sendPaymentSuccessEmail = async (donationData, paymentIntent, stripe) => {
     const isLiveMode = donationData.livemode || paymentIntent.livemode;
     const toEmail = isLiveMode 
         ? process.env.NOTIFICATION_EMAIL_LIVE 
@@ -12,6 +94,24 @@ const sendPaymentSuccessEmail = async (donationData, paymentIntent) => {
     
     if (!toEmail) {
         console.log('No notification email configured');
+        return;
+    }
+
+    // Check notification policy
+    const notificationPolicy = process.env.NOTIFICATION_POLICY || 'ALL';
+    
+    // Get customer object for policy evaluation
+    const customer = await stripe.customers.retrieve(paymentIntent.customer);
+    
+    const shouldSend = await shouldSendNotification(
+        stripe, 
+        customer, 
+        paymentIntent.amount, 
+        notificationPolicy
+    );
+
+    if (!shouldSend) {
+        console.log(`Notification skipped based on policy: ${notificationPolicy}`);
         return;
     }
     

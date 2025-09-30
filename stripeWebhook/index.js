@@ -134,7 +134,7 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             category: transactionData.category || 'General',
             livemode: paymentIntent.livemode
         };
-        await sendPaymentSuccessEmail(donationData, paymentIntent);
+        await sendPaymentSuccessEmail(donationData, paymentIntent, stripe);
         context.log('Payment success notification email sent');
     } catch (emailError) {
         context.log('Failed to send payment success email:', emailError.message);
