@@ -18,11 +18,12 @@ class IdempotencyService {
      * @returns {string} Idempotency key
      */
     generateKey(transactionData) {
-        const { transactionId, amount, email, timestamp } = transactionData;
+        const { transactionId, amount, email } = transactionData;
         
         // Create a key based on transaction ID and key identifying info
         // This ensures we don't reprocess the same transaction
-        return `${transactionId}_${amount}_${email}_${timestamp || 'no-ts'}`;
+        // Note: Removed timestamp to prevent duplicates from multiple webhook events for the same transaction
+        return `${transactionId}_${amount}_${email || 'no-email'}`;
     }
 
     /**

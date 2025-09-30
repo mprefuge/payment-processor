@@ -99,7 +99,7 @@ class SalesforceCrmService extends BaseCrmService {
             MailingStreet: address?.line1 || null,
             MailingCity: address?.city || null,
             MailingState: address?.state || null,
-            MailingPostalCode: address?.postal_code || null,
+            MailingPostalCode: address?.postalCode || address?.postal_code || null, // Handle both normalized and original field names
             MailingCountry: address?.country || 'US',
             LeadSource: 'Online Donation'
         };
