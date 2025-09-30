@@ -341,8 +341,8 @@ const createCheckoutSession = async (stripe, customerId, donationData) => {
     
     const baseParams = {
         customer: customerId,
-        success_url: process.env.SUCCESS_URL || 'https://refugeintl.org/thankyou',
-        cancel_url: 'https://refugeintl.org/donate',
+        success_url: process.env.SUCCESS_URL || process.env.CANCEL_URL || 'https://example.com/thankyou',
+        cancel_url: process.env.CANCEL_URL || 'https://example.com/donate',
         payment_method_types: ['card'],
         line_items: [{
             price_data: {
@@ -461,7 +461,7 @@ const sendNotificationEmail = async (donationData, sessionUrl) => {
     
     const msg = {
         to: toEmail,
-        from: 'noreply@refugeintl.org', // This should be a verified sender
+        from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
         subject: subject,
         html: html,
     };
@@ -494,12 +494,12 @@ module.exports = async function (context, req) {
         
         context.log('Request body parsed successfully:', JSON.stringify(body, null, 2));
         
-        // Send debug email (similar to Power Automate flow)
-        if (process.env.SENDGRID_API_KEY) {
+        // Send debug email (optional, only if DEBUG_EMAIL is configured)
+        if (process.env.SENDGRID_API_KEY && process.env.DEBUG_EMAIL) {
             try {
                 const debugMsg = {
-                    to: 'micah@refugeintl.org',
-                    from: 'noreply@refugeintl.org',
+                    to: process.env.DEBUG_EMAIL,
+                    from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
                     subject: `Debug: New Donation Submission - ${body.firstname || 'Unknown'} ${body.lastname || 'Unknown'}`,
                     html: `<p>${JSON.stringify(body, null, 2)}</p>`,
                 };

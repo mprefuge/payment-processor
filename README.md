@@ -63,6 +63,14 @@ npm start
 
 The function will be available at `http://localhost:7071/api/donation`
 
+### 4. Run Tests
+
+```bash
+npm test
+```
+
+This will run the integration tests to verify the payment processing flow.
+
 ## Azure Deployment
 
 ### Automatic Deployment via GitHub Actions
@@ -86,9 +94,17 @@ func azure functionapp publish payment-processing-function
 | `STRIPE_WEBHOOK_SECRET_TEST` | Stripe webhook endpoint secret (test) | `whsec_...` |
 | `STRIPE_WEBHOOK_SECRET_LIVE` | Stripe webhook endpoint secret (live) | `whsec_...` |
 | `SENDGRID_API_KEY` | SendGrid API key for emails | `SG.xxx` |
+| `NOTIFICATION_EMAIL_FROM` | From address for outgoing emails (must be verified in SendGrid) | `noreply@example.com` |
 | `NOTIFICATION_EMAIL_TEST` | Email for test notifications | `test@example.com` |
 | `NOTIFICATION_EMAIL_LIVE` | Email for live notifications | `live@example.com` |
-| `SUCCESS_URL` | Redirect URL after payment | `https://example.com/success` |
+| `SUCCESS_URL` | Redirect URL after successful payment | `https://example.com/thankyou` |
+| `CANCEL_URL` | Redirect URL after canceled payment | `https://example.com/donate` |
+
+### Optional Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DEBUG_EMAIL` | Email address for debug notifications (leave empty to disable) | `debug@example.com` |
 
 ### CRM Integration Variables (Optional)
 
