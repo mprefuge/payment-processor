@@ -61,7 +61,7 @@ Copy the `local.settings.json.template` to `local.settings.json` and fill in you
 npm start
 ```
 
-The function will be available at `http://localhost:7071/api/donation`
+The function will be available at `http://localhost:7071/api/transaction`
 
 ### 4. Run Tests
 
@@ -143,10 +143,8 @@ The system includes advanced customer-contact association with configurable matc
 ### Payment Processing Endpoint
 
 ```
-POST /api/donation
+POST /api/transaction
 ```
-
-Note: While the endpoint is named `/api/donation` for backward compatibility, it can be used for any type of payment transaction.
 
 ### Request Body
 
@@ -240,7 +238,7 @@ Examples:
 
 The system integrates with Salesforce CRM at two key points in the payment flow:
 
-**1. Checkout Session Creation (`/api/donation`)**
+**1. Checkout Session Creation (`/api/transaction`)**
 - When a checkout session is created, the system immediately syncs contact information to Salesforce
 - **If contact exists**: Updates address information with the latest data
 - **If contact doesn't exist**: Creates a new contact with all provided information

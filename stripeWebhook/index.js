@@ -125,7 +125,7 @@ const processPaymentSuccess = async (context, paymentIntent) => {
 
     // Send notification email for successful payment
     try {
-        const donationData = {
+        const paymentData = {
             email: customer.email,
             firstname: transactionData.firstName || 'Valued',
             lastname: transactionData.lastName || 'Customer',
@@ -134,7 +134,7 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             category: transactionData.category || 'General',
             livemode: paymentIntent.livemode
         };
-        await sendPaymentSuccessEmail(donationData, paymentIntent, stripe);
+        await sendPaymentSuccessEmail(paymentData, paymentIntent, stripe);
         context.log('Payment success notification email sent');
     } catch (emailError) {
         context.log('Failed to send payment success email:', emailError.message);

@@ -157,5 +157,5 @@ console.log('1. Stripe webhook receives payment confirmation');
 console.log('2. Extract customer info from Stripe');
 console.log('3. Search CRM for existing contacts');
 console.log('4. Select best match or create new contact');
-console.log('5. Create completed task for donation');
+console.log('5. Create completed task for transaction');
 console.log('6. Create transaction record with payment details');

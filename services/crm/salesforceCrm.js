@@ -101,7 +101,7 @@ class SalesforceCrmService extends BaseCrmService {
             MailingState: address?.state || null,
             MailingPostalCode: address?.postalCode || address?.postal_code || null, // Handle both normalized and original field names
             MailingCountry: address?.country || 'US',
-            LeadSource: 'Online Donation'
+            LeadSource: 'Online Transaction'
         };
 
         try {
@@ -188,11 +188,11 @@ class SalesforceCrmService extends BaseCrmService {
     async createTask(contactId, taskData) {
         await this.connect();
 
-        const { subject, description, type = 'Donation', status = 'Completed' } = taskData;
+        const { subject, description, type = 'Transaction', status = 'Completed' } = taskData;
 
         const taskRecord = {
             WhoId: contactId,
-            Subject: subject || 'Donation Received',
+            Subject: subject || 'Transaction Received',
             Description: description,
             Type: type,
             Status: status,
@@ -364,7 +364,7 @@ class SalesforceCrmService extends BaseCrmService {
             CloseDate: new Date().toISOString().split('T')[0],
             Description: fullDescription,
             LeadSource: 'Website',
-            Type: frequency === 'onetime' ? 'One-time Donation' : 'Recurring Donation'
+            Type: frequency === 'onetime' ? 'One-time Transaction' : 'Recurring Transaction'
         };
 
         try {
