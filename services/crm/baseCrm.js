@@ -26,16 +26,6 @@ class BaseCrmService {
     }
 
     /**
-     * Update an existing contact/person in the CRM
-     * @param {string} contactId - ID of the contact to update
-     * @param {Object} contactData - Contact information to update
-     * @returns {Promise<Object>} Updated contact object
-     */
-    async updateContact(contactId, contactData) {
-        throw new Error('updateContact method must be implemented by subclass');
-    }
-
-    /**
      * Create a task in the CRM
      * @param {string} contactId - ID of the contact to associate with the task
      * @param {Object} taskData - Task information
