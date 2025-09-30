@@ -183,6 +183,7 @@ POST /api/stripe/webhook
 ```
 
 This endpoint receives payment confirmations from Stripe and automatically:
+- Sends notification email to configured recipient
 - Searches for existing contacts in the configured CRM
 - Creates new contacts if none exist
 - Creates completed tasks for donation tracking
