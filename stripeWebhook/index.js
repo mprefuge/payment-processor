@@ -427,6 +427,90 @@ const processPaymentSuccess = async (context, paymentIntent) => {
     }
 };
 
+// Process payment failure and update transaction status in CRM
+const processPaymentFailure = async (context, paymentIntent) => {
+    try {
+        const crmConfig = getCrmConfig();
+        
+        if (!crmConfig) {
+            context.log('CRM integration disabled - payment failure processed without CRM sync');
+            return;
+        }
+
+        context.log(`Processing payment failure for payment intent: ${paymentIntent.id}`);
+
+        // Create CRM service
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        // Check if transaction exists in CRM
+        const existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
+        
+        if (existingTransaction) {
+            const isPending = existingTransaction.Status__c === 'Pending' || existingTransaction.StageName === 'Pending';
+            
+            if (isPending) {
+                context.log(`Updating transaction ${existingTransaction.Id} to Failed status`);
+                
+                await crmService.updateTransaction(existingTransaction.Id, {
+                    status: 'Failed',
+                    transactionId: paymentIntent.id
+                });
+                
+                context.log(`Transaction ${existingTransaction.Id} marked as Failed`);
+            } else {
+                context.log(`Transaction ${existingTransaction.Id} is not in Pending status, skipping update`);
+            }
+        } else {
+            context.log(`No pending transaction found for payment intent ${paymentIntent.id}`);
+        }
+    } catch (error) {
+        context.log('Error processing payment failure:', error.message);
+        // Don't throw - we don't want to cause webhook failures
+    }
+};
+
+// Process payment cancelation and update transaction status in CRM
+const processPaymentCanceled = async (context, paymentIntent) => {
+    try {
+        const crmConfig = getCrmConfig();
+        
+        if (!crmConfig) {
+            context.log('CRM integration disabled - payment cancelation processed without CRM sync');
+            return;
+        }
+
+        context.log(`Processing payment cancelation for payment intent: ${paymentIntent.id}`);
+
+        // Create CRM service
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        // Check if transaction exists in CRM
+        const existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
+        
+        if (existingTransaction) {
+            const isPending = existingTransaction.Status__c === 'Pending' || existingTransaction.StageName === 'Pending';
+            
+            if (isPending) {
+                context.log(`Updating transaction ${existingTransaction.Id} to Canceled status`);
+                
+                await crmService.updateTransaction(existingTransaction.Id, {
+                    status: 'Canceled',
+                    transactionId: paymentIntent.id
+                });
+                
+                context.log(`Transaction ${existingTransaction.Id} marked as Canceled`);
+            } else {
+                context.log(`Transaction ${existingTransaction.Id} is not in Pending status, skipping update`);
+            }
+        } else {
+            context.log(`No pending transaction found for payment intent ${paymentIntent.id}`);
+        }
+    } catch (error) {
+        context.log('Error processing payment cancelation:', error.message);
+        // Don't throw - we don't want to cause webhook failures
+    }
+};
+
 // Helper function to determine payment method from Stripe payment intent
 const determinePaymentMethod = (paymentIntent) => {
     if (paymentIntent.charges && paymentIntent.charges.data.length > 0) {
@@ -719,6 +803,14 @@ module.exports = async function (context, req) {
         switch (event.type) {
             case 'payment_intent.succeeded':
                 await processPaymentSuccess(context, event.data.object);
+                break;
+
+            case 'payment_intent.payment_failed':
+                await processPaymentFailure(context, event.data.object);
+                break;
+
+            case 'payment_intent.canceled':
+                await processPaymentCanceled(context, event.data.object);
                 break;
 
             case 'checkout.session.completed':
