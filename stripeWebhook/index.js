@@ -4,6 +4,7 @@ const { ContactMatcher } = require('../services/contactMatcher');
 const ReviewTaskService = require('../services/reviewTaskService');
 const IdempotencyService = require('../services/idempotencyService');
 const MetricsService = require('../services/metricsService');
+const { sendPaymentSuccessEmail } = require('../services/emailService');
 const { loadConfig, validateConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
 
 // Global service instances
@@ -70,6 +71,77 @@ const verifyWebhookSignature = (payload, signature, endpointSecret) => {
 
 // Process payment success and integrate with CRM
 const processPaymentSuccess = async (context, paymentIntent) => {
+    // Extract customer information from payment intent first
+    const customerId = paymentIntent.customer;
+    if (!customerId) {
+        context.log('No customer ID found in payment intent');
+        return;
+    }
+
+    // Initialize Stripe to fetch customer details
+    const stripe = initializeStripe(paymentIntent.livemode);
+    const customer = await stripe.customers.retrieve(customerId);
+
+    if (!customer) {
+        context.log(`Customer not found: ${customerId}`);
+        return;
+    }
+
+    context.log(`Processing payment for customer: ${customer.name || 'Unknown'} (${customer.email})`);
+
+    // Extract category from metadata or product name
+    let category = paymentIntent.metadata?.category || paymentIntent.metadata?.fund || null;
+    
+    // If no category in metadata, try to get product name from Stripe
+    if (!category) {
+        category = await extractProductName(stripe, paymentIntent);
+    }
+
+    // Prepare transaction data for matching
+    const transactionData = {
+        transactionId: paymentIntent.id,
+        amount: paymentIntent.amount,
+        currency: paymentIntent.currency,
+        timestamp: new Date(paymentIntent.created * 1000).toISOString(), // Keep timestamp for logging but don't use in idempotency key
+        email: customer.email,
+        phone: customer.phone,
+        firstName: customer.name ? customer.name.split(' ')[0] : null,
+        lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null,
+        address: customer.address,
+        // Use extracted category (from metadata or product name)
+        category: category,
+        description: paymentIntent.description,
+        frequency: paymentIntent.metadata?.frequency || 'onetime'
+    };
+
+    // Log metadata and product extraction for debugging
+    context.log('PaymentIntent metadata and product:', {
+        metadata: paymentIntent.metadata,
+        extractedCategory: transactionData.category,
+        extractedFrequency: transactionData.frequency,
+        hasInvoice: !!paymentIntent.invoice,
+        description: paymentIntent.description
+    });
+
+    // Send notification email for successful payment
+    try {
+        const donationData = {
+            email: customer.email,
+            firstname: transactionData.firstName || 'Valued',
+            lastname: transactionData.lastName || 'Donor',
+            amount: paymentIntent.amount,
+            frequency: transactionData.frequency,
+            category: transactionData.category || 'General',
+            livemode: paymentIntent.livemode
+        };
+        await sendPaymentSuccessEmail(donationData, paymentIntent);
+        context.log('Payment success notification email sent');
+    } catch (emailError) {
+        context.log('Failed to send payment success email:', emailError.message);
+        // Continue processing - email failure shouldn't break the flow
+    }
+
+    // Process CRM integration
     try {
         const crmConfig = getCrmConfig();
         
@@ -92,56 +164,6 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
         const contactMatcher = new ContactMatcher(matchingConfig);
         const reviewTaskService = new ReviewTaskService(crmService, matchingConfig.review);
-
-        // Extract customer information from payment intent
-        const customerId = paymentIntent.customer;
-        if (!customerId) {
-            throw new Error('No customer ID found in payment intent');
-        }
-
-        // Initialize Stripe to fetch customer details
-        const stripe = initializeStripe(paymentIntent.livemode);
-        const customer = await stripe.customers.retrieve(customerId);
-
-        if (!customer) {
-            throw new Error(`Customer not found: ${customerId}`);
-        }
-
-        context.log(`Processing payment for customer: ${customer.name || 'Unknown'} (${customer.email})`);
-
-        // Extract category from metadata or product name
-        let category = paymentIntent.metadata?.category || paymentIntent.metadata?.fund || null;
-        
-        // If no category in metadata, try to get product name from Stripe
-        if (!category) {
-            category = await extractProductName(stripe, paymentIntent);
-        }
-
-        // Prepare transaction data for matching
-        const transactionData = {
-            transactionId: paymentIntent.id,
-            amount: paymentIntent.amount,
-            currency: paymentIntent.currency,
-            timestamp: new Date(paymentIntent.created * 1000).toISOString(), // Keep timestamp for logging but don't use in idempotency key
-            email: customer.email,
-            phone: customer.phone,
-            firstName: customer.name ? customer.name.split(' ')[0] : null,
-            lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null,
-            address: customer.address,
-            // Use extracted category (from metadata or product name)
-            category: category,
-            description: paymentIntent.description,
-            frequency: paymentIntent.metadata?.frequency || 'onetime'
-        };
-
-        // Log metadata and product extraction for debugging
-        context.log('PaymentIntent metadata and product:', {
-            metadata: paymentIntent.metadata,
-            extractedCategory: transactionData.category,
-            extractedFrequency: transactionData.frequency,
-            hasInvoice: !!paymentIntent.invoice,
-            description: paymentIntent.description
-        });
 
         // Early idempotency check - if this transaction was already processed, skip everything
         const idempotencyKey = idempotencyService.generateKey(transactionData);
