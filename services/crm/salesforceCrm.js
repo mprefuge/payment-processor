@@ -133,7 +133,7 @@ class SalesforceCrmService extends BaseCrmService {
 
         const { address } = contactData;
         
-        // Only update address fields if address is provided
+        // Only update address fields if address is provided and has meaningful data
         if (!address) {
             return null;
         }
@@ -148,11 +148,16 @@ class SalesforceCrmService extends BaseCrmService {
 
         // Remove null values to avoid overwriting existing data with null
         Object.keys(updateRecord).forEach(key => {
-            if (updateRecord[key] === null) {
+            if (updateRecord[key] === null || updateRecord[key] === '') {
                 delete updateRecord[key];
             }
         });
 
+        // Only proceed if we have at least one field to update
+        if (Object.keys(updateRecord).length === 0) {
+            console.log('No meaningful address data to update');
+            return null;
+        }
         try {
             const result = await this.conn.sobject('Contact').update({
                 Id: contactId,
@@ -211,6 +216,45 @@ class SalesforceCrmService extends BaseCrmService {
             console.error('Error creating Salesforce task:', error);
             throw new Error(`Salesforce task creation failed: ${error.message}`);
         }
+    }
+
+    /**
+     * Find existing transaction by Stripe payment intent ID
+     * @param {string} stripeId - Stripe payment intent ID
+     * @returns {Promise<Object|null>} Existing transaction or null if not found
+     */
+    async findTransactionByStripeId(stripeId) {
+        await this.connect();
+
+        try {
+            // First try custom Transaction object
+            const query = `SELECT Id, Name, Transaction_ID__c FROM Transaction__c WHERE Transaction_ID__c = '${stripeId}' LIMIT 1`;
+            console.log(`Executing Salesforce query: ${query}`);
+            
+            const result = await this.conn.query(query);
+            
+            if (result.records && result.records.length > 0) {
+                return result.records[0];
+            }
+        } catch (error) {
+            console.log('Custom Transaction object not available, checking Opportunities');
+        }
+
+        try {
+            // Fallback to Opportunity records (if using them as transaction fallback)
+            const query = `SELECT Id, Name FROM Opportunity WHERE Name LIKE '%${stripeId}%' LIMIT 1`;
+            console.log(`Executing Salesforce query: ${query}`);
+            
+            const result = await this.conn.query(query);
+            
+            if (result.records && result.records.length > 0) {
+                return result.records[0];
+            }
+        } catch (error) {
+            console.log('Error checking Opportunities for existing transaction:', error.message);
+        }
+
+        return null;
     }
 
     /**

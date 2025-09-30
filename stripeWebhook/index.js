@@ -133,6 +133,13 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             extractedFrequency: transactionData.frequency
         });
 
+        // Check if transaction already exists in CRM to prevent duplicates
+        const existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
+        if (existingTransaction) {
+            context.log(`Transaction ${paymentIntent.id} already exists in CRM: ${existingTransaction.Id}`);
+            return;
+        }
+
         // Process with idempotency checking
         const startTime = Date.now();
         const result = await idempotencyService.processWithIdempotency(transactionData, async (txnData) => {
