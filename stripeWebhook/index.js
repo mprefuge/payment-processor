@@ -152,11 +152,27 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         }
 
         // Check if transaction already exists in CRM to prevent duplicates
-        const existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
-        if (existingTransaction) {
-            context.log(`Transaction ${paymentIntent.id} already exists in CRM: ${existingTransaction.Id}`);
-            return;
+        // Use retry logic to handle race condition with checkout.session.completed
+        let existingTransaction = null;
+        const maxRetries = 3;
+        const retryDelays = [500, 1000, 2000]; // Exponential backoff in ms
+        
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            if (attempt > 0) {
+                const delay = retryDelays[attempt - 1];
+                context.log(`Retry ${attempt}/${maxRetries}: Waiting ${delay}ms before checking if transaction exists`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            
+            existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
+            
+            if (existingTransaction) {
+                context.log(`Transaction ${paymentIntent.id} already exists in CRM: ${existingTransaction.Id} (found on attempt ${attempt + 1}/${maxRetries + 1})`);
+                return;
+            }
         }
+        
+        context.log(`Transaction ${paymentIntent.id} does not exist after ${maxRetries + 1} attempts, proceeding with processing`);
 
         // Check if there's a pending transaction from checkout.session.completed event
         // Get the checkout session ID from the payment intent
@@ -194,27 +210,41 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         let pendingTransaction = null;
         if (checkoutSessionId) {
             context.log(`Found checkout session ID: ${checkoutSessionId}, checking for pending transaction`);
-            pendingTransaction = await crmService.findTransactionBySessionId(checkoutSessionId);
             
-            if (pendingTransaction) {
-                context.log(`Found pending transaction: ${pendingTransaction.Id}, will update to completed`);
+            // Retry logic to handle race condition where checkout.session.completed 
+            // and payment_intent.succeeded fire simultaneously
+            const maxRetries = 3;
+            const retryDelays = [500, 1000, 2000]; // Exponential backoff in ms
+            
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                if (attempt > 0) {
+                    const delay = retryDelays[attempt - 1];
+                    context.log(`Retry ${attempt}/${maxRetries}: Waiting ${delay}ms before checking for pending transaction`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
                 
-                // Update the pending transaction to completed
-                const updatedTransaction = await crmService.updateTransaction(pendingTransaction.Id, {
-                    status: 'Completed',
-                    paymentMethod: determinePaymentMethod(paymentIntent),
-                    transactionId: paymentIntent.id
-                });
+                pendingTransaction = await crmService.findTransactionBySessionId(checkoutSessionId);
                 
-                context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
-                
-                // Record metrics and exit early
-                metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
-                context.log('CRM integration completed successfully - updated pending transaction');
-                return;
-            } else {
-                context.log('No pending transaction found, will create new transaction');
+                if (pendingTransaction) {
+                    context.log(`Found pending transaction: ${pendingTransaction.Id} (attempt ${attempt + 1}/${maxRetries + 1}), will update to completed`);
+                    
+                    // Update the pending transaction to completed
+                    const updatedTransaction = await crmService.updateTransaction(pendingTransaction.Id, {
+                        status: 'Completed',
+                        paymentMethod: determinePaymentMethod(paymentIntent),
+                        transactionId: paymentIntent.id
+                    });
+                    
+                    context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
+                    
+                    // Record metrics and exit early
+                    metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
+                    context.log('CRM integration completed successfully - updated pending transaction');
+                    return;
+                }
             }
+            
+            context.log(`No pending transaction found after ${maxRetries + 1} attempts, will create new transaction`);
         }
 
         // Process with idempotency checking
