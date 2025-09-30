@@ -109,6 +109,14 @@ const processPaymentSuccess = async (context, paymentIntent) => {
 
         context.log(`Processing payment for customer: ${customer.name || 'Unknown'} (${customer.email})`);
 
+        // Extract category from metadata or product name
+        let category = paymentIntent.metadata?.category || paymentIntent.metadata?.fund || null;
+        
+        // If no category in metadata, try to get product name from Stripe
+        if (!category) {
+            category = await extractProductName(stripe, paymentIntent);
+        }
+
         // Prepare transaction data for matching
         const transactionData = {
             transactionId: paymentIntent.id,
@@ -120,17 +128,19 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             firstName: customer.name ? customer.name.split(' ')[0] : null,
             lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null,
             address: customer.address,
-            // Extract category from metadata if available, with better logging
-            category: paymentIntent.metadata?.category || paymentIntent.metadata?.fund || null,
+            // Use extracted category (from metadata or product name)
+            category: category,
             description: paymentIntent.description,
             frequency: paymentIntent.metadata?.frequency || 'onetime'
         };
 
-        // Log metadata extraction for debugging
-        context.log('PaymentIntent metadata:', {
+        // Log metadata and product extraction for debugging
+        context.log('PaymentIntent metadata and product:', {
             metadata: paymentIntent.metadata,
             extractedCategory: transactionData.category,
-            extractedFrequency: transactionData.frequency
+            extractedFrequency: transactionData.frequency,
+            hasInvoice: !!paymentIntent.invoice,
+            description: paymentIntent.description
         });
 
         // Early idempotency check - if this transaction was already processed, skip everything
@@ -318,6 +328,43 @@ const determinePaymentMethod = (paymentIntent) => {
     }
     
     return 'Unknown';
+};
+
+// Helper function to extract product name from Stripe payment intent
+const extractProductName = async (stripe, paymentIntent) => {
+    try {
+        // If there's an invoice, get the product name from line items
+        if (paymentIntent.invoice) {
+            const invoice = await stripe.invoices.retrieve(paymentIntent.invoice, {
+                expand: ['lines.data.price.product']
+            });
+            
+            if (invoice.lines && invoice.lines.data.length > 0) {
+                const lineItem = invoice.lines.data[0];
+                
+                // Try to get product name from expanded product object
+                if (lineItem.price && lineItem.price.product && typeof lineItem.price.product === 'object') {
+                    return lineItem.price.product.name;
+                }
+                
+                // Fallback to description if available
+                if (lineItem.description) {
+                    return lineItem.description;
+                }
+            }
+        }
+        
+        // Fallback to payment intent description
+        if (paymentIntent.description) {
+            return paymentIntent.description;
+        }
+        
+        return null;
+    } catch (error) {
+        // Log error but don't fail - we'll use the fallback category
+        console.error('Error extracting product name from Stripe:', error.message);
+        return null;
+    }
 };
 
 // Process checkout session completed event
