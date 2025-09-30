@@ -203,7 +203,7 @@ const createPendingTransaction = async (context, session, contactId, transaction
             id: session.id
         });
 
-        const transactionData = {
+        const txnData = {
             amount: transactionData.amount,
             currency: 'usd',
             paymentMethod: 'Pending',
@@ -216,7 +216,7 @@ const createPendingTransaction = async (context, session, contactId, transaction
             name: transactionName
         };
 
-        const transaction = await crmService.createTransaction(contactId, transactionData);
+        const transaction = await crmService.createTransaction(contactId, txnData);
         context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
 
         return transaction;
