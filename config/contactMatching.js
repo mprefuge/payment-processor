@@ -44,7 +44,7 @@ function loadConfig() {
             nameTemplate: process.env.TRANSACTION_NAME_TEMPLATE || 'Transaction - {category}',
             defaultCategory: process.env.TRANSACTION_DEFAULT_CATEGORY || 'Uncategorized',
             controlledVocabulary: (process.env.TRANSACTION_CATEGORIES || 
-                'General Giving,Building Fund,Missions,Youth Ministry,Benevolence,Special Events,Memorial,Uncategorized'
+                'General Giving,General Donation,Building Fund,Missions,Youth Ministry,Benevolence,Special Events,Memorial,Uncategorized'
             ).split(',').map(c => c.trim())
         },
         

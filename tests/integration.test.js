@@ -134,6 +134,18 @@ function runIntegrationTests() {
         assertEqual(normalized, 'General Giving');
     });
     
+    test('Transaction category normalization - General Donation', () => {
+        const config = loadConfig();
+        const normalized = normalizeTransactionCategory('General Donation', config);
+        assertEqual(normalized, 'General Donation');
+    });
+    
+    test('Transaction category normalization - case insensitive General Donation', () => {
+        const config = loadConfig();
+        const normalized = normalizeTransactionCategory('general donation', config);
+        assertEqual(normalized, 'General Donation');
+    });
+    
     test('Transaction category normalization - invalid category', () => {
         const config = loadConfig();
         const normalized = normalizeTransactionCategory('Invalid Category', config);
@@ -151,6 +163,12 @@ function runIntegrationTests() {
         const config = loadConfig();
         const name = generateTransactionName('General Giving', config);
         assertEqual(name, 'Transaction - General Giving');
+    });
+    
+    test('Transaction name generation - General Donation', () => {
+        const config = loadConfig();
+        const name = generateTransactionName('General Donation', config);
+        assertEqual(name, 'Transaction - General Donation');
     });
     
     // Test full integration flow - high confidence match
