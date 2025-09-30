@@ -168,7 +168,30 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             
             if (existingTransaction) {
                 context.log(`Transaction ${paymentIntent.id} already exists in CRM: ${existingTransaction.Id} (found on attempt ${attempt + 1}/${maxRetries + 1})`);
-                return;
+                
+                // Check if the existing transaction is in Pending status
+                const isPending = existingTransaction.Status__c === 'Pending' || existingTransaction.StageName === 'Pending';
+                
+                if (isPending) {
+                    context.log(`Transaction ${existingTransaction.Id} is in Pending status, updating to Completed`);
+                    
+                    // Update the pending transaction to completed
+                    const updatedTransaction = await crmService.updateTransaction(existingTransaction.Id, {
+                        status: 'Completed',
+                        paymentMethod: determinePaymentMethod(paymentIntent),
+                        transactionId: paymentIntent.id
+                    });
+                    
+                    context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
+                    
+                    // Record metrics and exit
+                    metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
+                    context.log('CRM integration completed successfully - updated pending transaction');
+                    return;
+                } else {
+                    context.log(`Transaction ${existingTransaction.Id} is already completed, skipping duplicate processing`);
+                    return;
+                }
             }
         }
         

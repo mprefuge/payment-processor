@@ -228,7 +228,7 @@ class SalesforceCrmService extends BaseCrmService {
 
         try {
             // First try custom Transaction object
-            const query = `SELECT Id, Name, Transaction_ID__c FROM Transaction__c WHERE Transaction_ID__c = '${stripeId}' LIMIT 1`;
+            const query = `SELECT Id, Name, Transaction_ID__c, Status__c FROM Transaction__c WHERE Transaction_ID__c = '${stripeId}' LIMIT 1`;
             console.log(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
@@ -243,7 +243,7 @@ class SalesforceCrmService extends BaseCrmService {
         try {
             // Fallback to Opportunity records (if using them as transaction fallback)
             // Search in Description field for "Payment Intent: {stripeId}"
-            const query = `SELECT Id, Name, Description FROM Opportunity WHERE Description LIKE '%${stripeId}%' LIMIT 1`;
+            const query = `SELECT Id, Name, Description, StageName FROM Opportunity WHERE Description LIKE '%${stripeId}%' LIMIT 1`;
             console.log(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
