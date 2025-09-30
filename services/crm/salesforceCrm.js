@@ -359,6 +359,7 @@ class SalesforceCrmService extends BaseCrmService {
 
     /**
      * Enhanced contact matching logic for Salesforce
+     * Requires name to match when email or phone matches to prevent wrong contact updates
      * @param {Array} contacts - Array of Salesforce contacts
      * @param {Object} searchCriteria - Original search criteria
      * @returns {Object} Best matching contact
@@ -368,14 +369,34 @@ class SalesforceCrmService extends BaseCrmService {
             return null;
         }
 
-        if (contacts.length === 1) {
-            return contacts[0];
-        }
-
         const { email, firstName, lastName, phone } = searchCriteria;
 
-        // Score contacts based on matching criteria
-        const scoredContacts = contacts.map(contact => {
+        // Helper function to check if name matches
+        const nameMatches = (contact) => {
+            if (!firstName || !lastName || !contact.FirstName || !contact.LastName) {
+                return false;
+            }
+            return contact.FirstName.toLowerCase() === firstName.toLowerCase() &&
+                   contact.LastName.toLowerCase() === lastName.toLowerCase();
+        };
+
+        // Filter contacts to only those with matching names
+        // This prevents updating wrong contacts when email/phone match but name differs
+        const contactsWithMatchingNames = contacts.filter(nameMatches);
+
+        // If no contacts have matching names, return null to create new contact
+        if (contactsWithMatchingNames.length === 0) {
+            console.log('No contacts found with matching name, will create new contact');
+            return null;
+        }
+
+        // If only one contact with matching name, return it
+        if (contactsWithMatchingNames.length === 1) {
+            return contactsWithMatchingNames[0];
+        }
+
+        // Score contacts based on matching criteria (among those with matching names)
+        const scoredContacts = contactsWithMatchingNames.map(contact => {
             let score = 0;
             
             // Exact email match gets highest priority
@@ -383,13 +404,8 @@ class SalesforceCrmService extends BaseCrmService {
                 score += 10;
             }
             
-            // Exact name match
-            if (firstName && lastName && 
-                contact.FirstName && contact.LastName &&
-                contact.FirstName.toLowerCase() === firstName.toLowerCase() &&
-                contact.LastName.toLowerCase() === lastName.toLowerCase()) {
-                score += 8;
-            }
+            // Name already matches (filtered above), give base score
+            score += 8;
             
             // Phone match (allowing for formatting differences)
             if (phone && (contact.Phone || contact.MobilePhone)) {
