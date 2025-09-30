@@ -1,6 +1,7 @@
 const Stripe = require('stripe');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/crm/crmFactory');
+const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
 
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
@@ -170,6 +171,63 @@ const syncContactToCrm = async (context, customerData) => {
     }
 };
 
+// Create pending transaction in CRM after checkout session is created
+const createPendingTransaction = async (context, session, contactId, donationData) => {
+    try {
+        const crmConfig = getCrmConfig();
+        
+        if (!crmConfig) {
+            context.log('CRM integration disabled - skipping pending transaction creation');
+            return null;
+        }
+
+        // Validate CRM configuration
+        const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+        if (!validation.isValid) {
+            context.log(`CRM configuration invalid: ${validation.error}`);
+            return null;
+        }
+
+        // Create CRM service
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        // Load matching configuration for transaction naming
+        const matchingConfig = loadConfig();
+
+        // Prepare transaction data
+        const category = session.metadata?.category || donationData.category || 'General Donation';
+        const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
+        const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
+            amount: `$${(donationData.amount / 100).toFixed(2)}`,
+            date: new Date().toLocaleDateString(),
+            id: session.id
+        });
+
+        const transactionData = {
+            amount: donationData.amount,
+            currency: 'usd',
+            paymentMethod: 'Pending',
+            transactionId: null, // Will be set when payment_intent.succeeded fires
+            sessionId: session.id,
+            status: 'Pending',
+            description: transactionName,
+            frequency: donationData.frequency || 'onetime',
+            category: normalizedCategory,
+            name: transactionName
+        };
+
+        const transaction = await crmService.createTransaction(contactId, transactionData);
+        context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
+
+        return transaction;
+    } catch (error) {
+        // Log error but don't fail the checkout process
+        context.log(`Error creating pending transaction: ${error.message}`);
+        console.error('Pending transaction creation error details:', error);
+        return null;
+    }
+};
+
 // Validate required request parameters
 const validateRequest = (body) => {
     const required = ['email', 'firstname', 'lastname', 'amount', 'frequency'];
@@ -295,7 +353,11 @@ const createCheckoutSession = async (stripe, customerId, donationData) => {
                 unit_amount: donationData.amount
             },
             quantity: 1
-        }]
+        }],
+        metadata: {
+            category: donationData.category || 'General Donation',
+            frequency: donationData.frequency || 'onetime'
+        }
     };
     
     if (isOneTime) {
@@ -488,7 +550,12 @@ module.exports = async function (context, req) {
         
         // Sync contact to CRM (Salesforce) if configured
         // This happens after checkout session creation to not block the payment flow
-        await syncContactToCrm(context, body);
+        const contact = await syncContactToCrm(context, body);
+        
+        // Create pending transaction in CRM if contact was synced successfully
+        if (contact) {
+            await createPendingTransaction(context, session, contact.Id, body);
+        }
         
         // Send notification email
         await sendNotificationEmail(body, session.url);
