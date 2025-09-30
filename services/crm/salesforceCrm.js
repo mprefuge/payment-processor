@@ -446,6 +446,8 @@ class SalesforceCrmService extends BaseCrmService {
                     stageName = 'Prospecting';
                 } else if (stageName === 'Failed') {
                     stageName = 'Closed Lost';
+                } else if (stageName === 'Canceled') {
+                    stageName = 'Closed Lost';
                 }
 
                 const oppUpdateRecord = {};
