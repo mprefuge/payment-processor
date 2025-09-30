@@ -302,6 +302,33 @@ function runIntegrationTests() {
         assertEqual(transaction.Amount__c, 75.00);
     });
     
+    // Test category normalization with product name fallback
+    test('Transaction category from product name', () => {
+        const config = loadConfig();
+        
+        // When product name is provided, it should be used and normalized
+        const productName = 'Building Fund';
+        const normalized = normalizeTransactionCategory(productName, config);
+        assertEqual(normalized, 'Building Fund');
+    });
+    
+    test('Transaction category from product name - lowercase', () => {
+        const config = loadConfig();
+        
+        // Product names should be properly title-cased
+        const productName = 'general donation';
+        const normalized = normalizeTransactionCategory(productName, config);
+        assertEqual(normalized, 'General Donation');
+    });
+    
+    test('Transaction category fallback to Uncategorized', () => {
+        const config = loadConfig();
+        
+        // When no category or product name is provided, should default to Uncategorized
+        const normalized = normalizeTransactionCategory(null, config);
+        assertEqual(normalized, 'Uncategorized');
+    });
+    
     // Summary
     console.log(`\n📊 Integration Test Results: ${testsPassed}/${testsTotal} tests passed`);
     
