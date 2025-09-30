@@ -80,13 +80,22 @@ const syncContactToCrm = async (context, customerData) => {
             context.log(`Found existing contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
             
             // Update contact with address information if available
-            const addressData = {
-                line1: customerData.address,
-                city: customerData.city,
-                state: customerData.state,
-                postal_code: customerData.zipcode,
-                country: 'US'
-            };
+            // Handle both nested address object and flat address fields
+            const addressData = customerData.address && typeof customerData.address === 'object'
+                ? {
+                    line1: customerData.address.line1,
+                    city: customerData.address.city,
+                    state: customerData.address.state,
+                    postal_code: customerData.address.postal_code,
+                    country: 'US'
+                }
+                : {
+                    line1: customerData.address,
+                    city: customerData.city,
+                    state: customerData.state,
+                    postal_code: customerData.zipcode,
+                    country: 'US'
+                };
             
             // Only update if we have address data
             if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
@@ -112,13 +121,21 @@ const syncContactToCrm = async (context, customerData) => {
                 firstName: customerData.firstname,
                 lastName: customerData.lastname,
                 phone: customerData.phone,
-                address: {
-                    line1: customerData.address,
-                    city: customerData.city,
-                    state: customerData.state,
-                    postal_code: customerData.zipcode,
-                    country: 'US'
-                }
+                address: customerData.address && typeof customerData.address === 'object'
+                    ? {
+                        line1: customerData.address.line1,
+                        city: customerData.address.city,
+                        state: customerData.address.state,
+                        postal_code: customerData.address.postal_code,
+                        country: 'US'
+                    }
+                    : {
+                        line1: customerData.address,
+                        city: customerData.city,
+                        state: customerData.state,
+                        postal_code: customerData.zipcode,
+                        country: 'US'
+                    }
             };
             
             contact = await crmService.createContact(contactData);
@@ -165,17 +182,28 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
 // Create new Stripe customer
 const createStripeCustomer = async (stripe, customerData) => {
     try {
-        const customer = await stripe.customers.create({
-            email: customerData.email,
-            name: `${customerData.firstname} ${customerData.lastname}`,
-            phone: customerData.phone || null,
-            address: {
+        // Handle both nested address object and flat address fields
+        const addressData = customerData.address && typeof customerData.address === 'object' 
+            ? {
+                line1: customerData.address.line1 || null,
+                city: customerData.address.city || null,
+                state: customerData.address.state || null,
+                postal_code: customerData.address.postal_code || null,
+                country: customerData.address.country || 'US'
+            }
+            : {
                 line1: customerData.address || null,
                 city: customerData.city || null,
                 state: customerData.state || null,
                 postal_code: customerData.zipcode || null,
                 country: 'US'
-            }
+            };
+
+        const customer = await stripe.customers.create({
+            email: customerData.email,
+            name: `${customerData.firstname} ${customerData.lastname}`,
+            phone: customerData.phone || null,
+            address: addressData
         });
         return customer;
     } catch (error) {
@@ -192,15 +220,27 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
             phone: customerData.phone || null
         };
 
+        // Handle both nested address object and flat address fields
+        const hasNestedAddress = customerData.address && typeof customerData.address === 'object';
+        const hasFlatAddress = customerData.address || customerData.city || customerData.state || customerData.zipcode;
+        
         // Only include address if at least one field is provided
-        if (customerData.address || customerData.city || customerData.state || customerData.zipcode) {
-            updateData.address = {
-                line1: customerData.address || null,
-                city: customerData.city || null,
-                state: customerData.state || null,
-                postal_code: customerData.zipcode || null,
-                country: 'US'
-            };
+        if (hasNestedAddress || hasFlatAddress) {
+            updateData.address = hasNestedAddress
+                ? {
+                    line1: customerData.address.line1 || null,
+                    city: customerData.address.city || null,
+                    state: customerData.address.state || null,
+                    postal_code: customerData.address.postal_code || null,
+                    country: customerData.address.country || 'US'
+                }
+                : {
+                    line1: customerData.address || null,
+                    city: customerData.city || null,
+                    state: customerData.state || null,
+                    postal_code: customerData.zipcode || null,
+                    country: 'US'
+                };
         }
 
         const customer = await stripe.customers.update(customerId, updateData);
