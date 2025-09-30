@@ -75,44 +75,63 @@ const syncContactToCrm = async (context, customerData) => {
         let contact = null;
         
         if (existingContacts && existingContacts.length > 0) {
-            // Contact exists - update with new information
-            contact = existingContacts[0];
-            context.log(`Found existing contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+            // Validate that name matches before accepting a contact
+            // This prevents updating wrong contacts when email/phone match but name differs
+            const matchingContact = existingContacts.find(c => {
+                const firstNameMatch = c.FirstName && 
+                    c.FirstName.toLowerCase() === searchCriteria.firstName.toLowerCase();
+                const lastNameMatch = c.LastName && 
+                    c.LastName.toLowerCase() === searchCriteria.lastName.toLowerCase();
+                return firstNameMatch && lastNameMatch;
+            });
             
-            // Update contact with address information if available
-            // Handle both nested address object and flat address fields
-            const addressData = customerData.address && typeof customerData.address === 'object'
-                ? {
-                    line1: customerData.address.line1,
-                    city: customerData.address.city,
-                    state: customerData.address.state,
-                    postal_code: customerData.address.postal_code,
-                    country: 'US'
-                }
-                : {
-                    line1: customerData.address,
-                    city: customerData.city,
-                    state: customerData.state,
-                    postal_code: customerData.zipcode,
-                    country: 'US'
-                };
-            
-            // Only update if we have address data
-            if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
-                try {
-                    const updatedContact = await crmService.updateContact(contact.Id, {
-                        address: addressData
-                    });
-                    if (updatedContact) {
-                        contact = updatedContact;
-                        context.log(`Updated contact address for: ${contact.FirstName} ${contact.LastName}`);
+            if (matchingContact) {
+                // Contact exists with matching name - update with new information
+                contact = matchingContact;
+                context.log(`Found existing contact with matching name: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+                
+                // Update contact with address information if available
+                // Handle both nested address object and flat address fields
+                const addressData = customerData.address && typeof customerData.address === 'object'
+                    ? {
+                        line1: customerData.address.line1,
+                        city: customerData.address.city,
+                        state: customerData.address.state,
+                        postal_code: customerData.address.postal_code,
+                        country: 'US'
                     }
-                } catch (error) {
-                    context.log(`Failed to update contact address: ${error.message}`);
-                    // Continue - don't fail for address update issues
+                    : {
+                        line1: customerData.address,
+                        city: customerData.city,
+                        state: customerData.state,
+                        postal_code: customerData.zipcode,
+                        country: 'US'
+                    };
+                
+                // Only update if we have address data
+                if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
+                    try {
+                        const updatedContact = await crmService.updateContact(contact.Id, {
+                            address: addressData
+                        });
+                        if (updatedContact) {
+                            contact = updatedContact;
+                            context.log(`Updated contact address for: ${contact.FirstName} ${contact.LastName}`);
+                        }
+                    } catch (error) {
+                        context.log(`Failed to update contact address: ${error.message}`);
+                        // Continue - don't fail for address update issues
+                    }
                 }
+            } else {
+                // Found contacts by email/phone but name doesn't match
+                // Create new contact instead of updating wrong person
+                context.log('Found contacts by email/phone but name does not match. Creating new contact...');
+                contact = null; // Will trigger creation below
             }
-        } else {
+        }
+        
+        if (!contact) {
             // Contact doesn't exist - create new contact
             context.log('No existing contact found, creating new contact...');
             
@@ -172,7 +191,14 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
         const customers = await stripe.customers.search({
             query: `email:'${email}' AND name:'${fullName}'`
         });
-        return customers.data;
+        
+        // Additional validation: ensure name matches exactly
+        // This protects against cases where Stripe search might use fuzzy matching
+        const validCustomers = customers.data.filter(customer => {
+            return customer.name && customer.name.toLowerCase() === fullName.toLowerCase();
+        });
+        
+        return validCustomers;
     } catch (error) {
         console.error('Error searching Stripe customer:', error);
         throw error;
