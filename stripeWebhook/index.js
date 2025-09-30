@@ -158,6 +158,65 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             return;
         }
 
+        // Check if there's a pending transaction from checkout.session.completed event
+        // Get the checkout session ID from the payment intent
+        let checkoutSessionId = null;
+        try {
+            // Retrieve the payment intent with expanded data to get the checkout session
+            const expandedPaymentIntent = await stripe.paymentIntents.retrieve(paymentIntent.id, {
+                expand: ['latest_charge']
+            });
+            
+            // Get checkout session ID from metadata or latest charge
+            if (expandedPaymentIntent.metadata?.checkout_session_id) {
+                checkoutSessionId = expandedPaymentIntent.metadata.checkout_session_id;
+            } else if (expandedPaymentIntent.latest_charge && typeof expandedPaymentIntent.latest_charge === 'object') {
+                // Try to get session from charge metadata
+                checkoutSessionId = expandedPaymentIntent.latest_charge.metadata?.checkout_session_id;
+            }
+            
+            // If still not found, try to retrieve from Stripe's internal links
+            if (!checkoutSessionId) {
+                // Stripe doesn't always expose the session ID directly, so we'll search for it
+                const sessions = await stripe.checkout.sessions.list({
+                    payment_intent: paymentIntent.id,
+                    limit: 1
+                });
+                
+                if (sessions.data && sessions.data.length > 0) {
+                    checkoutSessionId = sessions.data[0].id;
+                }
+            }
+        } catch (error) {
+            context.log('Could not retrieve checkout session ID:', error.message);
+        }
+
+        let pendingTransaction = null;
+        if (checkoutSessionId) {
+            context.log(`Found checkout session ID: ${checkoutSessionId}, checking for pending transaction`);
+            pendingTransaction = await crmService.findTransactionBySessionId(checkoutSessionId);
+            
+            if (pendingTransaction) {
+                context.log(`Found pending transaction: ${pendingTransaction.Id}, will update to completed`);
+                
+                // Update the pending transaction to completed
+                const updatedTransaction = await crmService.updateTransaction(pendingTransaction.Id, {
+                    status: 'Completed',
+                    paymentMethod: determinePaymentMethod(paymentIntent),
+                    transactionId: paymentIntent.id
+                });
+                
+                context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
+                
+                // Record metrics and exit early
+                metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
+                context.log('CRM integration completed successfully - updated pending transaction');
+                return;
+            } else {
+                context.log('No pending transaction found, will create new transaction');
+            }
+        }
+
         // Process with idempotency checking
         const startTime = Date.now();
         const result = await idempotencyService.processWithIdempotency(transactionData, async (txnData) => {
@@ -330,6 +389,60 @@ const determinePaymentMethod = (paymentIntent) => {
     return 'Unknown';
 };
 
+// Helper function to prepare transaction data from checkout session
+const prepareTransactionDataFromSession = async (context, session, stripe, matchingConfig) => {
+    // Extract customer information
+    const customerId = session.customer;
+    if (!customerId) {
+        throw new Error('No customer ID found in checkout session');
+    }
+
+    const customer = await stripe.customers.retrieve(customerId);
+    if (!customer) {
+        throw new Error(`Customer not found: ${customerId}`);
+    }
+
+    context.log(`Preparing transaction data for customer: ${customer.name || 'Unknown'} (${customer.email})`);
+
+    // Extract category from metadata
+    let category = session.metadata?.category || session.metadata?.fund || null;
+    
+    // If no category, try to get product name from line items
+    if (!category && session.line_items?.data && session.line_items.data.length > 0) {
+        category = session.line_items.data[0].description;
+    }
+
+    // Prepare transaction data
+    const transactionData = {
+        sessionId: session.id,
+        amount: session.amount_total,
+        currency: session.currency,
+        email: customer.email,
+        phone: customer.phone,
+        firstName: customer.name ? customer.name.split(' ')[0] : null,
+        lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null,
+        address: customer.address,
+        category: category,
+        frequency: session.metadata?.frequency || 'onetime',
+        paymentIntentId: session.payment_intent
+    };
+
+    // Normalize category and generate transaction name
+    const normalizedCategory = normalizeTransactionCategory(transactionData.category, matchingConfig);
+    const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
+        amount: `$${(transactionData.amount / 100).toFixed(2)}`,
+        date: new Date().toLocaleDateString(),
+        id: session.id
+    });
+
+    return {
+        transactionData,
+        customer,
+        normalizedCategory,
+        transactionName
+    };
+};
+
 // Helper function to extract product name from Stripe payment intent
 const extractProductName = async (stripe, paymentIntent) => {
     try {
@@ -372,11 +485,120 @@ const processCheckoutSessionCompleted = async (context, session) => {
     try {
         context.log(`Processing checkout session completed: ${session.id}`);
         
+        const crmConfig = getCrmConfig();
+        
+        // If no CRM configured, skip transaction creation
+        if (!crmConfig) {
+            context.log('CRM integration disabled - skipping pending transaction creation');
+            return;
+        }
+
         // Get the payment intent from the session
         if (session.payment_intent) {
-            // Don't process payment_intent here - let the payment_intent.succeeded event handle it
-            // This prevents duplicate processing when both events fire
-            context.log(`Checkout session has payment_intent ${session.payment_intent} - skipping processing, will be handled by payment_intent.succeeded event`);
+            // Create a pending transaction that will be completed when payment_intent.succeeded fires
+            context.log(`Checkout session has payment_intent ${session.payment_intent} - creating pending transaction`);
+            
+            try {
+                // Load and validate matching configuration
+                const matchingConfig = loadConfig();
+                validateConfig(matchingConfig);
+
+                // Validate CRM configuration
+                const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+                if (!validation.isValid) {
+                    throw new Error(`CRM configuration invalid: ${validation.error}`);
+                }
+
+                // Create services
+                const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+                const contactMatcher = new ContactMatcher(matchingConfig);
+
+                // Initialize Stripe to fetch customer and session details
+                const stripe = initializeStripe(session.livemode);
+                
+                // Expand line_items to get product information
+                const expandedSession = await stripe.checkout.sessions.retrieve(session.id, {
+                    expand: ['line_items']
+                });
+
+                // Check if transaction already exists for this session (duplicate event protection)
+                const existingTransaction = await crmService.findTransactionBySessionId(session.id);
+                if (existingTransaction) {
+                    context.log(`Transaction already exists for session ${session.id}: ${existingTransaction.Id} - skipping duplicate processing`);
+                    return;
+                }
+
+                // Prepare transaction data from session
+                const { transactionData, customer, normalizedCategory, transactionName } = 
+                    await prepareTransactionDataFromSession(context, expandedSession, stripe, matchingConfig);
+
+                // Process contact matching
+                const result = await contactMatcher.processMatch(transactionData, async (normalized) => {
+                    const searchCriteria = {
+                        email: normalized.email,
+                        phone: normalized.phone,
+                        firstName: normalized.firstName,
+                        lastName: normalized.lastName
+                    };
+                    
+                    return await crmService.searchContact(searchCriteria);
+                });
+
+                const matchResult = result;
+                context.log('ContactMatcher decision for checkout:', {
+                    action: matchResult.decision.action,
+                    reason: matchResult.decision.reason,
+                    score: matchResult.decision.bestScore
+                });
+
+                let contact = null;
+
+                if (matchResult.decision.action === 'associate') {
+                    // Exact match found
+                    contact = matchResult.decision.candidate;
+                    context.log(`Using existing contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+                } else if (matchResult.decision.action === 'create' || matchResult.decision.action === 'review') {
+                    // Create new contact for pending transaction
+                    context.log('Creating new contact for pending transaction');
+                    
+                    const contactData = {
+                        email: customer.email,
+                        firstName: transactionData.firstName,
+                        lastName: transactionData.lastName,
+                        phone: customer.phone,
+                        address: customer.address
+                    };
+                    
+                    contact = await crmService.createContact(contactData);
+                    context.log(`Created new contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+                }
+
+                if (contact) {
+                    // Create pending transaction with session information
+                    const pendingTransactionData = {
+                        amount: transactionData.amount,
+                        currency: transactionData.currency,
+                        paymentMethod: 'Pending', // Will be updated when payment completes
+                        transactionId: null, // Will be updated when payment completes
+                        sessionId: session.id, // Store session ID for lookup
+                        status: 'Pending',
+                        description: transactionName,
+                        frequency: transactionData.frequency,
+                        category: normalizedCategory,
+                        name: transactionName
+                    };
+
+                    const transaction = await crmService.createTransaction(contact.Id, pendingTransactionData);
+                    context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
+                }
+
+                context.log('Pending transaction created successfully');
+
+            } catch (error) {
+                context.log('Error creating pending transaction:', error.message);
+                // Don't throw - this shouldn't prevent the checkout from completing
+            }
+            
             return;
         } else if (session.subscription) {
             // Handle subscription-based payments

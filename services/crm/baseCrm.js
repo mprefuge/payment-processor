@@ -56,6 +56,25 @@ class BaseCrmService {
     }
 
     /**
+     * Update an existing transaction record in the CRM
+     * @param {string} transactionId - ID of the transaction to update
+     * @param {Object} transactionData - Transaction information to update
+     * @returns {Promise<Object>} Updated transaction object
+     */
+    async updateTransaction(transactionId, transactionData) {
+        throw new Error('updateTransaction method must be implemented by subclass');
+    }
+
+    /**
+     * Find a transaction by checkout session ID
+     * @param {string} sessionId - Stripe checkout session ID
+     * @returns {Promise<Object|null>} Existing transaction or null if not found
+     */
+    async findTransactionBySessionId(sessionId) {
+        throw new Error('findTransactionBySessionId method must be implemented by subclass');
+    }
+
+    /**
      * Select the best match from multiple contacts based on similarity
      * @param {Array} contacts - Array of contact objects
      * @param {Object} searchCriteria - Original search criteria

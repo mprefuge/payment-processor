@@ -277,7 +277,8 @@ class SalesforceCrmService extends BaseCrmService {
             description,
             frequency,
             category,
-            name // New field for proper transaction naming
+            name, // New field for proper transaction naming
+            sessionId // New field for checkout session ID
         } = transactionData;
 
         // Try creating a custom Transaction record first
@@ -296,6 +297,11 @@ class SalesforceCrmService extends BaseCrmService {
                 Category__c: category,
                 Transaction_Date__c: new Date().toISOString()
             };
+
+            // Add session ID if provided (for tracking pending transactions)
+            if (sessionId) {
+                transactionRecord.Session_ID__c = sessionId;
+            }
 
             const result = await this.conn.sobject('Transaction__c').create(transactionRecord);
             
@@ -327,16 +333,32 @@ class SalesforceCrmService extends BaseCrmService {
             description,
             frequency,
             category,
-            name // New field for proper transaction naming
+            name, // New field for proper transaction naming
+            sessionId, // New field for checkout session ID
+            status = 'Completed'
         } = transactionData;
+
+        // Map status to Opportunity StageName
+        let stageName = 'Closed Won';
+        if (status === 'Pending') {
+            stageName = 'Prospecting';
+        } else if (status === 'Failed') {
+            stageName = 'Closed Lost';
+        }
+
+        // Include session ID in description if provided
+        let fullDescription = description;
+        if (sessionId) {
+            fullDescription = `${description || ''}\nCheckout Session: ${sessionId}`.trim();
+        }
 
         const opportunityRecord = {
             Name: name || description || `Transaction - ${category || 'Uncategorized'}`, // Use new naming format
             ContactId: contactId,
             Amount: amount / 100, // Convert cents to dollars
-            StageName: 'Closed Won',
+            StageName: stageName,
             CloseDate: new Date().toISOString().split('T')[0],
-            Description: description,
+            Description: fullDescription,
             LeadSource: 'Website',
             Type: frequency === 'onetime' ? 'One-time Donation' : 'Recurring Donation'
         };
@@ -355,6 +377,136 @@ class SalesforceCrmService extends BaseCrmService {
             console.error('Error creating Salesforce opportunity:', error);
             throw new Error(`Salesforce opportunity creation failed: ${error.message}`);
         }
+    }
+
+    /**
+     * Update an existing transaction record in Salesforce
+     * @param {string} transactionId - Salesforce Transaction ID
+     * @param {Object} transactionData - Transaction information to update
+     * @returns {Promise<Object>} Updated transaction object
+     */
+    async updateTransaction(transactionId, transactionData) {
+        await this.connect();
+
+        const { 
+            status,
+            paymentMethod,
+            transactionId: stripeTransactionId
+        } = transactionData;
+
+        // Build update record with only provided fields
+        const updateRecord = {};
+        
+        if (status !== undefined) {
+            updateRecord.Status__c = status;
+        }
+        
+        if (paymentMethod !== undefined) {
+            updateRecord.Payment_Method__c = paymentMethod;
+        }
+
+        if (stripeTransactionId !== undefined) {
+            updateRecord.Transaction_ID__c = stripeTransactionId;
+        }
+
+        // Only proceed if we have at least one field to update
+        if (Object.keys(updateRecord).length === 0) {
+            console.log('No transaction data to update');
+            return null;
+        }
+
+        try {
+            // Try updating custom Transaction object first
+            const result = await this.conn.sobject('Transaction__c').update({
+                Id: transactionId,
+                ...updateRecord
+            });
+            
+            if (result.success) {
+                console.log(`Updated Salesforce transaction ${transactionId} with status: ${status}`);
+                const updatedTransaction = await this.conn.sobject('Transaction__c').retrieve(transactionId);
+                return updatedTransaction;
+            } else {
+                throw new Error(`Transaction update failed: ${JSON.stringify(result.errors)}`);
+            }
+        } catch (error) {
+            console.log('Custom Transaction object not available, trying Opportunity');
+            
+            // Fallback to Opportunity record
+            try {
+                // Map status to Opportunity StageName
+                let stageName = updateRecord.Status__c;
+                if (stageName === 'Completed') {
+                    stageName = 'Closed Won';
+                } else if (stageName === 'Pending') {
+                    stageName = 'Prospecting';
+                } else if (stageName === 'Failed') {
+                    stageName = 'Closed Lost';
+                }
+
+                const oppUpdateRecord = {};
+                if (stageName) {
+                    oppUpdateRecord.StageName = stageName;
+                }
+
+                const result = await this.conn.sobject('Opportunity').update({
+                    Id: transactionId,
+                    ...oppUpdateRecord
+                });
+                
+                if (result.success) {
+                    console.log(`Updated Salesforce opportunity ${transactionId}`);
+                    const updatedOpportunity = await this.conn.sobject('Opportunity').retrieve(transactionId);
+                    return updatedOpportunity;
+                } else {
+                    throw new Error(`Opportunity update failed: ${JSON.stringify(result.errors)}`);
+                }
+            } catch (oppError) {
+                console.error('Error updating Salesforce opportunity:', oppError);
+                throw new Error(`Salesforce transaction/opportunity update failed: ${oppError.message}`);
+            }
+        }
+    }
+
+    /**
+     * Find a transaction by checkout session ID
+     * @param {string} sessionId - Stripe checkout session ID
+     * @returns {Promise<Object|null>} Existing transaction or null if not found
+     */
+    async findTransactionBySessionId(sessionId) {
+        await this.connect();
+
+        try {
+            // First try custom Transaction object
+            const query = `SELECT Id, Name, Transaction_ID__c, Status__c, Session_ID__c FROM Transaction__c WHERE Session_ID__c = '${sessionId}' LIMIT 1`;
+            console.log(`Executing Salesforce query: ${query}`);
+            
+            const result = await this.conn.query(query);
+            
+            if (result.records && result.records.length > 0) {
+                return result.records[0];
+            }
+        } catch (error) {
+            console.log('Custom Transaction object not available or Session_ID__c field not found, checking Opportunities');
+        }
+
+        try {
+            // Fallback to Opportunity records
+            // Note: Opportunities don't have a standard field for session ID, 
+            // so we'll look in the Description field
+            const query = `SELECT Id, Name, StageName, Description FROM Opportunity WHERE Description LIKE '%${sessionId}%' LIMIT 1`;
+            console.log(`Executing Salesforce query: ${query}`);
+            
+            const result = await this.conn.query(query);
+            
+            if (result.records && result.records.length > 0) {
+                return result.records[0];
+            }
+        } catch (error) {
+            console.log('Error checking Opportunities for existing transaction:', error.message);
+        }
+
+        return null;
     }
 
     /**
