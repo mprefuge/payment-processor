@@ -242,7 +242,8 @@ class SalesforceCrmService extends BaseCrmService {
 
         try {
             // Fallback to Opportunity records (if using them as transaction fallback)
-            const query = `SELECT Id, Name FROM Opportunity WHERE Name LIKE '%${stripeId}%' LIMIT 1`;
+            // Search in Description field for "Payment Intent: {stripeId}"
+            const query = `SELECT Id, Name, Description FROM Opportunity WHERE Description LIKE '%${stripeId}%' LIMIT 1`;
             console.log(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
@@ -346,10 +347,13 @@ class SalesforceCrmService extends BaseCrmService {
             stageName = 'Closed Lost';
         }
 
-        // Include session ID in description if provided
-        let fullDescription = description;
+        // Include session ID and transaction ID in description if provided
+        let fullDescription = description || '';
         if (sessionId) {
-            fullDescription = `${description || ''}\nCheckout Session: ${sessionId}`.trim();
+            fullDescription = `${fullDescription}\nCheckout Session: ${sessionId}`.trim();
+        }
+        if (transactionId) {
+            fullDescription = `${fullDescription}\nPayment Intent: ${transactionId}`.trim();
         }
 
         const opportunityRecord = {
