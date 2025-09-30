@@ -1,6 +1,6 @@
 # Payment Processing Azure Function
 
-This Azure Function app processes payments through Stripe, handling customer management, payment processing, and email notifications.
+This Azure Function app processes payments through Stripe, handling customer management, payment processing, email notifications, and accounting sync.
 
 ## Features
 
@@ -9,6 +9,7 @@ This Azure Function app processes payments through Stripe, handling customer man
 - Email notifications via SendGrid
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
+- **Stripe payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
 - **Salesforce contact sync on checkout session creation**
 - **Enhanced CRM integration with robust customer-contact association**
 - **Intelligent contact matching with normalization and fuzzy logic**
@@ -231,6 +232,76 @@ Examples:
 2. Add endpoint: `https://your-function-app.azurewebsites.net/api/stripe/webhook`
 3. Select the events listed above
 4. Copy the webhook signing secret to your environment variables
+
+## Accounting Integration
+
+The payment processor includes automated **Stripe Payout Sync to Accounting** with support for QuickBooks Online (extensible to Xero, Sage, and others).
+
+### Features
+
+- **Webhook-driven sync**: Process `payout.paid`, `payout.failed`, `payout.canceled` events
+- **Provider-agnostic design**: Abstract interface for multiple accounting systems
+- **Comprehensive reconciliation**: Validates that gross - refunds - fees - disputes = net
+- **Idempotent processing**: Prevents duplicate postings with event and payout deduplication
+- **Multi-account support**: Handle multiple Stripe accounts and Connect platforms
+- **Configurable posting**: Journal Entry + Transfer (default) or Bank Deposit
+- **Drift detection**: Detects when mapping changes affect existing payouts
+- **Complete audit trail**: Sync ledger links payouts to accounting documents
+
+### Quick Start
+
+1. **Enable accounting sync**:
+   ```bash
+   ACCOUNTING_SYNC_ENABLED=true
+   ACCOUNTING_PROVIDER=quickbooks
+   ```
+
+2. **Configure QuickBooks**:
+   ```bash
+   QBO_COMPANY_ID=your_company_id
+   QBO_ENVIRONMENT=sandbox  # or production
+   QBO_ACCESS_TOKEN=your_access_token
+   QBO_REFRESH_TOKEN=your_refresh_token
+   ```
+
+3. **Set account mappings**:
+   ```bash
+   ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
+   ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
+   ACCOUNTING_REVENUE_ACCOUNT=Revenue
+   ACCOUNTING_REFUNDS_ACCOUNT=Refunds
+   ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
+   ```
+
+4. **Configure Stripe webhook** to send `payout.*` events to `/api/stripe/webhook`
+
+### API Endpoints
+
+**Check payout sync status**:
+```
+GET /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
+```
+
+**Manually trigger payout sync**:
+```
+POST /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
+```
+
+**Force re-sync**:
+```
+POST /api/sync/stripe/payouts/{payoutId}?force=true
+```
+
+### Documentation
+
+See [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) for complete documentation including:
+- Architecture and data flow
+- Configuration reference
+- Accounting document structure
+- Idempotency and drift detection
+- Error handling and review workflow
+- Testing guide
+- Production deployment checklist
 
 ## CRM Integration
 

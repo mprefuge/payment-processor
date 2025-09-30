@@ -39,8 +39,29 @@ class SyncLedger {
      * @returns {string} Hash of posting instructions
      */
     generatePostingHash(postingInstructions) {
-        const normalized = JSON.stringify(postingInstructions, Object.keys(postingInstructions).sort());
+        // Deep sort and stringify for consistent hashing
+        const normalized = JSON.stringify(this._sortObject(postingInstructions));
         return crypto.createHash('sha256').update(normalized).digest('hex');
+    }
+
+    /**
+     * Recursively sort object keys for consistent hashing
+     */
+    _sortObject(obj) {
+        if (obj === null || typeof obj !== 'object') {
+            return obj;
+        }
+        
+        if (Array.isArray(obj)) {
+            return obj.map(item => this._sortObject(item));
+        }
+        
+        const sorted = {};
+        Object.keys(obj).sort().forEach(key => {
+            sorted[key] = this._sortObject(obj[key]);
+        });
+        
+        return sorted;
     }
 
     /**
