@@ -172,7 +172,7 @@ const syncContactToCrm = async (context, customerData) => {
 };
 
 // Create pending transaction in CRM after checkout session is created
-const createPendingTransaction = async (context, session, contactId, donationData) => {
+const createPendingTransaction = async (context, session, contactId, transactionData) => {
     try {
         const crmConfig = getCrmConfig();
         
@@ -195,23 +195,23 @@ const createPendingTransaction = async (context, session, contactId, donationDat
         const matchingConfig = loadConfig();
 
         // Prepare transaction data
-        const category = session.metadata?.category || donationData.category || 'General Donation';
+        const category = session.metadata?.category || transactionData.category || 'General';
         const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
         const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
-            amount: `$${(donationData.amount / 100).toFixed(2)}`,
+            amount: `$${(transactionData.amount / 100).toFixed(2)}`,
             date: new Date().toLocaleDateString(),
             id: session.id
         });
 
         const transactionData = {
-            amount: donationData.amount,
+            amount: transactionData.amount,
             currency: 'usd',
             paymentMethod: 'Pending',
             transactionId: null, // Will be set when payment_intent.succeeded fires
             sessionId: session.id,
             status: 'Pending',
             description: transactionName,
-            frequency: donationData.frequency || 'onetime',
+            frequency: transactionData.frequency || 'onetime',
             category: normalizedCategory,
             name: transactionName
         };
@@ -336,8 +336,8 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
 };
 
 // Create Stripe checkout session
-const createCheckoutSession = async (stripe, customerId, donationData) => {
-    const isOneTime = donationData.frequency === 'onetime';
+const createCheckoutSession = async (stripe, customerId, transactionData) => {
+    const isOneTime = transactionData.frequency === 'onetime';
     
     const baseParams = {
         customer: customerId,
@@ -348,15 +348,16 @@ const createCheckoutSession = async (stripe, customerId, donationData) => {
             price_data: {
                 currency: 'usd',
                 product_data: {
-                    name: donationData.category || 'Donation'
+                    name: transactionData.category || transactionData.transactionType || 'Payment'
                 },
-                unit_amount: donationData.amount
+                unit_amount: transactionData.amount
             },
             quantity: 1
         }],
         metadata: {
-            category: donationData.category || 'General Donation',
-            frequency: donationData.frequency || 'onetime'
+            category: transactionData.category || 'General',
+            frequency: transactionData.frequency || 'onetime',
+            transactionType: transactionData.transactionType || 'Payment'
         }
     };
     
@@ -365,8 +366,8 @@ const createCheckoutSession = async (stripe, customerId, donationData) => {
     } else {
         baseParams.mode = 'subscription';
         baseParams.line_items[0].price_data.recurring = {
-            interval: getStripeInterval(donationData.frequency),
-            interval_count: getIntervalCount(donationData.frequency)
+            interval: getStripeInterval(transactionData.frequency),
+            interval_count: getIntervalCount(transactionData.frequency)
         };
     }
     
@@ -406,7 +407,7 @@ const getIntervalCount = (frequency) => {
 // Main function handler for traditional Azure Functions model
 module.exports = async function (context, req) {
     try {
-        context.log('Processing donation request');
+        context.log('Processing payment request');
         
         let body = req.body;
         if (!body) {
@@ -428,7 +429,7 @@ module.exports = async function (context, req) {
                 const debugMsg = {
                     to: process.env.DEBUG_EMAIL,
                     from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
-                    subject: `Debug: New Donation Submission - ${body.firstname || 'Unknown'} ${body.lastname || 'Unknown'}`,
+                    subject: `Debug: New Payment Submission - ${body.firstname || 'Unknown'} ${body.lastname || 'Unknown'}`,
                     html: `<p>${JSON.stringify(body, null, 2)}</p>`,
                 };
                 await sgMail.send(debugMsg);

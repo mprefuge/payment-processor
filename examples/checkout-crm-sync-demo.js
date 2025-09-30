@@ -19,7 +19,7 @@ This example demonstrates the new checkout session CRM sync feature.
 📋 SCENARIO 1: New Customer Creates Checkout Session
 ───────────────────────────────────────────────────────────────────────────
 
-1. Customer fills out donation form:
+1. Customer fills out transaction form:
    - Email: new.donor@example.com
    - Name: Jane Smith
    - Phone: +1 555-123-4567
@@ -56,7 +56,7 @@ This example demonstrates the new checkout session CRM sync feature.
 📋 SCENARIO 2: Existing Customer Creates New Checkout Session
 ───────────────────────────────────────────────────────────────────────────
 
-1. Customer fills out donation form:
+1. Customer fills out transaction form:
    - Email: existing.donor@example.com (already in Salesforce)
    - Name: John Doe
    - Address: 456 New Ave, Los Angeles, CA 90001 (updated address)
@@ -87,7 +87,7 @@ This example demonstrates the new checkout session CRM sync feature.
 📋 SCENARIO 3: CRM Error Handling (Salesforce Down)
 ───────────────────────────────────────────────────────────────────────────
 
-1. Customer fills out donation form
+1. Customer fills out transaction form
 
 2. System creates Stripe customer
 
@@ -145,7 +145,7 @@ the CRM sync step.
 
 📚 RELATED FILES:
 
-- Implementation: processDonation/index.js
+- Implementation: processTransaction/index.js
 - Tests: tests/checkoutCrmSync.test.js
 - Documentation: README.md
 - CRM Service: services/crm/salesforceCrm.js

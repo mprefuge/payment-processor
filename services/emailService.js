@@ -86,8 +86,8 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
 };
 
 // Send notification email for successful payment
-const sendPaymentSuccessEmail = async (donationData, paymentIntent, stripe) => {
-    const isLiveMode = donationData.livemode || paymentIntent.livemode;
+const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
+    const isLiveMode = paymentData.livemode || paymentIntent.livemode;
     const toEmail = isLiveMode 
         ? process.env.NOTIFICATION_EMAIL_LIVE 
         : process.env.NOTIFICATION_EMAIL_TEST;
@@ -115,30 +115,30 @@ const sendPaymentSuccessEmail = async (donationData, paymentIntent, stripe) => {
         return;
     }
     
-    const subject = `Payment Received - ${donationData.firstname} ${donationData.lastname}`;
+    const subject = `Payment Received - ${paymentData.firstname} ${paymentData.lastname}`;
     const html = `<div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
         <h2 style='color: #BD2135;'>Payment Received Successfully</h2>
         <div style='background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px;'>
             <table style='width: 100%; border-collapse: collapse;'>
                 <tr>
                     <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Name:</strong></td>
-                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${donationData.firstname} ${donationData.lastname}</td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.firstname} ${paymentData.lastname}</td>
                 </tr>
                 <tr>
                     <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Email:</strong></td>
-                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${donationData.email}</td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.email}</td>
                 </tr>
                 <tr>
                     <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Amount:</strong></td>
-                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>$${(donationData.amount / 100).toFixed(2)}</td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>$${(paymentData.amount / 100).toFixed(2)}</td>
                 </tr>
                 <tr>
                     <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Frequency:</strong></td>
-                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${donationData.frequency}</td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.frequency}</td>
                 </tr>
                 <tr>
                     <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Category:</strong></td>
-                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${donationData.category || 'General'}</td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.category || 'General'}</td>
                 </tr>
                 <tr>
                     <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Payment ID:</strong></td>

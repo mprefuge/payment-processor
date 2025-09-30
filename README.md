@@ -1,10 +1,10 @@
 # Payment Processing Azure Function
 
-This Azure Function app processes donations through Stripe, handling customer management, payment processing, and email notifications.
+This Azure Function app processes payments through Stripe, handling customer management, payment processing, and email notifications.
 
 ## Features
 
-- Stripe payment processing (one-time and recurring donations)
+- Stripe payment processing (one-time and recurring payments)
 - Customer management (search/create)
 - Email notifications via SendGrid
 - Support for both test and live modes
@@ -61,7 +61,7 @@ Copy the `local.settings.json.template` to `local.settings.json` and fill in you
 npm start
 ```
 
-The function will be available at `http://localhost:7071/api/donation`
+The function will be available at `http://localhost:7071/api/transaction`
 
 ### 4. Run Tests
 
@@ -140,23 +140,24 @@ The system includes advanced customer-contact association with configurable matc
 
 ## API Usage
 
-### Donation Processing Endpoint
+### Payment Processing Endpoint
 
 ```
-POST /api/donation
+POST /api/transaction
 ```
 
 ### Request Body
 
 ```json
 {
-  "email": "donor@example.com",
+  "transactionType": "Donation",
+  "email": "customer@example.com",
   "firstname": "John",
   "lastname": "Doe",
   "phone": "+1234567890",
   "amount": 2500,
   "frequency": "onetime",
-  "category": "General Donation",
+  "category": "General",
   "coverFee": false,
   "livemode": false,
   "address": {
@@ -168,6 +169,20 @@ POST /api/donation
   }
 }
 ```
+
+**Request Parameters:**
+
+- `transactionType` (optional): Type of transaction (e.g., "Donation", "Payment", "Fee", etc.). Defaults to "Payment".
+- `email` (required): Customer email address
+- `firstname` (required): Customer first name
+- `lastname` (required): Customer last name
+- `phone` (optional): Customer phone number
+- `amount` (required): Amount in cents (e.g., 2500 = $25.00)
+- `frequency` (required): Payment frequency - "onetime", "week", "biweek", "month", or "year"
+- `category` (optional): Transaction category. Defaults to "General".
+- `coverFee` (optional): Whether customer covers processing fees
+- `livemode` (optional): Use live Stripe keys (true) or test keys (false)
+- `address` (optional): Customer address object
 
 ### Response
 
@@ -187,7 +202,7 @@ This endpoint receives payment confirmations from Stripe and automatically:
 - Sends notification email to configured recipient (based on `NOTIFICATION_POLICY`)
 - Searches for existing contacts in the configured CRM
 - Creates new contacts if none exist
-- Creates completed tasks for donation tracking
+- Creates completed tasks for transaction tracking
 - Records transaction details in the CRM
 
 **Notification Policy:**
@@ -202,7 +217,7 @@ The `NOTIFICATION_POLICY` environment variable controls when email notifications
 
 Examples:
 - Set to `FIRST` to only be notified about new customers making their first payment
-- Set to `ABOVE 500` to only be notified about large donations over $500
+- Set to `ABOVE 500` to only be notified about large payments over $500
 - Set to `MINIMUM 25` to filter out small transactions under $25
 - Set to `NONE` to disable all payment notifications
 
@@ -221,9 +236,9 @@ Examples:
 
 ### Contact Synchronization
 
-The system integrates with Salesforce CRM at two key points in the donation flow:
+The system integrates with Salesforce CRM at two key points in the payment flow:
 
-**1. Checkout Session Creation (`/api/donation`)**
+**1. Checkout Session Creation (`/api/transaction`)**
 - When a checkout session is created, the system immediately syncs contact information to Salesforce
 - **If contact exists**: Updates address information with the latest data
 - **If contact doesn't exist**: Creates a new contact with all provided information
@@ -233,7 +248,7 @@ The system integrates with Salesforce CRM at two key points in the donation flow
 **2. Payment Confirmation (`/api/stripe/webhook`)**
 - When a payment is confirmed via Stripe webhook, the system performs advanced contact matching
 - Associates the transaction with the correct contact in Salesforce
-- Creates transaction records and tasks for donation tracking
+- Creates transaction records and tasks for transaction tracking
 
 ### Enhanced Customer-Contact Association
 
@@ -274,8 +289,8 @@ The system includes a sophisticated contact matching engine that:
    - Note: This implementation uses username/password authentication
 
 2. **Required Salesforce Objects**:
-   - **Contact**: Standard object (used for donor management)
-   - **Task**: Standard object (used for donation tracking)
+   - **Contact**: Standard object (used for customer management)
+   - **Task**: Standard object (used for transaction tracking)
    - **Transaction__c**: Custom object (optional, falls back to Opportunity)
 
 3. **Custom Transaction Object** (optional):
