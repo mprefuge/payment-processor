@@ -115,8 +115,7 @@ The system includes advanced customer-contact association with configurable matc
 | `CONTACT_MATCH_EMAIL_STRIP_PLUS_TAGS` | Remove +tags from emails (user+tag@domain.com) | `true` | `false` |
 | `CONTACT_MATCH_DEFAULT_COUNTRY_CODE` | Default country for phone normalization | `US` | `CA` |
 | `CONTACT_MATCH_NAME_FUZZY_THRESHOLD` | Minimum similarity for fuzzy name matching | `0.8` | `0.75` |
-| `TRANSACTION_CATEGORIES` | Comma-separated list of allowed categories | See default | `Giving,Building,Missions` |
-| `TRANSACTION_DEFAULT_CATEGORY` | Fallback category for uncategorized transactions | `Uncategorized` | `General` |
+| `TRANSACTION_DEFAULT_CATEGORY` | Fallback category when no category is provided | `Uncategorized` | `General` |
 | `TRANSACTION_NAME_TEMPLATE` | Template for transaction display names | `Transaction - {category}` | `Donation - {category}` |
 | `CONTACT_MATCH_REVIEW_ENABLED` | Enable review task creation for uncertain matches | `true` | `false` |
 | `REVIEW_DEEP_LINK_BASE_URL` | Base URL for deep links in review tasks | `https://example.com/admin` | Your admin URL |

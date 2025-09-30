@@ -124,7 +124,7 @@ function runIntegrationTests() {
         const config = loadConfig();
         assertEqual(config.thresholds.high, 0.90);
         assertEqual(config.thresholds.low, 0.60);
-        assertTrue(config.transaction.controlledVocabulary.includes('Uncategorized'));
+        assertEqual(config.transaction.defaultCategory, 'Uncategorized');
     });
     
     // Test transaction category normalization
@@ -134,10 +134,28 @@ function runIntegrationTests() {
         assertEqual(normalized, 'General Giving');
     });
     
-    test('Transaction category normalization - invalid category', () => {
+    test('Transaction category normalization - General Donation', () => {
+        const config = loadConfig();
+        const normalized = normalizeTransactionCategory('General Donation', config);
+        assertEqual(normalized, 'General Donation');
+    });
+    
+    test('Transaction category normalization - case insensitive General Donation', () => {
+        const config = loadConfig();
+        const normalized = normalizeTransactionCategory('general donation', config);
+        assertEqual(normalized, 'General Donation');
+    });
+    
+    test('Transaction category normalization - example category', () => {
+        const config = loadConfig();
+        const normalized = normalizeTransactionCategory('Example category', config);
+        assertEqual(normalized, 'Example Category');
+    });
+    
+    test('Transaction category normalization - any category', () => {
         const config = loadConfig();
         const normalized = normalizeTransactionCategory('Invalid Category', config);
-        assertEqual(normalized, 'Uncategorized');
+        assertEqual(normalized, 'Invalid Category');
     });
     
     test('Transaction category normalization - null input', () => {
@@ -151,6 +169,18 @@ function runIntegrationTests() {
         const config = loadConfig();
         const name = generateTransactionName('General Giving', config);
         assertEqual(name, 'Transaction - General Giving');
+    });
+    
+    test('Transaction name generation - General Donation', () => {
+        const config = loadConfig();
+        const name = generateTransactionName('General Donation', config);
+        assertEqual(name, 'Transaction - General Donation');
+    });
+    
+    test('Transaction name generation - Example Category', () => {
+        const config = loadConfig();
+        const name = generateTransactionName('Example Category', config);
+        assertEqual(name, 'Transaction - Example Category');
     });
     
     // Test full integration flow - high confidence match
