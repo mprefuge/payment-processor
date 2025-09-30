@@ -42,10 +42,7 @@ function loadConfig() {
         // Transaction naming
         transaction: {
             nameTemplate: process.env.TRANSACTION_NAME_TEMPLATE || 'Transaction - {category}',
-            defaultCategory: process.env.TRANSACTION_DEFAULT_CATEGORY || 'Uncategorized',
-            controlledVocabulary: (process.env.TRANSACTION_CATEGORIES || 
-                'General Giving,General Donation,Building Fund,Missions,Youth Ministry,Benevolence,Special Events,Memorial,Uncategorized'
-            ).split(',').map(c => c.trim())
+            defaultCategory: process.env.TRANSACTION_DEFAULT_CATEGORY || 'Uncategorized'
         },
         
         // Review task settings
@@ -91,11 +88,6 @@ function validateConfig(config) {
         console.warn(`Warning: Maximum possible score (${totalMaxWeight}) is less than high threshold (${config.thresholds.high})`);
     }
     
-    // Validate controlled vocabulary
-    if (!config.transaction.controlledVocabulary.includes(config.transaction.defaultCategory)) {
-        errors.push(`Default category '${config.transaction.defaultCategory}' not in controlled vocabulary`);
-    }
-    
     if (errors.length > 0) {
         throw new Error(`Configuration validation failed: ${errors.join(', ')}`);
     }
@@ -111,12 +103,10 @@ function normalizeTransactionCategory(inputCategory, config) {
         return config.transaction.defaultCategory;
     }
     
-    // Check if input category is in controlled vocabulary (case-insensitive)
-    const normalized = config.transaction.controlledVocabulary.find(
-        cat => cat.toLowerCase() === inputCategory.toLowerCase()
-    );
-    
-    return normalized || config.transaction.defaultCategory;
+    // Use the input category directly, with proper title case formatting
+    return inputCategory.split(' ')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
 }
 
 /**
