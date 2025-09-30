@@ -105,6 +105,7 @@ func azure functionapp publish payment-processing-function
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DEBUG_EMAIL` | Email address for debug notifications (leave empty to disable) | `debug@example.com` |
+| `NOTIFICATION_POLICY` | Controls when payment success notifications are sent. Options: `ALL` (all payments), `FIRST` (first payment per customer only), `NONE` (no notifications), `ABOVE #` (only if payment exceeds amount, e.g., `ABOVE 100`), `MINIMUM #` (only if payment meets or exceeds amount, e.g., `MINIMUM 50`) | `ALL` |
 
 ### CRM Integration Variables (Optional)
 
@@ -183,10 +184,27 @@ POST /api/stripe/webhook
 ```
 
 This endpoint receives payment confirmations from Stripe and automatically:
+- Sends notification email to configured recipient (based on `NOTIFICATION_POLICY`)
 - Searches for existing contacts in the configured CRM
 - Creates new contacts if none exist
 - Creates completed tasks for donation tracking
 - Records transaction details in the CRM
+
+**Notification Policy:**
+
+The `NOTIFICATION_POLICY` environment variable controls when email notifications are sent for successful payments:
+
+- `ALL` (default) - Send notifications for all successful payments
+- `FIRST` - Send notification only for the first successful payment per customer
+- `NONE` - Do not send any payment notifications
+- `ABOVE #` - Send notifications only when payment amount exceeds the specified dollar amount (e.g., `ABOVE 100` sends notifications for payments over $100)
+- `MINIMUM #` - Send notifications only when payment amount meets or exceeds the specified dollar amount (e.g., `MINIMUM 50` sends notifications for payments of $50 or more)
+
+Examples:
+- Set to `FIRST` to only be notified about new customers making their first payment
+- Set to `ABOVE 500` to only be notified about large donations over $500
+- Set to `MINIMUM 25` to filter out small transactions under $25
+- Set to `NONE` to disable all payment notifications
 
 **Supported Webhook Events:**
 - `payment_intent.succeeded`

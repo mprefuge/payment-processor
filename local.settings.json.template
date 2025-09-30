@@ -14,6 +14,7 @@
     "SUCCESS_URL": "https://example.com/thankyou",
     "CANCEL_URL": "https://example.com/donate",
     "DEBUG_EMAIL": "",
+    "NOTIFICATION_POLICY": "ALL",
     "CRM_PROVIDER": "salesforce",
     "SALESFORCE_USERNAME": "your-salesforce-username@example.com",
     "SALESFORCE_PASSWORD": "your-salesforce-password",
