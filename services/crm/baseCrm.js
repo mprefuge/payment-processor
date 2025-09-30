@@ -101,6 +101,82 @@ class BaseCrmService {
         // If no exact email match, return the first contact
         return contacts[0];
     }
+
+    // ==================== PLEDGE METHODS ====================
+
+    /**
+     * Create a pledge record in the CRM
+     * @param {Object} pledgeData - Pledge information
+     * @returns {Promise<Object>} Created pledge object
+     */
+    async createPledge(pledgeData) {
+        throw new Error('createPledge method must be implemented by subclass');
+    }
+
+    /**
+     * Get a pledge by ID
+     * @param {string} pledgeId - Pledge ID
+     * @returns {Promise<Object>} Pledge object
+     */
+    async getPledge(pledgeId) {
+        throw new Error('getPledge method must be implemented by subclass');
+    }
+
+    /**
+     * Update a pledge record
+     * @param {string} pledgeId - Pledge ID
+     * @param {Object} updateData - Fields to update
+     * @returns {Promise<Object>} Updated pledge object
+     */
+    async updatePledge(pledgeId, updateData) {
+        throw new Error('updatePledge method must be implemented by subclass');
+    }
+
+    /**
+     * Get all active pledges for a contact
+     * @param {string} contactId - Contact ID
+     * @returns {Promise<Array>} Array of active pledges
+     */
+    async getActivePledgesForContact(contactId) {
+        throw new Error('getActivePledgesForContact method must be implemented by subclass');
+    }
+
+    /**
+     * Create pledge installments
+     * @param {string} pledgeId - Pledge ID
+     * @param {Array} installments - Array of installment objects
+     * @returns {Promise<Array>} Created installment objects
+     */
+    async createPledgeInstallments(pledgeId, installments) {
+        throw new Error('createPledgeInstallments method must be implemented by subclass');
+    }
+
+    /**
+     * Get installments for a pledge
+     * @param {string} pledgeId - Pledge ID
+     * @returns {Promise<Array>} Array of installment objects
+     */
+    async getPledgeInstallments(pledgeId) {
+        throw new Error('getPledgeInstallments method must be implemented by subclass');
+    }
+
+    /**
+     * Create pledge payment allocations
+     * @param {Array} allocations - Array of allocation objects
+     * @returns {Promise<Array>} Created allocation objects
+     */
+    async createPledgeAllocations(allocations) {
+        throw new Error('createPledgeAllocations method must be implemented by subclass');
+    }
+
+    /**
+     * Get allocations for a transaction
+     * @param {string} transactionId - Transaction ID
+     * @returns {Promise<Array>} Array of allocation objects
+     */
+    async getAllocationsForTransaction(transactionId) {
+        throw new Error('getAllocationsForTransaction method must be implemented by subclass');
+    }
 }
 
 module.exports = BaseCrmService;

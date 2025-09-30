@@ -586,6 +586,342 @@ class SalesforceCrmService extends BaseCrmService {
         
         return bestMatch.contact;
     }
+
+    // ==================== PLEDGE METHODS ====================
+
+    /**
+     * Create a pledge record in Salesforce
+     * @param {Object} pledgeData - Pledge information
+     * @returns {Promise<Object>} Created pledge object
+     */
+    async createPledge(pledgeData) {
+        await this.connect();
+
+        const {
+            contactId,
+            fundCategory,
+            totalAmount,
+            currency,
+            balanceRemaining,
+            startDate,
+            endDate,
+            scheduleType,
+            numberOfInstallments,
+            status,
+            notes
+        } = pledgeData;
+
+        const pledgeRecord = {
+            Contact__c: contactId,
+            Fund_Category__c: fundCategory,
+            Total_Amount__c: totalAmount,
+            Currency__c: currency,
+            Balance_Remaining__c: balanceRemaining,
+            Start_Date__c: startDate,
+            End_Date__c: endDate,
+            Schedule_Type__c: scheduleType,
+            Number_of_Installments__c: numberOfInstallments,
+            Status__c: status,
+            Notes__c: notes || ''
+        };
+
+        try {
+            const result = await this.conn.sobject('Pledge__c').create(pledgeRecord);
+
+            if (result.success) {
+                console.log(`Created Salesforce pledge with ID: ${result.id}`);
+                const createdPledge = await this.conn.sobject('Pledge__c').retrieve(result.id);
+                return createdPledge;
+            } else {
+                throw new Error(`Pledge creation failed: ${JSON.stringify(result.errors)}`);
+            }
+        } catch (error) {
+            console.error('Error creating Salesforce pledge:', error);
+            throw new Error(`Salesforce pledge creation failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get a pledge by ID
+     * @param {string} pledgeId - Pledge ID
+     * @returns {Promise<Object>} Pledge object
+     */
+    async getPledge(pledgeId) {
+        await this.connect();
+
+        try {
+            const query = `SELECT Id, Name, Contact__c, Fund_Category__c, Total_Amount__c, 
+                          Currency__c, Balance_Remaining__c, Start_Date__c, End_Date__c,
+                          Schedule_Type__c, Number_of_Installments__c, Status__c, Notes__c,
+                          Write_Off_Date__c, Write_Off_Reason__c, CreatedDate, LastModifiedDate
+                          FROM Pledge__c 
+                          WHERE Id = '${pledgeId}'`;
+
+            const result = await this.conn.query(query);
+
+            if (result.records && result.records.length > 0) {
+                const pledge = result.records[0];
+                return {
+                    Id: pledge.Id,
+                    contactId: pledge.Contact__c,
+                    fundCategory: pledge.Fund_Category__c,
+                    totalAmount: pledge.Total_Amount__c,
+                    currency: pledge.Currency__c,
+                    balanceRemaining: pledge.Balance_Remaining__c,
+                    startDate: pledge.Start_Date__c,
+                    endDate: pledge.End_Date__c,
+                    scheduleType: pledge.Schedule_Type__c,
+                    numberOfInstallments: pledge.Number_of_Installments__c,
+                    status: pledge.Status__c,
+                    notes: pledge.Notes__c,
+                    writeOffDate: pledge.Write_Off_Date__c,
+                    writeOffReason: pledge.Write_Off_Reason__c
+                };
+            }
+
+            throw new Error(`Pledge ${pledgeId} not found`);
+        } catch (error) {
+            console.error('Error retrieving Salesforce pledge:', error);
+            throw new Error(`Salesforce pledge retrieval failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Update a pledge record
+     * @param {string} pledgeId - Pledge ID
+     * @param {Object} updateData - Fields to update
+     * @returns {Promise<Object>} Updated pledge object
+     */
+    async updatePledge(pledgeId, updateData) {
+        await this.connect();
+
+        const updateRecord = {
+            Id: pledgeId
+        };
+
+        // Map fields
+        if (updateData.status !== undefined) {
+            updateRecord.Status__c = updateData.status;
+        }
+        if (updateData.balanceRemaining !== undefined) {
+            updateRecord.Balance_Remaining__c = updateData.balanceRemaining;
+        }
+        if (updateData.notes !== undefined) {
+            updateRecord.Notes__c = updateData.notes;
+        }
+        if (updateData.writeOffDate !== undefined) {
+            updateRecord.Write_Off_Date__c = updateData.writeOffDate;
+        }
+        if (updateData.writeOffReason !== undefined) {
+            updateRecord.Write_Off_Reason__c = updateData.writeOffReason;
+        }
+
+        try {
+            const result = await this.conn.sobject('Pledge__c').update(updateRecord);
+
+            if (result.success) {
+                console.log(`Updated Salesforce pledge ${pledgeId}`);
+                return await this.getPledge(pledgeId);
+            } else {
+                throw new Error(`Pledge update failed: ${JSON.stringify(result.errors)}`);
+            }
+        } catch (error) {
+            console.error('Error updating Salesforce pledge:', error);
+            throw new Error(`Salesforce pledge update failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get all active pledges for a contact
+     * @param {string} contactId - Contact ID
+     * @returns {Promise<Array>} Array of active pledges
+     */
+    async getActivePledgesForContact(contactId) {
+        await this.connect();
+
+        try {
+            const query = `SELECT Id, Name, Contact__c, Fund_Category__c, Total_Amount__c,
+                          Currency__c, Balance_Remaining__c, Start_Date__c, End_Date__c,
+                          Schedule_Type__c, Number_of_Installments__c, Status__c, Notes__c
+                          FROM Pledge__c
+                          WHERE Contact__c = '${contactId}' 
+                          AND Status__c = 'Active'
+                          ORDER BY Start_Date__c ASC`;
+
+            const result = await this.conn.query(query);
+
+            return result.records.map(pledge => ({
+                Id: pledge.Id,
+                contactId: pledge.Contact__c,
+                fundCategory: pledge.Fund_Category__c,
+                totalAmount: pledge.Total_Amount__c,
+                currency: pledge.Currency__c,
+                balanceRemaining: pledge.Balance_Remaining__c,
+                startDate: pledge.Start_Date__c,
+                endDate: pledge.End_Date__c,
+                scheduleType: pledge.Schedule_Type__c,
+                numberOfInstallments: pledge.Number_of_Installments__c,
+                status: pledge.Status__c,
+                notes: pledge.Notes__c
+            }));
+        } catch (error) {
+            console.error('Error retrieving active pledges:', error);
+            throw new Error(`Salesforce active pledges retrieval failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Create pledge installments
+     * @param {string} pledgeId - Pledge ID
+     * @param {Array} installments - Array of installment objects
+     * @returns {Promise<Array>} Created installment objects
+     */
+    async createPledgeInstallments(pledgeId, installments) {
+        await this.connect();
+
+        const installmentRecords = installments.map(inst => ({
+            Pledge__c: pledgeId,
+            Sequence_Number__c: inst.sequenceNumber,
+            Due_Date__c: inst.dueDate,
+            Amount_Due__c: inst.amountDue,
+            Amount_Paid__c: inst.amountPaid || 0,
+            Notes__c: inst.notes || ''
+        }));
+
+        try {
+            const results = await this.conn.sobject('PledgeInstallment__c').create(installmentRecords);
+
+            // Handle both single and bulk create results
+            const resultArray = Array.isArray(results) ? results : [results];
+
+            const createdIds = resultArray
+                .filter(r => r.success)
+                .map(r => r.id);
+
+            if (createdIds.length === 0) {
+                throw new Error('No installments were created successfully');
+            }
+
+            console.log(`Created ${createdIds.length} pledge installments`);
+
+            // Retrieve created installments
+            return await this.getPledgeInstallments(pledgeId);
+        } catch (error) {
+            console.error('Error creating pledge installments:', error);
+            throw new Error(`Salesforce pledge installment creation failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get installments for a pledge
+     * @param {string} pledgeId - Pledge ID
+     * @returns {Promise<Array>} Array of installment objects
+     */
+    async getPledgeInstallments(pledgeId) {
+        await this.connect();
+
+        try {
+            const query = `SELECT Id, Name, Pledge__c, Sequence_Number__c, Due_Date__c,
+                          Amount_Due__c, Amount_Paid__c, Balance_Remaining__c, Status__c, Notes__c
+                          FROM PledgeInstallment__c
+                          WHERE Pledge__c = '${pledgeId}'
+                          ORDER BY Sequence_Number__c ASC`;
+
+            const result = await this.conn.query(query);
+
+            return result.records.map(inst => ({
+                Id: inst.Id,
+                pledgeId: inst.Pledge__c,
+                sequenceNumber: inst.Sequence_Number__c,
+                dueDate: inst.Due_Date__c,
+                amountDue: inst.Amount_Due__c,
+                amountPaid: inst.Amount_Paid__c || 0,
+                balanceRemaining: inst.Balance_Remaining__c,
+                status: inst.Status__c,
+                notes: inst.Notes__c
+            }));
+        } catch (error) {
+            console.error('Error retrieving pledge installments:', error);
+            throw new Error(`Salesforce pledge installments retrieval failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Create pledge payment allocations
+     * @param {Array} allocations - Array of allocation objects
+     * @returns {Promise<Array>} Created allocation objects
+     */
+    async createPledgeAllocations(allocations) {
+        await this.connect();
+
+        const allocationRecords = allocations.map(alloc => ({
+            Transaction__c: alloc.transactionId,
+            Pledge__c: alloc.pledgeId,
+            PledgeInstallment__c: alloc.installmentId,
+            Amount_Applied__c: alloc.amountApplied,
+            Allocation_Date__c: alloc.allocationDate,
+            Applied_By__c: alloc.appliedBy || null,
+            Is_Automatic__c: alloc.isAutomatic || false
+        }));
+
+        try {
+            const results = await this.conn.sobject('PledgePaymentAllocation__c').create(allocationRecords);
+
+            // Handle both single and bulk create results
+            const resultArray = Array.isArray(results) ? results : [results];
+
+            const createdAllocations = resultArray
+                .filter(r => r.success)
+                .map((r, index) => ({
+                    Id: r.id,
+                    ...allocations[index]
+                }));
+
+            if (createdAllocations.length === 0) {
+                throw new Error('No allocations were created successfully');
+            }
+
+            console.log(`Created ${createdAllocations.length} pledge payment allocations`);
+
+            return createdAllocations;
+        } catch (error) {
+            console.error('Error creating pledge allocations:', error);
+            throw new Error(`Salesforce pledge allocation creation failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get allocations for a transaction
+     * @param {string} transactionId - Transaction ID
+     * @returns {Promise<Array>} Array of allocation objects
+     */
+    async getAllocationsForTransaction(transactionId) {
+        await this.connect();
+
+        try {
+            const query = `SELECT Id, Name, Transaction__c, Pledge__c, PledgeInstallment__c,
+                          Amount_Applied__c, Allocation_Date__c, Applied_By__c, Is_Automatic__c
+                          FROM PledgePaymentAllocation__c
+                          WHERE Transaction__c = '${transactionId}'
+                          ORDER BY Allocation_Date__c DESC`;
+
+            const result = await this.conn.query(query);
+
+            return result.records.map(alloc => ({
+                Id: alloc.Id,
+                transactionId: alloc.Transaction__c,
+                pledgeId: alloc.Pledge__c,
+                installmentId: alloc.PledgeInstallment__c,
+                amountApplied: alloc.Amount_Applied__c,
+                allocationDate: alloc.Allocation_Date__c,
+                appliedBy: alloc.Applied_By__c,
+                isAutomatic: alloc.Is_Automatic__c
+            }));
+        } catch (error) {
+            console.error('Error retrieving pledge allocations:', error);
+            throw new Error(`Salesforce pledge allocations retrieval failed: ${error.message}`);
+        }
+    }
 }
 
 module.exports = SalesforceCrmService;
