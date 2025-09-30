@@ -395,7 +395,8 @@ class SalesforceCrmService extends BaseCrmService {
         const { 
             status,
             paymentMethod,
-            transactionId: stripeTransactionId
+            transactionId: stripeTransactionId,
+            pledgeId  // New field for pledge linkage
         } = transactionData;
 
         // Build update record with only provided fields
@@ -411,6 +412,10 @@ class SalesforceCrmService extends BaseCrmService {
 
         if (stripeTransactionId !== undefined) {
             updateRecord.Transaction_ID__c = stripeTransactionId;
+        }
+
+        if (pledgeId !== undefined) {
+            updateRecord.Pledge__c = pledgeId;
         }
 
         // Only proceed if we have at least one field to update
