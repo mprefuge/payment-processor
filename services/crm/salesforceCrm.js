@@ -123,6 +123,58 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     /**
+     * Update contact information in Salesforce
+     * @param {string} contactId - Salesforce Contact ID
+     * @param {Object} contactData - Contact information to update
+     * @returns {Promise<Object>} Updated contact object
+     */
+    async updateContact(contactId, contactData) {
+        await this.connect();
+
+        const { address } = contactData;
+        
+        // Only update address fields if address is provided
+        if (!address) {
+            return null;
+        }
+
+        const updateRecord = {
+            MailingStreet: address.line1 || null,
+            MailingCity: address.city || null,
+            MailingState: address.state || null,
+            MailingPostalCode: address.postalCode || address.postal_code || null,
+            MailingCountry: address.country || 'US'
+        };
+
+        // Remove null values to avoid overwriting existing data with null
+        Object.keys(updateRecord).forEach(key => {
+            if (updateRecord[key] === null) {
+                delete updateRecord[key];
+            }
+        });
+
+        try {
+            const result = await this.conn.sobject('Contact').update({
+                Id: contactId,
+                ...updateRecord
+            });
+            
+            if (result.success) {
+                console.log(`Updated Salesforce contact ${contactId} with address information`);
+                
+                // Fetch the updated contact to return complete data
+                const updatedContact = await this.conn.sobject('Contact').retrieve(contactId);
+                return updatedContact;
+            } else {
+                throw new Error(`Contact update failed: ${JSON.stringify(result.errors)}`);
+            }
+        } catch (error) {
+            console.error('Error updating Salesforce contact:', error);
+            throw new Error(`Salesforce contact update failed: ${error.message}`);
+        }
+    }
+
+    /**
      * Create a completed task in Salesforce
      * @param {string} contactId - Salesforce Contact ID
      * @param {Object} taskData - Task information

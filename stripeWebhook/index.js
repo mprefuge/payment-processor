@@ -175,6 +175,22 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             contact = matchResult.decision.candidate;
             context.log(`High confidence match: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
             
+            // Update contact with new address information if available
+            if (customer.address) {
+                try {
+                    const updatedContact = await crmService.updateContact(contact.Id, {
+                        address: customer.address
+                    });
+                    if (updatedContact) {
+                        contact = updatedContact;
+                        context.log(`Updated contact address for: ${contact.FirstName} ${contact.LastName}`);
+                    }
+                } catch (error) {
+                    context.log(`Failed to update contact address: ${error.message}`);
+                    // Continue processing - don't fail the transaction for address update issues
+                }
+            }
+            
         } else if (matchResult.decision.action === 'review') {
             // Uncertain or no match - create review task
             if (matchingConfig.review.enabled) {
@@ -204,6 +220,22 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 // Use best candidate but mark for review
                 contact = matchResult.decision.candidate;
                 context.log(`Using best candidate for review: ${contact.FirstName} ${contact.LastName} (Score: ${matchResult.decision.bestScore})`);
+                
+                // Update contact with new address information if available
+                if (customer.address) {
+                    try {
+                        const updatedContact = await crmService.updateContact(contact.Id, {
+                            address: customer.address
+                        });
+                        if (updatedContact) {
+                            contact = updatedContact;
+                            context.log(`Updated contact address for review candidate: ${contact.FirstName} ${contact.LastName}`);
+                        }
+                    } catch (error) {
+                        context.log(`Failed to update contact address: ${error.message}`);
+                        // Continue processing - don't fail the transaction for address update issues
+                    }
+                }
             }
         }
 
@@ -216,18 +248,7 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 id: paymentIntent.id
             });
 
-            // Create completed task for the donation
-            const taskData = {
-                subject: 'Donation Received',
-                description: `Payment received via Stripe. Amount: $${(paymentIntent.amount / 100).toFixed(2)} ${paymentIntent.currency.toUpperCase()}. Transaction ID: ${paymentIntent.id}. Match Score: ${matchResult.decision.bestScore.toFixed(3)}`,
-                type: 'Donation',
-                status: 'Completed'
-            };
-
-            const task = await crmService.createTask(contact.Id, taskData);
-            context.log(`Created task: ${task.Id}`);
-
-            // Create transaction record with proper naming
+            // Create transaction record with proper naming (no duplicate task needed)
             const enhancedTransactionData = {
                 amount: paymentIntent.amount,
                 currency: paymentIntent.currency,
