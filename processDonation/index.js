@@ -80,13 +80,22 @@ const syncContactToCrm = async (context, customerData) => {
             context.log(`Found existing contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
             
             // Update contact with address information if available
-            const addressData = {
-                line1: customerData.address,
-                city: customerData.city,
-                state: customerData.state,
-                postal_code: customerData.zipcode,
-                country: 'US'
-            };
+            // Handle both nested address object and flat address fields
+            const addressData = customerData.address && typeof customerData.address === 'object'
+                ? {
+                    line1: customerData.address.line1,
+                    city: customerData.address.city,
+                    state: customerData.address.state,
+                    postal_code: customerData.address.postal_code,
+                    country: 'US'
+                }
+                : {
+                    line1: customerData.address,
+                    city: customerData.city,
+                    state: customerData.state,
+                    postal_code: customerData.zipcode,
+                    country: 'US'
+                };
             
             // Only update if we have address data
             if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
@@ -112,13 +121,21 @@ const syncContactToCrm = async (context, customerData) => {
                 firstName: customerData.firstname,
                 lastName: customerData.lastname,
                 phone: customerData.phone,
-                address: {
-                    line1: customerData.address,
-                    city: customerData.city,
-                    state: customerData.state,
-                    postal_code: customerData.zipcode,
-                    country: 'US'
-                }
+                address: customerData.address && typeof customerData.address === 'object'
+                    ? {
+                        line1: customerData.address.line1,
+                        city: customerData.address.city,
+                        state: customerData.address.state,
+                        postal_code: customerData.address.postal_code,
+                        country: 'US'
+                    }
+                    : {
+                        line1: customerData.address,
+                        city: customerData.city,
+                        state: customerData.state,
+                        postal_code: customerData.zipcode,
+                        country: 'US'
+                    }
             };
             
             contact = await crmService.createContact(contactData);
