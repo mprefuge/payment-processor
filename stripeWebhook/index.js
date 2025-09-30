@@ -128,7 +128,7 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         const donationData = {
             email: customer.email,
             firstname: transactionData.firstName || 'Valued',
-            lastname: transactionData.lastName || 'Donor',
+            lastname: transactionData.lastName || 'Customer',
             amount: paymentIntent.amount,
             frequency: transactionData.frequency,
             category: transactionData.category || 'General',

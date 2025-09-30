@@ -195,7 +195,7 @@ const createPendingTransaction = async (context, session, contactId, donationDat
         const matchingConfig = loadConfig();
 
         // Prepare transaction data
-        const category = session.metadata?.category || donationData.category || 'General Donation';
+        const category = session.metadata?.category || donationData.category || 'General';
         const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
         const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
             amount: `$${(donationData.amount / 100).toFixed(2)}`,
@@ -348,15 +348,16 @@ const createCheckoutSession = async (stripe, customerId, donationData) => {
             price_data: {
                 currency: 'usd',
                 product_data: {
-                    name: donationData.category || 'Donation'
+                    name: donationData.category || donationData.transactionType || 'Payment'
                 },
                 unit_amount: donationData.amount
             },
             quantity: 1
         }],
         metadata: {
-            category: donationData.category || 'General Donation',
-            frequency: donationData.frequency || 'onetime'
+            category: donationData.category || 'General',
+            frequency: donationData.frequency || 'onetime',
+            transactionType: donationData.transactionType || 'Payment'
         }
     };
     
@@ -406,7 +407,7 @@ const getIntervalCount = (frequency) => {
 // Main function handler for traditional Azure Functions model
 module.exports = async function (context, req) {
     try {
-        context.log('Processing donation request');
+        context.log('Processing payment request');
         
         let body = req.body;
         if (!body) {
@@ -428,7 +429,7 @@ module.exports = async function (context, req) {
                 const debugMsg = {
                     to: process.env.DEBUG_EMAIL,
                     from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
-                    subject: `Debug: New Donation Submission - ${body.firstname || 'Unknown'} ${body.lastname || 'Unknown'}`,
+                    subject: `Debug: New Payment Submission - ${body.firstname || 'Unknown'} ${body.lastname || 'Unknown'}`,
                     html: `<p>${JSON.stringify(body, null, 2)}</p>`,
                 };
                 await sgMail.send(debugMsg);
