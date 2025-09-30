@@ -4,7 +4,8 @@
   "description": "Azure Function for payment processing with Stripe integration",
   "main": "processDonation/index.js",
   "scripts": {
-    "start": "func start"
+    "start": "func start",
+    "test": "node tests/integration.test.js && node tests/transactionCreationFlow.test.js && node tests/failedCanceledTransactions.test.js"
   },
   "dependencies": {
     "@azure/functions": "^4.5.0",

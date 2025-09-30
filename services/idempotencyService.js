@@ -2,14 +2,26 @@
  * Idempotency Service
  * 
  * Prevents duplicate processing of transactions by tracking processed items
- * Uses in-memory storage for simplicity (could be enhanced with Redis/database)
+ * 
+ * ⚠️ PRODUCTION WARNING: This implementation uses in-memory storage which will be
+ * lost on application restart or when running in distributed environments.
+ * For production use, replace with persistent storage:
+ * - Redis for distributed caching
+ * - Database with TTL/expiry for long-term storage
+ * - Azure Cache for Redis (recommended for Azure Functions)
  */
 
 class IdempotencyService {
     constructor() {
-        // In production, this should be replaced with persistent storage (Redis, database)
+        // WARNING: In-memory storage - not suitable for production at scale
+        // Replace with Redis, database, or Azure Cache for production deployments
         this.processedTransactions = new Map();
         this.logger = console;
+        
+        // Log warning in production
+        if (process.env.NODE_ENV === 'production' && !process.env.SUPPRESS_IDEMPOTENCY_WARNING) {
+            this.logger.warn('⚠️ IdempotencyService using in-memory storage. This is not suitable for production. Use Redis or database instead.');
+        }
     }
 
     /**
