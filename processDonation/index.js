@@ -184,6 +184,33 @@ const createStripeCustomer = async (stripe, customerData) => {
     }
 };
 
+// Update existing Stripe customer
+const updateStripeCustomer = async (stripe, customerId, customerData) => {
+    try {
+        const updateData = {
+            name: `${customerData.firstname} ${customerData.lastname}`,
+            phone: customerData.phone || null
+        };
+
+        // Only include address if at least one field is provided
+        if (customerData.address || customerData.city || customerData.state || customerData.zipcode) {
+            updateData.address = {
+                line1: customerData.address || null,
+                city: customerData.city || null,
+                state: customerData.state || null,
+                postal_code: customerData.zipcode || null,
+                country: 'US'
+            };
+        }
+
+        const customer = await stripe.customers.update(customerId, updateData);
+        return customer;
+    } catch (error) {
+        console.error('Error updating Stripe customer:', error);
+        throw error;
+    }
+};
+
 // Create Stripe checkout session
 const createCheckoutSession = async (stripe, customerId, donationData) => {
     const isOneTime = donationData.frequency === 'onetime';
@@ -383,6 +410,10 @@ module.exports = async function (context, req) {
         } else {
             context.log('Using existing Stripe customer');
             customerId = existingCustomers[0].id;
+            
+            // Update existing customer with latest information
+            context.log('Updating existing Stripe customer with latest information');
+            await updateStripeCustomer(stripe, customerId, body);
         }
         
         // Create checkout session
