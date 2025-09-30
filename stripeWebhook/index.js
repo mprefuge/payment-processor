@@ -114,17 +114,24 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             transactionId: paymentIntent.id,
             amount: paymentIntent.amount,
             currency: paymentIntent.currency,
-            timestamp: new Date(paymentIntent.created * 1000).toISOString(), // Add timestamp for idempotency
+            timestamp: new Date(paymentIntent.created * 1000).toISOString(), // Keep timestamp for logging but don't use in idempotency key
             email: customer.email,
             phone: customer.phone,
             firstName: customer.name ? customer.name.split(' ')[0] : null,
             lastName: customer.name ? customer.name.split(' ').slice(1).join(' ') : null,
             address: customer.address,
-            // Extract category from metadata if available
+            // Extract category from metadata if available, with better logging
             category: paymentIntent.metadata?.category || paymentIntent.metadata?.fund || null,
             description: paymentIntent.description,
             frequency: paymentIntent.metadata?.frequency || 'onetime'
         };
+
+        // Log metadata extraction for debugging
+        context.log('PaymentIntent metadata:', {
+            metadata: paymentIntent.metadata,
+            extractedCategory: transactionData.category,
+            extractedFrequency: transactionData.frequency
+        });
 
         // Process with idempotency checking
         const startTime = Date.now();
