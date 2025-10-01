@@ -13,11 +13,12 @@ const Stripe = require('stripe');
  */
 
 class PayoutSyncService {
-    constructor(config, accountingProvider, syncLedger, reviewTaskService = null) {
+    constructor(config, accountingProvider, syncLedger, reviewTaskService = null, crmService = null) {
         this.config = config;
         this.accountingProvider = accountingProvider;
         this.syncLedger = syncLedger;
         this.reviewTaskService = reviewTaskService;
+        this.crmService = crmService;
         this.logger = console;
     }
 
@@ -543,6 +544,64 @@ class PayoutSyncService {
                 recordedAt: new Date().toISOString()
             }
         });
+    }
+
+    /**
+     * Create payout record in CRM if CRM service is configured
+     * @param {Object} payout - Stripe payout object
+     * @param {Object} summary - Activity summary
+     * @param {string} stripeAccountId - Stripe account ID
+     * @param {Object} providerDocIds - Accounting provider document IDs
+     * @returns {Promise<Object|null>} Created CRM payout record or null if not available
+     */
+    async createCrmPayout(payout, summary, stripeAccountId = null, providerDocIds = {}) {
+        if (!this.crmService) {
+            this.logger.log('[PayoutSync] CRM service not configured, skipping CRM payout creation');
+            return null;
+        }
+
+        try {
+            this.logger.log(`[PayoutSync] Creating payout record in CRM: ${payout.id}`);
+
+            const payoutData = {
+                payoutId: payout.id,
+                stripeAccountId: stripeAccountId || 'default',
+                amount: payout.amount,
+                currency: payout.currency || 'usd',
+                arrivalDate: payout.arrival_date,
+                createdDate: payout.created,
+                status: payout.status === 'paid' ? 'Paid' : payout.status,
+                description: `Stripe payout for ${new Date(payout.arrival_date * 1000).toLocaleDateString()}`,
+                summary: {
+                    charges: summary.charges,
+                    refunds: summary.refunds,
+                    fees: summary.fees,
+                    disputes: summary.disputes
+                },
+                providerDocIds,
+                metadata: {
+                    type: payout.type,
+                    method: payout.method,
+                    sourceType: payout.source_type,
+                    automatic: payout.automatic
+                }
+            };
+
+            const crmPayout = await this.crmService.createPayout(payoutData);
+            
+            if (crmPayout) {
+                this.logger.log(`[PayoutSync] Created CRM payout record: ${crmPayout.Id}`);
+                return crmPayout;
+            } else {
+                this.logger.log('[PayoutSync] CRM payout creation returned null (object may not exist)');
+                return null;
+            }
+        } catch (error) {
+            // Log error but don't fail the entire payout sync
+            this.logger.error(`[PayoutSync] Failed to create CRM payout record: ${error.message}`);
+            this.logger.log('[PayoutSync] Continuing with accounting sync despite CRM error');
+            return null;
+        }
     }
 
     /**

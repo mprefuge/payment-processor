@@ -117,11 +117,30 @@ module.exports = async function (context, req) {
                 providerConfig
             );
 
+            // Initialize CRM service if available
+            const CrmFactory = require('../services/crm/crmFactory');
+            let crmService = null;
+            const crmProvider = process.env.CRM_PROVIDER;
+            if (crmProvider) {
+                try {
+                    const crmConfig = {
+                        username: process.env.SALESFORCE_USERNAME,
+                        password: process.env.SALESFORCE_PASSWORD,
+                        securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
+                        loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com'
+                    };
+                    crmService = CrmFactory.createCrmService(crmProvider, crmConfig);
+                } catch (error) {
+                    context.log('Failed to initialize CRM service:', error.message);
+                }
+            }
+
             const payoutSyncService = new PayoutSyncService(
                 accountingConfig,
                 accountingProvider,
                 syncLedger,
-                null
+                null,
+                crmService
             );
 
             // Process payout sync
@@ -169,7 +188,13 @@ module.exports = async function (context, req) {
                 const providerDocIds = await payoutSyncService.postToAccounting(postingInstructions);
                 context.log('Posted to accounting:', providerDocIds);
 
-                // 7. Record in ledger
+                // 7. Create payout record in CRM (if CRM service is configured)
+                const crmPayout = await payoutSyncService.createCrmPayout(payout, summary, stripeAccountId, providerDocIds);
+                if (crmPayout) {
+                    context.log('Created payout record in CRM:', crmPayout.Id);
+                }
+
+                // 8. Record in ledger
                 await payoutSyncService.recordLedger(
                     stripeAccountId,
                     payoutId,
@@ -184,6 +209,7 @@ module.exports = async function (context, req) {
                         payoutId,
                         stripeAccountId: stripeAccountId || 'default',
                         providerDocIds,
+                        crmPayoutId: crmPayout?.Id || null,
                         summary: {
                             charges: summary.charges.count,
                             refunds: summary.refunds.count,
