@@ -75,6 +75,15 @@ class BaseCrmService {
     }
 
     /**
+     * Create a payout record in the CRM
+     * @param {Object} payoutData - Payout information
+     * @returns {Promise<Object>} Created payout object
+     */
+    async createPayout(payoutData) {
+        throw new Error('createPayout method must be implemented by subclass');
+    }
+
+    /**
      * Select the best match from multiple contacts based on similarity
      * @param {Array} contacts - Array of contact objects
      * @param {Object} searchCriteria - Original search criteria

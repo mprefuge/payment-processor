@@ -61,6 +61,22 @@ const getCrmConfig = () => {
     }
 };
 
+// Get CRM service instance for payout storage (if enabled)
+const getCrmServiceInstance = () => {
+    const crmConfig = getCrmConfig();
+    if (!crmConfig) {
+        return null;
+    }
+
+    try {
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+        return crmService;
+    } catch (error) {
+        console.error('Failed to create CRM service instance:', error.message);
+        return null;
+    }
+};
+
 // Verify Stripe webhook signature
 const verifyWebhookSignature = (payload, signature, endpointSecret) => {
     if (!endpointSecret) {
@@ -846,7 +862,8 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null) => {
             accountingConfig,
             accountingProvider,
             syncLedger,
-            null // ReviewTaskService integration can be added later
+            null, // ReviewTaskService integration can be added later
+            getCrmServiceInstance() // Add CRM service for payout storage
         );
 
         // Enqueue job for async processing
@@ -973,14 +990,21 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
         const providerDocIds = await payoutSyncService.postToAccounting(postingInstructions);
         context.log('[PayoutJob] Posted to accounting:', providerDocIds);
 
-        // 7. Record in sync ledger
+        // 7. Create payout record in CRM (if CRM service is configured)
+        const crmPayout = await payoutSyncService.createCrmPayout(payout, summary, stripeAccountId, providerDocIds);
+        if (crmPayout) {
+            context.log('[PayoutJob] Created payout record in CRM:', crmPayout.Id);
+        }
+
+        // 8. Record in sync ledger
         await payoutSyncService.recordLedger(stripeAccountId, payoutId, postingInstructions, providerDocIds);
         context.log('[PayoutJob] Recorded in sync ledger');
 
-        // 8. Update event status
+        // 9. Update event status
         await webhookEventStore.updateEventStatus(context.invocationId, 'completed', {
             payoutId,
-            providerDocIds
+            providerDocIds,
+            crmPayoutId: crmPayout?.Id || null
         });
 
         context.log('[PayoutJob] Payout sync completed successfully');

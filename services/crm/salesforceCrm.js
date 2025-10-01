@@ -516,6 +516,82 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     /**
+     * Create a payout record in Salesforce
+     * Note: This assumes a custom Payout object exists in Salesforce
+     * @param {Object} payoutData - Payout information
+     * @returns {Promise<Object>} Created payout object
+     */
+    async createPayout(payoutData) {
+        await this.connect();
+
+        const {
+            payoutId,
+            stripeAccountId,
+            amount,
+            currency = 'USD',
+            arrivalDate,
+            createdDate,
+            status = 'Paid',
+            description,
+            summary,
+            providerDocIds,
+            metadata
+        } = payoutData;
+
+        // Try creating a custom Payout record first
+        try {
+            const payoutRecord = {
+                Name: `Payout - ${new Date(arrivalDate * 1000).toISOString().split('T')[0]}`,
+                Payout_ID__c: payoutId,
+                Stripe_Account_ID__c: stripeAccountId || 'default',
+                Amount__c: amount / 100, // Convert cents to dollars
+                Currency__c: currency,
+                Arrival_Date__c: new Date(arrivalDate * 1000).toISOString(),
+                Created_Date__c: new Date(createdDate * 1000).toISOString(),
+                Status__c: status,
+                Description__c: description || `Stripe payout ${payoutId}`,
+                
+                // Summary fields
+                Charge_Count__c: summary?.charges?.count || 0,
+                Charge_Amount__c: summary?.charges?.grossAmount ? summary.charges.grossAmount / 100 : 0,
+                Refund_Count__c: summary?.refunds?.count || 0,
+                Refund_Amount__c: summary?.refunds?.amount ? summary.refunds.amount / 100 : 0,
+                Fee_Amount__c: summary?.fees ? (summary.fees.stripe.amount + summary.fees.application.amount) / 100 : 0,
+                Dispute_Count__c: summary?.disputes?.count || 0,
+                Dispute_Amount__c: summary?.disputes?.amount ? summary.disputes.amount / 100 : 0,
+                
+                // Accounting integration fields
+                Accounting_Journal_Entry_ID__c: providerDocIds?.journalEntry || null,
+                Accounting_Transfer_ID__c: providerDocIds?.transfer || null,
+                Accounting_Deposit_ID__c: providerDocIds?.deposit || null,
+                
+                // Metadata
+                Metadata__c: metadata ? JSON.stringify(metadata) : null
+            };
+
+            const result = await this.conn.sobject('Payout__c').create(payoutRecord);
+            
+            if (result.success) {
+                console.log(`Created Salesforce payout with ID: ${result.id}`);
+                const createdPayout = await this.conn.sobject('Payout__c').retrieve(result.id);
+                return createdPayout;
+            } else {
+                throw new Error(`Payout creation failed: ${JSON.stringify(result.errors)}`);
+            }
+        } catch (error) {
+            console.error('Error creating Salesforce payout:', error);
+            
+            // If custom Payout object doesn't exist, log and return null gracefully
+            if (error.message.includes('sObject type') || error.message.includes('Payout__c')) {
+                console.log('Custom Payout__c object not available in Salesforce - skipping payout storage in CRM');
+                return null;
+            }
+            
+            throw new Error(`Salesforce payout creation failed: ${error.message}`);
+        }
+    }
+
+    /**
      * Enhanced contact matching logic for Salesforce
      * Requires name to match when email or phone matches to prevent wrong contact updates
      * @param {Array} contacts - Array of Salesforce contacts
