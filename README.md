@@ -1,6 +1,6 @@
 # Payment Processing Azure Function
 
-This Azure Function app processes payments through Stripe, handling customer management, payment processing, and email notifications.
+This Azure Function app processes payments through Stripe, handling customer management, payment processing, email notifications, and accounting sync.
 
 ## Features
 
@@ -9,6 +9,7 @@ This Azure Function app processes payments through Stripe, handling customer man
 - Email notifications via SendGrid
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
+- **Stripe payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
 - **Salesforce contact sync on checkout session creation**
 - **Enhanced CRM integration with robust customer-contact association**
 - **Intelligent contact matching with normalization and fuzzy logic**
@@ -232,6 +233,76 @@ Examples:
 3. Select the events listed above
 4. Copy the webhook signing secret to your environment variables
 
+## Accounting Integration
+
+The payment processor includes automated **Stripe Payout Sync to Accounting** with support for QuickBooks Online (extensible to Xero, Sage, and others).
+
+### Features
+
+- **Webhook-driven sync**: Process `payout.paid`, `payout.failed`, `payout.canceled` events
+- **Provider-agnostic design**: Abstract interface for multiple accounting systems
+- **Comprehensive reconciliation**: Validates that gross - refunds - fees - disputes = net
+- **Idempotent processing**: Prevents duplicate postings with event and payout deduplication
+- **Multi-account support**: Handle multiple Stripe accounts and Connect platforms
+- **Configurable posting**: Journal Entry + Transfer (default) or Bank Deposit
+- **Drift detection**: Detects when mapping changes affect existing payouts
+- **Complete audit trail**: Sync ledger links payouts to accounting documents
+
+### Quick Start
+
+1. **Enable accounting sync**:
+   ```bash
+   ACCOUNTING_SYNC_ENABLED=true
+   ACCOUNTING_PROVIDER=quickbooks
+   ```
+
+2. **Configure QuickBooks**:
+   ```bash
+   QBO_COMPANY_ID=your_company_id
+   QBO_ENVIRONMENT=sandbox  # or production
+   QBO_ACCESS_TOKEN=your_access_token
+   QBO_REFRESH_TOKEN=your_refresh_token
+   ```
+
+3. **Set account mappings**:
+   ```bash
+   ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
+   ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
+   ACCOUNTING_REVENUE_ACCOUNT=Revenue
+   ACCOUNTING_REFUNDS_ACCOUNT=Refunds
+   ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
+   ```
+
+4. **Configure Stripe webhook** to send `payout.*` events to `/api/stripe/webhook`
+
+### API Endpoints
+
+**Check payout sync status**:
+```
+GET /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
+```
+
+**Manually trigger payout sync**:
+```
+POST /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
+```
+
+**Force re-sync**:
+```
+POST /api/sync/stripe/payouts/{payoutId}?force=true
+```
+
+### Documentation
+
+See [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) for complete documentation including:
+- Architecture and data flow
+- Configuration reference
+- Accounting document structure
+- Idempotency and drift detection
+- Error handling and review workflow
+- Testing guide
+- Production deployment checklist
+
 ## CRM Integration
 
 ### Contact Synchronization
@@ -249,6 +320,91 @@ The system integrates with Salesforce CRM at two key points in the payment flow:
 - When a payment is confirmed via Stripe webhook, the system performs advanced contact matching
 - Associates the transaction with the correct contact in Salesforce
 - Creates transaction records and tasks for transaction tracking
+
+### Payout Synchronization to CRM
+
+In addition to syncing payouts to accounting systems, the payment processor can also **create payout records in your CRM** for comprehensive financial tracking and reporting.
+
+**Features:**
+- **Automatic payout tracking**: When a `payout.paid` event is received, a payout record is created in the CRM
+- **Comprehensive information**: Includes payout amount, dates, status, transaction counts, and accounting document IDs
+- **Optional and graceful**: CRM payout storage is optional; errors won't prevent accounting sync
+- **Linked data**: Payout records include references to accounting system document IDs (journal entries, transfers, deposits)
+
+**How it works:**
+1. Stripe sends a `payout.paid` webhook event
+2. System processes payout to accounting system (QuickBooks, Xero, etc.)
+3. If CRM provider is configured (`CRM_PROVIDER=salesforce`), system creates a payout record in CRM
+4. Payout record includes summary data: charge count/amount, refund count/amount, fees, disputes
+5. Links to accounting documents are stored for easy reconciliation
+
+**Required Salesforce Setup:**
+
+Create a custom `Payout__c` object in Salesforce with the following fields:
+
+```sql
+-- Standard fields
+Name (Text) -- Auto-generated: "Payout - YYYY-MM-DD"
+
+-- Stripe payout identifiers
+Payout_ID__c (Text, Unique, External ID) -- Stripe payout ID (e.g., po_xxx)
+Stripe_Account_ID__c (Text) -- Stripe account ID or 'default'
+
+-- Amount and currency
+Amount__c (Currency) -- Payout net amount in dollars
+Currency__c (Text, 3) -- ISO currency code (USD, EUR, etc.)
+
+-- Dates and status
+Arrival_Date__c (Date) -- When funds arrived in bank account
+Created_Date__c (DateTime) -- When payout was created in Stripe
+Status__c (Picklist: Paid, Pending, Failed, Canceled)
+
+-- Description
+Description__c (Long Text Area) -- Description of the payout
+
+-- Transaction summary fields
+Charge_Count__c (Number) -- Number of charges in payout
+Charge_Amount__c (Currency) -- Gross charge amount
+Refund_Count__c (Number) -- Number of refunds in payout
+Refund_Amount__c (Currency) -- Total refund amount
+Fee_Amount__c (Currency) -- Total Stripe fees
+Dispute_Count__c (Number) -- Number of disputes in payout
+Dispute_Amount__c (Currency) -- Total dispute amount
+
+-- Accounting integration references
+Accounting_Journal_Entry_ID__c (Text) -- Journal entry ID in accounting system
+Accounting_Transfer_ID__c (Text) -- Transfer transaction ID in accounting system
+Accounting_Deposit_ID__c (Text) -- Deposit transaction ID in accounting system
+
+-- Metadata
+Metadata__c (Long Text Area) -- JSON metadata from Stripe payout
+```
+
+**Configuration:**
+
+Simply ensure your CRM provider is configured (same configuration used for transaction sync):
+
+```bash
+CRM_PROVIDER=salesforce
+SALESFORCE_USERNAME=your_username@example.com
+SALESFORCE_PASSWORD=your_password
+SALESFORCE_SECURITY_TOKEN=your_security_token
+SALESFORCE_LOGIN_URL=https://login.salesforce.com
+```
+
+No additional configuration needed - payout storage is automatically enabled when CRM is configured.
+
+**Behavior:**
+- If the `Payout__c` object exists, payout records will be created automatically
+- If the object doesn't exist, the system logs a message and continues (graceful degradation)
+- Payout CRM storage errors don't prevent accounting sync from completing
+- Each payout is created once with full summary and accounting references
+
+**Benefits:**
+- **Unified reporting**: View transaction and payout data together in your CRM
+- **Reconciliation**: Easy lookup of accounting documents from CRM payout records
+- **Business intelligence**: Build CRM reports and dashboards on payout trends
+- **Audit trail**: Complete history of payouts with links to source systems
 
 ### Enhanced Customer-Contact Association
 
