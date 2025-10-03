@@ -9,7 +9,8 @@ This Azure Function app processes payments through Stripe, handling customer man
 - Email notifications via SendGrid
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
-- **Stripe payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
+- **Webhook-only payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
+- **Automatic CRM payout tracking (Salesforce, extensible to other CRMs)**
 - **Salesforce contact sync on checkout session creation**
 - **Enhanced CRM integration with robust customer-contact association**
 - **Intelligent contact matching with normalization and fuzzy logic**
@@ -237,9 +238,13 @@ Examples:
 
 The payment processor includes automated **Stripe Payout Sync to Accounting** with support for QuickBooks Online (extensible to Xero, Sage, and others).
 
+> **⚠️ IMPORTANT: Webhook-Only Processing**
+> 
+> Payout sync is **fully automated via Stripe webhooks**. Manual payout sync has been removed for reliability and consistency. All payouts are processed automatically when Stripe sends the `payout.paid` event.
+
 ### Features
 
-- **Webhook-driven sync**: Process `payout.paid`, `payout.failed`, `payout.canceled` events
+- **Webhook-only processing**: Fully automated via Stripe `payout.paid` events - no manual sync needed
 - **Provider-agnostic design**: Abstract interface for multiple accounting systems
 - **Comprehensive reconciliation**: Validates that gross - refunds - fees - disputes = net
 - **Idempotent processing**: Prevents duplicate postings with event and payout deduplication
@@ -247,6 +252,7 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 - **Configurable posting**: Journal Entry + Transfer (default) or Bank Deposit
 - **Drift detection**: Detects when mapping changes affect existing payouts
 - **Complete audit trail**: Sync ledger links payouts to accounting documents
+- **CRM integration**: Automatically creates payout records in your CRM (Salesforce, etc.)
 
 ### Quick Start
 
@@ -275,6 +281,8 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 
 4. **Configure Stripe webhook** to send `payout.*` events to `/api/stripe/webhook`
 
+5. **Test your setup** - See [TESTING_GUIDE.md](./TESTING_GUIDE.md) for quick test scenarios
+
 ### API Endpoints
 
 **Check payout sync status**:
@@ -282,26 +290,24 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 GET /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
 ```
 
-**Manually trigger payout sync**:
-```
-POST /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
-```
-
-**Force re-sync**:
-```
-POST /api/sync/stripe/payouts/{payoutId}?force=true
-```
+> **Note:** Manual payout sync (POST) has been removed. The system is **webhook-only** for reliability and automation. To process a payout, ensure it's marked as paid in Stripe and the webhook is configured correctly.
 
 ### Documentation
 
-See [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) for complete documentation including:
-- Architecture and data flow
-- Configuration reference
-- Accounting document structure
-- Idempotency and drift detection
-- Error handling and review workflow
-- Testing guide
-- Production deployment checklist
+**Getting Started:**
+- [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) - **Start here!** Complete setup guide with:
+  - Step-by-step configuration
+  - CRM integration (Salesforce example)
+  - Test case scenarios and walkthroughs
+  - Troubleshooting guide
+  - Monitoring recommendations
+
+**Testing:**
+- [TESTING_GUIDE.md](./TESTING_GUIDE.md) - Quick test scenarios to validate your setup
+
+**Technical Details:**
+- [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) - Detailed architecture and technical documentation
+- [SALESFORCE_PAYOUT_SETUP.md](./SALESFORCE_PAYOUT_SETUP.md) - Salesforce object creation guide
 
 ## CRM Integration
 
@@ -326,10 +332,11 @@ The system integrates with Salesforce CRM at two key points in the payment flow:
 In addition to syncing payouts to accounting systems, the payment processor can also **create payout records in your CRM** for comprehensive financial tracking and reporting.
 
 **Features:**
-- **Automatic payout tracking**: When a `payout.paid` event is received, a payout record is created in the CRM
+- **Automatic payout tracking**: When a `payout.paid` webhook is received, a payout record is created in the CRM
 - **Comprehensive information**: Includes payout amount, dates, status, transaction counts, and accounting document IDs
 - **Optional and graceful**: CRM payout storage is optional; errors won't prevent accounting sync
 - **Linked data**: Payout records include references to accounting system document IDs (journal entries, transfers, deposits)
+- **Webhook-only**: Fully automated - no manual sync needed
 
 **How it works:**
 1. Stripe sends a `payout.paid` webhook event
@@ -395,7 +402,8 @@ SALESFORCE_LOGIN_URL=https://login.salesforce.com
 No additional configuration needed - payout storage is automatically enabled when CRM is configured.
 
 **Behavior:**
-- If the `Payout__c` object exists, payout records will be created automatically
+- Payout records are created automatically when `payout.paid` webhook is received
+- If the `Payout__c` object exists, records will be created with all summary data
 - If the object doesn't exist, the system logs a message and continues (graceful degradation)
 - Payout CRM storage errors don't prevent accounting sync from completing
 - Each payout is created once with full summary and accounting references
@@ -405,6 +413,12 @@ No additional configuration needed - payout storage is automatically enabled whe
 - **Reconciliation**: Easy lookup of accounting documents from CRM payout records
 - **Business intelligence**: Build CRM reports and dashboards on payout trends
 - **Audit trail**: Complete history of payouts with links to source systems
+
+**Complete Setup Guide:**
+
+For detailed setup instructions, test scenarios, and troubleshooting, see:
+- [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) - Complete webhook-only setup guide with test scenarios
+- [SALESFORCE_PAYOUT_SETUP.md](./SALESFORCE_PAYOUT_SETUP.md) - Step-by-step Salesforce object creation
 
 ### Enhanced Customer-Contact Association
 
