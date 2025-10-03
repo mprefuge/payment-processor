@@ -145,7 +145,12 @@ async function runTests() {
             amount: 12100 // Net amount after all transactions
         };
 
-        const validation = service.validateTotals(summary, payout);
+        const testBalanceTransactions = [
+            { id: 'txn_1', type: 'charge', amount: 10000, net: 9700 },
+            { id: 'txn_2', type: 'charge', amount: 5000, net: 4850 }
+        ];
+
+        const validation = service.validateTotals(summary, payout, testBalanceTransactions);
 
         if (validation.isValid && validation.difference === 0) {
             console.log('✅ Total validation - matching totals');
@@ -181,7 +186,7 @@ async function runTests() {
             amount: 12000 // Different from summary total
         };
 
-        const validation = service.validateTotals(summary, payout);
+        const validation = service.validateTotals(summary, payout, []);
 
         if (!validation.isValid && validation.difference === 100) {
             console.log('✅ Total validation - detects mismatch');
