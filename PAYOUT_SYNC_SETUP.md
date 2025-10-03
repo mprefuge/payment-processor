@@ -550,6 +550,21 @@ class XeroProvider extends BaseAccountingProvider {
 module.exports = XeroProvider;
 ```
 
+### Technical Notes
+
+#### Manual vs Automatic Payouts
+
+The Stripe API has a limitation when fetching balance transactions for payouts:
+
+- **Automatic payouts**: Can use `balanceTransactions.list({ payout: 'po_xxx' })` filter directly
+- **Manual payouts**: Cannot filter by payout ID - API returns error "Balance transaction history can only be filtered on automatic transfers, not manual"
+
+**Solution**: The `pullPayout()` method checks the `payout.automatic` field:
+- For automatic payouts: uses the efficient payout filter
+- For manual payouts: fetches transactions in a date range (±7 days from arrival date) and filters client-side
+
+This ensures compatibility with both payout types without errors.
+
 ### Future Enhancements
 
 - [ ] Backfill API endpoint for date range
