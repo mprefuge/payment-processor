@@ -84,15 +84,17 @@ class PayoutSyncService {
             }
         } else {
             // Manual payout OR connected account - fetch all transactions in date range and filter client-side
-            // Use a time window around the payout creation date to limit the search
+            // Use a time window around the payout arrival date to limit the search
             // Transactions are available based on available_on date, and manual payouts
-            // include all transactions with available_on <= payout creation time
+            // include all transactions with available_on <= payout arrival_date
             const reason = !payout.automatic ? 'manual payout' : 'connected account';
             this.logger.log(`[PayoutSync] Using date range filter (${reason})`);
             
-            const createdDate = payout.created;
-            const startTime = createdDate - (30 * 24 * 60 * 60); // 30 days before creation
-            const endTime = createdDate + (7 * 24 * 60 * 60); // 7 days after creation (for safety)
+            // For manual payouts: use arrival_date as the reference point
+            // For connected accounts: use created date as fallback
+            const referenceDate = payout.arrival_date || payout.created;
+            const startTime = referenceDate - (30 * 24 * 60 * 60); // 30 days before reference
+            const endTime = referenceDate; // Up to the reference date (arrival for manual payouts)
 
             while (hasMore) {
                 const params = {
@@ -110,8 +112,18 @@ class PayoutSyncService {
                     ? await stripe.balanceTransactions.list(params, requestOptions)
                     : await stripe.balanceTransactions.list(params);
                 
+                // Log diagnostic info about fetched transactions
+                this.logger.log(`[PayoutSync] Fetched ${response.data.length} transactions in date range`);
+                if (response.data.length > 0 && response.data.length <= 5) {
+                    // For small result sets, log details to help diagnose issues
+                    response.data.forEach(txn => {
+                        this.logger.log(`[PayoutSync]   Transaction ${txn.id}: payout=${txn.payout}, available_on=${new Date(txn.available_on * 1000).toISOString()}`);
+                    });
+                }
+                
                 // Filter to only transactions belonging to this payout
                 const filteredTransactions = response.data.filter(txn => txn.payout === payoutId);
+                this.logger.log(`[PayoutSync] Filtered to ${filteredTransactions.length} transactions for payout ${payoutId}`);
                 balanceTransactions.push(...filteredTransactions);
 
                 hasMore = response.has_more;
