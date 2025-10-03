@@ -70,11 +70,10 @@ class QuickBooksProvider extends BaseAccountingProvider {
         
         for (const account of accounts) {
             try {
-                // Search for existing account by name
-                const query = `SELECT * FROM Account WHERE Name = '${account.name.replace(/'/g, "\\'")}'`;
+                // Search for existing account by name using findAccounts
                 const existingAccounts = await this._executeWithTokenRefresh(() => 
                     new Promise((resolve, reject) => {
-                        this.qbo.query(query, (err, data) => {
+                        this.qbo.findAccounts({ Name: account.name }, (err, data) => {
                             if (err) reject(err);
                             else resolve(data.QueryResponse.Account || []);
                         });
@@ -137,11 +136,10 @@ class QuickBooksProvider extends BaseAccountingProvider {
         }
 
         try {
-            // Search for existing JE by DocNumber
-            const query = `SELECT * FROM JournalEntry WHERE DocNumber = '${journalEntry.docNumber.replace(/'/g, "\\'")}'`;
+            // Search for existing JE by DocNumber using findJournalEntries
             const existingEntries = await this._executeWithTokenRefresh(() =>
                 new Promise((resolve, reject) => {
-                    this.qbo.query(query, (err, data) => {
+                    this.qbo.findJournalEntries({ DocNumber: journalEntry.docNumber }, (err, data) => {
                         if (err) reject(err);
                         else resolve(data.QueryResponse.JournalEntry || []);
                     });
@@ -227,10 +225,12 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
         try {
             // Search for existing Transfer by PrivateNote containing docNumber
-            const query = `SELECT * FROM Transfer WHERE PrivateNote LIKE '%${transfer.docNumber.replace(/'/g, "\\'")}%'`;
+            // Use array criteria with LIKE operator
             const existingTransfers = await this._executeWithTokenRefresh(() =>
                 new Promise((resolve, reject) => {
-                    this.qbo.query(query, (err, data) => {
+                    this.qbo.findTransfers([
+                        { field: 'PrivateNote', value: `%${transfer.docNumber}%`, operator: 'LIKE' }
+                    ], (err, data) => {
                         if (err) reject(err);
                         else resolve(data.QueryResponse.Transfer || []);
                     });
@@ -309,10 +309,12 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
         try {
             // Search for existing Deposit by PrivateNote containing docNumber
-            const query = `SELECT * FROM Deposit WHERE PrivateNote LIKE '%${deposit.docNumber.replace(/'/g, "\\'")}%'`;
+            // Use array criteria with LIKE operator
             const existingDeposits = await this._executeWithTokenRefresh(() =>
                 new Promise((resolve, reject) => {
-                    this.qbo.query(query, (err, data) => {
+                    this.qbo.findDeposits([
+                        { field: 'PrivateNote', value: `%${deposit.docNumber}%`, operator: 'LIKE' }
+                    ], (err, data) => {
                         if (err) reject(err);
                         else resolve(data.QueryResponse.Deposit || []);
                     });
@@ -517,24 +519,25 @@ class QuickBooksProvider extends BaseAccountingProvider {
         }
 
         try {
-            const conditions = [];
+            // Build criteria array for findAccounts
+            const queryCriteria = [];
             
             if (criteria.name) {
-                conditions.push(`Name = '${criteria.name.replace(/'/g, "\\'")}'`);
+                queryCriteria.push({ field: 'Name', value: criteria.name });
             }
             if (criteria.type) {
-                conditions.push(`AccountType = '${criteria.type}'`);
+                queryCriteria.push({ field: 'AccountType', value: criteria.type });
             }
             if (criteria.subType) {
-                conditions.push(`AccountSubType = '${criteria.subType}'`);
+                queryCriteria.push({ field: 'AccountSubType', value: criteria.subType });
             }
 
-            const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
-            const query = `SELECT * FROM Account${whereClause}`;
+            // Use criteria object or array depending on what we have
+            const findCriteria = queryCriteria.length > 0 ? queryCriteria : {};
 
             const accounts = await this._executeWithTokenRefresh(() =>
                 new Promise((resolve, reject) => {
-                    this.qbo.query(query, (err, data) => {
+                    this.qbo.findAccounts(findCriteria, (err, data) => {
                         if (err) reject(err);
                         else resolve(data.QueryResponse.Account || []);
                     });

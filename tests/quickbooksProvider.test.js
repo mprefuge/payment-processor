@@ -179,6 +179,112 @@ class MockQBOClient {
             refresh_token: 'new-refresh-token'
         });
     }
+
+    // Find methods to match the real node-quickbooks API
+    findAccounts(criteria, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        let filteredAccounts = this.accounts;
+
+        // Handle object criteria
+        if (criteria && typeof criteria === 'object' && !Array.isArray(criteria)) {
+            if (criteria.Name) {
+                filteredAccounts = filteredAccounts.filter(a => a.Name === criteria.Name);
+            }
+            if (criteria.AccountType) {
+                filteredAccounts = filteredAccounts.filter(a => a.AccountType === criteria.AccountType);
+            }
+        }
+
+        // Handle array criteria
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (c.field === 'Name') {
+                    filteredAccounts = filteredAccounts.filter(a => a.Name === c.value);
+                }
+                if (c.field === 'AccountType') {
+                    filteredAccounts = filteredAccounts.filter(a => a.AccountType === c.value);
+                }
+                if (c.field === 'AccountSubType') {
+                    filteredAccounts = filteredAccounts.filter(a => a.AccountSubType === c.value);
+                }
+            });
+        }
+
+        callback(null, { QueryResponse: { Account: filteredAccounts } });
+    }
+
+    findJournalEntries(criteria, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        let filteredJEs = this.journalEntries;
+
+        // Handle object criteria
+        if (criteria && typeof criteria === 'object' && !Array.isArray(criteria)) {
+            if (criteria.DocNumber) {
+                filteredJEs = filteredJEs.filter(je => je.DocNumber === criteria.DocNumber);
+            }
+        }
+
+        // Handle array criteria
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (c.field === 'DocNumber') {
+                    filteredJEs = filteredJEs.filter(je => je.DocNumber === c.value);
+                }
+            });
+        }
+
+        callback(null, { QueryResponse: { JournalEntry: filteredJEs } });
+    }
+
+    findTransfers(criteria, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        let filteredTransfers = this.transfers;
+
+        // Handle array criteria with LIKE operator
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (c.field === 'PrivateNote' && c.operator === 'LIKE') {
+                    const searchValue = c.value.replace(/%/g, '');
+                    filteredTransfers = filteredTransfers.filter(t => 
+                        t.PrivateNote && t.PrivateNote.includes(searchValue)
+                    );
+                }
+            });
+        }
+
+        callback(null, { QueryResponse: { Transfer: filteredTransfers } });
+    }
+
+    findDeposits(criteria, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        let filteredDeposits = this.deposits;
+
+        // Handle array criteria with LIKE operator
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (c.field === 'PrivateNote' && c.operator === 'LIKE') {
+                    const searchValue = c.value.replace(/%/g, '');
+                    filteredDeposits = filteredDeposits.filter(d => 
+                        d.PrivateNote && d.PrivateNote.includes(searchValue)
+                    );
+                }
+            });
+        }
+
+        callback(null, { QueryResponse: { Deposit: filteredDeposits } });
+    }
 }
 
 // Override the require for node-quickbooks
