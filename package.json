@@ -5,7 +5,7 @@
   "main": "processTransaction/index.js",
   "scripts": {
     "start": "func start",
-    "test": "node tests/integration.test.js && node tests/transactionCreationFlow.test.js && node tests/failedCanceledTransactions.test.js && node tests/payoutSync.test.js && node tests/payoutCrmIntegration.test.js && node tests/payoutSyncFix.test.js && node tests/manualPayoutSync.test.js && node tests/payoutDateRangeFix.test.js && node tests/connectedAccountPayoutFix.test.js && node tests/payoutArrivalDateFix.test.js && node tests/payoutSyncLogicCorrection.test.js"
+    "test": "node tests/integration.test.js && node tests/transactionCreationFlow.test.js && node tests/failedCanceledTransactions.test.js && node tests/payoutSync.test.js && node tests/payoutCrmIntegration.test.js && node tests/payoutSyncFix.test.js && node tests/manualPayoutSync.test.js && node tests/payoutDateRangeFix.test.js && node tests/connectedAccountPayoutFix.test.js && node tests/payoutArrivalDateFix.test.js && node tests/payoutSyncLogicCorrection.test.js && node tests/payoutAdvanceExclusion.test.js && node tests/productionScenarioSimulation.test.js"
   },
   "dependencies": {
     "@azure/functions": "^4.5.0",
