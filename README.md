@@ -239,7 +239,7 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 
 ### Features
 
-- **Webhook-driven sync**: Process `payout.paid`, `payout.failed`, `payout.canceled` events
+- **Webhook-only processing**: Fully automated via Stripe `payout.paid` events - no manual sync needed
 - **Provider-agnostic design**: Abstract interface for multiple accounting systems
 - **Comprehensive reconciliation**: Validates that gross - refunds - fees - disputes = net
 - **Idempotent processing**: Prevents duplicate postings with event and payout deduplication
@@ -282,26 +282,18 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 GET /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
 ```
 
-**Manually trigger payout sync**:
-```
-POST /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
-```
-
-**Force re-sync**:
-```
-POST /api/sync/stripe/payouts/{payoutId}?force=true
-```
+**Note:** Manual payout sync has been removed. The system is webhook-only for reliability and automation.
 
 ### Documentation
 
-See [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) for complete documentation including:
-- Architecture and data flow
-- Configuration reference
-- Accounting document structure
-- Idempotency and drift detection
-- Error handling and review workflow
-- Testing guide
-- Production deployment checklist
+See [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) for complete setup guide including:
+- Step-by-step configuration
+- CRM integration (Salesforce example)
+- Test case scenarios and walkthroughs
+- Troubleshooting guide
+- Monitoring recommendations
+
+See also [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) for detailed architecture and technical documentation.
 
 ## CRM Integration
 
@@ -326,10 +318,11 @@ The system integrates with Salesforce CRM at two key points in the payment flow:
 In addition to syncing payouts to accounting systems, the payment processor can also **create payout records in your CRM** for comprehensive financial tracking and reporting.
 
 **Features:**
-- **Automatic payout tracking**: When a `payout.paid` event is received, a payout record is created in the CRM
+- **Automatic payout tracking**: When a `payout.paid` webhook is received, a payout record is created in the CRM
 - **Comprehensive information**: Includes payout amount, dates, status, transaction counts, and accounting document IDs
 - **Optional and graceful**: CRM payout storage is optional; errors won't prevent accounting sync
 - **Linked data**: Payout records include references to accounting system document IDs (journal entries, transfers, deposits)
+- **Webhook-only**: Fully automated - no manual sync needed
 
 **How it works:**
 1. Stripe sends a `payout.paid` webhook event
@@ -395,7 +388,8 @@ SALESFORCE_LOGIN_URL=https://login.salesforce.com
 No additional configuration needed - payout storage is automatically enabled when CRM is configured.
 
 **Behavior:**
-- If the `Payout__c` object exists, payout records will be created automatically
+- Payout records are created automatically when `payout.paid` webhook is received
+- If the `Payout__c` object exists, records will be created with all summary data
 - If the object doesn't exist, the system logs a message and continues (graceful degradation)
 - Payout CRM storage errors don't prevent accounting sync from completing
 - Each payout is created once with full summary and accounting references
@@ -405,6 +399,12 @@ No additional configuration needed - payout storage is automatically enabled whe
 - **Reconciliation**: Easy lookup of accounting documents from CRM payout records
 - **Business intelligence**: Build CRM reports and dashboards on payout trends
 - **Audit trail**: Complete history of payouts with links to source systems
+
+**Complete Setup Guide:**
+
+For detailed setup instructions, test scenarios, and troubleshooting, see:
+- [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) - Complete webhook-only setup guide with test scenarios
+- [SALESFORCE_PAYOUT_SETUP.md](./SALESFORCE_PAYOUT_SETUP.md) - Step-by-step Salesforce object creation
 
 ### Enhanced Customer-Contact Association
 
