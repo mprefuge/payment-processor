@@ -119,7 +119,8 @@ class PayoutSyncService {
                 const startTime = previousSync 
                     ? previousSync.payout.arrival_date 
                     : (payout.arrival_date || payout.created) - (30 * 24 * 60 * 60);
-                const endTime = payout.arrival_date || payout.created;
+                // End at "now" so the window includes the latest available transactions
+                const endTime = Math.floor(Date.now() / 1000);
                 
                 this.logger.log(`[PayoutSync] Date window: ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
                 
@@ -159,7 +160,8 @@ class PayoutSyncService {
             const startTime = previousSync 
                 ? previousSync.payout.arrival_date 
                 : (payout.arrival_date || payout.created) - (30 * 24 * 60 * 60);
-            const endTime = payout.arrival_date || payout.created;
+            // End at "now" so the window includes the latest available transactions
+            const endTime = Math.floor(Date.now() / 1000);
             
             this.logger.log(`[PayoutSync] Date window: ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
 
