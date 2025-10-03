@@ -283,6 +283,11 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 
 5. **Test your setup** - See [TESTING_GUIDE.md](./TESTING_GUIDE.md) for quick test scenarios
 
+### Detailed Setup Guides
+
+- **[QuickBooks Online Setup](./QUICKBOOKS_SETUP.md)** - Complete guide for QBO integration including OAuth setup, API reference, and troubleshooting
+- **[General Accounting Setup](./PAYOUT_SYNC_SETUP.md)** - Architecture, configuration, and advanced options
+
 ### API Endpoints
 
 **Check payout sync status**:
