@@ -3,6 +3,15 @@
 /**
  * Simulate Stripe webhook requests for testing
  * This creates example payloads that match what Stripe would send
+ * 
+ * Usage:
+ *   node examples/webhook-simulation.js
+ * 
+ * This script outputs:
+ * 1. Curl commands to send to your local webhook endpoint
+ * 2. JSON payloads for each webhook event type
+ * 
+ * Use these to test your webhook endpoint without creating real Stripe transactions.
  */
 
 // Example 1: Manual payout.created event
