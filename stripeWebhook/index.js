@@ -822,7 +822,7 @@ const processCheckoutSessionCompleted = async (context, session) => {
 };
 
 // Process payout.paid event - main payout sync workflow
-const processPayoutPaid = async (context, payout, stripeAccountId = null) => {
+const processPayoutPaid = async (context, payout, stripeAccountId = null, eventId = null) => {
     try {
         context.log(`Processing payout.paid: ${payout.id}`);
 
@@ -837,9 +837,11 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null) => {
         const validation = accountingConfig.validate();
         if (!validation.isValid) {
             context.log('Accounting configuration invalid:', validation.errors);
-            await webhookEventStore.updateEventStatus(context.invocationId, 'needs_review', {
-                error: `Configuration invalid: ${validation.errors.join(', ')}`
-            });
+            if (eventId) {
+                await webhookEventStore.updateEventStatus(eventId, 'needs_review', {
+                    error: `Configuration invalid: ${validation.errors.join(', ')}`
+                });
+            }
             return;
         }
 
@@ -871,13 +873,15 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null) => {
         // For now, process synchronously but with timeout protection
         context.log('Processing payout synchronously (production should use async queue)');
 
-        await processPayoutJob(context, payout.id, stripeAccountId, payoutSyncService);
+        await processPayoutJob(context, payout.id, stripeAccountId, payoutSyncService, eventId);
 
     } catch (error) {
         context.log('Error processing payout.paid:', error.message);
-        await webhookEventStore.updateEventStatus(context.invocationId, 'failed', {
-            error: error.message
-        });
+        if (eventId) {
+            await webhookEventStore.updateEventStatus(eventId, 'failed', {
+                error: error.message
+            });
+        }
     }
 };
 
@@ -932,7 +936,7 @@ const processPayoutCanceled = async (context, payout, stripeAccountId = null) =>
 };
 
 // Async job processor for payout sync
-const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncService) => {
+const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncService, eventId = null) => {
     try {
         context.log(`[PayoutJob] Processing payout: ${payoutId}`);
 
@@ -963,10 +967,12 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
             });
 
             // Update event status
-            await webhookEventStore.updateEventStatus(context.invocationId, 'needs_review', {
-                error: `Totals mismatch: ${validation.difference} difference`,
-                payoutId
-            });
+            if (eventId) {
+                await webhookEventStore.updateEventStatus(eventId, 'needs_review', {
+                    error: `Totals mismatch: ${validation.difference} difference`,
+                    payoutId
+                });
+            }
 
             return;
         }
@@ -1001,11 +1007,13 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
         context.log('[PayoutJob] Recorded in sync ledger');
 
         // 9. Update event status
-        await webhookEventStore.updateEventStatus(context.invocationId, 'completed', {
-            payoutId,
-            providerDocIds,
-            crmPayoutId: crmPayout?.Id || null
-        });
+        if (eventId) {
+            await webhookEventStore.updateEventStatus(eventId, 'completed', {
+                payoutId,
+                providerDocIds,
+                crmPayoutId: crmPayout?.Id || null
+            });
+        }
 
         context.log('[PayoutJob] Payout sync completed successfully');
 
@@ -1020,10 +1028,12 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
         });
 
         // Update event status
-        await webhookEventStore.updateEventStatus(context.invocationId, 'failed', {
-            error: error.message,
-            payoutId
-        });
+        if (eventId) {
+            await webhookEventStore.updateEventStatus(eventId, 'failed', {
+                error: error.message,
+                payoutId
+            });
+        }
 
         throw error;
     }
@@ -1107,7 +1117,7 @@ module.exports = async function (context, req) {
 
             // Payout events for accounting sync
             case 'payout.paid':
-                await processPayoutPaid(context, event.data.object, stripeAccountId);
+                await processPayoutPaid(context, event.data.object, stripeAccountId, event.id);
                 break;
 
             case 'payout.failed':
