@@ -64,7 +64,9 @@ class PayoutSyncService {
                 params.starting_after = startingAfter;
             }
 
-            const response = await stripe.balanceTransactions.list(params, requestOptions);
+            const response = stripeAccountId 
+                ? await stripe.balanceTransactions.list(params, requestOptions)
+                : await stripe.balanceTransactions.list(params);
             balanceTransactions.push(...response.data);
 
             hasMore = response.has_more;
