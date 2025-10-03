@@ -1223,10 +1223,7 @@ module.exports = async function (context, req) {
                 // Optional: stage/pre-warm but do not post until paid
                 context.log(`Payout created: ${event.data.object.id} - will post when paid`);
                 break;
-            case 'payout.updated':
-                // Non-terminal; ignore to reduce noise
-                context.log('Ignoring payout.updated (non-terminal event)');
-                break;
+
             default:
                 context.log(`Unhandled event type: ${event.type}`);
                 break;
