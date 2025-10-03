@@ -21,6 +21,69 @@ const webhookEventStore = new WebhookEventStore();
 const syncLedger = new SyncLedger();
 
 /**
+ * Redact sensitive information from headers
+ * @private
+ */
+function redactHeaders(headers) {
+    if (!headers || typeof headers !== 'object') return {};
+    
+    const redacted = { ...headers };
+    const sensitiveHeaders = [
+        'authorization', 'x-api-key', 'stripe-signature', 
+        'cookie', 'set-cookie', 'x-auth-token'
+    ];
+    
+    for (const key of Object.keys(redacted)) {
+        const lowerKey = key.toLowerCase();
+        if (sensitiveHeaders.some(sh => lowerKey.includes(sh))) {
+            redacted[key] = '[REDACTED]';
+        }
+    }
+    
+    return redacted;
+}
+
+/**
+ * Log webhook request with safe, redacted information
+ * @private
+ */
+function logWebhookRequest(context, req, event) {
+    try {
+        const safeHeaders = redactHeaders(req.headers);
+        
+        const logEntry = {
+            method: req.method,
+            url: req.url,
+            headers: {
+                'content-type': safeHeaders['content-type'],
+                'user-agent': safeHeaders['user-agent'],
+                'stripe-account': safeHeaders['stripe-account'],
+                'stripe-version': safeHeaders['stripe-version']
+            },
+            event: {
+                id: event?.id,
+                type: event?.type,
+                livemode: event?.livemode,
+                created: event?.created
+            }
+        };
+        
+        // Add minimal event object identity without sensitive data
+        if (event?.data?.object) {
+            const obj = event.data.object;
+            logEntry.event.object = {
+                id: obj.id,
+                object: obj.object
+            };
+        }
+        
+        context.log('[Webhook] Request:', JSON.stringify(logEntry));
+    } catch (error) {
+        context.log('[Webhook] Failed to log request safely:', error.message);
+    }
+}
+
+/**
  * Stripe Webhook Handler for Payment Confirmations
  * Processes successful payments and integrates with CRM systems
  */
@@ -953,7 +1016,7 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
         });
 
         // 3. Validate totals
-        const validation = payoutSyncService.validateTotals(summary, payout);
+        const validation = payoutSyncService.validateTotals(summary, payout, balanceTransactions);
         if (!validation.isValid) {
             context.log('[PayoutJob] Validation failed - totals mismatch');
             
@@ -1062,6 +1125,10 @@ module.exports = async function (context, req) {
         }
 
         const event = req.body;
+        
+        // Log webhook request with safe, redacted information
+        logWebhookRequest(context, req, event);
+        
         context.log(`Processing webhook event: ${event.type}`);
 
         // Extract Stripe account ID for Connect accounts
