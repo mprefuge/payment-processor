@@ -1,13 +1,9 @@
 const BaseAccountingProvider = require('./baseAccountingProvider');
+const QuickBooks = require('node-quickbooks');
 
 /**
  * QuickBooks Online (QBO) Accounting Provider
- * Implements accounting operations for QuickBooks Online
- * 
- * Note: This is a stub implementation. Full QBO integration requires:
- * - node-quickbooks package or similar QBO SDK
- * - OAuth 2.0 token management
- * - QBO company ID and realm ID
+ * Implements accounting operations for QuickBooks Online using the QuickBooks API
  */
 class QuickBooksProvider extends BaseAccountingProvider {
     constructor(config) {
@@ -16,6 +12,48 @@ class QuickBooksProvider extends BaseAccountingProvider {
         this.oauthTokens = config.oauthTokens || {};
         this.environment = config.environment || 'sandbox'; // 'sandbox' or 'production'
         this.logger = console;
+        
+        // Initialize QuickBooks client if tokens are available
+        this.qbo = null;
+        if (this.oauthTokens.accessToken && this.companyId) {
+            this._initializeClient();
+        }
+    }
+
+    /**
+     * Initialize QuickBooks client
+     */
+    _initializeClient() {
+        const useSandbox = this.environment === 'sandbox';
+        this.qbo = new QuickBooks(
+            process.env.QBO_CLIENT_ID || '',
+            process.env.QBO_CLIENT_SECRET || '',
+            this.oauthTokens.accessToken,
+            false, // no token secret needed for OAuth 2.0
+            this.companyId,
+            useSandbox,
+            true, // debug
+            null, // minorversion - use default
+            '2.0', // oauth version
+            this.oauthTokens.refreshToken
+        );
+    }
+
+    /**
+     * Execute API call with automatic token refresh on 401
+     */
+    async _executeWithTokenRefresh(apiCall) {
+        try {
+            return await apiCall();
+        } catch (error) {
+            // If 401, try to refresh token and retry once
+            if (error.fault && error.fault.type === 'AUTHENTICATION') {
+                this.logger.log('[QBO] Access token expired, refreshing...');
+                await this.refreshTokens();
+                return await apiCall();
+            }
+            throw error;
+        }
     }
 
     /**
@@ -24,16 +62,53 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async ensureChartOfAccounts(accounts) {
         this.logger.log('[QBO] Ensuring chart of accounts:', accounts.map(a => a.name));
         
-        // In production, this would:
-        // 1. Query QBO for existing accounts
-        // 2. Create missing accounts
-        // 3. Return map of account names to QBO IDs
-        
-        // Stub implementation - return mock account IDs
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
+
         const accountMap = {};
+        
         for (const account of accounts) {
-            // In real implementation, query or create account in QBO
-            accountMap[account.name] = `qbo-${account.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+            try {
+                // Search for existing account by name
+                const query = `SELECT * FROM Account WHERE Name = '${account.name.replace(/'/g, "\\'")}'`;
+                const existingAccounts = await this._executeWithTokenRefresh(() => 
+                    new Promise((resolve, reject) => {
+                        this.qbo.query(query, (err, data) => {
+                            if (err) reject(err);
+                            else resolve(data.QueryResponse.Account || []);
+                        });
+                    })
+                );
+
+                if (existingAccounts.length > 0) {
+                    // Account exists
+                    accountMap[account.name] = existingAccounts[0].Id;
+                    this.logger.log(`[QBO] Found existing account: ${account.name} (ID: ${existingAccounts[0].Id})`);
+                } else {
+                    // Create new account
+                    const newAccount = {
+                        Name: account.name,
+                        AccountType: account.type || 'Bank',
+                        AccountSubType: account.subType || 'CashOnHand'
+                    };
+
+                    const created = await this._executeWithTokenRefresh(() =>
+                        new Promise((resolve, reject) => {
+                            this.qbo.createAccount(newAccount, (err, data) => {
+                                if (err) reject(err);
+                                else resolve(data);
+                            });
+                        })
+                    );
+
+                    accountMap[account.name] = created.Id;
+                    this.logger.log(`[QBO] Created account: ${account.name} (ID: ${created.Id})`);
+                }
+            } catch (error) {
+                this.logger.error(`[QBO] Error ensuring account ${account.name}:`, error.message);
+                throw new Error(`Failed to ensure account "${account.name}": ${error.message}`);
+            }
         }
         
         return accountMap;
@@ -45,12 +120,9 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async upsertJournalEntry(journalEntry) {
         this.logger.log('[QBO] Upserting journal entry:', journalEntry.docNumber);
         
-        // In production, this would:
-        // 1. Search for existing JE by DocNumber
-        // 2. If exists and unchanged, return existing
-        // 3. If exists and changed, update (sparse update)
-        // 4. If not exists, create new
-        // 5. Return JE with QBO Id and SyncToken
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
         
         // Validate lines balance
         const totalDebits = journalEntry.lines
@@ -63,16 +135,79 @@ class QuickBooksProvider extends BaseAccountingProvider {
         if (Math.abs(totalDebits - totalCredits) > 0.01) {
             throw new Error(`Journal entry lines do not balance: debits=${totalDebits}, credits=${totalCredits}`);
         }
-        
-        // Stub response
-        return {
-            id: `qbo-je-${journalEntry.docNumber}`,
-            docNumber: journalEntry.docNumber,
-            txnDate: journalEntry.date,
-            syncToken: '1',
-            provider: 'quickbooks',
-            created: true
-        };
+
+        try {
+            // Search for existing JE by DocNumber
+            const query = `SELECT * FROM JournalEntry WHERE DocNumber = '${journalEntry.docNumber.replace(/'/g, "\\'")}'`;
+            const existingEntries = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.query(query, (err, data) => {
+                        if (err) reject(err);
+                        else resolve(data.QueryResponse.JournalEntry || []);
+                    });
+                })
+            );
+
+            if (existingEntries.length > 0) {
+                // Entry exists - return existing
+                const existing = existingEntries[0];
+                this.logger.log(`[QBO] Journal entry already exists: ${journalEntry.docNumber} (ID: ${existing.Id})`);
+                return {
+                    id: existing.Id,
+                    docNumber: existing.DocNumber,
+                    txnDate: existing.TxnDate,
+                    syncToken: existing.SyncToken,
+                    provider: 'quickbooks',
+                    created: false
+                };
+            }
+
+            // Create new journal entry
+            const jeData = {
+                DocNumber: journalEntry.docNumber,
+                TxnDate: this._formatDate(journalEntry.date),
+                PrivateNote: journalEntry.memo || '',
+                Line: journalEntry.lines.map((line, index) => ({
+                    Id: (index + 1).toString(),
+                    Description: line.description || journalEntry.memo || '',
+                    Amount: line.amount.toFixed(2),
+                    DetailType: 'JournalEntryLineDetail',
+                    JournalEntryLineDetail: {
+                        PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
+                        AccountRef: {
+                            value: line.accountId
+                        }
+                    }
+                }))
+            };
+
+            const created = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.createJournalEntry(jeData, (err, data) => {
+                        if (err) {
+                            this.logger.error('[QBO] Error creating journal entry:', err);
+                            reject(err);
+                        } else {
+                            resolve(data);
+                        }
+                    });
+                })
+            );
+
+            this.logger.log(`[QBO] Created journal entry: ${created.DocNumber} (ID: ${created.Id})`);
+            
+            return {
+                id: created.Id,
+                docNumber: created.DocNumber,
+                txnDate: created.TxnDate,
+                syncToken: created.SyncToken,
+                provider: 'quickbooks',
+                created: true
+            };
+        } catch (error) {
+            this.logger.error('[QBO] Error upserting journal entry:', error);
+            throw new Error(`Failed to upsert journal entry: ${error.message}`);
+        }
     }
 
     /**
@@ -81,28 +216,85 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async upsertTransfer(transfer) {
         this.logger.log('[QBO] Upserting transfer:', transfer.docNumber);
         
-        // In production, this would:
-        // 1. Search for existing Transfer by DocNumber or PrivateNote containing docNumber
-        // 2. If exists, return existing
-        // 3. If not exists, create new Transfer
-        // 4. Return Transfer with QBO Id
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
         
         // Validate amount
         if (transfer.amount <= 0) {
             throw new Error('Transfer amount must be positive');
         }
-        
-        // Stub response
-        return {
-            id: `qbo-transfer-${transfer.docNumber}`,
-            docNumber: transfer.docNumber,
-            txnDate: transfer.date,
-            fromAccountRef: { value: transfer.fromAccountId },
-            toAccountRef: { value: transfer.toAccountId },
-            amount: transfer.amount,
-            provider: 'quickbooks',
-            created: true
-        };
+
+        try {
+            // Search for existing Transfer by PrivateNote containing docNumber
+            const query = `SELECT * FROM Transfer WHERE PrivateNote LIKE '%${transfer.docNumber.replace(/'/g, "\\'")}%'`;
+            const existingTransfers = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.query(query, (err, data) => {
+                        if (err) reject(err);
+                        else resolve(data.QueryResponse.Transfer || []);
+                    });
+                })
+            );
+
+            if (existingTransfers.length > 0) {
+                // Transfer exists - return existing
+                const existing = existingTransfers[0];
+                this.logger.log(`[QBO] Transfer already exists: ${transfer.docNumber} (ID: ${existing.Id})`);
+                return {
+                    id: existing.Id,
+                    docNumber: transfer.docNumber,
+                    txnDate: existing.TxnDate,
+                    fromAccountRef: existing.FromAccountRef,
+                    toAccountRef: existing.ToAccountRef,
+                    amount: parseFloat(existing.Amount),
+                    provider: 'quickbooks',
+                    created: false
+                };
+            }
+
+            // Create new transfer
+            const transferData = {
+                FromAccountRef: {
+                    value: transfer.fromAccountId
+                },
+                ToAccountRef: {
+                    value: transfer.toAccountId
+                },
+                Amount: transfer.amount.toFixed(2),
+                TxnDate: this._formatDate(transfer.date),
+                PrivateNote: `${transfer.memo || ''} [DocNum: ${transfer.docNumber}]`
+            };
+
+            const created = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.createTransfer(transferData, (err, data) => {
+                        if (err) {
+                            this.logger.error('[QBO] Error creating transfer:', err);
+                            reject(err);
+                        } else {
+                            resolve(data);
+                        }
+                    });
+                })
+            );
+
+            this.logger.log(`[QBO] Created transfer: ${transfer.docNumber} (ID: ${created.Id})`);
+            
+            return {
+                id: created.Id,
+                docNumber: transfer.docNumber,
+                txnDate: created.TxnDate,
+                fromAccountRef: created.FromAccountRef,
+                toAccountRef: created.ToAccountRef,
+                amount: parseFloat(created.Amount),
+                provider: 'quickbooks',
+                created: true
+            };
+        } catch (error) {
+            this.logger.error('[QBO] Error upserting transfer:', error);
+            throw new Error(`Failed to upsert transfer: ${error.message}`);
+        }
     }
 
     /**
@@ -111,22 +303,85 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async upsertDeposit(deposit) {
         this.logger.log('[QBO] Upserting deposit:', deposit.docNumber);
         
-        // In production, this would:
-        // 1. Search for existing Deposit by DocNumber
-        // 2. If exists, return existing
-        // 3. If not exists, create new Deposit
-        // 4. Return Deposit with QBO Id
-        
-        // Stub response
-        return {
-            id: `qbo-deposit-${deposit.docNumber}`,
-            docNumber: deposit.docNumber,
-            txnDate: deposit.date,
-            depositToAccountRef: { value: deposit.toAccountId },
-            totalAmt: deposit.lines.reduce((sum, l) => sum + l.amount, 0),
-            provider: 'quickbooks',
-            created: true
-        };
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
+
+        try {
+            // Search for existing Deposit by PrivateNote containing docNumber
+            const query = `SELECT * FROM Deposit WHERE PrivateNote LIKE '%${deposit.docNumber.replace(/'/g, "\\'")}%'`;
+            const existingDeposits = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.query(query, (err, data) => {
+                        if (err) reject(err);
+                        else resolve(data.QueryResponse.Deposit || []);
+                    });
+                })
+            );
+
+            if (existingDeposits.length > 0) {
+                // Deposit exists - return existing
+                const existing = existingDeposits[0];
+                this.logger.log(`[QBO] Deposit already exists: ${deposit.docNumber} (ID: ${existing.Id})`);
+                return {
+                    id: existing.Id,
+                    docNumber: deposit.docNumber,
+                    txnDate: existing.TxnDate,
+                    depositToAccountRef: existing.DepositToAccountRef,
+                    totalAmt: parseFloat(existing.TotalAmt),
+                    provider: 'quickbooks',
+                    created: false
+                };
+            }
+
+            // Create new deposit
+            const depositData = {
+                DepositToAccountRef: {
+                    value: deposit.toAccountId
+                },
+                TxnDate: this._formatDate(deposit.date),
+                PrivateNote: `${deposit.memo || ''} [DocNum: ${deposit.docNumber}]`,
+                Line: deposit.lines.map((line, index) => ({
+                    Id: (index + 1).toString(),
+                    Amount: line.amount.toFixed(2),
+                    DetailType: 'DepositLineDetail',
+                    DepositLineDetail: {
+                        AccountRef: {
+                            value: line.accountId
+                        }
+                    },
+                    Description: line.description || deposit.memo || ''
+                }))
+            };
+
+            const created = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.createDeposit(depositData, (err, data) => {
+                        if (err) {
+                            this.logger.error('[QBO] Error creating deposit:', err);
+                            reject(err);
+                        } else {
+                            resolve(data);
+                        }
+                    });
+                })
+            );
+
+            this.logger.log(`[QBO] Created deposit: ${deposit.docNumber} (ID: ${created.Id})`);
+            
+            return {
+                id: created.Id,
+                docNumber: deposit.docNumber,
+                txnDate: created.TxnDate,
+                depositToAccountRef: created.DepositToAccountRef,
+                totalAmt: parseFloat(created.TotalAmt),
+                provider: 'quickbooks',
+                created: true
+            };
+        } catch (error) {
+            this.logger.error('[QBO] Error upserting deposit:', error);
+            throw new Error(`Failed to upsert deposit: ${error.message}`);
+        }
     }
 
     /**
@@ -135,17 +390,30 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async attachDocument(transactionId, attachment) {
         this.logger.log('[QBO] Attaching document to transaction:', transactionId);
         
-        // In production, this would:
-        // 1. Upload file to QBO
-        // 2. Link attachment to transaction
-        // 3. Return attachment ID
-        
-        // Stub response
-        return {
-            id: `qbo-attachment-${Date.now()}`,
-            fileName: attachment.fileName,
-            transactionId: transactionId
-        };
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
+
+        try {
+            // Note: Document attachment in QBO requires multipart upload
+            // For now, we'll log the intent but not implement full attachment
+            this.logger.warn('[QBO] Document attachment not fully implemented - would upload:', attachment.fileName);
+            
+            // In production, this would:
+            // 1. Upload file to QBO using multipart/form-data
+            // 2. Link attachment to transaction
+            // 3. Return attachment ID
+            
+            return {
+                id: `qbo-attachment-${Date.now()}`,
+                fileName: attachment.fileName,
+                transactionId: transactionId,
+                status: 'pending_implementation'
+            };
+        } catch (error) {
+            this.logger.error('[QBO] Error attaching document:', error);
+            throw new Error(`Failed to attach document: ${error.message}`);
+        }
     }
 
     /**
@@ -153,9 +421,6 @@ class QuickBooksProvider extends BaseAccountingProvider {
      */
     async healthCheck() {
         try {
-            // In production, this would make a lightweight API call to QBO
-            // e.g., GET /v3/company/{companyId}/companyinfo/{companyId}
-            
             if (!this.companyId) {
                 return {
                     healthy: false,
@@ -171,21 +436,38 @@ class QuickBooksProvider extends BaseAccountingProvider {
                     details: { provider: 'quickbooks' }
                 };
             }
+
+            if (!this.qbo) {
+                this._initializeClient();
+            }
+
+            // Make a lightweight API call to verify connectivity
+            const companyInfo = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.getCompanyInfo(this.companyId, (err, data) => {
+                        if (err) reject(err);
+                        else resolve(data);
+                    });
+                })
+            );
+
+            this.logger.log(`[QBO] Successfully connected to: ${companyInfo.CompanyName}`);
             
-            // Stub - assume healthy if config present
             return {
                 healthy: true,
-                message: 'QBO connection healthy (stub)',
+                message: 'QBO connection healthy',
                 details: {
                     provider: 'quickbooks',
                     environment: this.environment,
-                    companyId: this.companyId
+                    companyId: this.companyId,
+                    companyName: companyInfo.CompanyName
                 }
             };
         } catch (error) {
+            this.logger.error('[QBO] Health check failed:', error);
             return {
                 healthy: false,
-                message: error.message,
+                message: `QBO connection failed: ${error.message}`,
                 details: { provider: 'quickbooks', error: error.message }
             };
         }
@@ -197,15 +479,31 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async getAccount(accountId) {
         this.logger.log('[QBO] Getting account:', accountId);
         
-        // In production, query QBO: GET /v3/company/{companyId}/account/{accountId}
-        
-        // Stub response
-        return {
-            id: accountId,
-            name: 'Mock Account',
-            accountType: 'Bank',
-            currentBalance: 0
-        };
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
+
+        try {
+            const account = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.getAccount(accountId, (err, data) => {
+                        if (err) reject(err);
+                        else resolve(data);
+                    });
+                })
+            );
+
+            return {
+                id: account.Id,
+                name: account.Name,
+                accountType: account.AccountType,
+                accountSubType: account.AccountSubType,
+                currentBalance: parseFloat(account.CurrentBalance || 0)
+            };
+        } catch (error) {
+            this.logger.error('[QBO] Error getting account:', error);
+            throw new Error(`Failed to get account: ${error.message}`);
+        }
     }
 
     /**
@@ -214,10 +512,46 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async findAccounts(criteria) {
         this.logger.log('[QBO] Finding accounts:', criteria);
         
-        // In production, query QBO with filters
-        
-        // Stub response
-        return [];
+        if (!this.qbo) {
+            throw new Error('QuickBooks client not initialized. Check configuration.');
+        }
+
+        try {
+            const conditions = [];
+            
+            if (criteria.name) {
+                conditions.push(`Name = '${criteria.name.replace(/'/g, "\\'")}'`);
+            }
+            if (criteria.type) {
+                conditions.push(`AccountType = '${criteria.type}'`);
+            }
+            if (criteria.subType) {
+                conditions.push(`AccountSubType = '${criteria.subType}'`);
+            }
+
+            const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+            const query = `SELECT * FROM Account${whereClause}`;
+
+            const accounts = await this._executeWithTokenRefresh(() =>
+                new Promise((resolve, reject) => {
+                    this.qbo.query(query, (err, data) => {
+                        if (err) reject(err);
+                        else resolve(data.QueryResponse.Account || []);
+                    });
+                })
+            );
+
+            return accounts.map(account => ({
+                id: account.Id,
+                name: account.Name,
+                accountType: account.AccountType,
+                accountSubType: account.AccountSubType,
+                currentBalance: parseFloat(account.CurrentBalance || 0)
+            }));
+        } catch (error) {
+            this.logger.error('[QBO] Error finding accounts:', error);
+            throw new Error(`Failed to find accounts: ${error.message}`);
+        }
     }
 
     /**
@@ -226,13 +560,56 @@ class QuickBooksProvider extends BaseAccountingProvider {
     async refreshTokens() {
         this.logger.log('[QBO] Refreshing OAuth tokens');
         
-        // In production, this would:
-        // 1. Use refresh token to get new access token
-        // 2. Update stored tokens
-        // 3. Return success/failure
-        
-        // Stub - assume success
-        return true;
+        if (!this.oauthTokens.refreshToken) {
+            throw new Error('No refresh token available');
+        }
+
+        try {
+            const refreshToken = await new Promise((resolve, reject) => {
+                if (!this.qbo) {
+                    this._initializeClient();
+                }
+                
+                this.qbo.refreshAccessToken((err, data) => {
+                    if (err) {
+                        this.logger.error('[QBO] Error refreshing token:', err);
+                        reject(err);
+                    } else {
+                        resolve(data);
+                    }
+                });
+            });
+
+            // Update stored tokens
+            this.oauthTokens.accessToken = refreshToken.access_token;
+            if (refreshToken.refresh_token) {
+                this.oauthTokens.refreshToken = refreshToken.refresh_token;
+            }
+
+            // Reinitialize client with new token
+            this._initializeClient();
+
+            this.logger.log('[QBO] Successfully refreshed OAuth tokens');
+            
+            // Note: In production, you should persist these tokens to storage
+            // so they can be used across sessions
+            if (process.env.NODE_ENV === 'production') {
+                this.logger.warn('[QBO] WARNING: Refreshed tokens should be persisted to storage (e.g., env vars, key vault)');
+            }
+
+            return true;
+        } catch (error) {
+            this.logger.error('[QBO] Failed to refresh tokens:', error);
+            throw new Error(`Failed to refresh OAuth tokens: ${error.message}`);
+        }
+    }
+
+    /**
+     * Helper to format date for QBO API (YYYY-MM-DD)
+     */
+    _formatDate(date) {
+        const d = new Date(date);
+        return d.toISOString().split('T')[0];
     }
 }
 

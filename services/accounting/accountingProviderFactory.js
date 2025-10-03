@@ -81,6 +81,19 @@ class AccountingProviderFactory {
             };
         }
 
+        // Check OAuth tokens
+        if (!config.oauthTokens || !config.oauthTokens.accessToken) {
+            return {
+                isValid: false,
+                error: 'QuickBooks OAuth access token is required'
+            };
+        }
+
+        if (!config.oauthTokens.refreshToken) {
+            // Warning but not fatal - can still work without refresh
+            console.warn('[QBO] Warning: No refresh token provided. Token refresh will not be available.');
+        }
+
         return { isValid: true };
     }
 }
