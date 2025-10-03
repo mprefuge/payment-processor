@@ -51,29 +51,68 @@ class PayoutSyncService {
         }
 
         // Fetch balance transactions for this payout
+        // Note: Stripe API only allows filtering by payout for automatic payouts
+        // For manual payouts, we need to fetch all transactions and filter client-side
         const balanceTransactions = [];
         let hasMore = true;
         let startingAfter = null;
 
-        while (hasMore) {
-            const params = {
-                payout: payoutId,
-                limit: 100
-            };
-            if (startingAfter) {
-                params.starting_after = startingAfter;
+        if (payout.automatic) {
+            // Automatic payout - can use payout filter directly
+            while (hasMore) {
+                const params = {
+                    payout: payoutId,
+                    limit: 100
+                };
+                if (startingAfter) {
+                    params.starting_after = startingAfter;
+                }
+
+                const response = stripeAccountId 
+                    ? await stripe.balanceTransactions.list(params, requestOptions)
+                    : await stripe.balanceTransactions.list(params);
+                balanceTransactions.push(...response.data);
+
+                hasMore = response.has_more;
+                if (hasMore && response.data.length > 0) {
+                    startingAfter = response.data[response.data.length - 1].id;
+                } else {
+                    hasMore = false;
+                }
             }
+        } else {
+            // Manual payout - fetch all transactions in date range and filter client-side
+            // Use a time window around the payout arrival date to limit the search
+            const arrivalDate = payout.arrival_date;
+            const startTime = arrivalDate - (7 * 24 * 60 * 60); // 7 days before
+            const endTime = arrivalDate + (7 * 24 * 60 * 60); // 7 days after
 
-            const response = stripeAccountId 
-                ? await stripe.balanceTransactions.list(params, requestOptions)
-                : await stripe.balanceTransactions.list(params);
-            balanceTransactions.push(...response.data);
+            while (hasMore) {
+                const params = {
+                    limit: 100,
+                    created: {
+                        gte: startTime,
+                        lte: endTime
+                    }
+                };
+                if (startingAfter) {
+                    params.starting_after = startingAfter;
+                }
 
-            hasMore = response.has_more;
-            if (hasMore && response.data.length > 0) {
-                startingAfter = response.data[response.data.length - 1].id;
-            } else {
-                hasMore = false;
+                const response = stripeAccountId 
+                    ? await stripe.balanceTransactions.list(params, requestOptions)
+                    : await stripe.balanceTransactions.list(params);
+                
+                // Filter to only transactions belonging to this payout
+                const filteredTransactions = response.data.filter(txn => txn.payout === payoutId);
+                balanceTransactions.push(...filteredTransactions);
+
+                hasMore = response.has_more;
+                if (hasMore && response.data.length > 0) {
+                    startingAfter = response.data[response.data.length - 1].id;
+                } else {
+                    hasMore = false;
+                }
             }
         }
 
