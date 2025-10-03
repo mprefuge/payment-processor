@@ -82,10 +82,12 @@ class PayoutSyncService {
             }
         } else {
             // Manual payout - fetch all transactions in date range and filter client-side
-            // Use a time window around the payout arrival date to limit the search
-            const arrivalDate = payout.arrival_date;
-            const startTime = arrivalDate - (7 * 24 * 60 * 60); // 7 days before
-            const endTime = arrivalDate + (7 * 24 * 60 * 60); // 7 days after
+            // Use a time window around the payout creation date to limit the search
+            // Transactions are available based on available_on date, and manual payouts
+            // include all transactions with available_on <= payout creation time
+            const createdDate = payout.created;
+            const startTime = createdDate - (30 * 24 * 60 * 60); // 30 days before creation
+            const endTime = createdDate + (7 * 24 * 60 * 60); // 7 days after creation (for safety)
 
             while (hasMore) {
                 const params = {
