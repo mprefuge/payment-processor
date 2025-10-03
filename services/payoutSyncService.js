@@ -119,8 +119,8 @@ class PayoutSyncService {
                 const startTime = previousSync 
                     ? previousSync.payout.arrival_date 
                     : (payout.arrival_date || payout.created) - (30 * 24 * 60 * 60);
-                // End at "now" so the window includes the latest available transactions
-                const endTime = Math.floor(Date.now() / 1000);
+                // End at current payout's arrival date to avoid including transactions from future payouts
+                const endTime = payout.arrival_date || payout.created;
                 
                 this.logger.log(`[PayoutSync] Date window: ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
                 
@@ -152,20 +152,29 @@ class PayoutSyncService {
                 }
             }
         } else {
-            // Manual payout - fetch all transactions in date range WITHOUT payout ID filtering
-            this.logger.log('[PayoutSync] Using date range filter for manual payout (no payout ID filtering)');
+            // Manual payout - fetch transactions and match based on payout amount
+            this.logger.log('[PayoutSync] Using amount-matching strategy for manual payout');
+            
+            // For manual payouts, find the payout transaction that matches this payout's amount
+            // The payout transaction has type=payout and amount=-payout.amount
+            const expectedPayoutTxnAmount = -payout.amount;
             
             // Get previous payout arrival date to tighten the window
             const previousSync = await this._getPreviousPayoutSync(stripeAccountId, payout);
             const startTime = previousSync 
                 ? previousSync.payout.arrival_date 
                 : (payout.arrival_date || payout.created) - (30 * 24 * 60 * 60);
-            // End at "now" so the window includes the latest available transactions
-            const endTime = Math.floor(Date.now() / 1000);
+            // End at current payout's arrival date
+            const endTime = payout.arrival_date || payout.created;
             
-            this.logger.log(`[PayoutSync] Date window: ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
+            this.logger.log(`[PayoutSync] Searching for payout transaction with amount=${expectedPayoutTxnAmount} in window ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
 
-            while (hasMore) {
+            // First, find the matching payout transaction
+            let matchingPayoutTxn = null;
+            hasMore = true;
+            startingAfter = null;
+            
+            while (hasMore && !matchingPayoutTxn) {
                 const params = {
                     limit: 100,
                     available_on: {
@@ -181,9 +190,55 @@ class PayoutSyncService {
                     ? await stripe.balanceTransactions.list(params, requestOptions)
                     : await stripe.balanceTransactions.list(params);
                 
+                // Look for the payout transaction that matches our amount
+                for (const txn of response.data) {
+                    if (txn.type === 'payout' && txn.amount === expectedPayoutTxnAmount) {
+                        matchingPayoutTxn = txn;
+                        this.logger.log(`[PayoutSync] Found matching payout transaction: ${txn.id} at ${new Date(txn.available_on * 1000).toISOString()}`);
+                        break;
+                    }
+                }
+
+                hasMore = response.has_more;
+                if (hasMore && response.data.length > 0) {
+                    startingAfter = response.data[response.data.length - 1].id;
+                } else {
+                    hasMore = false;
+                }
+            }
+            
+            if (!matchingPayoutTxn) {
+                this.logger.warn(`[PayoutSync] Could not find matching payout transaction for amount ${expectedPayoutTxnAmount}, using full date range`);
+                // Fallback to using the payout's arrival_date
+                matchingPayoutTxn = { available_on: payout.arrival_date || payout.created };
+            }
+            
+            // Now fetch transactions from previous payout to this payout transaction
+            const finalEndTime = matchingPayoutTxn.available_on;
+            this.logger.log(`[PayoutSync] Fetching transactions from ${new Date(startTime * 1000).toISOString()} to ${new Date(finalEndTime * 1000).toISOString()}`);
+            
+            hasMore = true;
+            startingAfter = null;
+            
+            while (hasMore) {
+                const params = {
+                    limit: 100,
+                    available_on: {
+                        gte: startTime,
+                        lte: finalEndTime
+                    }
+                };
+                if (startingAfter) {
+                    params.starting_after = startingAfter;
+                }
+
+                const response = stripeAccountId 
+                    ? await stripe.balanceTransactions.list(params, requestOptions)
+                    : await stripe.balanceTransactions.list(params);
+                
                 this.logger.log(`[PayoutSync] Fetched ${response.data.length} transactions in date range`);
                 
-                // For manual payouts: DO NOT filter by payout ID - keep all transactions in window
+                // For manual payouts: keep all transactions in window (they will be filtered in summarize)
                 balanceTransactions.push(...response.data);
 
                 hasMore = response.has_more;
