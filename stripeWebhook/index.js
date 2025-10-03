@@ -1020,6 +1020,30 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
         if (!validation.isValid) {
             context.log('[PayoutJob] Validation failed - totals mismatch');
             
+            // Generate posting instructions even though validation failed
+            // This ensures we have the arrival_date for future payouts to use as lower bound
+            const postingInstructions = payoutSyncService.generatePostingInstructions(
+                payout,
+                summary,
+                stripeAccountId
+            );
+            
+            // Record the failed sync in ledger so next payout can use its arrival_date as lower bound
+            await syncLedger.recordSync({
+                stripeAccountId,
+                payoutId,
+                provider: payoutSyncService.config.getConfig().provider,
+                providerDocIds: {}, // No provider docs since we didn't post
+                postingInstructions,
+                status: 'needs_review',
+                metadata: {
+                    error: 'Totals mismatch',
+                    validation,
+                    recordedAt: new Date().toISOString()
+                }
+            });
+            context.log('[PayoutJob] Recorded failed sync in ledger for date window optimization');
+            
             // Create review task
             await payoutSyncService.createReviewTask({
                 payoutId,

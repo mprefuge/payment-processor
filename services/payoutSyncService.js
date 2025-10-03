@@ -210,14 +210,15 @@ class PayoutSyncService {
             // Get all syncs for this account
             const syncs = await this.syncLedger.getSyncsByAccount(stripeAccountId || 'default');
             
-            // Filter to posted payouts before current payout
+            // Filter to payouts before current payout (ANY status, not just 'posted')
+            // This ensures we use previous payout as lower bound even if it failed validation
             const previousPayouts = syncs.filter(sync => {
                 if (!sync.postingInstructions || !sync.postingInstructions.postingDate) {
                     return false;
                 }
                 const syncDate = new Date(sync.postingInstructions.postingDate).getTime() / 1000;
                 const currentDate = currentPayout.arrival_date || currentPayout.created;
-                return syncDate < currentDate && sync.status === 'posted';
+                return syncDate < currentDate; // Accept any status
             });
             
             // Sort by posting date descending and get most recent
