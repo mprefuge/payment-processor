@@ -9,7 +9,8 @@ This Azure Function app processes payments through Stripe, handling customer man
 - Email notifications via SendGrid
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
-- **Stripe payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
+- **Webhook-only payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
+- **Automatic CRM payout tracking (Salesforce, extensible to other CRMs)**
 - **Salesforce contact sync on checkout session creation**
 - **Enhanced CRM integration with robust customer-contact association**
 - **Intelligent contact matching with normalization and fuzzy logic**
@@ -237,6 +238,10 @@ Examples:
 
 The payment processor includes automated **Stripe Payout Sync to Accounting** with support for QuickBooks Online (extensible to Xero, Sage, and others).
 
+> **⚠️ IMPORTANT: Webhook-Only Processing**
+> 
+> Payout sync is **fully automated via Stripe webhooks**. Manual payout sync has been removed for reliability and consistency. All payouts are processed automatically when Stripe sends the `payout.paid` event.
+
 ### Features
 
 - **Webhook-only processing**: Fully automated via Stripe `payout.paid` events - no manual sync needed
@@ -247,6 +252,7 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 - **Configurable posting**: Journal Entry + Transfer (default) or Bank Deposit
 - **Drift detection**: Detects when mapping changes affect existing payouts
 - **Complete audit trail**: Sync ledger links payouts to accounting documents
+- **CRM integration**: Automatically creates payout records in your CRM (Salesforce, etc.)
 
 ### Quick Start
 
@@ -275,6 +281,8 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 
 4. **Configure Stripe webhook** to send `payout.*` events to `/api/stripe/webhook`
 
+5. **Test your setup** - See [TESTING_GUIDE.md](./TESTING_GUIDE.md) for quick test scenarios
+
 ### API Endpoints
 
 **Check payout sync status**:
@@ -282,18 +290,24 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 GET /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
 ```
 
-**Note:** Manual payout sync has been removed. The system is webhook-only for reliability and automation.
+> **Note:** Manual payout sync (POST) has been removed. The system is **webhook-only** for reliability and automation. To process a payout, ensure it's marked as paid in Stripe and the webhook is configured correctly.
 
 ### Documentation
 
-See [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) for complete setup guide including:
-- Step-by-step configuration
-- CRM integration (Salesforce example)
-- Test case scenarios and walkthroughs
-- Troubleshooting guide
-- Monitoring recommendations
+**Getting Started:**
+- [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) - **Start here!** Complete setup guide with:
+  - Step-by-step configuration
+  - CRM integration (Salesforce example)
+  - Test case scenarios and walkthroughs
+  - Troubleshooting guide
+  - Monitoring recommendations
 
-See also [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) for detailed architecture and technical documentation.
+**Testing:**
+- [TESTING_GUIDE.md](./TESTING_GUIDE.md) - Quick test scenarios to validate your setup
+
+**Technical Details:**
+- [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) - Detailed architecture and technical documentation
+- [SALESFORCE_PAYOUT_SETUP.md](./SALESFORCE_PAYOUT_SETUP.md) - Salesforce object creation guide
 
 ## CRM Integration
 
