@@ -51,113 +51,48 @@ class PayoutSyncService {
         }
 
         // Fetch balance transactions for this payout
-        // Note: Stripe API has limitations on filtering by payout:
-        // - For automatic payouts on platform accounts (no stripeAccountId): can use payout filter directly
-        // - For manual payouts: must fetch in date range WITHOUT payout ID filtering
-        // - For connected accounts (with stripeAccountId): try payout filter first, fallback to date range
+        // Strategy: Try direct payout filter first for all payouts, fallback to date range if needed
+        // - Platform accounts: Try direct payout filter first
+        // - Connected accounts: Try direct payout filter first
+        // - If direct filter returns 0 transactions: Fallback to date range filter
         const balanceTransactions = [];
         let hasMore = true;
         let startingAfter = null;
 
-        if (payout.automatic && !stripeAccountId) {
-            // Automatic payout on platform account - can use payout filter directly
-            this.logger.log('[PayoutSync] Using direct payout filter (automatic payout, platform account)');
+        // Try direct payout filter first for ALL payouts (platform and connected)
+        this.logger.log('[PayoutSync] Trying direct payout filter for payout');
+        
+        const directParams = { payout: payoutId, limit: 100 };
+        const directResponse = stripeAccountId 
+            ? await stripe.balanceTransactions.list(directParams, requestOptions)
+            : await stripe.balanceTransactions.list(directParams);
+        
+        if (directResponse.data.length > 0) {
+            // Direct filter worked - use it for all results
+            this.logger.log(`[PayoutSync] Direct payout filter returned ${directResponse.data.length} transactions`);
+            balanceTransactions.push(...directResponse.data);
+            
+            // Handle pagination
+            hasMore = directResponse.has_more;
+            startingAfter = directResponse.data.length > 0 ? directResponse.data[directResponse.data.length - 1].id : null;
+            
             while (hasMore) {
-                const params = {
-                    payout: payoutId,
-                    limit: 100
-                };
-                if (startingAfter) {
-                    params.starting_after = startingAfter;
-                }
-
-                const response = await stripe.balanceTransactions.list(params);
-                balanceTransactions.push(...response.data);
-
-                hasMore = response.has_more;
-                if (hasMore && response.data.length > 0) {
-                    startingAfter = response.data[response.data.length - 1].id;
+                const paginatedParams = { payout: payoutId, limit: 100, starting_after: startingAfter };
+                const paginatedResponse = stripeAccountId
+                    ? await stripe.balanceTransactions.list(paginatedParams, requestOptions)
+                    : await stripe.balanceTransactions.list(paginatedParams);
+                balanceTransactions.push(...paginatedResponse.data);
+                
+                hasMore = paginatedResponse.has_more;
+                if (hasMore && paginatedResponse.data.length > 0) {
+                    startingAfter = paginatedResponse.data[paginatedResponse.data.length - 1].id;
                 } else {
                     hasMore = false;
                 }
             }
-        } else if (payout.automatic && stripeAccountId) {
-            // Connected account automatic payout - try payout filter first, fallback to date range
-            this.logger.log('[PayoutSync] Trying direct payout filter for connected account automatic payout');
-            
-            // Try direct payout filter first
-            const params = { payout: payoutId, limit: 100 };
-            const directResponse = await stripe.balanceTransactions.list(params, requestOptions);
-            
-            if (directResponse.data.length > 0) {
-                // Direct filter worked, use it
-                this.logger.log(`[PayoutSync] Direct payout filter returned ${directResponse.data.length} transactions`);
-                balanceTransactions.push(...directResponse.data);
-                
-                // Handle pagination if needed
-                hasMore = directResponse.has_more;
-                startingAfter = directResponse.data.length > 0 ? directResponse.data[directResponse.data.length - 1].id : null;
-                
-                while (hasMore) {
-                    const paginatedParams = { payout: payoutId, limit: 100, starting_after: startingAfter };
-                    const paginatedResponse = await stripe.balanceTransactions.list(paginatedParams, requestOptions);
-                    balanceTransactions.push(...paginatedResponse.data);
-                    
-                    hasMore = paginatedResponse.has_more;
-                    if (hasMore && paginatedResponse.data.length > 0) {
-                        startingAfter = paginatedResponse.data[paginatedResponse.data.length - 1].id;
-                    } else {
-                        hasMore = false;
-                    }
-                }
-            } else {
-                // Direct filter returned nothing, fallback to date range
-                this.logger.log('[PayoutSync] Direct payout filter returned 0 transactions, falling back to date range filter');
-                
-                // Get previous payout arrival date to tighten the window
-                const previousSync = await this._getPreviousPayoutSync(stripeAccountId, payout);
-                const startTime = previousSync 
-                    ? previousSync.payout.arrival_date 
-                    : (payout.arrival_date || payout.created) - (30 * 24 * 60 * 60);
-                // End at current payout's arrival date to avoid including transactions from future payouts
-                const endTime = payout.arrival_date || payout.created;
-                
-                this.logger.log(`[PayoutSync] Date window: ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
-                
-                hasMore = true;
-                startingAfter = null;
-                while (hasMore) {
-                    const dateParams = {
-                        limit: 100,
-                        available_on: { gte: startTime, lte: endTime }
-                    };
-                    if (startingAfter) {
-                        dateParams.starting_after = startingAfter;
-                    }
-                    
-                    const dateResponse = await stripe.balanceTransactions.list(dateParams, requestOptions);
-                    this.logger.log(`[PayoutSync] Fetched ${dateResponse.data.length} transactions in date range`);
-                    
-                    // For connected account automatic, filter by payout ID
-                    const filteredTransactions = dateResponse.data.filter(txn => txn.payout === payoutId);
-                    this.logger.log(`[PayoutSync] Filtered to ${filteredTransactions.length} transactions for payout ${payoutId}`);
-                    balanceTransactions.push(...filteredTransactions);
-                    
-                    hasMore = dateResponse.has_more;
-                    if (hasMore && dateResponse.data.length > 0) {
-                        startingAfter = dateResponse.data[dateResponse.data.length - 1].id;
-                    } else {
-                        hasMore = false;
-                    }
-                }
-            }
         } else {
-            // Manual payout - fetch transactions and match based on payout amount
-            this.logger.log('[PayoutSync] Using amount-matching strategy for manual payout');
-            
-            // For manual payouts, find the payout transaction that matches this payout's amount
-            // The payout transaction has type=payout and amount=-payout.amount
-            const expectedPayoutTxnAmount = -payout.amount;
+            // Direct filter returned nothing - fallback to date range filter
+            this.logger.log('[PayoutSync] Direct payout filter returned 0 transactions, falling back to date range filter');
             
             // Get previous payout arrival date to tighten the window
             const previousSync = await this._getPreviousPayoutSync(stripeAccountId, payout);
@@ -167,83 +102,43 @@ class PayoutSyncService {
             // End at current payout's arrival date
             const endTime = payout.arrival_date || payout.created;
             
-            this.logger.log(`[PayoutSync] Searching for payout transaction with amount=${expectedPayoutTxnAmount} in window ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
-
-            // First, find the matching payout transaction
-            let matchingPayoutTxn = null;
-            hasMore = true;
-            startingAfter = null;
-            
-            while (hasMore && !matchingPayoutTxn) {
-                const params = {
-                    limit: 100,
-                    available_on: {
-                        gte: startTime,
-                        lte: endTime
-                    }
-                };
-                if (startingAfter) {
-                    params.starting_after = startingAfter;
-                }
-
-                const response = stripeAccountId 
-                    ? await stripe.balanceTransactions.list(params, requestOptions)
-                    : await stripe.balanceTransactions.list(params);
-                
-                // Look for the payout transaction that matches our amount
-                for (const txn of response.data) {
-                    if (txn.type === 'payout' && txn.amount === expectedPayoutTxnAmount) {
-                        matchingPayoutTxn = txn;
-                        this.logger.log(`[PayoutSync] Found matching payout transaction: ${txn.id} at ${new Date(txn.available_on * 1000).toISOString()}`);
-                        break;
-                    }
-                }
-
-                hasMore = response.has_more;
-                if (hasMore && response.data.length > 0) {
-                    startingAfter = response.data[response.data.length - 1].id;
-                } else {
-                    hasMore = false;
-                }
-            }
-            
-            if (!matchingPayoutTxn) {
-                this.logger.warn(`[PayoutSync] Could not find matching payout transaction for amount ${expectedPayoutTxnAmount}, using full date range`);
-                // Fallback to using the payout's arrival_date
-                matchingPayoutTxn = { available_on: payout.arrival_date || payout.created };
-            }
-            
-            // Now fetch transactions from previous payout to this payout transaction
-            const finalEndTime = matchingPayoutTxn.available_on;
-            this.logger.log(`[PayoutSync] Fetching transactions from ${new Date(startTime * 1000).toISOString()} to ${new Date(finalEndTime * 1000).toISOString()}`);
+            this.logger.log(`[PayoutSync] Date window: ${new Date(startTime * 1000).toISOString()} to ${new Date(endTime * 1000).toISOString()}`);
             
             hasMore = true;
             startingAfter = null;
             
             while (hasMore) {
-                const params = {
+                const dateParams = {
                     limit: 100,
-                    available_on: {
-                        gte: startTime,
-                        lte: finalEndTime
-                    }
+                    available_on: { gte: startTime, lte: endTime }
                 };
                 if (startingAfter) {
-                    params.starting_after = startingAfter;
+                    dateParams.starting_after = startingAfter;
                 }
-
-                const response = stripeAccountId 
-                    ? await stripe.balanceTransactions.list(params, requestOptions)
-                    : await stripe.balanceTransactions.list(params);
                 
-                this.logger.log(`[PayoutSync] Fetched ${response.data.length} transactions in date range`);
+                const dateResponse = stripeAccountId 
+                    ? await stripe.balanceTransactions.list(dateParams, requestOptions)
+                    : await stripe.balanceTransactions.list(dateParams);
                 
-                // For manual payouts: keep all transactions in window (they will be filtered in summarize)
-                balanceTransactions.push(...response.data);
-
-                hasMore = response.has_more;
-                if (hasMore && response.data.length > 0) {
-                    startingAfter = response.data[response.data.length - 1].id;
+                this.logger.log(`[PayoutSync] Fetched ${dateResponse.data.length} transactions in date range`);
+                
+                // Filter by payout ID if the transaction has it set
+                // For payouts where Stripe doesn't set the payout field reliably, keep all transactions
+                const filteredTransactions = dateResponse.data.filter(txn => {
+                    // Exclude payout/advance/payout_cancel transactions (these are filtered in summarize)
+                    if (txn.type === 'payout' || txn.type === 'advance' || txn.type === 'payout_cancel') {
+                        return false;
+                    }
+                    // If the transaction has a payout field, it must match our payout ID
+                    // If it doesn't have a payout field, include it (for truly manual payouts)
+                    return !txn.payout || txn.payout === payoutId;
+                });
+                this.logger.log(`[PayoutSync] Filtered to ${filteredTransactions.length} transactions for payout ${payoutId}`);
+                balanceTransactions.push(...filteredTransactions);
+                
+                hasMore = dateResponse.has_more;
+                if (hasMore && dateResponse.data.length > 0) {
+                    startingAfter = dateResponse.data[dateResponse.data.length - 1].id;
                 } else {
                     hasMore = false;
                 }
