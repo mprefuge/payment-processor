@@ -51,14 +51,18 @@ class PayoutSyncService {
         }
 
         // Fetch balance transactions for this payout
-        // Note: Stripe API only allows filtering by payout for automatic payouts
-        // For manual payouts, we need to fetch all transactions and filter client-side
+        // Note: Stripe API has limitations on filtering by payout:
+        // - For automatic payouts on platform accounts (no stripeAccountId): can use payout filter directly
+        // - For manual payouts: must fetch in date range and filter client-side
+        // - For connected accounts (with stripeAccountId): must fetch in date range and filter client-side
+        //   (Stripe API doesn't support payout filter on connected accounts)
         const balanceTransactions = [];
         let hasMore = true;
         let startingAfter = null;
 
-        if (payout.automatic) {
-            // Automatic payout - can use payout filter directly
+        if (payout.automatic && !stripeAccountId) {
+            // Automatic payout on platform account - can use payout filter directly
+            this.logger.log('[PayoutSync] Using direct payout filter (automatic payout, platform account)');
             while (hasMore) {
                 const params = {
                     payout: payoutId,
@@ -68,9 +72,7 @@ class PayoutSyncService {
                     params.starting_after = startingAfter;
                 }
 
-                const response = stripeAccountId 
-                    ? await stripe.balanceTransactions.list(params, requestOptions)
-                    : await stripe.balanceTransactions.list(params);
+                const response = await stripe.balanceTransactions.list(params);
                 balanceTransactions.push(...response.data);
 
                 hasMore = response.has_more;
@@ -81,10 +83,13 @@ class PayoutSyncService {
                 }
             }
         } else {
-            // Manual payout - fetch all transactions in date range and filter client-side
+            // Manual payout OR connected account - fetch all transactions in date range and filter client-side
             // Use a time window around the payout creation date to limit the search
             // Transactions are available based on available_on date, and manual payouts
             // include all transactions with available_on <= payout creation time
+            const reason = !payout.automatic ? 'manual payout' : 'connected account';
+            this.logger.log(`[PayoutSync] Using date range filter (${reason})`);
+            
             const createdDate = payout.created;
             const startTime = createdDate - (30 * 24 * 60 * 60); // 30 days before creation
             const endTime = createdDate + (7 * 24 * 60 * 60); // 7 days after creation (for safety)
