@@ -268,7 +268,8 @@ class PayoutSyncService {
             adjustments: { count: 0, amount: 0 },
             other: { count: 0, amount: 0 },
             total: 0,
-            currency: null
+            currency: null,
+            excluded: { count: 0, types: [] }
         };
 
         for (const txn of balanceTransactions) {
@@ -277,6 +278,16 @@ class PayoutSyncService {
                 summary.currency = txn.currency;
             } else if (summary.currency !== txn.currency) {
                 this.logger.warn(`[PayoutSync] Mixed currencies detected: ${summary.currency} vs ${txn.currency}`);
+            }
+
+            // Exclude payout and advance types - these are Stripe internal balance movements
+            // not actual business transactions to sync to accounting
+            if (txn.type === 'payout' || txn.type === 'advance' || txn.type === 'payout_cancel') {
+                summary.excluded.count++;
+                if (!summary.excluded.types.includes(txn.type)) {
+                    summary.excluded.types.push(txn.type);
+                }
+                continue; // Skip these from total and categorization
             }
 
             // Net amount contributes to payout total
@@ -356,13 +367,20 @@ class PayoutSyncService {
             }
         }
 
-        this.logger.log('[PayoutSync] Summary:', {
+        // Log summary with excluded transaction info
+        const logSummary = {
             charges: summary.charges.count,
             refunds: summary.refunds.count,
             fees: summary.fees.stripe.amount + summary.fees.application.amount,
             total: summary.total,
             currency: summary.currency
-        });
+        };
+        
+        if (summary.excluded.count > 0) {
+            logSummary.excluded = `${summary.excluded.count} transactions (types: ${summary.excluded.types.join(', ')})`;
+        }
+        
+        this.logger.log('[PayoutSync] Summary:', logSummary);
 
         return summary;
     }
