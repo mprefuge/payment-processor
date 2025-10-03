@@ -90,7 +90,7 @@ class PayoutSyncService {
             while (hasMore) {
                 const params = {
                     limit: 100,
-                    created: {
+                    available_on: {
                         gte: startTime,
                         lte: endTime
                     }
