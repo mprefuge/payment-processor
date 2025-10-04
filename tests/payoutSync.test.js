@@ -50,6 +50,15 @@ class MockAccountingProvider {
         return entry;
     }
 
+    async ensureChartOfAccounts(accounts) {
+        // Mock implementation - returns account IDs for all account names
+        const accountMap = {};
+        accounts.forEach((account, index) => {
+            accountMap[account.name] = `account-${index + 1}`;
+        });
+        return accountMap;
+    }
+
     async healthCheck() {
         return { healthy: true, message: 'Mock provider healthy' };
     }
