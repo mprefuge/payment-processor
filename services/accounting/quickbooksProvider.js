@@ -135,6 +135,19 @@ class QuickBooksProvider extends BaseAccountingProvider {
             throw new Error(`Journal entry lines do not balance: debits=${totalDebits}, credits=${totalCredits}`);
         }
 
+        // Validate that all lines have valid account IDs
+        for (const line of journalEntry.lines) {
+            if (!line.accountId) {
+                throw new Error(`Required parameter AccountRef is missing: Line missing accountId: ${JSON.stringify(line)}`);
+            }
+            // Check if accountId looks like a mock/invalid ID
+            if (typeof line.accountId === 'string' && line.accountId.startsWith('account-')) {
+                this.logger.warn(`[QBO] Warning: Line has suspicious account ID that may be invalid: ${line.accountId}`);
+            }
+        }
+
+        this.logger.log(`[QBO] Journal entry has ${journalEntry.lines.length} lines, debits=${totalDebits}, credits=${totalCredits}`);
+
         try {
             // Search for existing JE by DocNumber using findJournalEntries
             const existingEntries = await this._executeWithTokenRefresh(() =>
@@ -204,6 +217,11 @@ class QuickBooksProvider extends BaseAccountingProvider {
             };
         } catch (error) {
             this.logger.error('[QBO] Error upserting journal entry:', error);
+            this.logger.error('[QBO] Error details:', {
+                message: error.message,
+                fault: error.Fault,
+                stack: error.stack
+            });
             
             // Extract error message from Fault if present
             let errorMessage = error.message;

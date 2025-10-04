@@ -645,11 +645,20 @@ class PayoutSyncService {
             try {
                 switch (doc.type) {
                     case 'journal':
-                        // Map account names to IDs
-                        const linesWithAccountIds = doc.lines.map(line => ({
-                            ...line,
-                            accountId: accountMap[line.accountName] || `account-${line.accountName}`
-                        }));
+                        // Map account names to IDs with validation
+                        const linesWithAccountIds = doc.lines.map(line => {
+                            const accountId = accountMap[line.accountName];
+                            if (!accountId) {
+                                throw new Error(`Account ID not found for account: ${line.accountName}. Available accounts: ${Object.keys(accountMap).join(', ')}`);
+                            }
+                            return {
+                                ...line,
+                                accountId
+                            };
+                        });
+
+                        this.logger.log(`[PayoutSync] Creating journal entry with ${linesWithAccountIds.length} lines`);
+                        this.logger.log(`[PayoutSync] Journal entry lines:`, linesWithAccountIds.map(l => `${l.type} ${l.accountName}(${l.accountId}): ${l.amount}`).join(', '));
 
                         result = await this.accountingProvider.upsertJournalEntry({
                             docNumber: doc.docNumber,
@@ -661,6 +670,7 @@ class PayoutSyncService {
                                 stripeAccountId: postingInstructions.stripeAccountId
                             }
                         });
+                        this.logger.log(`[PayoutSync] Posted journal entry: ${result.id}`);
                         providerDocIds.journalEntry = result.id;
                         break;
 
@@ -714,6 +724,7 @@ class PayoutSyncService {
                 }
             } catch (error) {
                 this.logger.error(`[PayoutSync] Failed to post ${doc.type}:`, error.message);
+                this.logger.error(`[PayoutSync] Error stack:`, error.stack);
                 throw error;
             }
         }

@@ -930,6 +930,12 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
             null, // ReviewTaskService integration can be added later
             getCrmServiceInstance() // Add CRM service for payout storage
         );
+        
+        // Set the context logger so we can see the logs
+        payoutSyncService.logger = context;
+        if (accountingProvider.logger) {
+            accountingProvider.logger = context;
+        }
 
         // Enqueue job for async processing
         // In production, this would use Azure Queue, Service Bus, or Durable Functions
@@ -940,9 +946,11 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
 
     } catch (error) {
         context.log('Error processing payout.paid:', error.message);
+        context.log('Error stack:', error.stack);
         if (eventId) {
             await webhookEventStore.updateEventStatus(eventId, 'failed', {
-                error: error.message
+                error: error.message,
+                stack: error.stack
             });
         }
     }
@@ -1106,18 +1114,24 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
 
     } catch (error) {
         context.log('[PayoutJob] Error:', error.message);
+        context.log('[PayoutJob] Error stack:', error.stack);
 
         // Create review task on error
-        await payoutSyncService.createReviewTask({
-            payoutId,
-            stripeAccountId,
-            error: error.message
-        });
+        try {
+            await payoutSyncService.createReviewTask({
+                payoutId,
+                stripeAccountId,
+                error: error.message
+            });
+        } catch (reviewTaskError) {
+            context.log('[PayoutJob] Failed to create review task:', reviewTaskError.message);
+        }
 
         // Update event status
         if (eventId) {
             await webhookEventStore.updateEventStatus(eventId, 'failed', {
                 error: error.message,
+                stack: error.stack,
                 payoutId
             });
         }
