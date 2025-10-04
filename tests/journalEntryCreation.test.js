@@ -18,6 +18,8 @@ class MockQBOClient {
         this.accounts = [];
         this.journalEntries = [];
         this.transfers = [];
+        this.customers = [];
+        this.vendors = [];
     }
 
     findAccounts(criteria, callback) {
@@ -42,6 +44,92 @@ class MockQBOClient {
         };
         this.accounts.push(newAccount);
         callback(null, newAccount);
+    }
+
+    findCustomers(criteria, callback) {
+        let filteredCustomers = this.customers.slice();
+
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (c.field === 'PrimaryEmailAddr' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredCustomers = filteredCustomers.filter(customer =>
+                        customer.PrimaryEmailAddr &&
+                        customer.PrimaryEmailAddr.Address &&
+                        customer.PrimaryEmailAddr.Address.toLowerCase() === target
+                    );
+                }
+                if (c.field === 'DisplayName' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredCustomers = filteredCustomers.filter(customer =>
+                        customer.DisplayName && customer.DisplayName.toLowerCase() === target
+                    );
+                }
+            });
+        } else if (criteria && typeof criteria === 'object') {
+            if (criteria.DisplayName) {
+                const target = criteria.DisplayName.toLowerCase();
+                filteredCustomers = filteredCustomers.filter(customer =>
+                    customer.DisplayName && customer.DisplayName.toLowerCase() === target
+                );
+            }
+        }
+
+        callback(null, { QueryResponse: { Customer: filteredCustomers } });
+    }
+
+    createCustomer(customer, callback) {
+        const newCustomer = {
+            Id: `customer-${this.customers.length + 1}`,
+            DisplayName: customer.DisplayName,
+            PrimaryEmailAddr: customer.PrimaryEmailAddr || null,
+            GivenName: customer.GivenName || null,
+            FamilyName: customer.FamilyName || null
+        };
+        this.customers.push(newCustomer);
+        callback(null, newCustomer);
+    }
+
+    findVendors(criteria, callback) {
+        let filteredVendors = this.vendors.slice();
+
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (c.field === 'PrimaryEmailAddr' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredVendors = filteredVendors.filter(vendor =>
+                        vendor.PrimaryEmailAddr &&
+                        vendor.PrimaryEmailAddr.Address &&
+                        vendor.PrimaryEmailAddr.Address.toLowerCase() === target
+                    );
+                }
+                if (c.field === 'DisplayName' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredVendors = filteredVendors.filter(vendor =>
+                        vendor.DisplayName && vendor.DisplayName.toLowerCase() === target
+                    );
+                }
+            });
+        } else if (criteria && typeof criteria === 'object') {
+            if (criteria.DisplayName) {
+                const target = criteria.DisplayName.toLowerCase();
+                filteredVendors = filteredVendors.filter(vendor =>
+                    vendor.DisplayName && vendor.DisplayName.toLowerCase() === target
+                );
+            }
+        }
+
+        callback(null, { QueryResponse: { Vendor: filteredVendors } });
+    }
+
+    createVendor(vendor, callback) {
+        const newVendor = {
+            Id: `vendor-${this.vendors.length + 1}`,
+            DisplayName: vendor.DisplayName,
+            PrimaryEmailAddr: vendor.PrimaryEmailAddr || null
+        };
+        this.vendors.push(newVendor);
+        callback(null, newVendor);
     }
 
     findJournalEntries(criteria, callback) {
@@ -179,6 +267,8 @@ async function runTests() {
     try {
         mockQBOClient.accounts = [];
         mockQBOClient.journalEntries = [];
+        mockQBOClient.customers = [];
+        mockQBOClient.vendors = [];
 
         // Setup
         const config = new AccountingSyncConfig();
@@ -271,27 +361,44 @@ async function runTests() {
                 throw new Error('Some journal entry lines missing AccountRef.value');
             }
 
-            const entityPresence = createdJE.Line.map(line =>
-                line.JournalEntryLineDetail &&
-                line.JournalEntryLineDetail.Entity &&
-                line.JournalEntryLineDetail.Entity.EntityRef
-                    ? line.JournalEntryLineDetail.Entity.EntityRef.name || line.JournalEntryLineDetail.Entity.EntityRef.value
-                    : null
-            );
+            const entitySummary = createdJE.Line.map(line => {
+                const detail = line.JournalEntryLineDetail;
+                if (!detail || !detail.Entity || !detail.Entity.EntityRef) {
+                    return null;
+                }
+                return {
+                    type: detail.Entity.Type,
+                    name: detail.Entity.EntityRef.name,
+                    value: detail.Entity.EntityRef.value
+                };
+            });
 
-            const hasEntityRefs = entityPresence.some(value => value !== null && value !== undefined);
-            if (hasEntityRefs) {
-                throw new Error(`Unexpected entity references on journal lines: ${entityPresence.join(', ')}`);
+            const vendorEntities = entitySummary.filter(entity => entity && entity.type === 'Vendor');
+            if (vendorEntities.length === 0 || !vendorEntities.every(entity => entity.name === 'Stripe')) {
+                throw new Error(`Expected Stripe vendor entity on fee lines, got: ${JSON.stringify(vendorEntities)}`);
+            }
+
+            const customerEntities = entitySummary.filter(entity => entity && entity.type === 'Customer');
+            if (customerEntities.length !== 0) {
+                throw new Error('Summary journal entry should not include customer entity references');
             }
 
             const descriptions = createdJE.Line.map(line => line.Description || '');
-            if (!descriptions.every(desc => desc.includes('Stripe Payout'))) {
+            const payoutDescriptorPresent = descriptions.every(desc => {
+                const lowered = desc.toLowerCase();
+                return lowered.includes('stripe payout');
+            });
+            if (!payoutDescriptorPresent) {
                 throw new Error(`Journal line descriptions missing payout identifier: ${descriptions.join(' || ')}`);
             }
 
             // Verify accounts were created
             if (mockQBOClient.accounts.length < 2) {
                 throw new Error(`Expected at least 2 accounts to be created, got ${mockQBOClient.accounts.length}`);
+            }
+
+            if (mockQBOClient.vendors.length === 0) {
+                throw new Error('Expected Stripe vendor to be created');
             }
 
             console.log('✅ Complete payout sync flow with journal entry creation');
@@ -315,6 +422,8 @@ async function runTests() {
     try {
         mockQBOClient.accounts = [];
         mockQBOClient.journalEntries = [];
+        mockQBOClient.customers = [];
+        mockQBOClient.vendors = [];
 
         const config = new AccountingSyncConfig();
         config.config = {
@@ -401,40 +510,74 @@ async function runTests() {
         const revenueLine = jeDoc.lines.find(line => line.accountKey === 'revenue');
         const feeLine = jeDoc.lines.find(line => line.accountKey === 'fees' && line.metadata && line.metadata.component === 'Processing fees');
 
-        if (!clearingLine || clearingLine.name !== 'Stripe Payout') {
-            throw new Error(`Clearing line missing or has incorrect name: ${clearingLine ? clearingLine.name : 'none'}`);
-        }
-
         if (!revenueLine || revenueLine.name !== 'Alice Customer') {
             throw new Error(`Revenue line missing or has incorrect name: ${revenueLine ? revenueLine.name : 'none'}`);
         }
 
-        if (!feeLine || feeLine.name !== 'Alice Customer') {
-            throw new Error(`Fee line missing or has incorrect name: ${feeLine ? feeLine.name : 'none'}`);
+        if (!feeLine || !feeLine.entity || feeLine.entity.type !== 'Vendor') {
+            throw new Error('Fee line missing vendor entity');
+        }
+
+        if (!revenueLine.entity || revenueLine.entity.type !== 'Customer') {
+            throw new Error('Revenue line missing customer entity');
+        }
+
+        if (!clearingLine) {
+            throw new Error('Clearing line missing');
+        }
+
+        if (clearingLine.entity) {
+            throw new Error('Clearing line should not have an entity');
         }
 
         await payoutSyncService.postToAccounting(instructions);
 
         if (mockQBOClient.journalEntries.length === 1) {
             const created = mockQBOClient.journalEntries[0];
-            const entitySummary = created.Line.map(line =>
-                line.JournalEntryLineDetail &&
-                line.JournalEntryLineDetail.Entity &&
-                line.JournalEntryLineDetail.Entity.EntityRef
-                    ? line.JournalEntryLineDetail.Entity.EntityRef.name || line.JournalEntryLineDetail.Entity.EntityRef.value
-                    : null
-            );
+            if (created.Line.length !== 3) {
+                throw new Error(`Per-transaction JE should have 3 lines, got ${created.Line.length}`);
+            }
 
-            if (entitySummary.some(value => value !== null && value !== undefined)) {
-                throw new Error(`Unexpected entity references on per-transaction JE: ${entitySummary.join(', ')}`);
+            const entitySummary = created.Line.map(line => {
+                const detail = line.JournalEntryLineDetail;
+                if (!detail || !detail.Entity || !detail.Entity.EntityRef) {
+                    return null;
+                }
+                return {
+                    type: detail.Entity.Type,
+                    name: detail.Entity.EntityRef.name,
+                    value: detail.Entity.EntityRef.value,
+                    description: line.Description || ''
+                };
+            });
+
+            const customerEntity = entitySummary.find(entity => entity && entity.type === 'Customer');
+            if (!customerEntity || customerEntity.name !== 'Alice Customer') {
+                throw new Error(`Customer entity missing or incorrect: ${JSON.stringify(customerEntity)}`);
+            }
+
+            const vendorEntities = entitySummary.filter(entity => entity && entity.type === 'Vendor');
+            if (vendorEntities.length !== 1 || vendorEntities[0].name !== 'Stripe') {
+                throw new Error(`Expected Stripe vendor entity on fee line, got: ${JSON.stringify(vendorEntities)}`);
+            }
+
+            const clearingEntities = created.Line
+                .filter(line => (line.Description || '').includes('Net to Stripe Clearing'))
+                .map(line => line.JournalEntryLineDetail && line.JournalEntryLineDetail.Entity && line.JournalEntryLineDetail.Entity.EntityRef)
+                .filter(Boolean);
+            if (clearingEntities.length > 0) {
+                throw new Error('Clearing line should not include an EntityRef');
             }
 
             const descriptions = created.Line.map(line => line.Description || '');
-            const hasPayoutDescriptor = descriptions.some(desc => desc.includes('Stripe Payout'));
-            const hasCustomerDescriptor = descriptions.filter(desc => desc.includes('Alice Customer')).length === 2;
+            const hasPayoutDescriptor = descriptions.some(desc => desc.toLowerCase().includes('stripe payout'));
 
-            if (!hasPayoutDescriptor || !hasCustomerDescriptor) {
-                throw new Error(`Journal entry descriptions missing expected identifiers: ${descriptions.join(' || ')}`);
+            if (!hasPayoutDescriptor) {
+                throw new Error(`Journal entry descriptions missing payout identifier: ${descriptions.join(' || ')}`);
+            }
+
+            if (mockQBOClient.customers.length === 0) {
+                throw new Error('Expected QuickBooks customer to be created');
             }
 
             console.log('✅ Per-transaction journal entry retains customer names in instructions without invalid QBO entity refs');

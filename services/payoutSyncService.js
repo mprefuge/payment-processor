@@ -459,7 +459,8 @@ class PayoutSyncService {
                     refundsAccount,
                     feesAccount,
                     chargebackAccount,
-                    adjustmentAccount
+                    adjustmentAccount,
+                    clearingAccount
                 });
 
                 if (!Array.isArray(lines) || lines.length === 0) {
@@ -470,6 +471,9 @@ class PayoutSyncService {
                     line.description = buildSummaryDescription(line.description || line.memo || 'Stripe transaction', [
                         line.metadata && line.metadata.balanceTransactionId
                             ? `Transaction: ${line.metadata.balanceTransactionId}`
+                            : null,
+                        line.metadata && (line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source)
+                            ? `Source: ${line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source}`
                             : null,
                         formatCurrency(line.amount) ? `Amount: ${formatCurrency(line.amount)}` : null,
                         line.metadata && line.metadata.component
@@ -550,8 +554,14 @@ class PayoutSyncService {
                         ...feeDetails,
                         formatCurrency(totalFees) ? `Total: ${formatCurrency(totalFees)}` : null
                     ]),
-                    name: this._resolveEntityName(null, 'payout'),
-                    entityContext: 'payout'
+                    name: 'Stripe',
+                    entityContext: 'payout',
+                    entity: {
+                        type: 'Vendor',
+                        name: 'Stripe',
+                        displayName: 'Stripe',
+                        externalId: 'stripe'
+                    }
                 });
                 clearingNet -= totalFees;
             }
@@ -779,6 +789,97 @@ class PayoutSyncService {
             }
         }
 
+        const normalizeKey = (value) => {
+            if (value === undefined || value === null) {
+                return null;
+            }
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                return trimmed.length > 0 ? trimmed.toLowerCase() : null;
+            }
+            return value.toString().trim().toLowerCase();
+        };
+
+        const buildCustomerKey = (entity) => {
+            if (!entity || typeof entity !== 'object') {
+                return null;
+            }
+            return normalizeKey(entity.stripeCustomerId)
+                || normalizeKey(entity.externalId)
+                || normalizeKey(entity.email)
+                || normalizeKey(entity.name);
+        };
+
+        const buildVendorKey = (entity) => {
+            if (!entity || typeof entity !== 'object') {
+                return null;
+            }
+            return normalizeKey(entity.externalId)
+                || normalizeKey(entity.name)
+                || 'vendor-stripe';
+        };
+
+        const customersToEnsure = new Map();
+        const vendorsToEnsure = new Map();
+
+        for (const doc of postingInstructions.documents) {
+            if (doc.type !== 'journal' || !Array.isArray(doc.lines)) {
+                continue;
+            }
+
+            for (const line of doc.lines) {
+                if (!line || typeof line !== 'object') {
+                    continue;
+                }
+
+                if (line.entity && line.entity.type === 'Customer') {
+                    const key = buildCustomerKey(line.entity);
+                    if (key && !customersToEnsure.has(key)) {
+                        customersToEnsure.set(key, line.entity);
+                    }
+                } else if (line.entity && line.entity.type === 'Vendor') {
+                    const key = buildVendorKey(line.entity) || 'vendor-stripe';
+                    if (!vendorsToEnsure.has(key)) {
+                        vendorsToEnsure.set(key, line.entity);
+                    }
+                }
+            }
+        }
+
+        const customerRefMap = {};
+        for (const [key, entity] of customersToEnsure.entries()) {
+            const displayName = entity.name || entity.displayName || (entity.email ? entity.email.split('@')[0] : 'Stripe Customer');
+            try {
+                const customerRef = await this.accountingProvider.ensureCustomer({
+                    displayName,
+                    email: entity.email || null,
+                    givenName: entity.givenName || null,
+                    familyName: entity.familyName || null,
+                    externalId: entity.stripeCustomerId || entity.externalId || null
+                });
+                customerRefMap[key] = customerRef.id;
+            } catch (error) {
+                this.logger.error(`[PayoutSync] Failed to ensure customer ${displayName}:`, error.message);
+                throw new Error(`Failed to ensure customer "${displayName}": ${error.message}`);
+            }
+        }
+
+        const vendorRefMap = {};
+        for (const [key, entity] of vendorsToEnsure.entries()) {
+            const displayName = entity.name || entity.displayName || 'Stripe';
+            try {
+                const vendorRef = await this.accountingProvider.ensureVendor({
+                    displayName,
+                    email: entity.email || null,
+                    externalId: entity.externalId || entity.stripeCustomerId || null
+                });
+                vendorRefMap[key] = vendorRef.id;
+            } catch (error) {
+                this.logger.error(`[PayoutSync] Failed to ensure vendor ${displayName}:`, error.message);
+                throw new Error(`Failed to ensure vendor "${displayName}": ${error.message}`);
+            }
+        }
+
         for (const doc of postingInstructions.documents) {
             let result = null;
 
@@ -791,10 +892,34 @@ class PayoutSyncService {
                             if (!accountId) {
                                 throw new Error(`Account ID not found for account: ${line.accountName}. Available accounts: ${Object.keys(accountMap).join(', ')}`);
                             }
-                            return {
+                            const mappedLine = {
                                 ...line,
                                 accountId
                             };
+
+                            if (line.entity && line.entity.type === 'Customer') {
+                                const key = buildCustomerKey(line.entity);
+                                const customerId = key ? customerRefMap[key] : null;
+                                if (customerId) {
+                                    mappedLine.entityRef = {
+                                        type: 'Customer',
+                                        value: customerId,
+                                        name: line.entity.name || line.name || this._resolveEntityName(null, 'transaction')
+                                    };
+                                }
+                            } else if (line.entity && line.entity.type === 'Vendor') {
+                                const key = buildVendorKey(line.entity) || 'vendor-stripe';
+                                const vendorId = vendorRefMap[key];
+                                if (vendorId) {
+                                    mappedLine.entityRef = {
+                                        type: 'Vendor',
+                                        value: vendorId,
+                                        name: line.entity.name || 'Stripe'
+                                    };
+                                }
+                            }
+
+                            return mappedLine;
                         });
 
                         this.logger.log(`[PayoutSync] Creating journal entry with ${linesWithAccountIds.length} lines`);
@@ -1206,6 +1331,167 @@ class PayoutSyncService {
     }
 
     /**
+     * Attempt to extract a customer email from a Stripe balance transaction
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string|null}
+     * @private
+     */
+    _extractTransactionCustomerEmail(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        const candidates = [];
+
+        const pushCandidate = (value) => {
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (trimmed.length > 0) {
+                    candidates.push(trimmed);
+                }
+            }
+        };
+
+        pushCandidate(txn.customer_email);
+        pushCandidate(txn.customerEmail);
+
+        if (txn.customer && typeof txn.customer === 'object') {
+            pushCandidate(txn.customer.email);
+        }
+
+        if (txn.customer_details && typeof txn.customer_details === 'object') {
+            pushCandidate(txn.customer_details.email);
+        }
+
+        if (txn.billing_details && typeof txn.billing_details === 'object') {
+            pushCandidate(txn.billing_details.email);
+        }
+
+        if (txn.source && typeof txn.source === 'object') {
+            if (txn.source.billing_details && typeof txn.source.billing_details === 'object') {
+                pushCandidate(txn.source.billing_details.email);
+            }
+            if (txn.source.customer && typeof txn.source.customer === 'object') {
+                pushCandidate(txn.source.customer.email);
+            }
+        }
+
+        if (txn.metadata && typeof txn.metadata === 'object') {
+            const metadataEmailFields = ['customer_email', 'customerEmail', 'email'];
+            for (const field of metadataEmailFields) {
+                pushCandidate(txn.metadata[field]);
+            }
+        }
+
+        if (Array.isArray(txn.receipt_emails)) {
+            txn.receipt_emails.forEach(pushCandidate);
+        }
+
+        return candidates.length > 0 ? candidates[0] : null;
+    }
+
+    /**
+     * Attempt to extract a Stripe customer identifier from a balance transaction
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string|null}
+     * @private
+     */
+    _extractTransactionCustomerId(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        const candidates = [];
+
+        const addCandidate = (value) => {
+            if (typeof value === 'string' && value.trim().length > 0) {
+                candidates.push(value.trim());
+            }
+        };
+
+        addCandidate(txn.customer);
+        addCandidate(txn.customer_id);
+        addCandidate(txn.customerId);
+
+        if (txn.customer && typeof txn.customer === 'object') {
+            addCandidate(txn.customer.id);
+        }
+
+        if (txn.customer_details && typeof txn.customer_details === 'object') {
+            addCandidate(txn.customer_details.id);
+        }
+
+        if (txn.source && typeof txn.source === 'object') {
+            if (typeof txn.source.customer === 'string') {
+                addCandidate(txn.source.customer);
+            } else if (txn.source.customer && typeof txn.source.customer === 'object') {
+                addCandidate(txn.source.customer.id);
+            }
+        }
+
+        if (txn.metadata && typeof txn.metadata === 'object') {
+            const metadataFields = ['stripe_customer_id', 'stripeCustomerId', 'customer_id'];
+            for (const field of metadataFields) {
+                addCandidate(txn.metadata[field]);
+            }
+        }
+
+        return candidates.length > 0 ? candidates[0] : null;
+    }
+
+    /**
+     * Split a full name into given and family name components
+     * @param {string|null} fullName - Full name string
+     * @returns {{givenName: string|null, familyName: string|null}}
+     * @private
+     */
+    _splitName(fullName) {
+        if (!fullName || typeof fullName !== 'string') {
+            return { givenName: null, familyName: null };
+        }
+
+        const trimmed = fullName.trim();
+        if (trimmed.length === 0) {
+            return { givenName: null, familyName: null };
+        }
+
+        const parts = trimmed.split(/\s+/);
+        if (parts.length === 1) {
+            return { givenName: parts[0], familyName: null };
+        }
+
+        const givenName = parts.slice(0, parts.length - 1).join(' ');
+        const familyName = parts[parts.length - 1];
+        return { givenName, familyName };
+    }
+
+    /**
+     * Extract normalized customer details from a Stripe balance transaction
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {Object|null}
+     * @private
+     */
+    _extractTransactionCustomerDetails(txn) {
+        const name = this._extractTransactionCustomerName(txn);
+        const email = this._extractTransactionCustomerEmail(txn);
+        const stripeCustomerId = this._extractTransactionCustomerId(txn);
+
+        if (!name && !email && !stripeCustomerId) {
+            return null;
+        }
+
+        const { givenName, familyName } = this._splitName(name);
+
+        return {
+            name: name || null,
+            email: email || null,
+            stripeCustomerId: stripeCustomerId || null,
+            givenName: givenName || null,
+            familyName: familyName || null
+        };
+    }
+
+    /**
      * Resolve the entity name for a journal line based on context
      * @param {string|null} customerName - Extracted customer name
      * @param {'transaction'|'payout'} context - Context for the line
@@ -1306,20 +1592,83 @@ class PayoutSyncService {
             return [];
         }
 
-        const { revenueAccount, refundsAccount, feesAccount, chargebackAccount, adjustmentAccount } = accounts;
+        const {
+            revenueAccount,
+            refundsAccount,
+            feesAccount,
+            chargebackAccount,
+            adjustmentAccount,
+            clearingAccount
+        } = accounts;
+
         const memo = this._buildTransactionMemo(txn);
         const baseDescription = this._buildTransactionDescription(txn);
         const baseMetadata = { ...this._buildTransactionMetadata(txn) };
-        const customerName = this._extractTransactionCustomerName(txn);
-        if (customerName) {
-            baseMetadata.customerName = customerName;
+
+        const extractedCustomerName = this._extractTransactionCustomerName(txn);
+        const customerDetails = this._extractTransactionCustomerDetails(txn);
+
+        if (extractedCustomerName && !baseMetadata.customerName) {
+            baseMetadata.customerName = extractedCustomerName;
         }
 
-        const name = this._resolveEntityName(customerName, 'transaction');
+        if (customerDetails && customerDetails.name) {
+            baseMetadata.customerName = customerDetails.name;
+        }
+
+        if (customerDetails && customerDetails.email) {
+            baseMetadata.customerEmail = customerDetails.email;
+        }
+
+        if (customerDetails && customerDetails.stripeCustomerId) {
+            baseMetadata.stripeCustomerId = customerDetails.stripeCustomerId;
+        }
+
+        if (typeof txn.source === 'string') {
+            baseMetadata.chargeId = txn.source;
+        } else if (txn.source && typeof txn.source === 'object' && typeof txn.source.id === 'string') {
+            baseMetadata.chargeId = txn.source.id;
+        }
+
+        if (txn.payment_intent && typeof txn.payment_intent === 'string') {
+            baseMetadata.paymentIntentId = txn.payment_intent;
+        }
+
+        const defaultLineName = this._resolveEntityName(
+            customerDetails && customerDetails.name ? customerDetails.name : extractedCustomerName,
+            'transaction'
+        );
+
+        const customerEntity = customerDetails ? {
+            type: 'Customer',
+            name: customerDetails.name || defaultLineName,
+            email: customerDetails.email || null,
+            stripeCustomerId: customerDetails.stripeCustomerId || null,
+            givenName: customerDetails.givenName || null,
+            familyName: customerDetails.familyName || null
+        } : null;
+
+        const stripeVendorEntity = {
+            type: 'Vendor',
+            name: 'Stripe',
+            displayName: 'Stripe',
+            externalId: 'stripe'
+        };
+
         const defaultRawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
         const lines = [];
 
-        const appendLine = ({ type, accountKey, accountName, rawAmount, component = null, description = null, metadataOverrides = {} }) => {
+        const appendLine = ({
+            type,
+            accountKey,
+            accountName,
+            rawAmount,
+            component = null,
+            description = null,
+            metadataOverrides = {},
+            entity = null,
+            nameOverride
+        }) => {
             if (!accountName || typeof rawAmount !== 'number' || Number.isNaN(rawAmount) || rawAmount === 0) {
                 return;
             }
@@ -1343,6 +1692,10 @@ class PayoutSyncService {
                 }
             });
 
+            const resolvedName = typeof nameOverride !== 'undefined'
+                ? nameOverride
+                : (entity && entity.name ? entity.name : defaultLineName);
+
             lines.push({
                 type,
                 accountKey,
@@ -1350,8 +1703,9 @@ class PayoutSyncService {
                 amount: normalizedAmount,
                 memo,
                 description: finalDescription || memo || null,
-                name,
+                name: resolvedName,
                 entityContext: 'transaction',
+                entity: entity || null,
                 metadata: lineMetadata
             });
         };
@@ -1361,6 +1715,23 @@ class PayoutSyncService {
                 return;
             }
             appendLine({ type, accountKey, accountName, rawAmount: defaultRawAmount });
+        };
+
+        const appendClearingLine = (netAmount) => {
+            if (!clearingAccount || typeof netAmount !== 'number' || Number.isNaN(netAmount) || netAmount === 0) {
+                return;
+            }
+
+            appendLine({
+                type: netAmount >= 0 ? 'debit' : 'credit',
+                accountKey: 'clearing',
+                accountName: clearingAccount,
+                rawAmount: netAmount,
+                component: 'Net to Stripe Clearing',
+                metadataOverrides: { netAmount },
+                entity: null,
+                nameOverride: null
+            });
         };
 
         switch (txn.type) {
@@ -1373,6 +1744,7 @@ class PayoutSyncService {
                         accountName: revenueAccount,
                         rawAmount: txn.amount,
                         component: 'Gross amount',
+                        entity: customerEntity,
                         metadataOverrides: { grossAmount: txn.amount }
                     });
                 }
@@ -1384,9 +1756,18 @@ class PayoutSyncService {
                         accountName: feesAccount,
                         rawAmount: txn.fee,
                         component: 'Processing fees',
-                        metadataOverrides: { feeAmount: txn.fee }
+                        entity: stripeVendorEntity,
+                        metadataOverrides: { feeAmount: txn.fee, vendor: 'Stripe' }
                     });
                 }
+
+                const netAmount = typeof txn.net === 'number'
+                    ? txn.net
+                    : (typeof txn.amount === 'number'
+                        ? txn.amount - (typeof txn.fee === 'number' ? txn.fee : 0)
+                        : 0);
+
+                appendClearingLine(netAmount);
 
                 if (lines.length === 0) {
                     makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'revenue', revenueAccount);
@@ -1414,9 +1795,18 @@ class PayoutSyncService {
                         accountName: feesAccount,
                         rawAmount: txn.fee,
                         component: 'Processing fees',
-                        metadataOverrides: { feeAmount: txn.fee }
+                        entity: stripeVendorEntity,
+                        metadataOverrides: { feeAmount: txn.fee, vendor: 'Stripe' }
                     });
                 }
+
+                const refundNet = typeof txn.net === 'number'
+                    ? txn.net
+                    : (typeof txn.amount === 'number'
+                        ? txn.amount - (typeof txn.fee === 'number' ? txn.fee : 0)
+                        : 0);
+
+                appendClearingLine(refundNet);
 
                 if (lines.length === 0) {
                     makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'refunds', refundsAccount);
@@ -1425,13 +1815,39 @@ class PayoutSyncService {
             }
 
             case 'stripe_fee':
-            case 'application_fee':
-                makeDefaultLine('debit', 'fees', feesAccount);
+            case 'application_fee': {
+                if (typeof defaultRawAmount === 'number' && defaultRawAmount !== 0) {
+                    appendLine({
+                        type: defaultRawAmount >= 0 ? 'debit' : 'credit',
+                        accountKey: 'fees',
+                        accountName: feesAccount,
+                        rawAmount: defaultRawAmount,
+                        component: 'Processing fees',
+                        entity: stripeVendorEntity,
+                        metadataOverrides: { feeAmount: defaultRawAmount, vendor: 'Stripe' }
+                    });
+                } else {
+                    makeDefaultLine('debit', 'fees', feesAccount);
+                }
                 break;
+            }
 
-            case 'application_fee_refund':
-                makeDefaultLine(defaultRawAmount >= 0 ? 'debit' : 'credit', 'fees', feesAccount);
+            case 'application_fee_refund': {
+                if (typeof defaultRawAmount === 'number' && defaultRawAmount !== 0) {
+                    appendLine({
+                        type: defaultRawAmount >= 0 ? 'debit' : 'credit',
+                        accountKey: 'fees',
+                        accountName: feesAccount,
+                        rawAmount: defaultRawAmount,
+                        component: 'Processing fees',
+                        entity: stripeVendorEntity,
+                        metadataOverrides: { feeAmount: defaultRawAmount, vendor: 'Stripe' }
+                    });
+                } else {
+                    makeDefaultLine(defaultRawAmount >= 0 ? 'debit' : 'credit', 'fees', feesAccount);
+                }
                 break;
+            }
 
             case 'adjustment':
                 makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'adjustments', adjustmentAccount);
