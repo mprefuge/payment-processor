@@ -216,6 +216,19 @@ class QuickBooksProvider extends BaseAccountingProvider {
                         }
                     };
 
+                    if (line.name) {
+                        const entityType = line.entityContext === 'transaction'
+                            ? 'Customer'
+                            : 'Other';
+
+                        jeLine.JournalEntryLineDetail.Entity = {
+                            Type: entityType,
+                            EntityRef: {
+                                name: line.name
+                            }
+                        };
+                    }
+
                     return jeLine;
                 })
             };

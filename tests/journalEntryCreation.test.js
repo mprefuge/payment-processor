@@ -271,6 +271,19 @@ async function runTests() {
                 throw new Error('Some journal entry lines missing AccountRef.value');
             }
 
+            const entityNames = createdJE.Line.map(line =>
+                line.JournalEntryLineDetail &&
+                line.JournalEntryLineDetail.Entity &&
+                line.JournalEntryLineDetail.Entity.EntityRef
+                    ? line.JournalEntryLineDetail.Entity.EntityRef.name
+                    : null
+            );
+
+            const allEntitiesMatch = entityNames.every(name => name === 'Stripe Payout');
+            if (!allEntitiesMatch) {
+                throw new Error(`Unexpected entity names on journal lines: ${entityNames.join(', ')}`);
+            }
+
             // Verify accounts were created
             if (mockQBOClient.accounts.length < 2) {
                 throw new Error(`Expected at least 2 accounts to be created, got ${mockQBOClient.accounts.length}`);
@@ -293,7 +306,139 @@ async function runTests() {
         failed++;
     }
 
-    // Test 2: Verify DocNumber validation rejects long DocNumbers
+    // Test 2: Per-transaction lines split gross/fee with customer names
+    try {
+        mockQBOClient.accounts = [];
+        mockQBOClient.journalEntries = [];
+
+        const config = new AccountingSyncConfig();
+        config.config = {
+            provider: 'quickbooks',
+            accounts: {
+                stripeClearingAccount: 'Stripe Clearing',
+                operatingBankAccount: 'Operating Bank',
+                revenueAccount: 'Revenue',
+                refundsAccount: 'Refunds',
+                stripeFeeAccount: 'Stripe Fees',
+                chargebackAccount: 'Chargebacks',
+                adjustmentAccount: 'Adjustments'
+            },
+            posting: {
+                strategy: 'je-transfer',
+                dateSource: 'arrival',
+                transactionLineMode: 'per-transaction'
+            }
+        };
+
+        const qboConfig = {
+            companyId: 'test-company-123',
+            environment: 'sandbox',
+            oauthTokens: {
+                accessToken: 'test-access-token',
+                refreshToken: 'test-refresh-token'
+            }
+        };
+
+        const provider = new QuickBooksProvider(qboConfig);
+        const syncLedger = new SyncLedger();
+        const payoutSyncService = new PayoutSyncService(config, provider, syncLedger);
+
+        const payout = {
+            id: 'po_1TestPerTxn',
+            amount: 9671,
+            arrival_date: 1716076800,
+            created: 1716076800,
+            status: 'paid',
+            currency: 'usd'
+        };
+
+        const summary = {
+            charges: { count: 1, grossAmount: 10000 },
+            refunds: { count: 0, amount: 0 },
+            fees: { stripe: { amount: 329 }, application: { amount: 0 } },
+            disputes: { count: 0, amount: 0 },
+            adjustments: { count: 0, amount: 0 },
+            total: 9671,
+            currency: 'usd'
+        };
+
+        const balanceTransactions = [{
+            id: 'txn_1ABC',
+            type: 'charge',
+            amount: 10000,
+            fee: 329,
+            net: 9671,
+            currency: 'usd',
+            description: 'Test per-transaction charge',
+            customer_details: { name: 'Alice Customer' },
+            created: 1716076800,
+            available_on: 1716076800,
+            payout: payout.id
+        }];
+
+        const instructions = payoutSyncService.generatePostingInstructions(
+            payout,
+            summary,
+            null,
+            balanceTransactions
+        );
+
+        const jeDoc = instructions.documents.find(d => d.type === 'journal');
+        if (!jeDoc) {
+            throw new Error('No journal entry document found for per-transaction mode');
+        }
+
+        if (jeDoc.lines.length !== 3) {
+            throw new Error(`Expected 3 journal lines (clearing + gross + fee), got ${jeDoc.lines.length}`);
+        }
+
+        const clearingLine = jeDoc.lines.find(line => line.accountKey === 'clearing');
+        const revenueLine = jeDoc.lines.find(line => line.accountKey === 'revenue');
+        const feeLine = jeDoc.lines.find(line => line.accountKey === 'fees' && line.metadata && line.metadata.component === 'Processing fees');
+
+        if (!clearingLine || clearingLine.name !== 'Stripe Payout') {
+            throw new Error(`Clearing line missing or has incorrect name: ${clearingLine ? clearingLine.name : 'none'}`);
+        }
+
+        if (!revenueLine || revenueLine.name !== 'Alice Customer') {
+            throw new Error(`Revenue line missing or has incorrect name: ${revenueLine ? revenueLine.name : 'none'}`);
+        }
+
+        if (!feeLine || feeLine.name !== 'Alice Customer') {
+            throw new Error(`Fee line missing or has incorrect name: ${feeLine ? feeLine.name : 'none'}`);
+        }
+
+        await payoutSyncService.postToAccounting(instructions);
+
+        if (mockQBOClient.journalEntries.length === 1) {
+            const created = mockQBOClient.journalEntries[0];
+            const nameSummary = created.Line.map(line =>
+                line.JournalEntryLineDetail &&
+                line.JournalEntryLineDetail.Entity &&
+                line.JournalEntryLineDetail.Entity.EntityRef
+                    ? line.JournalEntryLineDetail.Entity.EntityRef.name
+                    : null
+            );
+
+            const payoutNameCount = nameSummary.filter(name => name === 'Stripe Payout').length;
+            const customerNameCount = nameSummary.filter(name => name === 'Alice Customer').length;
+            if (payoutNameCount !== 1 || customerNameCount !== 2) {
+                throw new Error(`Unexpected entity names on per-transaction JE: ${nameSummary.join(', ')}`);
+            }
+
+            console.log('✅ Per-transaction journal entry splits gross and fee with customer name');
+            passed++;
+        } else {
+            console.log('❌ Per-transaction journal entry - wrong number of entries created');
+            console.log(`   Expected: 1, Got: ${mockQBOClient.journalEntries.length}`);
+            failed++;
+        }
+    } catch (error) {
+        console.log('❌ Per-transaction journal entry - error:', error.message);
+        failed++;
+    }
+
+    // Test 3: Verify DocNumber validation rejects long DocNumbers
     try {
         mockQBOClient.accounts = [];
         mockQBOClient.journalEntries = [];
@@ -338,7 +483,7 @@ async function runTests() {
         failed++;
     }
 
-    // Test 3: Verify AccountRef validation rejects missing account IDs
+    // Test 4: Verify AccountRef validation rejects missing account IDs
     try {
         mockQBOClient.accounts = [];
         mockQBOClient.journalEntries = [];
