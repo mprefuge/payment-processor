@@ -234,19 +234,29 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         description: paymentIntent.description
     });
 
-    // Send notification email for successful payment
+    const paymentData = {
+        email: customer.email,
+        firstname: transactionData.firstName || 'Valued',
+        lastname: transactionData.lastName || 'Customer',
+        amount: paymentIntent.amount,
+        frequency: transactionData.frequency,
+        category: transactionData.category || 'General',
+        livemode: paymentIntent.livemode
+    };
+
     try {
-        const paymentData = {
-            email: customer.email,
-            firstname: transactionData.firstName || 'Valued',
-            lastname: transactionData.lastName || 'Customer',
-            amount: paymentIntent.amount,
-            frequency: transactionData.frequency,
-            category: transactionData.category || 'General',
-            livemode: paymentIntent.livemode
-        };
-        await sendPaymentSuccessEmail(paymentData, paymentIntent, stripe);
-        context.log('Payment success notification email sent');
+        const emailResult = await sendPaymentSuccessEmail(paymentData, paymentIntent, stripe);
+
+        if (emailResult?.status === 'sent') {
+            context.log('Payment success notification email sent');
+        } else if (emailResult?.status === 'skipped') {
+            context.log(`Payment success notification email skipped: ${emailResult.reason}`);
+        } else if (emailResult?.status === 'failed') {
+            const errorMessage = emailResult.error?.message || emailResult.reason || 'unknown_error';
+            context.log('Failed to send payment success email:', errorMessage);
+        } else {
+            context.log('Payment success notification email status unknown');
+        }
     } catch (emailError) {
         context.log('Failed to send payment success email:', emailError.message);
         // Continue processing - email failure shouldn't break the flow
