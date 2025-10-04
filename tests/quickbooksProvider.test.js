@@ -19,6 +19,8 @@ class MockQBOClient {
         this.journalEntries = [];
         this.transfers = [];
         this.deposits = [];
+        this.customers = [];
+        this.vendors = [];
         this.companyInfo = {
             CompanyName: 'Test Company',
             Id: 'test-company-123'
@@ -30,6 +32,8 @@ class MockQBOClient {
             access_token: 'new-access-token',
             refresh_token: 'new-refresh-token'
         };
+        this.lastCustomerPayload = null;
+        this.lastVendorPayload = null;
     }
 
     reset() {
@@ -37,6 +41,8 @@ class MockQBOClient {
         this.journalEntries = [];
         this.transfers = [];
         this.deposits = [];
+        this.customers = [];
+        this.vendors = [];
         this.shouldFailAuth = false;
         this.tokenRefreshCount = 0;
         this.refreshError = null;
@@ -44,6 +50,8 @@ class MockQBOClient {
             access_token: 'new-access-token',
             refresh_token: 'new-refresh-token'
         };
+        this.lastCustomerPayload = null;
+        this.lastVendorPayload = null;
     }
 
     query(queryStr, callback) {
@@ -134,6 +142,65 @@ class MockQBOClient {
         }
     }
 
+    findCustomers(criteria, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        let filteredCustomers = this.customers.slice();
+
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (!c || typeof c !== 'object') {
+                    return;
+                }
+
+                if (c.field === 'PrimaryEmailAddr' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredCustomers = filteredCustomers.filter(customer =>
+                        customer.PrimaryEmailAddr &&
+                        customer.PrimaryEmailAddr.Address &&
+                        customer.PrimaryEmailAddr.Address.toLowerCase() === target
+                    );
+                }
+
+                if (c.field === 'DisplayName' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredCustomers = filteredCustomers.filter(customer =>
+                        customer.DisplayName && customer.DisplayName.toLowerCase() === target
+                    );
+                }
+            });
+        } else if (criteria && typeof criteria === 'object') {
+            if (criteria.DisplayName) {
+                const target = criteria.DisplayName.toLowerCase();
+                filteredCustomers = filteredCustomers.filter(customer =>
+                    customer.DisplayName && customer.DisplayName.toLowerCase() === target
+                );
+            }
+        }
+
+        callback(null, { QueryResponse: { Customer: filteredCustomers } });
+    }
+
+    createCustomer(customer, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        const newCustomer = {
+            Id: `customer-${this.customers.length + 1}`,
+            DisplayName: customer.DisplayName,
+            PrimaryEmailAddr: customer.PrimaryEmailAddr || null,
+            GivenName: customer.GivenName || null,
+            FamilyName: customer.FamilyName || null
+        };
+
+        this.customers.push(newCustomer);
+        this.lastCustomerPayload = customer;
+        callback(null, newCustomer);
+    }
+
     createJournalEntry(je, callback) {
         if (this.shouldFailAuth) {
             return callback({ fault: { type: 'AUTHENTICATION' } });
@@ -166,6 +233,64 @@ class MockQBOClient {
         };
         this.transfers.push(newTransfer);
         callback(null, newTransfer);
+    }
+
+    findVendors(criteria, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        let filteredVendors = this.vendors.slice();
+
+        if (Array.isArray(criteria)) {
+            criteria.forEach(c => {
+                if (!c || typeof c !== 'object') {
+                    return;
+                }
+
+                if (c.field === 'PrimaryEmailAddr' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredVendors = filteredVendors.filter(vendor =>
+                        vendor.PrimaryEmailAddr &&
+                        vendor.PrimaryEmailAddr.Address &&
+                        vendor.PrimaryEmailAddr.Address.toLowerCase() === target
+                    );
+                }
+
+                if (c.field === 'DisplayName' && typeof c.value === 'string') {
+                    const target = c.value.toLowerCase();
+                    filteredVendors = filteredVendors.filter(vendor =>
+                        vendor.DisplayName && vendor.DisplayName.toLowerCase() === target
+                    );
+                }
+            });
+        } else if (criteria && typeof criteria === 'object') {
+            if (criteria.DisplayName) {
+                const target = criteria.DisplayName.toLowerCase();
+                filteredVendors = filteredVendors.filter(vendor =>
+                    vendor.DisplayName && vendor.DisplayName.toLowerCase() === target
+                );
+            }
+        }
+
+        callback(null, { QueryResponse: { Vendor: filteredVendors } });
+    }
+
+    createVendor(vendor, callback) {
+        if (this.shouldFailAuth) {
+            return callback({ fault: { type: 'AUTHENTICATION' } });
+        }
+
+        const newVendor = {
+            Id: `vendor-${this.vendors.length + 1}`,
+            DisplayName: vendor.DisplayName,
+            PrimaryEmailAddr: vendor.PrimaryEmailAddr || null,
+            AcctNum: vendor.AcctNum || null
+        };
+
+        this.vendors.push(newVendor);
+        this.lastVendorPayload = vendor;
+        callback(null, newVendor);
     }
 
     createDeposit(deposit, callback) {
@@ -1012,6 +1137,56 @@ async function runTests() {
             console.log('❌ Token refresh failure - unexpected error:', error.message);
             failed++;
         }
+    }
+
+    // Test 17: Ensure vendor creation sanitizes invalid fields
+    try {
+        mockQBOClient.reset();
+
+        const config = {
+            companyId: 'test-company-123',
+            environment: 'sandbox',
+            oauthTokens: {
+                accessToken: 'test-access-token',
+                refreshToken: 'test-refresh-token'
+            }
+        };
+
+        const provider = new QuickBooksProvider(config);
+
+        const longExternalId = 'acct_' + '1234567890'.repeat(4);
+
+        const vendorRef = await provider.ensureVendor({
+            displayName: 'Stripe',
+            email: 'not-an-email',
+            externalId: longExternalId
+        });
+
+        const payload = mockQBOClient.lastVendorPayload;
+        const storedVendor = mockQBOClient.vendors[0];
+
+        const expectedAcctNum = longExternalId.substring(0, 30);
+
+        if (vendorRef &&
+            vendorRef.id === 'vendor-1' &&
+            payload &&
+            !payload.PrimaryEmailAddr &&
+            payload.AcctNum === expectedAcctNum &&
+            storedVendor &&
+            storedVendor.AcctNum === expectedAcctNum &&
+            storedVendor.PrimaryEmailAddr === null) {
+            console.log('✅ Ensure vendor creation sanitizes invalid fields');
+            passed++;
+        } else {
+            console.log('❌ Ensure vendor creation sanitizes invalid fields failed');
+            console.log('   Vendor ref:', vendorRef);
+            console.log('   Payload:', payload);
+            console.log('   Stored vendor:', storedVendor);
+            failed++;
+        }
+    } catch (error) {
+        console.log('❌ Ensure vendor creation sanitizes invalid fields - error:', error.message);
+        failed++;
     }
 
     // Print summary
