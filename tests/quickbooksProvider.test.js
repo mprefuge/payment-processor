@@ -25,6 +25,11 @@ class MockQBOClient {
         };
         this.shouldFailAuth = false;
         this.tokenRefreshCount = 0;
+        this.refreshError = null;
+        this.refreshResponse = {
+            access_token: 'new-access-token',
+            refresh_token: 'new-refresh-token'
+        };
     }
 
     reset() {
@@ -34,6 +39,11 @@ class MockQBOClient {
         this.deposits = [];
         this.shouldFailAuth = false;
         this.tokenRefreshCount = 0;
+        this.refreshError = null;
+        this.refreshResponse = {
+            access_token: 'new-access-token',
+            refresh_token: 'new-refresh-token'
+        };
     }
 
     query(queryStr, callback) {
@@ -187,10 +197,11 @@ class MockQBOClient {
 
     refreshAccessToken(callback) {
         this.tokenRefreshCount++;
-        callback(null, {
-            access_token: 'new-access-token',
-            refresh_token: 'new-refresh-token'
-        });
+        if (this.refreshError) {
+            return callback(this.refreshError);
+        }
+
+        callback(null, this.refreshResponse);
     }
 
     // Find methods to match the real node-quickbooks API
@@ -512,7 +523,7 @@ async function runTests() {
             date: new Date('2024-01-15'),
             memo: 'Test journal entry',
             lines: [
-                { type: 'debit', accountId: 'acc-1', amount: 1000, memo: 'Debit memo', description: 'Debit line', name: 'debit-name' },
+                { type: 'debit', accountId: 'acc-1', amount: 1000, memo: 'Debit memo', description: 'Debit line' },
                 { type: 'credit', accountId: 'acc-2', amount: 1000, description: 'Credit line' }
             ]
         };
@@ -523,9 +534,7 @@ async function runTests() {
             result.docNumber === 'JE-2024-001' &&
             mockQBOClient.journalEntries.length === 1 &&
             mockQBOClient.journalEntries[0].Line[0].Description === 'Debit memo' &&
-            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line' &&
-            mockQBOClient.journalEntries[0].Line[0].Name === 'debit-name' &&
-            typeof mockQBOClient.journalEntries[0].Line[1].Name === 'undefined') {
+            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line') {
             console.log('✅ Create journal entry');
             passed++;
         } else {
@@ -741,7 +750,7 @@ async function runTests() {
             toAccountId: 'acc-bank',
             memo: 'Test deposit',
             lines: [
-                { accountId: 'acc-revenue', amount: 1000, memo: 'Deposit memo line 1', description: 'Revenue line 1', name: 'donor-1' },
+                { accountId: 'acc-revenue', amount: 1000, memo: 'Deposit memo line 1', description: 'Revenue line 1' },
                 { accountId: 'acc-revenue', amount: 500 }
             ]
         };
@@ -754,9 +763,7 @@ async function runTests() {
             mockQBOClient.deposits.length === 1 &&
             mockQBOClient.deposits[0].DocNumber === 'DEP-2024-001' &&
             mockQBOClient.deposits[0].Line[0].Description === 'Deposit memo line 1' &&
-            mockQBOClient.deposits[0].Line[1].Description === 'Test deposit' &&
-            mockQBOClient.deposits[0].Line[0].Name === 'donor-1' &&
-            typeof mockQBOClient.deposits[0].Line[1].Name === 'undefined') {
+            mockQBOClient.deposits[0].Line[1].Description === 'Test deposit') {
             console.log('✅ Create deposit');
             passed++;
         } else {
@@ -917,7 +924,7 @@ async function runTests() {
     // Test 15: Token refresh
     try {
         mockQBOClient.reset();
-        
+
         const config = {
             companyId: 'test-company-123',
             environment: 'sandbox',
@@ -928,7 +935,7 @@ async function runTests() {
         };
 
         const provider = new QuickBooksProvider(config);
-        
+
         const initialRefreshCount = mockQBOClient.tokenRefreshCount;
         const result = await provider.refreshTokens();
 
@@ -942,6 +949,38 @@ async function runTests() {
     } catch (error) {
         console.log('❌ Token refresh - error:', error.message);
         failed++;
+    }
+
+    // Test 16: Token refresh failure surfaces error
+    try {
+        mockQBOClient.reset();
+        mockQBOClient.refreshResponse = {
+            error: 'invalid_grant',
+            error_description: 'Incorrect or invalid refresh token'
+        };
+
+        const config = {
+            companyId: 'test-company-123',
+            environment: 'sandbox',
+            oauthTokens: {
+                accessToken: 'expired-token',
+                refreshToken: 'invalid-refresh-token'
+            }
+        };
+
+        const provider = new QuickBooksProvider(config);
+
+        await provider.refreshTokens();
+        console.log('❌ Token refresh failure - expected error but succeeded');
+        failed++;
+    } catch (error) {
+        if (error.message.includes('Incorrect or invalid refresh token')) {
+            console.log('✅ Token refresh failure surfaces error');
+            passed++;
+        } else {
+            console.log('❌ Token refresh failure - unexpected error:', error.message);
+            failed++;
+        }
     }
 
     // Print summary

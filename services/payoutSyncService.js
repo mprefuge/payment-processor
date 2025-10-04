@@ -947,110 +947,23 @@ class PayoutSyncService {
      * @private
      */
     _buildTransactionMemo(txn) {
-        return this._buildTransactionDetailString(txn);
-    }
-
-    /**
-     * Build a detailed description for a per-transaction journal line
-     * @param {Object} txn - Stripe balance transaction
-     * @returns {string}
-     * @private
-     */
-    _buildTransactionDescription(txn) {
-        return this._buildTransactionDetailString(txn);
-    }
-
-    /**
-     * Build a descriptive name for a per-transaction journal line
-     * @param {Object} txn - Stripe balance transaction
-     * @returns {string|null}
-     * @private
-     */
-    _buildTransactionName(txn) {
-        if (!txn || typeof txn !== 'object') {
-            return null;
-        }
-
-        if (txn.source && typeof txn.source === 'string') {
-            return txn.source;
-        }
-
-        if (txn.charge && typeof txn.charge === 'string') {
-            return txn.charge;
-        }
-
-        return typeof txn.id === 'string' ? txn.id : null;
-    }
-
-    /**
-     * Build the detailed string shared by memo/description for per-transaction lines
-     * @param {Object} txn - Stripe balance transaction
-     * @returns {string}
-     * @private
-     */
-    _buildTransactionDetailString(txn) {
         if (!txn || typeof txn !== 'object') {
             return 'Stripe transaction';
         }
 
-        const labelParts = [];
-        const typeLabel = this._humanizeTransactionType(txn.type || 'transaction');
-        if (typeLabel) {
-            labelParts.push(typeLabel);
-        }
-
         if (txn.description) {
-            labelParts.push(txn.description);
-        } else if (txn.metadata && txn.metadata.statement_descriptor) {
-            labelParts.push(txn.metadata.statement_descriptor);
+            return txn.description;
         }
 
-        const summary = labelParts.length > 0 ? labelParts.join(' – ') : 'Stripe transaction';
-
-        const detailParts = [];
-
-        const gross = this._formatCurrency(txn.amount, txn.currency);
-        if (gross) {
-            detailParts.push(`Gross ${gross}`);
+        if (txn.metadata && txn.metadata.statement_descriptor) {
+            return txn.metadata.statement_descriptor;
         }
 
-        const net = this._formatCurrency(txn.net, txn.currency);
-        if (net) {
-            detailParts.push(`Net ${net}`);
+        if (txn.source) {
+            return `Stripe ${txn.type || 'transaction'} ${txn.source}`;
         }
 
-        const fee = this._formatCurrency(txn.fee, txn.currency);
-        if (fee && txn.fee) {
-            detailParts.push(`Fee ${fee}`);
-        }
-
-        if (txn.source && txn.source !== txn.id) {
-            detailParts.push(`Source ${txn.source}`);
-        }
-
-        if (txn.id) {
-            detailParts.push(`Balance txn ${txn.id}`);
-        }
-
-        if (txn.reporting_category) {
-            detailParts.push(`Reporting ${txn.reporting_category}`);
-        }
-
-        if (txn.created) {
-            const created = new Date(txn.created * 1000).toISOString();
-            detailParts.push(`Created ${created}`);
-        }
-
-        const metadataSummary = this._summarizeMetadata(txn.metadata);
-        if (metadataSummary.length > 0) {
-            detailParts.push(`Metadata ${metadataSummary.join(', ')}`);
-        }
-
-        if (detailParts.length === 0) {
-            return summary;
-        }
-
-        return `${summary} | ${detailParts.join(' | ')}`;
+        return `Stripe ${txn.type || 'transaction'} ${txn.id || ''}`.trim();
     }
 
     /**
@@ -1113,8 +1026,6 @@ class PayoutSyncService {
 
         const { revenueAccount, refundsAccount, feesAccount, chargebackAccount, adjustmentAccount } = accounts;
         const memo = this._buildTransactionMemo(txn);
-        const description = this._buildTransactionDescription(txn);
-        const name = this._buildTransactionName(txn);
         const metadata = this._buildTransactionMetadata(txn);
         const rawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
         const amount = Math.abs(rawAmount || 0);
@@ -1129,8 +1040,6 @@ class PayoutSyncService {
             accountName,
             amount,
             memo,
-            description,
-            name,
             metadata
         });
 
@@ -1162,71 +1071,6 @@ class PayoutSyncService {
                     ? makeLine('credit', 'adjustments', adjustmentAccount)
                     : makeLine('debit', 'adjustments', adjustmentAccount);
         }
-    }
-
-    /**
-     * Create a human-readable label from a Stripe transaction type
-     * @param {string} type
-     * @returns {string}
-     * @private
-     */
-    _humanizeTransactionType(type) {
-        if (!type || typeof type !== 'string') {
-            return 'Stripe transaction';
-        }
-
-        return type
-            .split(/[_\s]+/)
-            .filter(Boolean)
-            .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-            .join(' ');
-    }
-
-    /**
-     * Format a cent-based amount into a currency string
-     * @param {number} amount
-     * @param {string} currency
-     * @returns {string|null}
-     * @private
-     */
-    _formatCurrency(amount, currency) {
-        if (typeof amount !== 'number' || isNaN(amount)) {
-            return null;
-        }
-
-        const absolute = Math.abs(amount);
-        const formatted = (absolute / 100).toFixed(2);
-        const sign = amount < 0 ? '-' : '';
-        const currencyCode = (currency || 'usd').toUpperCase();
-
-        return `${sign}${currencyCode} ${formatted}`;
-    }
-
-    /**
-     * Summarize Stripe metadata into a concise list
-     * @param {Object} metadata
-     * @returns {Array<string>}
-     * @private
-     */
-    _summarizeMetadata(metadata) {
-        if (!metadata || typeof metadata !== 'object') {
-            return [];
-        }
-
-        const entries = Object.entries(metadata)
-            .filter(([key]) => key !== 'statement_descriptor')
-            .slice(0, 3);
-
-        return entries
-            .map(([key, value]) => {
-                if (value === null || value === undefined) {
-                    return null;
-                }
-
-                const normalized = typeof value === 'object' ? JSON.stringify(value) : String(value);
-                return `${key}=${normalized}`;
-            })
-            .filter(Boolean);
     }
 
     /**
