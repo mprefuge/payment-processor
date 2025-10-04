@@ -3,22 +3,27 @@
  * 
  * Stores and tracks Stripe webhook events for idempotency and processing state
  * 
- * ⚠️ PRODUCTION WARNING: This implementation uses in-memory storage which will be
- * lost on application restart. For production use, replace with persistent storage:
- * - Database (SQL or NoSQL) for permanent audit trail
- * - Redis for distributed caching with TTL
- * - Azure Table Storage or Cosmos DB
+ * Backed by a persistent key/value provider (file-based by default) so webhook
+ * receipts are durable across process restarts and multiple instances. The
+ * storage client can be swapped for Azure Cache for Redis, Cosmos DB, etc.
  */
 
+const { createPersistentStorageClients } = require('./storage/persistentStoreFactory');
+
 class WebhookEventStore {
-    constructor() {
-        // WARNING: In-memory storage - not suitable for production at scale
-        this.events = new Map(); // event.id -> event data
-        this.logger = console;
-        
-        if (process.env.NODE_ENV === 'production' && !process.env.SUPPRESS_WEBHOOK_STORE_WARNING) {
-            this.logger.warn('⚠️ WebhookEventStore using in-memory storage. Use database for production.');
+    constructor({ storageClient, logger = console, namespace } = {}) {
+        const storageNamespace = namespace || process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+
+        const clients = storageClient
+            ? { webhookEventStore: storageClient }
+            : createPersistentStorageClients(storageNamespace);
+
+        this.storage = clients.webhookEventStore;
+        if (!this.storage) {
+            throw new Error('WebhookEventStore requires a storage client');
         }
+
+        this.logger = logger;
     }
 
     /**
@@ -41,9 +46,9 @@ class WebhookEventStore {
             data: event.data?.object || null
         };
 
-        this.events.set(event.id, record);
+        await this.storage.set(event.id, record);
         this.logger.log(`[WebhookEventStore] Recorded event: ${event.id} (${event.type})`);
-        
+
         return record;
     }
 
@@ -53,7 +58,7 @@ class WebhookEventStore {
      * @returns {boolean} True if event exists
      */
     async hasEvent(eventId) {
-        return this.events.has(eventId);
+        return await this.storage.has(eventId);
     }
 
     /**
@@ -62,7 +67,7 @@ class WebhookEventStore {
      * @returns {Object|null} Event record or null
      */
     async getEvent(eventId) {
-        return this.events.get(eventId) || null;
+        return await this.storage.get(eventId);
     }
 
     /**
@@ -73,7 +78,7 @@ class WebhookEventStore {
      * @returns {Object} Updated event record
      */
     async updateEventStatus(eventId, status, metadata = {}) {
-        const event = this.events.get(eventId);
+        const event = await this.storage.get(eventId);
         if (!event) {
             throw new Error(`Event not found: ${eventId}`);
         }
@@ -93,9 +98,9 @@ class WebhookEventStore {
             event.payoutId = metadata.payoutId;
         }
 
-        this.events.set(eventId, event);
+        await this.storage.set(eventId, event);
         this.logger.log(`[WebhookEventStore] Updated event ${eventId} to status: ${status}`);
-        
+
         return event;
     }
 
@@ -105,7 +110,8 @@ class WebhookEventStore {
      * @returns {Array<Object>} Matching events
      */
     async getEventsByStatus(status) {
-        return Array.from(this.events.values()).filter(e => e.status === status);
+        const events = await this.storage.values();
+        return events.filter(e => e.status === status);
     }
 
     /**
@@ -114,7 +120,8 @@ class WebhookEventStore {
      * @returns {Array<Object>} Matching events
      */
     async getEventsByPayoutId(payoutId) {
-        return Array.from(this.events.values()).filter(e => e.payoutId === payoutId);
+        const events = await this.storage.values();
+        return events.filter(e => e.payoutId === payoutId);
     }
 
     /**
@@ -126,10 +133,11 @@ class WebhookEventStore {
         const cutoff = Date.now() - maxAgeMs;
         let removed = 0;
 
-        for (const [eventId, event] of this.events.entries()) {
+        const entries = await this.storage.entries();
+        for (const [eventId, event] of entries) {
             const eventTime = new Date(event.receivedAt).getTime();
             if (eventTime < cutoff) {
-                this.events.delete(eventId);
+                await this.storage.delete(eventId);
                 removed++;
             }
         }
@@ -139,6 +147,11 @@ class WebhookEventStore {
         }
 
         return removed;
+    }
+
+    async clear() {
+        await this.storage.clear();
+        this.logger.log('[WebhookEventStore] Cleared all events');
     }
 }
 

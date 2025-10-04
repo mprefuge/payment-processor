@@ -1,7 +1,10 @@
 const SyncLedger = require('../services/syncLedger');
+const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
 
 // Global service instances
-const syncLedger = new SyncLedger();
+const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+const { syncLedgerStore } = createPersistentStorageClients(storageNamespace);
+const syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
 
 /**
  * Payout Sync Status Checker

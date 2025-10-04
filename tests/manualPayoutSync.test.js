@@ -9,6 +9,7 @@
 
 const PayoutSyncService = require('../services/payoutSyncService');
 const SyncLedger = require('../services/syncLedger');
+const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider
 class MockAccountingProvider {
@@ -45,7 +46,7 @@ async function testAutomaticPayoutHandling() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('manual-payout-sync-auto');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -81,7 +82,7 @@ async function testManualPayoutHandling() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('manual-payout-sync-manual');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 

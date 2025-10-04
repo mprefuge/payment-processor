@@ -196,6 +196,7 @@ async function run() {
                     NOTIFICATION_EMAIL_TEST: 'notify@example.com',
                     NOTIFICATION_EMAIL_FROM: 'from@example.com',
                     NOTIFICATION_POLICY: 'ALL',
+                    PERSISTENT_STORAGE_NAMESPACE: 'stripe-webhook-email-sendgrid',
                     CRM_PROVIDER: undefined,
                     STRIPE_TEST_SECRET_KEY: 'sk_test_mock'
                 }, async () => {
@@ -234,6 +235,7 @@ async function run() {
                     NOTIFICATION_EMAIL_TEST: 'notify@example.com',
                     NOTIFICATION_EMAIL_FROM: 'from@example.com',
                     NOTIFICATION_POLICY: 'ALL',
+                    PERSISTENT_STORAGE_NAMESPACE: 'stripe-webhook-email-disabled',
                     CRM_PROVIDER: undefined,
                     STRIPE_TEST_SECRET_KEY: 'sk_test_mock'
                 }, async () => {
