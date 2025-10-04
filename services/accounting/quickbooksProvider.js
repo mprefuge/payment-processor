@@ -123,7 +123,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             throw new Error('QuickBooks client not initialized. Check configuration.');
         }
         
-        // Validate lines balance
+        // Validate lines balance (amounts are in cents)
         const totalDebits = journalEntry.lines
             .filter(l => l.type === 'debit')
             .reduce((sum, l) => sum + l.amount, 0);
@@ -131,8 +131,8 @@ class QuickBooksProvider extends BaseAccountingProvider {
             .filter(l => l.type === 'credit')
             .reduce((sum, l) => sum + l.amount, 0);
             
-        if (Math.abs(totalDebits - totalCredits) > 0.01) {
-            throw new Error(`Journal entry lines do not balance: debits=${totalDebits}, credits=${totalCredits}`);
+        if (Math.abs(totalDebits - totalCredits) > 1) { // Allow 1 cent tolerance
+            throw new Error(`Journal entry lines do not balance: debits=${totalDebits / 100}, credits=${totalCredits / 100}`);
         }
 
         // Validate that all lines have valid account IDs
@@ -146,7 +146,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             }
         }
 
-        this.logger.log(`[QBO] Journal entry has ${journalEntry.lines.length} lines, debits=${totalDebits}, credits=${totalCredits}`);
+        this.logger.log(`[QBO] Journal entry has ${journalEntry.lines.length} lines, debits=$${(totalDebits / 100).toFixed(2)}, credits=$${(totalCredits / 100).toFixed(2)}`);
 
         try {
             // Search for existing JE by DocNumber using findJournalEntries
@@ -181,7 +181,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 Line: journalEntry.lines.map((line, index) => ({
                     Id: (index + 1).toString(),
                     Description: line.description || journalEntry.memo || '',
-                    Amount: line.amount.toFixed(2),
+                    Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
                     DetailType: 'JournalEntryLineDetail',
                     JournalEntryLineDetail: {
                         PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
@@ -273,7 +273,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                     txnDate: existing.TxnDate,
                     fromAccountRef: existing.FromAccountRef,
                     toAccountRef: existing.ToAccountRef,
-                    amount: parseFloat(existing.Amount),
+                    amount: Math.round(parseFloat(existing.Amount) * 100), // Convert dollars back to cents
                     provider: 'quickbooks',
                     created: false
                 };
@@ -287,7 +287,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 ToAccountRef: {
                     value: transfer.toAccountId
                 },
-                Amount: transfer.amount.toFixed(2),
+                Amount: (transfer.amount / 100).toFixed(2), // Convert cents to dollars
                 TxnDate: this._formatDate(transfer.date),
                 PrivateNote: `${transfer.memo || ''} [DocNum: ${transfer.docNumber}]`
             };
@@ -313,7 +313,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 txnDate: created.TxnDate,
                 fromAccountRef: created.FromAccountRef,
                 toAccountRef: created.ToAccountRef,
-                amount: parseFloat(created.Amount),
+                amount: Math.round(parseFloat(created.Amount) * 100), // Convert dollars back to cents
                 provider: 'quickbooks',
                 created: true
             };
@@ -364,7 +364,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                     docNumber: deposit.docNumber,
                     txnDate: existing.TxnDate,
                     depositToAccountRef: existing.DepositToAccountRef,
-                    totalAmt: parseFloat(existing.TotalAmt),
+                    totalAmt: Math.round(parseFloat(existing.TotalAmt) * 100), // Convert dollars back to cents
                     provider: 'quickbooks',
                     created: false
                 };
@@ -379,7 +379,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 PrivateNote: `${deposit.memo || ''} [DocNum: ${deposit.docNumber}]`,
                 Line: deposit.lines.map((line, index) => ({
                     Id: (index + 1).toString(),
-                    Amount: line.amount.toFixed(2),
+                    Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
                     DetailType: 'DepositLineDetail',
                     DepositLineDetail: {
                         AccountRef: {
@@ -410,7 +410,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 docNumber: deposit.docNumber,
                 txnDate: created.TxnDate,
                 depositToAccountRef: created.DepositToAccountRef,
-                totalAmt: parseFloat(created.TotalAmt),
+                totalAmt: Math.round(parseFloat(created.TotalAmt) * 100), // Convert dollars back to cents
                 provider: 'quickbooks',
                 created: true
             };
