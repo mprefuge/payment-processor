@@ -1070,7 +1070,8 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
             const postingInstructions = payoutSyncService.generatePostingInstructions(
                 payout,
                 summary,
-                stripeAccountId
+                stripeAccountId,
+                balanceTransactions
             );
             
             // Record the failed sync in ledger so next payout can use its arrival_date as lower bound
@@ -1113,7 +1114,8 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
         const postingInstructions = payoutSyncService.generatePostingInstructions(
             payout,
             summary,
-            stripeAccountId
+            stripeAccountId,
+            balanceTransactions
         );
         context.log(`[PayoutJob] Generated ${postingInstructions.documents.length} documents`);
 
