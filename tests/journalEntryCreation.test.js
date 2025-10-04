@@ -61,10 +61,12 @@ class MockQBOClient {
 
         if (Array.isArray(criteria)) {
             criteria.forEach(c => {
-                if (c.field === 'PrivateNote' && c.operator === 'LIKE') {
-                    const searchValue = c.value.replace(/%/g, '');
-                    filteredTransfers = filteredTransfers.filter(t => 
-                        t.PrivateNote && t.PrivateNote.includes(searchValue)
+                if (c.field === 'TxnDate') {
+                    filteredTransfers = filteredTransfers.filter(t => t.TxnDate === c.value);
+                }
+                if (c.field === 'Amount') {
+                    filteredTransfers = filteredTransfers.filter(t =>
+                        parseFloat(t.Amount).toFixed(2) === parseFloat(c.value).toFixed(2)
                     );
                 }
             });

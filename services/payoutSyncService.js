@@ -620,13 +620,27 @@ class PayoutSyncService {
         // Ensure all required accounts exist in the accounting system
         // and get their account IDs
         const accountsToEnsure = new Set();
+        const addAccountToEnsure = (accountName) => {
+            if (accountName) {
+                accountsToEnsure.add(accountName);
+            }
+        };
+
         for (const doc of postingInstructions.documents) {
-            if (doc.type === 'journal') {
-                doc.lines.forEach(line => {
-                    if (line.accountName) {
-                        accountsToEnsure.add(line.accountName);
-                    }
-                });
+            switch (doc.type) {
+                case 'journal':
+                    doc.lines.forEach(line => addAccountToEnsure(line.accountName));
+                    break;
+                case 'transfer':
+                    addAccountToEnsure(doc.fromAccountName);
+                    addAccountToEnsure(doc.toAccountName);
+                    break;
+                case 'deposit':
+                    addAccountToEnsure(doc.toAccountName);
+                    doc.lines.forEach(line => addAccountToEnsure(line.accountName));
+                    break;
+                default:
+                    break;
             }
         }
 
@@ -685,8 +699,12 @@ class PayoutSyncService {
 
                     case 'transfer':
                         // Map account names to IDs (in production, lookup from chart of accounts)
-                        const fromAccountId = `account-${doc.fromAccountName}`;
-                        const toAccountId = `account-${doc.toAccountName}`;
+                        const fromAccountId = accountMap[doc.fromAccountName];
+                        const toAccountId = accountMap[doc.toAccountName];
+
+                        if (!fromAccountId || !toAccountId) {
+                            throw new Error(`Account ID not found for transfer accounts: from=${doc.fromAccountName}, to=${doc.toAccountName}`);
+                        }
 
                         result = await this.accountingProvider.upsertTransfer({
                             docNumber: doc.docNumber,
@@ -704,19 +722,29 @@ class PayoutSyncService {
                         break;
 
                     case 'deposit':
-                        const depositAccountId = `account-${doc.toAccountName}`;
+                        const depositAccountId = accountMap[doc.toAccountName];
+                        if (!depositAccountId) {
+                            throw new Error(`Account ID not found for deposit account: ${doc.toAccountName}`);
+                        }
+
+                        const depositLinesWithAccountIds = doc.lines.map(line => {
+                            const accountId = accountMap[line.accountName];
+                            if (!accountId) {
+                                throw new Error(`Account ID not found for deposit line account: ${line.accountName}`);
+                            }
+                            return {
+                                ...line,
+                                accountId
+                            };
+                        });
 
                         result = await this.accountingProvider.upsertDeposit({
                             docNumber: doc.docNumber,
                             date: doc.date,
                             toAccountId: depositAccountId,
-                            lines: doc.lines.map(line => ({
-                                accountId: `account-${line.accountName}`,
-                                amount: line.amount,
-                                memo: line.memo
-                            })),
+                            lines: depositLinesWithAccountIds,
                             memo: doc.memo,
-                            metadata: { 
+                            metadata: {
                                 payoutId: postingInstructions.payoutId,
                                 stripeAccountId: postingInstructions.stripeAccountId
                             }
