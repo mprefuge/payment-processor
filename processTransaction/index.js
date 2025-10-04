@@ -4,13 +4,88 @@ const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/crm/crmFactory');
 const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
 
+const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
+const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
+
+const defaultStripeClientFactory = (key) => new Stripe(key);
+let stripeClientFactory = defaultStripeClientFactory;
+
+const parseBooleanFlag = (value) => {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    if (typeof value === 'number') {
+        return value !== 0;
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+
+        if (TRUTHY_VALUES.has(normalized)) {
+            return true;
+        }
+
+        if (FALSY_VALUES.has(normalized)) {
+            return false;
+        }
+    }
+
+    return Boolean(value);
+};
+
+const getConfiguredMode = (context) => {
+    if (context?.bindingData && typeof context.bindingData.livemode !== 'undefined') {
+        return parseBooleanFlag(context.bindingData.livemode);
+    }
+
+    if (typeof process.env.STRIPE_MODE === 'string') {
+        const normalized = process.env.STRIPE_MODE.trim().toLowerCase();
+
+        if (normalized === 'live') {
+            return true;
+        }
+
+        if (normalized === 'test' || normalized === 'sandbox') {
+            return false;
+        }
+
+        if (TRUTHY_VALUES.has(normalized)) {
+            return true;
+        }
+
+        if (FALSY_VALUES.has(normalized)) {
+            return false;
+        }
+    }
+
+    const envFlag =
+        typeof process.env.STRIPE_LIVE_MODE_ENABLED !== 'undefined'
+            ? process.env.STRIPE_LIVE_MODE_ENABLED
+            : process.env.STRIPE_LIVEMODE;
+
+    if (typeof envFlag !== 'undefined') {
+        return parseBooleanFlag(envFlag);
+    }
+
+    return false;
+};
+
+const setStripeClientFactory = (factory) => {
+    stripeClientFactory = typeof factory === 'function' ? factory : defaultStripeClientFactory;
+};
+
+const resetStripeClientFactory = () => {
+    stripeClientFactory = defaultStripeClientFactory;
+};
+
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
     const stripeKey = isLiveMode
         ? process.env.STRIPE_LIVE_SECRET_KEY
         : process.env.STRIPE_TEST_SECRET_KEY;
 
-    const stripe = new Stripe(stripeKey);
+    const stripe = stripeClientFactory(stripeKey);
 
     const sendgridKey = process.env.SENDGRID_API_KEY;
     if (sendgridKey) {
@@ -474,10 +549,11 @@ module.exports = async function (context, req) {
             };
             return;
         }
-        
+
         // Initialize services
-        const { stripe } = initializeServices(body.livemode);
-        
+        const isLiveMode = getConfiguredMode(context);
+        const { stripe } = initializeServices(isLiveMode);
+
         // Search for existing customer
         const fullName = `${body.firstname} ${body.lastname}`;
         const existingCustomers = await searchStripeCustomer(stripe, body.email, fullName);
@@ -541,7 +617,11 @@ module.exports = async function (context, req) {
 
 module.exports.__internals = {
     searchStripeCustomer,
-    escapeStripeQueryValue
+    escapeStripeQueryValue,
+    initializeServices,
+    getConfiguredMode,
+    setStripeClientFactory,
+    resetStripeClientFactory
 };
 
 const createRequestSummary = (body) => {
@@ -555,10 +635,6 @@ const createRequestSummary = (body) => {
 
     if (typeof body?.frequency === 'string') {
         summary.frequency = body.frequency;
-    }
-
-    if (typeof body?.livemode !== 'undefined') {
-        summary.livemode = Boolean(body.livemode);
     }
 
     return summary;
