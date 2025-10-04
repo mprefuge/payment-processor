@@ -216,17 +216,51 @@ class QuickBooksProvider extends BaseAccountingProvider {
                         }
                     };
 
-                    if (line.name) {
-                        const entityType = line.entityContext === 'transaction'
-                            ? 'Customer'
-                            : 'Other';
+                    if (line) {
+                        const entityRef = typeof line.entityRef === 'object' && line.entityRef
+                            ? { ...line.entityRef }
+                            : {};
 
-                        jeLine.JournalEntryLineDetail.Entity = {
-                            Type: entityType,
-                            EntityRef: {
-                                name: line.name
+                        const entityId = entityRef.value
+                            || line.entityRefValue
+                            || line.entityId
+                            || (line.entity && line.entity.id);
+
+                        const entityName = entityRef.name
+                            || (line.entity && line.entity.name)
+                            || line.entityRefName
+                            || line.name;
+
+                        const entityType = entityRef.type
+                            || (line.entity && line.entity.type)
+                            || line.entityType
+                            || (line.entityContext === 'transaction' ? 'Customer' : 'Other');
+
+                        if (entityId) {
+                            jeLine.JournalEntryLineDetail.Entity = {
+                                Type: entityType,
+                                EntityRef: {
+                                    value: entityId
+                                }
+                            };
+
+                            if (entityName) {
+                                jeLine.JournalEntryLineDetail.Entity.EntityRef.name = entityName;
                             }
-                        };
+                        } else if (entityName) {
+                            this.logger.warn(
+                                `[QBO] Skipping entity reference for journal line ${index + 1} (${entityName}) - missing entity identifier`
+                            );
+
+                            if (typeof jeLine.Description === 'string') {
+                                const trimmedName = entityName.trim();
+                                if (trimmedName.length > 0 && !jeLine.Description.includes(trimmedName)) {
+                                    jeLine.Description = jeLine.Description.length > 0
+                                        ? `${jeLine.Description} | ${trimmedName}`
+                                        : trimmedName;
+                                }
+                            }
+                        }
                     }
 
                     return jeLine;

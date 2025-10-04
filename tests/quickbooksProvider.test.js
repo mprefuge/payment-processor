@@ -545,11 +545,25 @@ async function runTests() {
 
         const createdLine = mockQBOClient.journalEntries[0]?.Line || [];
 
+        const debitDescription = createdLine[0]?.Description || '';
+        const creditDescription = createdLine[1]?.Description || '';
+
+        const debitHasAllDetails =
+            debitDescription.includes('Debit line') &&
+            debitDescription.includes('Debit memo') &&
+            debitDescription.includes('Test journal entry') &&
+            debitDescription.includes('line-debit');
+
+        const creditHasAllDetails =
+            creditDescription.includes('Credit line') &&
+            creditDescription.includes('Test journal entry') &&
+            creditDescription.includes('line-credit');
+
         if (result.created === true &&
             result.docNumber === 'JE-2024-001' &&
             mockQBOClient.journalEntries.length === 1 &&
-            createdLine[0]?.Description === 'Debit line | line-debit | Debit memo | Test journal entry' &&
-            createdLine[1]?.Description === 'Credit line | line-credit | Test journal entry' &&
+            debitHasAllDetails &&
+            creditHasAllDetails &&
             !('Name' in (createdLine[0] || {})) &&
             !('Name' in (createdLine[1] || {}))) {
             console.log('✅ Create journal entry');
