@@ -254,11 +254,25 @@ const validateRequest = (body) => {
     return { isValid: true };
 };
 
+// Escape values for safe usage in Stripe search queries
+const escapeStripeQueryValue = (value) => {
+    if (value === null || value === undefined) {
+        return '';
+    }
+
+    return String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'");
+};
+
 // Search for existing Stripe customer
 const searchStripeCustomer = async (stripe, email, fullName) => {
     try {
+        const sanitizedEmail = escapeStripeQueryValue(email);
+        const sanitizedFullName = escapeStripeQueryValue(fullName);
+
         const customers = await stripe.customers.search({
-            query: `email:'${email}' AND name:'${fullName}'`
+            query: `email:'${sanitizedEmail}' AND name:'${sanitizedFullName}'`
         });
         
         // Additional validation: ensure name matches exactly
@@ -523,6 +537,11 @@ module.exports = async function (context, req) {
             })
         };
     }
+};
+
+module.exports.__internals = {
+    searchStripeCustomer,
+    escapeStripeQueryValue
 };
 
 const createRequestSummary = (body) => {
