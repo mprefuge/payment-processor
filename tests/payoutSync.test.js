@@ -53,8 +53,12 @@ class MockAccountingProvider {
     async ensureChartOfAccounts(accounts) {
         // Mock implementation - returns account IDs for all account names
         const accountMap = {};
-        accounts.forEach((account, index) => {
-            accountMap[account.name] = `account-${index + 1}`;
+        accounts.forEach((account) => {
+            const normalized = account.name
+                .toLowerCase()
+                .replace(/\s+/g, '_')
+                .replace(/[^a-z0-9_]/g, '');
+            accountMap[account.name] = `acct-${normalized}`;
         });
         return accountMap;
     }
@@ -451,6 +455,16 @@ async function runTests() {
                     toAccountName: 'Operating Bank',
                     amount: 1000,
                     memo: 'Test transfer'
+                },
+                {
+                    type: 'deposit',
+                    docNumber: 'STRIPE-default-po_post_test-DEP',
+                    date: new Date(),
+                    toAccountName: 'Operating Bank',
+                    memo: 'Test deposit',
+                    lines: [
+                        { accountName: 'Stripe Clearing', amount: 1000, memo: 'Deposit from clearing' }
+                    ]
                 }
             ]
         };
@@ -459,15 +473,38 @@ async function runTests() {
 
         if (providerDocIds.journalEntry &&
             providerDocIds.transfer &&
+            providerDocIds.deposit &&
             provider.journalEntries.length === 1 &&
-            provider.transfers.length === 1) {
-            console.log('✅ Post to accounting provider');
-            passed++;
+            provider.transfers.length === 1 &&
+            provider.deposits.length === 1) {
+            const expectedId = (name) => `acct-${name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')}`;
+            const transfer = provider.transfers[0];
+            const deposit = provider.deposits[0];
+
+            const transferAccountsCorrect =
+                transfer.fromAccountId === expectedId('Stripe Clearing') &&
+                transfer.toAccountId === expectedId('Operating Bank');
+
+            const depositAccountsCorrect =
+                deposit.toAccountId === expectedId('Operating Bank') &&
+                deposit.lines.length === 1 &&
+                deposit.lines[0].accountId === expectedId('Stripe Clearing');
+
+            if (transferAccountsCorrect && depositAccountsCorrect) {
+                console.log('✅ Post to accounting provider');
+                passed++;
+            } else {
+                console.log('❌ Post to accounting provider - incorrect account IDs');
+                console.log('   Transfer:', transfer);
+                console.log('   Deposit:', deposit);
+                failed++;
+            }
         } else {
             console.log('❌ Post to accounting provider - failed');
             console.log('   Provider doc IDs:', providerDocIds);
             console.log('   JE count:', provider.journalEntries.length);
             console.log('   Transfer count:', provider.transfers.length);
+            console.log('   Deposit count:', provider.deposits.length);
             failed++;
         }
     } catch (error) {
