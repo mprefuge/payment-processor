@@ -959,11 +959,89 @@ class PayoutSyncService {
             return txn.metadata.statement_descriptor;
         }
 
-        if (txn.source) {
-            return `Stripe ${txn.type || 'transaction'} ${txn.source}`;
+        const base = `Stripe ${txn.type || 'transaction'}`.trim();
+
+        // Only append the source/ID for non-charge transactions so the charge
+        // identifier can be displayed in the dedicated Name column.
+        if (txn.source && txn.type !== 'charge' && txn.type !== 'payment') {
+            return `${base} ${txn.source}`.trim();
         }
 
-        return `Stripe ${txn.type || 'transaction'} ${txn.id || ''}`.trim();
+        if (txn.id && txn.type !== 'charge' && txn.type !== 'payment') {
+            return `${base} ${txn.id}`.trim();
+        }
+
+        return base;
+    }
+
+    /**
+     * Build a richer description for a balance transaction, primarily used for
+     * charge tracking when rendering posting instructions or accounting lines.
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string|null}
+     * @private
+     */
+    _buildTransactionDescription(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        const memo = this._buildTransactionMemo(txn);
+
+        // Only enrich charge/payment transactions with detailed amounts. Other
+        // transaction types keep the memo-only description.
+        if (txn.type !== 'charge' && txn.type !== 'payment') {
+            return memo;
+        }
+
+        const details = [];
+
+        if (typeof txn.amount === 'number') {
+            const formatted = this._formatCurrency(txn.amount, txn.currency);
+            if (formatted) {
+                details.push(`Gross: ${formatted}`);
+            }
+        }
+
+        if (typeof txn.fee === 'number' && txn.fee !== 0) {
+            const formattedFee = this._formatCurrency(Math.abs(txn.fee), txn.currency);
+            if (formattedFee) {
+                details.push(`Fees: ${formattedFee}`);
+            }
+        }
+
+        if (typeof txn.net === 'number') {
+            const formattedNet = this._formatCurrency(txn.net, txn.currency);
+            if (formattedNet) {
+                details.push(`Net: ${formattedNet}`);
+            }
+        }
+
+        if (details.length === 0) {
+            return memo;
+        }
+
+        const detailString = details.join(', ');
+        return memo ? `${memo} | ${detailString}` : detailString;
+    }
+
+    /**
+     * Build the name to associate with a transaction line. For Stripe charges we
+     * prefer the charge identifier so it can surface in accounting Name columns.
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string|null}
+     * @private
+     */
+    _buildTransactionName(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        if (txn.type === 'charge' || txn.type === 'payment') {
+            return txn.source || txn.id || null;
+        }
+
+        return null;
     }
 
     /**
@@ -1026,6 +1104,8 @@ class PayoutSyncService {
 
         const { revenueAccount, refundsAccount, feesAccount, chargebackAccount, adjustmentAccount } = accounts;
         const memo = this._buildTransactionMemo(txn);
+        const description = this._buildTransactionDescription(txn);
+        const name = this._buildTransactionName(txn);
         const metadata = this._buildTransactionMetadata(txn);
         const rawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
         const amount = Math.abs(rawAmount || 0);
@@ -1040,6 +1120,8 @@ class PayoutSyncService {
             accountName,
             amount,
             memo,
+            description,
+            name,
             metadata
         });
 
@@ -1125,7 +1207,7 @@ class PayoutSyncService {
      */
     _getAccountSubType(accountName) {
         const normalizedName = accountName.toLowerCase();
-        
+
         if (normalizedName.includes('clearing')) {
             return 'CashOnHand';
         } else if (normalizedName.includes('bank')) {
@@ -1135,8 +1217,33 @@ class PayoutSyncService {
         } else if (normalizedName.includes('fee') || normalizedName.includes('expense')) {
             return 'SuppliesMaterials';
         }
-        
+
         return 'CashOnHand'; // Default
+    }
+
+    /**
+     * Format an amount (in cents) into a currency string for descriptions.
+     * @param {number} amount - Amount in the smallest currency unit
+     * @param {string} currency - ISO currency code (defaults to USD)
+     * @returns {string|null}
+     * @private
+     */
+    _formatCurrency(amount, currency = 'usd') {
+        if (typeof amount !== 'number' || Number.isNaN(amount)) {
+            return null;
+        }
+
+        const iso = (currency || 'usd').toUpperCase();
+        const absolute = Math.abs(amount) / 100;
+        const formatted = absolute.toFixed(2);
+
+        let symbol = `${iso} `;
+        if (iso === 'USD') {
+            symbol = '$';
+        }
+
+        const sign = amount < 0 ? '-' : '';
+        return `${sign}${symbol}${formatted}`;
     }
 }
 

@@ -741,12 +741,14 @@ async function runTests() {
         const feeTransaction = balanceTransactions.find(txn => txn.id === 'txn_fee_1');
         const adjustmentTransaction = balanceTransactions.find(txn => txn.id === 'txn_adjust_1');
 
+        const expectedChargeDescription = 'Donation A | Gross: $50.00, Fees: $1.50, Net: $48.50';
+
         const linesValid = journal &&
             clearingLine &&
             clearingLine.type === 'debit' &&
             clearingLine.amount === payout.amount &&
             detailLines.length === balanceTransactions.length &&
-            chargeLine && chargeLine.type === 'credit' && chargeLine.accountKey === 'revenue' && chargeLine.amount === Math.abs(chargeTransaction.net) && chargeLine.memo === 'Donation A' &&
+            chargeLine && chargeLine.type === 'credit' && chargeLine.accountKey === 'revenue' && chargeLine.amount === Math.abs(chargeTransaction.net) && chargeLine.memo === 'Donation A' && chargeLine.description === expectedChargeDescription && chargeLine.name === 'ch_123' &&
             refundLine && refundLine.type === 'debit' && refundLine.accountKey === 'refunds' && refundLine.amount === Math.abs(refundTransaction.net) &&
             feeLine && feeLine.type === 'debit' && feeLine.accountKey === 'fees' && feeLine.amount === Math.abs(feeTransaction.net) &&
             adjustmentLine && adjustmentLine.type === 'credit' && adjustmentLine.accountKey === 'adjustments' && adjustmentLine.amount === Math.abs(adjustmentTransaction.net) &&
