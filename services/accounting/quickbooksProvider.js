@@ -188,8 +188,14 @@ class QuickBooksProvider extends BaseAccountingProvider {
                         AccountRef: {
                             value: line.accountId
                         }
+                    };
+
+                    if (line.name) {
+                        linePayload.Name = line.name;
                     }
-                }))
+
+                    return linePayload;
+                })
             };
 
             const created = await this._executeWithTokenRefresh(() =>
