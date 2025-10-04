@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const Stripe = require('stripe');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/crm/crmFactory');
@@ -416,12 +417,18 @@ const getIntervalCount = (frequency) => {
 
 // Main function handler for traditional Azure Functions model
 module.exports = async function (context, req) {
+    const requestId = randomUUID();
+    const secureDebugEnabled = process.env.SECURE_DEBUG === 'true';
+    const log = (message, extra = {}) => {
+        context.log(message, { requestId, ...extra });
+    };
+
     try {
-        context.log('Processing payment request');
-        
+        log('Processing payment request');
+
         let body = req.body;
         if (!body) {
-            context.log('No request body provided');
+            log('No request body provided');
             context.res = {
                 status: 400,
                 body: JSON.stringify({
@@ -430,27 +437,20 @@ module.exports = async function (context, req) {
             };
             return;
         }
-        
-        context.log('Request body parsed successfully:', JSON.stringify(body, null, 2));
-        
-        // Send debug email (optional, only if DEBUG_EMAIL is configured)
-        if (process.env.SENDGRID_API_KEY && process.env.DEBUG_EMAIL) {
-            try {
-                const debugMsg = {
-                    to: process.env.DEBUG_EMAIL,
-                    from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
-                    subject: `Debug: New Payment Submission - ${body.firstname || 'Unknown'} ${body.lastname || 'Unknown'}`,
-                    html: `<p>${JSON.stringify(body, null, 2)}</p>`,
-                };
-                await sgMail.send(debugMsg);
-            } catch (debugError) {
-                context.log('Debug email failed:', debugError);
-            }
+
+        const requestSummary = createRequestSummary(body);
+        log('Request body summary', requestSummary);
+
+        if (secureDebugEnabled) {
+            log('Secure debug payload snapshot', { payload: redactSensitiveFields(body) });
         }
-        
+
         // Validate request
         const validation = validateRequest(body);
-        context.log('Validation result:', validation);
+        log('Validation result', {
+            isValid: validation.isValid,
+            hasError: Boolean(validation.error)
+        });
         if (!validation.isValid) {
             context.res = {
                 status: 400,
@@ -471,20 +471,20 @@ module.exports = async function (context, req) {
         // Get or create customer
         let customerId;
         if (existingCustomers.length === 0) {
-            context.log('Creating new Stripe customer');
+            log('Creating new Stripe customer');
             const newCustomer = await createStripeCustomer(stripe, body);
             customerId = newCustomer.id;
         } else {
-            context.log('Using existing Stripe customer');
+            log('Using existing Stripe customer');
             customerId = existingCustomers[0].id;
-            
+
             // Update existing customer with latest information
-            context.log('Updating existing Stripe customer with latest information');
+            log('Updating existing Stripe customer with latest information');
             await updateStripeCustomer(stripe, customerId, body);
         }
-        
+
         // Create checkout session
-        context.log('Creating Stripe checkout session');
+        log('Creating Stripe checkout session');
         const session = await createCheckoutSession(stripe, customerId, body);
         
         // Sync contact to CRM (Salesforce) if configured
@@ -509,11 +509,12 @@ module.exports = async function (context, req) {
             })
         };
         
-        context.log('Donation processing completed successfully');
-        
+        log('Donation processing completed successfully');
+
     } catch (error) {
-        context.log('Error processing donation:', error);
-        
+        log('Error processing donation', { error: error.message });
+        console.error('Donation processing error details:', { requestId, stack: error.stack });
+
         context.res = {
             status: 500,
             body: JSON.stringify({
@@ -522,4 +523,61 @@ module.exports = async function (context, req) {
             })
         };
     }
+};
+
+const createRequestSummary = (body) => {
+    const summary = {
+        receivedFields: Object.keys(body || {})
+    };
+
+    if (typeof body?.amount === 'number') {
+        summary.amount = body.amount;
+    }
+
+    if (typeof body?.frequency === 'string') {
+        summary.frequency = body.frequency;
+    }
+
+    if (typeof body?.livemode !== 'undefined') {
+        summary.livemode = Boolean(body.livemode);
+    }
+
+    return summary;
+};
+
+const redactSensitiveFields = (data) => {
+    if (data === null || data === undefined) {
+        return data;
+    }
+
+    if (Array.isArray(data)) {
+        return data.map(item => redactSensitiveFields(item));
+    }
+
+    if (typeof data !== 'object') {
+        return typeof data === 'string' ? '[REDACTED]' : data;
+    }
+
+    const sensitiveKeywords = ['name', 'email', 'phone', 'address', 'line1', 'line2', 'city', 'state', 'zip', 'postal', 'country', 'card', 'account', 'routing', 'ssn'];
+    const nestedRedactionKeywords = ['address'];
+
+    return Object.entries(data).reduce((accumulator, [key, value]) => {
+        const lowerKey = key.toLowerCase();
+        const shouldRedact = sensitiveKeywords.some(keyword => lowerKey.includes(keyword));
+        const requiresNestedRedaction = nestedRedactionKeywords.some(keyword => lowerKey.includes(keyword));
+
+        if (shouldRedact) {
+            if (requiresNestedRedaction && typeof value === 'object' && value !== null) {
+                accumulator[key] = redactSensitiveFields(value);
+            } else {
+                accumulator[key] = '[REDACTED]';
+            }
+        } else if (typeof value === 'object' && value !== null) {
+            accumulator[key] = redactSensitiveFields(value);
+        } else {
+            accumulator[key] = value;
+        }
+
+        return accumulator;
+    }, {});
 };
