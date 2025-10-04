@@ -174,22 +174,51 @@ class QuickBooksProvider extends BaseAccountingProvider {
             }
 
             // Create new journal entry
+            const buildLineDescription = (line) => {
+                const parts = [];
+                const addPart = (value) => {
+                    if (!value || typeof value !== 'string') {
+                        return;
+                    }
+
+                    const trimmed = value.trim();
+                    if (trimmed.length === 0) {
+                        return;
+                    }
+
+                    if (!parts.includes(trimmed)) {
+                        parts.push(trimmed);
+                    }
+                };
+
+                addPart(line.description);
+                addPart(line.name);
+                addPart(line.memo);
+                addPart(journalEntry.memo);
+
+                return parts.join(' | ');
+            };
+
             const jeData = {
                 DocNumber: journalEntry.docNumber,
                 TxnDate: this._formatDate(journalEntry.date),
                 PrivateNote: journalEntry.memo || '',
-                Line: journalEntry.lines.map((line, index) => ({
-                    Id: (index + 1).toString(),
-                    Description: line.description || line.memo || journalEntry.memo || '',
-                    Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
-                    DetailType: 'JournalEntryLineDetail',
-                    JournalEntryLineDetail: {
-                        PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
-                        AccountRef: {
-                            value: line.accountId
+                Line: journalEntry.lines.map((line, index) => {
+                    const jeLine = {
+                        Id: (index + 1).toString(),
+                        Description: buildLineDescription(line) || '',
+                        Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
+                        DetailType: 'JournalEntryLineDetail',
+                        JournalEntryLineDetail: {
+                            PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
+                            AccountRef: {
+                                value: line.accountId
+                            }
                         }
-                    }
-                }))
+                    };
+
+                    return jeLine;
+                })
             };
 
             const created = await this._executeWithTokenRefresh(() =>

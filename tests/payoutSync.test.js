@@ -741,7 +741,15 @@ async function runTests() {
         const feeTransaction = balanceTransactions.find(txn => txn.id === 'txn_fee_1');
         const adjustmentTransaction = balanceTransactions.find(txn => txn.id === 'txn_adjust_1');
 
-        const expectedChargeDescription = 'Donation A | Gross: $50.00, Fees: $1.50, Net: $48.50';
+        const expectedChargeDescription = [
+            'Stripe payout po_txn_mode',
+            'Currency: USD',
+            'Mode: Per transaction',
+            'Donation A',
+            'Gross: $50.00, Fees: $1.50, Net: $48.50',
+            'Transaction: txn_charge_1',
+            'Amount: $48.50'
+        ].join(' | ');
 
         const linesValid = journal &&
             clearingLine &&
