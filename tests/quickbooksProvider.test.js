@@ -533,7 +533,7 @@ async function runTests() {
         if (result.created === true &&
             result.docNumber === 'JE-2024-001' &&
             mockQBOClient.journalEntries.length === 1 &&
-            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit memo' &&
+            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit line' &&
             mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line') {
             console.log('✅ Create journal entry');
             passed++;
