@@ -427,23 +427,18 @@ class PayoutSyncService {
 
         // Build journal entry lines
         const jeLines = [];
+        let clearingNet = 0;
 
         // Revenue (charges)
         if (summary.charges.grossAmount > 0) {
-            jeLines.push({
-                type: 'debit',
-                accountKey: 'clearing',
-                accountName: clearingAccount,
-                amount: summary.charges.grossAmount,
-                memo: `Stripe charges - ${summary.charges.count} transactions`
-            });
             jeLines.push({
                 type: 'credit',
                 accountKey: 'revenue',
                 accountName: revenueAccount,
                 amount: summary.charges.grossAmount,
-                memo: `Revenue from Stripe charges`
+                memo: `Revenue from ${summary.charges.count} Stripe charges`
             });
+            clearingNet += summary.charges.grossAmount;
         }
 
         // Refunds
@@ -455,13 +450,7 @@ class PayoutSyncService {
                 amount: summary.refunds.amount,
                 memo: `Stripe refunds - ${summary.refunds.count} transactions`
             });
-            jeLines.push({
-                type: 'credit',
-                accountKey: 'clearing',
-                accountName: clearingAccount,
-                amount: summary.refunds.amount,
-                memo: `Refunds processed`
-            });
+            clearingNet -= summary.refunds.amount;
         }
 
         // Stripe fees
@@ -472,15 +461,9 @@ class PayoutSyncService {
                 accountKey: 'fees',
                 accountName: feesAccount,
                 amount: totalFees,
-                memo: `Stripe fees`
+                memo: `Stripe processing fees`
             });
-            jeLines.push({
-                type: 'credit',
-                accountKey: 'clearing',
-                accountName: clearingAccount,
-                amount: totalFees,
-                memo: `Stripe fees deducted`
-            });
+            clearingNet -= totalFees;
         }
 
         // Disputes/chargebacks
@@ -492,48 +475,49 @@ class PayoutSyncService {
                 amount: summary.disputes.amount,
                 memo: `Chargebacks - ${summary.disputes.count} disputes`
             });
-            jeLines.push({
-                type: 'credit',
-                accountKey: 'clearing',
-                accountName: clearingAccount,
-                amount: summary.disputes.amount,
-                memo: `Dispute losses`
-            });
+            clearingNet -= summary.disputes.amount;
         }
 
         // Adjustments
         if (summary.adjustments.amount !== 0) {
+            const adjustmentAmount = Math.abs(summary.adjustments.amount);
             if (summary.adjustments.amount > 0) {
-                jeLines.push({
-                    type: 'debit',
-                    accountKey: 'clearing',
-                    accountName: clearingAccount,
-                    amount: summary.adjustments.amount,
-                    memo: `Stripe adjustments`
-                });
                 jeLines.push({
                     type: 'credit',
                     accountKey: 'adjustments',
                     accountName: adjustmentAccount,
-                    amount: summary.adjustments.amount,
-                    memo: `Adjustments`
+                    amount: adjustmentAmount,
+                    memo: `Positive Stripe adjustments`
                 });
+                clearingNet += adjustmentAmount;
             } else {
                 jeLines.push({
                     type: 'debit',
                     accountKey: 'adjustments',
                     accountName: adjustmentAccount,
-                    amount: Math.abs(summary.adjustments.amount),
-                    memo: `Stripe adjustments`
+                    amount: adjustmentAmount,
+                    memo: `Negative Stripe adjustments`
                 });
-                jeLines.push({
-                    type: 'credit',
-                    accountKey: 'clearing',
-                    accountName: clearingAccount,
-                    amount: Math.abs(summary.adjustments.amount),
-                    memo: `Adjustments`
-                });
+                clearingNet -= adjustmentAmount;
             }
+        }
+
+        const expectedClearing = typeof summary.total === 'number'
+            ? summary.total
+            : payout.amount;
+
+        if (typeof expectedClearing === 'number' && Math.abs(expectedClearing - clearingNet) <= 1) {
+            clearingNet = expectedClearing;
+        }
+
+        if (clearingNet !== 0) {
+            jeLines.unshift({
+                type: clearingNet > 0 ? 'debit' : 'credit',
+                accountKey: 'clearing',
+                accountName: clearingAccount,
+                amount: Math.abs(clearingNet),
+                memo: `Stripe clearing balance impact`
+            });
         }
 
         // Build posting instructions
