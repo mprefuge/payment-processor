@@ -1,6 +1,9 @@
 const BaseAccountingProvider = require('./baseAccountingProvider');
 const QuickBooks = require('node-quickbooks');
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const MAX_VENDOR_ACCOUNT_NUMBER_LENGTH = 30;
+
 /**
  * QuickBooks Online (QBO) Accounting Provider
  * Implements accounting operations for QuickBooks Online using the QuickBooks API
@@ -54,6 +57,48 @@ class QuickBooksProvider extends BaseAccountingProvider {
             }
             throw error;
         }
+    }
+
+    _normalizeEmail(value) {
+        if (value === null || value === undefined) {
+            return null;
+        }
+
+        const email = value.toString().trim();
+
+        if (email.length === 0) {
+            return null;
+        }
+
+        if (!EMAIL_REGEX.test(email)) {
+            if (this.logger && typeof this.logger.warn === 'function') {
+                this.logger.warn(`[QBO] Skipping invalid email address: ${email}`);
+            }
+            return null;
+        }
+
+        return email.toLowerCase();
+    }
+
+    _sanitizeVendorExternalId(externalId) {
+        if (externalId === null || externalId === undefined) {
+            return null;
+        }
+
+        const value = externalId.toString().trim();
+
+        if (value.length === 0) {
+            return null;
+        }
+
+        if (value.length > MAX_VENDOR_ACCOUNT_NUMBER_LENGTH) {
+            if (this.logger && typeof this.logger.warn === 'function') {
+                this.logger.warn(`[QBO] Truncating vendor external ID to ${MAX_VENDOR_ACCOUNT_NUMBER_LENGTH} characters`);
+            }
+            return value.substring(0, MAX_VENDOR_ACCOUNT_NUMBER_LENGTH);
+        }
+
+        return value;
     }
 
     _extractQboErrorMessage(error, fallback = 'Unknown QuickBooks error') {
@@ -162,7 +207,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
         const displayNameSource = customer.displayName || customer.name || customer.email || customer.externalId || 'Stripe Customer';
         const displayName = displayNameSource.toString().trim().substring(0, 99) || 'Stripe Customer';
-        const normalizedEmail = customer.email ? customer.email.toString().trim().toLowerCase() : null;
+        const normalizedEmail = this._normalizeEmail(customer.email);
         const normalizedDisplayName = displayName.toLowerCase();
         const existingCustomers = [];
 
@@ -244,7 +289,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             newCustomer.FamilyName = customer.familyName;
         }
         if (normalizedEmail) {
-            newCustomer.PrimaryEmailAddr = { Address: customer.email.toString().trim() };
+            newCustomer.PrimaryEmailAddr = { Address: normalizedEmail };
         }
         if (customer.externalId) {
             newCustomer.Notes = `Stripe Customer ID: ${customer.externalId}`;
@@ -283,7 +328,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
         const displayNameSource = vendor.displayName || vendor.name || 'Stripe';
         const displayName = displayNameSource.toString().trim().substring(0, 99) || 'Stripe';
-        const normalizedEmail = vendor.email ? vendor.email.toString().trim().toLowerCase() : null;
+        const normalizedEmail = this._normalizeEmail(vendor.email);
         const normalizedDisplayName = displayName.toLowerCase();
 
         const uniqueById = (list) => {
@@ -360,10 +405,12 @@ class QuickBooksProvider extends BaseAccountingProvider {
         };
 
         if (normalizedEmail) {
-            newVendor.PrimaryEmailAddr = { Address: vendor.email.toString().trim() };
+            newVendor.PrimaryEmailAddr = { Address: normalizedEmail };
         }
-        if (vendor.externalId) {
-            newVendor.Other1 = vendor.externalId;
+
+        const sanitizedExternalId = this._sanitizeVendorExternalId(vendor.externalId);
+        if (sanitizedExternalId) {
+            newVendor.AcctNum = sanitizedExternalId;
         }
 
         try {
