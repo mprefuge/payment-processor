@@ -271,7 +271,7 @@ async function runTests() {
                 throw new Error('Some journal entry lines missing AccountRef.value');
             }
 
-            const entityNames = createdJE.Line.map(line =>
+            const entityPresence = createdJE.Line.map(line =>
                 line.JournalEntryLineDetail &&
                 line.JournalEntryLineDetail.Entity &&
                 line.JournalEntryLineDetail.Entity.EntityRef
@@ -279,12 +279,9 @@ async function runTests() {
                     : null
             );
 
-            const expectedEntityNames = ['Stripe Payout', 'Stripe Payout', 'Stripe Payout'];
-            const entityNamesMatch = entityNames.length === expectedEntityNames.length &&
-                entityNames.every((name, idx) => name === expectedEntityNames[idx]);
-
-            if (!entityNamesMatch) {
-                throw new Error(`Journal line entity names mismatch. Expected ${expectedEntityNames.join(', ')}, got ${entityNames.join(', ')}`);
+            const hasEntityRefs = entityPresence.some(value => value !== null && value !== undefined);
+            if (hasEntityRefs) {
+                throw new Error(`Unexpected entity references on journal lines: ${entityPresence.join(', ')}`);
             }
 
             const descriptions = createdJE.Line.map(line => line.Description || '');
@@ -428,12 +425,8 @@ async function runTests() {
                     : null
             );
 
-            const expectedSummary = ['Stripe Payout', 'Alice Customer', 'Alice Customer'];
-            const summaryMatches = entitySummary.length === expectedSummary.length &&
-                entitySummary.every((name, idx) => name === expectedSummary[idx]);
-
-            if (!summaryMatches) {
-                throw new Error(`Per-transaction JE entity names mismatch. Expected ${expectedSummary.join(', ')}, got ${entitySummary.join(', ')}`);
+            if (entitySummary.some(value => value !== null && value !== undefined)) {
+                throw new Error(`Unexpected entity references on per-transaction JE: ${entitySummary.join(', ')}`);
             }
 
             const descriptions = created.Line.map(line => line.Description || '');
