@@ -12,6 +12,9 @@ class AccountingSyncConfig {
     constructor() {
         this.config = this._loadFromEnvironment();
         this.logger = console;
+        this.accountOverrides = {
+            operatingBank: {}
+        };
     }
 
     /**
@@ -43,7 +46,7 @@ class AccountingSyncConfig {
             // Account mappings
             accounts: {
                 stripeClearingAccount: process.env.ACCOUNTING_STRIPE_CLEARING_ACCOUNT || 'Stripe Clearing',
-                operatingBankAccount: process.env.ACCOUNTING_OPERATING_BANK_ACCOUNT || 'Operating Bank',
+                operatingBankAccount: null,
                 revenueAccount: process.env.ACCOUNTING_REVENUE_ACCOUNT || 'Revenue',
                 refundsAccount: process.env.ACCOUNTING_REFUNDS_ACCOUNT || 'Refunds',
                 stripeFeeAccount: process.env.ACCOUNTING_STRIPE_FEE_ACCOUNT || 'Stripe Fees',
@@ -253,14 +256,48 @@ class AccountingSyncConfig {
             errors.push('Stripe clearing account is required');
         }
 
-        if (!this.config.accounts.operatingBankAccount) {
-            errors.push('Operating bank account is required');
-        }
-
         return {
             isValid: errors.length === 0,
             errors
         };
+    }
+
+    /**
+     * Set the operating bank account name for a Stripe account
+     * @param {string} name - Bank account name from Stripe
+     * @param {string|null} accountId - Stripe account ID (null for platform default)
+     */
+    setOperatingBankAccountName(name, accountId = null) {
+        if (!name) {
+            return;
+        }
+
+        const key = accountId || 'default';
+        this.accountOverrides.operatingBank[key] = name;
+
+        if (!accountId) {
+            this.config.accounts.operatingBankAccount = name;
+        }
+    }
+
+    /**
+     * Get the operating bank account name for a Stripe account
+     * @param {string|null} accountId - Stripe account ID (null for platform default)
+     * @returns {string|null}
+     */
+    getOperatingBankAccountName(accountId = null) {
+        const key = accountId || 'default';
+        const overrides = this.accountOverrides?.operatingBank || {};
+
+        if (overrides[key]) {
+            return overrides[key];
+        }
+
+        if (overrides.default) {
+            return overrides.default;
+        }
+
+        return this.config.accounts.operatingBankAccount || null;
     }
 
     /**

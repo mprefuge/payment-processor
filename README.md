@@ -331,11 +331,13 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
 3. **Set account mappings**:
    ```bash
    ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
-   ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
    ACCOUNTING_REVENUE_ACCOUNT=Revenue
    ACCOUNTING_REFUNDS_ACCOUNT=Refunds
    ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
    ```
+
+   > ℹ️ The operating bank account name is now pulled directly from Stripe based on the payout destination, so no environment
+   > variable is required.
 
 4. **Configure Stripe webhook** to send `payout.*` events to `/api/stripe/webhook`
 

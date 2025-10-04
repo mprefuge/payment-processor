@@ -124,7 +124,6 @@ STRIPE_ACCOUNTS=acct_123:live:sk_live_...,acct_456:test:sk_test_...
 ```bash
 # Primary accounts
 ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
-ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
 ACCOUNTING_REVENUE_ACCOUNT=Revenue
 ACCOUNTING_REFUNDS_ACCOUNT=Refunds
 ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
@@ -134,6 +133,8 @@ ACCOUNTING_ADJUSTMENT_ACCOUNT=Adjustments
 # Revenue mapping by category (optional)
 ACCOUNTING_REVENUE_MAPPING=General Giving:Revenue - Donations,Building Fund:Revenue - Building
 ```
+
+> ℹ️ The operating bank account name is retrieved automatically from Stripe when payouts are processed.
 
 ### Posting Policy
 

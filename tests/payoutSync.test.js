@@ -780,6 +780,58 @@ async function runTests() {
         failed++;
     }
 
+    // Test 9: Operating bank account name is loaded from Stripe payout destination
+    try {
+        let override = null;
+        const mockConfig = {
+            getConfig: () => ({
+                provider: 'quickbooks',
+                accounts: {
+                    stripeClearingAccount: 'Stripe Clearing',
+                    operatingBankAccount: null,
+                    revenueAccount: 'Revenue',
+                    refundsAccount: 'Refunds',
+                    stripeFeeAccount: 'Stripe Fees',
+                    chargebackAccount: 'Chargebacks',
+                    adjustmentAccount: 'Adjustments'
+                },
+                posting: { strategy: 'je-transfer' }
+            }),
+            getStripeAccount: () => null,
+            setOperatingBankAccountName: (name, accountId) => {
+                override = { name, accountId };
+            },
+            getOperatingBankAccountName: () => (override ? override.name : null)
+        };
+
+        const syncLedger = await createTestSyncLedger('payout-bank-name');
+        const provider = new MockAccountingProvider();
+        const service = new PayoutSyncService(mockConfig, provider, syncLedger);
+
+        const payout = {
+            id: 'po_bank_name',
+            destination: {
+                object: 'bank_account',
+                bank_name: 'Mission Bank',
+                account_holder_name: 'Mission Bank Operating'
+            }
+        };
+
+        await service._ensureOperatingBankAccount({}, payout, null);
+
+        if (override && override.name === 'Mission Bank Operating' && override.accountId === null) {
+            console.log('✅ Operating bank account pulled from Stripe destination');
+            passed++;
+        } else {
+            console.log('❌ Failed to load operating bank account from Stripe destination');
+            console.log('   Override value:', override);
+            failed++;
+        }
+    } catch (error) {
+        console.log('❌ Operating bank account loading - error:', error.message);
+        failed++;
+    }
+
     // Summary
     console.log(`\n📊 Payout Sync Test Results: ${passed}/${passed + failed} tests passed`);
 
