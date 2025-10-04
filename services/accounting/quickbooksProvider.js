@@ -178,18 +178,38 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 DocNumber: journalEntry.docNumber,
                 TxnDate: this._formatDate(journalEntry.date),
                 PrivateNote: journalEntry.memo || '',
-                Line: journalEntry.lines.map((line, index) => ({
-                    Id: (index + 1).toString(),
-                    Description: line.memo || line.description || journalEntry.memo || '',
-                    Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
-                    DetailType: 'JournalEntryLineDetail',
-                    JournalEntryLineDetail: {
+                Line: journalEntry.lines.map((line, index) => {
+                    const detail = {
                         PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
                         AccountRef: {
                             value: line.accountId
                         }
+                    };
+
+                    if (line.name) {
+                        detail.Entity = {
+                            Type: 'OtherName',
+                            EntityRef: {
+                                value: line.name,
+                                name: line.name
+                            }
+                        };
                     }
-                }))
+
+                    const payload = {
+                        Id: (index + 1).toString(),
+                        Description: line.description || line.memo || journalEntry.memo || '',
+                        Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
+                        DetailType: 'JournalEntryLineDetail',
+                        JournalEntryLineDetail: detail
+                    };
+
+                    if (line.name) {
+                        payload.Name = line.name;
+                    }
+
+                    return payload;
+                })
             };
 
             const created = await this._executeWithTokenRefresh(() =>

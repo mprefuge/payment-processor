@@ -741,12 +741,43 @@ async function runTests() {
         const feeTransaction = balanceTransactions.find(txn => txn.id === 'txn_fee_1');
         const adjustmentTransaction = balanceTransactions.find(txn => txn.id === 'txn_adjust_1');
 
+        const formatCurrency = (amount) => {
+            const sign = amount < 0 ? '-' : '';
+            return `${sign}$${(Math.abs(amount) / 100).toFixed(2)}`;
+        };
+
+        const expectedChargeDescriptionParts = [
+            chargeTransaction.description,
+            `Type: ${chargeTransaction.type}`,
+            `Balance Txn: ${chargeTransaction.id}`
+        ];
+
+        if (chargeTransaction.source && chargeTransaction.source !== chargeTransaction.id) {
+            expectedChargeDescriptionParts.push(`Charge: ${chargeTransaction.source}`);
+        }
+
+        expectedChargeDescriptionParts.push(`Currency: ${chargeTransaction.currency.toUpperCase()}`);
+        expectedChargeDescriptionParts.push(`Gross: ${formatCurrency(chargeTransaction.amount)}`);
+        expectedChargeDescriptionParts.push(`Fees: ${formatCurrency(chargeTransaction.fee)}`);
+        expectedChargeDescriptionParts.push(`Net: ${formatCurrency(chargeTransaction.net)}`);
+        expectedChargeDescriptionParts.push(`Created: ${new Date(chargeTransaction.created * 1000).toISOString()}`);
+        expectedChargeDescriptionParts.push(`Available: ${new Date(chargeTransaction.available_on * 1000).toISOString()}`);
+
+        if (chargeTransaction.metadata && Object.keys(chargeTransaction.metadata).length > 0) {
+            const metadataEntries = Object.keys(chargeTransaction.metadata)
+                .sort()
+                .map(key => `${key}=${String(chargeTransaction.metadata[key])}`);
+            expectedChargeDescriptionParts.push(`Metadata: ${metadataEntries.join(', ')}`);
+        }
+
+        const expectedChargeDescription = expectedChargeDescriptionParts.join(' | ');
+
         const linesValid = journal &&
             clearingLine &&
             clearingLine.type === 'debit' &&
             clearingLine.amount === payout.amount &&
             detailLines.length === balanceTransactions.length &&
-            chargeLine && chargeLine.type === 'credit' && chargeLine.accountKey === 'revenue' && chargeLine.amount === Math.abs(chargeTransaction.net) && chargeLine.memo === 'Donation A' &&
+            chargeLine && chargeLine.type === 'credit' && chargeLine.accountKey === 'revenue' && chargeLine.amount === Math.abs(chargeTransaction.net) && chargeLine.memo === 'Donation A' && chargeLine.description === expectedChargeDescription && chargeLine.name === chargeTransaction.id &&
             refundLine && refundLine.type === 'debit' && refundLine.accountKey === 'refunds' && refundLine.amount === Math.abs(refundTransaction.net) &&
             feeLine && feeLine.type === 'debit' && feeLine.accountKey === 'fees' && feeLine.amount === Math.abs(feeTransaction.net) &&
             adjustmentLine && adjustmentLine.type === 'credit' && adjustmentLine.accountKey === 'adjustments' && adjustmentLine.amount === Math.abs(adjustmentTransaction.net) &&

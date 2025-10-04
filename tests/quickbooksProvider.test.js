@@ -523,18 +523,26 @@ async function runTests() {
             date: new Date('2024-01-15'),
             memo: 'Test journal entry',
             lines: [
-                { type: 'debit', accountId: 'acc-1', amount: 1000, memo: 'Debit memo', description: 'Debit line' },
+                { type: 'debit', accountId: 'acc-1', amount: 1000, memo: 'Debit memo', description: 'Debit line', name: 'line-1' },
                 { type: 'credit', accountId: 'acc-2', amount: 1000, description: 'Credit line' }
             ]
         };
 
         const result = await provider.upsertJournalEntry(journalEntry);
 
+        const createdEntry = mockQBOClient.journalEntries[0];
+        const firstLine = createdEntry?.Line?.[0];
+        const secondLine = createdEntry?.Line?.[1];
+
         if (result.created === true &&
             result.docNumber === 'JE-2024-001' &&
             mockQBOClient.journalEntries.length === 1 &&
-            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit memo' &&
-            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line') {
+            firstLine?.Description === 'Debit line' &&
+            firstLine?.Name === 'line-1' &&
+            firstLine?.JournalEntryLineDetail?.Entity?.EntityRef?.value === 'line-1' &&
+            firstLine?.JournalEntryLineDetail?.Entity?.Type === 'OtherName' &&
+            secondLine?.Description === 'Credit line' &&
+            typeof secondLine?.Name === 'undefined') {
             console.log('✅ Create journal entry');
             passed++;
         } else {

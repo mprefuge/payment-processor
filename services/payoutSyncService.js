@@ -959,11 +959,165 @@ class PayoutSyncService {
             return txn.metadata.statement_descriptor;
         }
 
-        if (txn.source) {
-            return `Stripe ${txn.type || 'transaction'} ${txn.source}`;
+        const base = `Stripe ${txn.type || 'transaction'}`.trim();
+
+        // Only append the source/ID for non-charge transactions so the charge
+        // identifier can be displayed in the dedicated Name column.
+        if (txn.source && txn.type !== 'charge' && txn.type !== 'payment') {
+            return `${base} ${txn.source}`.trim();
         }
 
-        return `Stripe ${txn.type || 'transaction'} ${txn.id || ''}`.trim();
+        if (txn.id && txn.type !== 'charge' && txn.type !== 'payment') {
+            return `${base} ${txn.id}`.trim();
+        }
+
+        return base;
+    }
+
+    /**
+     * Build a richer description for a balance transaction, primarily used for
+     * charge tracking when rendering posting instructions or accounting lines.
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string|null}
+     * @private
+     */
+    _buildTransactionDescription(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        const segments = [];
+        const memo = this._buildTransactionMemo(txn);
+
+        if (memo) {
+            segments.push(memo);
+        }
+
+        const details = [];
+
+        if (txn.type) {
+            details.push(`Type: ${txn.type}`);
+        }
+
+        if (txn.id) {
+            details.push(`Balance Txn: ${txn.id}`);
+        }
+
+        if (txn.source && txn.source !== txn.id) {
+            const sourceLabel = txn.type === 'charge' || txn.type === 'payment' ? 'Charge' : 'Source';
+            details.push(`${sourceLabel}: ${txn.source}`);
+        }
+
+        if (txn.currency) {
+            details.push(`Currency: ${(txn.currency || '').toUpperCase()}`);
+        }
+
+        if (typeof txn.amount === 'number') {
+            const formatted = this._formatCurrency(txn.amount, txn.currency);
+            if (formatted) {
+                const label = txn.type === 'charge' || txn.type === 'payment' ? 'Gross' : 'Amount';
+                details.push(`${label}: ${formatted}`);
+            }
+        }
+
+        if (typeof txn.fee === 'number') {
+            const formattedFee = this._formatCurrency(txn.fee, txn.currency);
+            if (formattedFee) {
+                details.push(`Fees: ${formattedFee}`);
+            }
+        }
+
+        if (typeof txn.net === 'number') {
+            const formattedNet = this._formatCurrency(txn.net, txn.currency);
+            if (formattedNet) {
+                details.push(`Net: ${formattedNet}`);
+            }
+        }
+
+        if (typeof txn.exchange_rate === 'number' && !Number.isNaN(txn.exchange_rate)) {
+            details.push(`Exchange Rate: ${txn.exchange_rate}`);
+        }
+
+        if (typeof txn.created === 'number' && !Number.isNaN(txn.created)) {
+            details.push(`Created: ${new Date(txn.created * 1000).toISOString()}`);
+        }
+
+        if (typeof txn.available_on === 'number' && !Number.isNaN(txn.available_on)) {
+            details.push(`Available: ${new Date(txn.available_on * 1000).toISOString()}`);
+        }
+
+        if (Array.isArray(txn.fee_details) && txn.fee_details.length > 0) {
+            const feeDetails = txn.fee_details
+                .map(detail => {
+                    const parts = [];
+                    if (detail.type) {
+                        parts.push(detail.type);
+                    }
+                    if (typeof detail.amount === 'number') {
+                        const formattedAmount = this._formatCurrency(detail.amount, detail.currency || txn.currency);
+                        if (formattedAmount) {
+                            parts.push(formattedAmount);
+                        }
+                    }
+                    if (detail.application) {
+                        parts.push(`application=${detail.application}`);
+                    }
+                    if (detail.description) {
+                        parts.push(detail.description);
+                    }
+                    return parts.join(' ');
+                })
+                .filter(Boolean);
+
+            if (feeDetails.length > 0) {
+                details.push(`Fee Details: ${feeDetails.join('; ')}`);
+            }
+        }
+
+        if (txn.metadata && typeof txn.metadata === 'object' && Object.keys(txn.metadata).length > 0) {
+            const metadataEntries = Object.keys(txn.metadata)
+                .sort()
+                .map(key => {
+                    const value = txn.metadata[key];
+                    if (value === null || typeof value === 'undefined') {
+                        return `${key}=`;
+                    }
+                    if (typeof value === 'object') {
+                        try {
+                            return `${key}=${JSON.stringify(value)}`;
+                        } catch (err) {
+                            return `${key}=${String(value)}`;
+                        }
+                    }
+                    return `${key}=${String(value)}`;
+                });
+
+            if (metadataEntries.length > 0) {
+                details.push(`Metadata: ${metadataEntries.join(', ')}`);
+            }
+        }
+
+        return [...segments, ...details].join(' | ');
+    }
+
+    /**
+     * Build the name to associate with a transaction line. The Stripe balance
+     * transaction identifier is surfaced so downstream accounting systems can
+     * display it in the Name column for reconciliation.
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string|null}
+     * @private
+     */
+    _buildTransactionName(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        if (txn.id) {
+            return txn.id;
+        }
+
+        return null;
     }
 
     /**
@@ -1026,6 +1180,8 @@ class PayoutSyncService {
 
         const { revenueAccount, refundsAccount, feesAccount, chargebackAccount, adjustmentAccount } = accounts;
         const memo = this._buildTransactionMemo(txn);
+        const description = this._buildTransactionDescription(txn);
+        const name = this._buildTransactionName(txn);
         const metadata = this._buildTransactionMetadata(txn);
         const rawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
         const amount = Math.abs(rawAmount || 0);
@@ -1040,6 +1196,8 @@ class PayoutSyncService {
             accountName,
             amount,
             memo,
+            description,
+            name,
             metadata
         });
 
@@ -1125,7 +1283,7 @@ class PayoutSyncService {
      */
     _getAccountSubType(accountName) {
         const normalizedName = accountName.toLowerCase();
-        
+
         if (normalizedName.includes('clearing')) {
             return 'CashOnHand';
         } else if (normalizedName.includes('bank')) {
@@ -1135,8 +1293,33 @@ class PayoutSyncService {
         } else if (normalizedName.includes('fee') || normalizedName.includes('expense')) {
             return 'SuppliesMaterials';
         }
-        
+
         return 'CashOnHand'; // Default
+    }
+
+    /**
+     * Format an amount (in cents) into a currency string for descriptions.
+     * @param {number} amount - Amount in the smallest currency unit
+     * @param {string} currency - ISO currency code (defaults to USD)
+     * @returns {string|null}
+     * @private
+     */
+    _formatCurrency(amount, currency = 'usd') {
+        if (typeof amount !== 'number' || Number.isNaN(amount)) {
+            return null;
+        }
+
+        const iso = (currency || 'usd').toUpperCase();
+        const absolute = Math.abs(amount) / 100;
+        const formatted = absolute.toFixed(2);
+
+        let symbol = `${iso} `;
+        if (iso === 'USD') {
+            symbol = '$';
+        }
+
+        const sign = amount < 0 ? '-' : '';
+        return `${sign}${symbol}${formatted}`;
     }
 }
 
