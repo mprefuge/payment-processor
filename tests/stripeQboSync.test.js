@@ -2,6 +2,7 @@ const assert = require('assert');
 const os = require('os');
 const path = require('path');
 const fs = require('fs/promises');
+const { setTimeout: delay } = require('timers/promises');
 
 const {
     resolveQboCustomer,
@@ -13,7 +14,8 @@ const {
     attachStripeArtifacts,
     ProcessedStripeStore,
     ensureStripeVendor,
-    convertPayoutAmount
+    convertPayoutAmount,
+    normalizeAmount
 } = require('../services/accounting/stripe-qbo');
 
 const accounts = {
@@ -195,6 +197,7 @@ async function testBalanceTransactionMappings() {
     const refundBT = {
         id: 'bt_ref',
         type: 'refund',
+        reporting_category: 'refund',
         amount: -1500,
         fee: 50,
         net: -1550,
@@ -214,6 +217,7 @@ async function testBalanceTransactionMappings() {
     const disputeBT = {
         id: 'bt_dp',
         type: 'dispute',
+        reporting_category: 'dispute',
         amount: -2000,
         fee: 150,
         net: -2150,
@@ -233,6 +237,7 @@ async function testBalanceTransactionMappings() {
     const feeBT = {
         id: 'bt_fee',
         type: 'fee',
+        reporting_category: 'fee',
         amount: -300,
         fee: 0,
         net: -300,
@@ -246,6 +251,7 @@ async function testBalanceTransactionMappings() {
     const feeRefundBT = {
         id: 'bt_fee_ref',
         type: 'fee_refund',
+        reporting_category: 'fee_refund',
         amount: 100,
         fee: 0,
         net: 100,
@@ -259,14 +265,38 @@ async function testBalanceTransactionMappings() {
     const adjustmentBT = {
         id: 'bt_adj',
         type: 'adjustment',
+        reporting_category: 'other_adjustment',
         amount: 500,
         fee: 0,
         net: 500,
         currency: 'usd'
     };
+    const disputeReversalBT = {
+        id: 'bt_dr',
+        type: 'dispute',
+        reporting_category: 'dispute_reversal',
+        amount: 2000,
+        fee: -150,
+        net: 2150,
+        currency: 'usd',
+        payout: 'po_123'
+    };
+
+    const disputeReversalMapped = mapBalanceTxnToEntries(disputeReversalBT, {
+        accounts,
+        vendor,
+        dispute: { id: 'dp_1', charge: 'ch_789' },
+        charge: { id: 'ch_789', payment_intent: 'pi_123' }
+    });
+    assert.strictEqual(disputeReversalMapped.lines.length, 3);
+    const reversalRefund = disputeReversalMapped.lines.find(line => line.accountId === accounts.refundsContraId);
+    assert.strictEqual(reversalRefund.type, 'credit');
+    const reversalClearing = disputeReversalMapped.lines.find(line => line.accountId === accounts.stripeClearingId);
+    assert.strictEqual(reversalClearing.type, 'debit');
+
     const adjustmentMapped = mapBalanceTxnToEntries(adjustmentBT, { accounts, vendor });
     assert.strictEqual(adjustmentMapped.lines[0].accountId, accounts.adjustments.default);
-    assert.strictEqual(adjustmentMapped.lines[0].type, 'credit');
+    assert.strictEqual(adjustmentMapped.lines[0].type, 'debit');
 }
 
 async function testPayoutReconciliationAndTransfer() {
@@ -416,6 +446,60 @@ async function testConvertPayoutAmount() {
     assert.strictEqual(fxAmount, 12000);
 }
 
+function createMockFs(delayMs = 5) {
+    const files = new Map();
+    const mockFs = {
+        writes: [],
+        async mkdir() { return; },
+        async readFile(file) {
+            if (!files.has(file)) {
+                const error = new Error('Not found');
+                error.code = 'ENOENT';
+                throw error;
+            }
+            return files.get(file);
+        },
+        async writeFile(file, contents) {
+            await delay(delayMs);
+            files.set(file, contents);
+            mockFs.writes.push(JSON.parse(contents));
+        }
+    };
+    return mockFs;
+}
+
+async function testProcessedStoreDurableFlush() {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'stripe-qbo-store-'));
+    const storagePath = path.join(tmpDir, 'state.json');
+    const mockFs = createMockFs(20);
+    const store = new ProcessedStripeStore({ storagePath, fs: mockFs, logger: console });
+
+    await Promise.all([
+        store.recordProcessed({ stripeId: 'evt-1', qboEntityId: 'je-1' }),
+        (async () => {
+            await delay(5);
+            return store.recordProcessed({ stripeId: 'evt-2', qboEntityId: 'je-2' });
+        })()
+    ]);
+
+    await store.flush();
+
+    const persistedRaw = await mockFs.readFile(storagePath);
+    const persisted = JSON.parse(persistedRaw);
+    assert.ok(persisted['evt-1']);
+    assert.ok(persisted['evt-2']);
+    const finalWrite = mockFs.writes[mockFs.writes.length - 1];
+    assert.ok(finalWrite['evt-1']);
+    assert.ok(finalWrite['evt-2']);
+}
+
+async function testNormalizeAmountUtility() {
+    assert.strictEqual(normalizeAmount(1050, 'usd'), 10.5);
+    assert.strictEqual(normalizeAmount(12345, 'KWD'), 12.345);
+    assert.strictEqual(normalizeAmount(500, 'jpy'), 500);
+    assert.strictEqual(normalizeAmount(null, 'usd'), 0);
+}
+
 (async () => {
     await runTest('Resolves customers with fallback handling', testResolveQboCustomer);
     await runTest('Builds balanced charge journal entry with correct EntityRefs', testBuildChargeJournalEntry);
@@ -425,6 +509,8 @@ async function testConvertPayoutAmount() {
     await runTest('Handles multicurrency conversion with memo tagging', testMulticurrencyConversion);
     await runTest('Creates Stripe artifact attachments', testAttachmentsHelper);
     await runTest('Converts payout amounts respecting FX rates', testConvertPayoutAmount);
+    await runTest('Flushes ProcessedStripeStore with concurrent writes', testProcessedStoreDurableFlush);
+    await runTest('Normalizes Stripe integer amounts by currency exponent', testNormalizeAmountUtility);
 
     console.log('All Stripe ↔ QBO sync tests passed');
 })().catch(error => {

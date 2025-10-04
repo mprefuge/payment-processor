@@ -4,6 +4,45 @@ const { UNKNOWN_DONOR_NAME } = require('./customerResolver');
 
 const CENT_TOLERANCE = 1; // one cent
 
+const ZERO_DECIMAL_CURRENCIES = new Set([
+    'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'
+]);
+
+const THREE_DECIMAL_CURRENCIES = new Set([
+    'BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND'
+]);
+
+function getCurrencyExponent(currency) {
+    if (!currency || typeof currency !== 'string') {
+        return 2;
+    }
+
+    const normalized = currency.trim().toUpperCase();
+    if (ZERO_DECIMAL_CURRENCIES.has(normalized)) {
+        return 0;
+    }
+    if (THREE_DECIMAL_CURRENCIES.has(normalized)) {
+        return 3;
+    }
+    return 2;
+}
+
+function normalizeAmount(value, currency) {
+    if (value === null || value === undefined) {
+        return 0;
+    }
+
+    let numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return 0;
+    }
+
+    const exponent = getCurrencyExponent(currency);
+    const denominator = 10 ** exponent;
+    const decimal = numeric / denominator;
+    return Number(decimal.toFixed(Math.min(exponent, 6)));
+}
+
 function formatDate(timestamp, timezone) {
     const date = new Date(timestamp);
 
@@ -206,6 +245,10 @@ function describeRefundLine({ chargeId, refundId, balanceTransactionId }) {
 
 function describeDisputeLine({ disputeId, chargeId, balanceTransactionId }) {
     return `Dispute loss — charge ${chargeId} (dispute ${disputeId || '-'}, balance txn ${balanceTransactionId})`;
+}
+
+function describeDisputeReversalLine({ disputeId, chargeId, balanceTransactionId }) {
+    return `Dispute reversal — charge ${chargeId} (dispute ${disputeId || '-'}, balance txn ${balanceTransactionId})`;
 }
 
 function describeFeeRefundLine({ chargeId, referenceId, balanceTransactionId }) {
@@ -445,6 +488,65 @@ function mapDispute(balanceTransaction, context) {
     };
 }
 
+function mapDisputeReversal(balanceTransaction, context) {
+    const accounts = ensureAccounts(context.accounts);
+    const logger = context.logger || console;
+    const vendor = context.vendor;
+    const dispute = context.dispute || {};
+    const charge = context.charge || {};
+
+    const amounts = computeAmounts(balanceTransaction, context.companyHomeCurrency);
+    validateAmounts(amounts, logger, { balanceTransactionId: balanceTransaction.id });
+
+    const chargeId = charge.id || dispute.charge || balanceTransaction.source || '-';
+    const memo = buildMemo({
+        charge: chargeId,
+        paymentIntentId: dispute.payment_intent || charge.payment_intent || null,
+        balanceTransactionId: balanceTransaction.id,
+        payoutId: balanceTransaction.payout,
+        customerId: context.customer?.id,
+        exchangeRate: amounts.exchangeRate
+    });
+
+    const disputeReversalLine = createLine({
+        type: 'credit',
+        accountId: accounts.refundsContraId,
+        amount: amounts.gross,
+        description: describeDisputeReversalLine({
+            disputeId: dispute.id || balanceTransaction.source,
+            chargeId,
+            balanceTransactionId: balanceTransaction.id
+        }),
+        memo
+    });
+
+    const feeLine = createFeeLine(amounts, accounts, vendor && vendor.id ? {
+        type: 'Vendor',
+        value: vendor.id,
+        name: vendor.name || 'Stripe'
+    } : null, { memo }, () => `Stripe dispute fee reversal — balance txn ${balanceTransaction.id}`);
+
+    const clearingLine = createLine({
+        type: amounts.net >= 0 ? 'debit' : 'credit',
+        accountId: accounts.stripeClearingId,
+        amount: amounts.net,
+        description: `Clearing impact — dispute reversal ${dispute.id || balanceTransaction.source || '-'}`,
+        memo
+    });
+
+    const lines = [disputeReversalLine, feeLine, clearingLine].filter(Boolean);
+
+    return {
+        type: 'dispute_reversal',
+        balanceTransactionId: balanceTransaction.id,
+        payoutId: balanceTransaction.payout || null,
+        lines,
+        memo,
+        amounts,
+        clearingImpact: computeClearingImpact(lines, accounts.stripeClearingId)
+    };
+}
+
 function mapFee(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
     const vendor = context.vendor;
@@ -571,7 +673,7 @@ function mapAdjustment(balanceTransaction, context) {
     });
 
     const principalLine = createLine({
-        type: amounts.gross >= 0 ? 'credit' : 'debit',
+        type: amounts.gross >= 0 ? 'debit' : 'credit',
         accountId: adjustmentAccountId,
         amount: amounts.gross,
         description: describeAdjustmentLine(balanceTransaction),
@@ -588,7 +690,7 @@ function mapAdjustment(balanceTransaction, context) {
     }));
 
     const clearingLine = createLine({
-        type: amounts.net >= 0 ? 'debit' : 'credit',
+        type: amounts.net >= 0 ? 'credit' : 'debit',
         accountId: accounts.stripeClearingId,
         amount: amounts.net,
         description: `Clearing impact — adjustment ${balanceTransaction.id}`,
@@ -608,10 +710,22 @@ function mapAdjustment(balanceTransaction, context) {
     };
 }
 
-const TYPE_HANDLERS = {
+const REPORTING_CATEGORY_HANDLERS = {
     charge: mapCharge,
     refund: mapRefund,
     dispute: mapDispute,
+    dispute_reversal: mapDisputeReversal,
+    fee: mapFee,
+    fee_tax: mapFee,
+    fee_refund: mapFeeRefund,
+    other_adjustment: mapAdjustment
+};
+
+const TYPE_FALLBACK_HANDLERS = {
+    charge: mapCharge,
+    refund: mapRefund,
+    dispute: mapDispute,
+    dispute_reversal: mapDisputeReversal,
     fee: mapFee,
     fee_tax: mapFee,
     fee_refund: mapFeeRefund,
@@ -626,13 +740,12 @@ function mapBalanceTxnToEntries(balanceTransaction, context = {}) {
         throw new Error('Balance transaction is required');
     }
 
-    if (!balanceTransaction.type) {
-        throw new Error('Balance transaction type is required');
-    }
+    const category = (balanceTransaction.reporting_category || '').toString().trim().toLowerCase();
+    const type = (balanceTransaction.type || '').toString().trim().toLowerCase();
 
-    const handler = TYPE_HANDLERS[balanceTransaction.type];
+    const handler = REPORTING_CATEGORY_HANDLERS[category] || TYPE_FALLBACK_HANDLERS[type];
     if (!handler) {
-        throw new Error(`Unsupported balance transaction type: ${balanceTransaction.type}`);
+        throw new Error(`Unsupported balance transaction classification: ${balanceTransaction.reporting_category || balanceTransaction.type}`);
     }
 
     return handler(balanceTransaction, context);
@@ -678,5 +791,6 @@ module.exports = {
     computeClearingImpact,
     computeAmounts,
     buildMemo,
-    formatDate
+    formatDate,
+    normalizeAmount
 };

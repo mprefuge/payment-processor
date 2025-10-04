@@ -11,8 +11,10 @@ class ProcessedStripeStore {
         this.logger = options.logger || console;
         this.fs = options.fs || fs;
         this.records = new Map();
+        this.pending = new Set();
         this.loaded = false;
-        this.persistPromise = null;
+        this.inFlight = null;
+        this.dirty = false;
     }
 
     async _ensureLoaded() {
@@ -31,7 +33,7 @@ class ProcessedStripeStore {
             this.loaded = true;
         } catch (error) {
             if (error.code === 'ENOENT') {
-                await this._persist();
+                await this._writePayload({});
                 this.loaded = true;
                 return;
             }
@@ -44,20 +46,54 @@ class ProcessedStripeStore {
         }
     }
 
-    async _persist() {
-        if (!this.persistPromise) {
-            this.persistPromise = (async () => {
-                const payload = Object.fromEntries(this.records.entries());
-                await this.fs.mkdir(path.dirname(this.storagePath), { recursive: true });
-                await this.fs.writeFile(this.storagePath, JSON.stringify(payload, null, 2), 'utf8');
-                return payload;
-            })()
-                .finally(() => {
-                    this.persistPromise = null;
-                });
+    async _writePayload(payload) {
+        await this.fs.mkdir(path.dirname(this.storagePath), { recursive: true });
+        const serialized = JSON.stringify(payload, null, 2);
+        await this.fs.writeFile(this.storagePath, serialized, 'utf8');
+        return serialized;
+    }
+
+    _scheduleFlush() {
+        if (this.inFlight) {
+            return;
         }
 
-        return this.persistPromise;
+        this.inFlight = this._doFlush()
+            .catch(error => {
+                this.logger.error('[Stripe→QBO] Failed to persist idempotency state', {
+                    storagePath: this.storagePath,
+                    error: error.message
+                });
+                throw error;
+            })
+            .finally(() => {
+                this.inFlight = null;
+                if (this.pending.size > 0) {
+                    // New records arrived while flushing; immediately schedule the follow-up
+                    this._scheduleFlush();
+                } else {
+                    this.dirty = false;
+                }
+            });
+    }
+
+    async _doFlush() {
+        await this._ensureLoaded();
+
+        while (this.pending.size > 0) {
+            const payload = Object.fromEntries(this.records.entries());
+            const pendingIds = Array.from(this.pending);
+            this.pending.clear();
+
+            try {
+                await this._writePayload(payload);
+            } catch (error) {
+                // Restore pending IDs so callers can retry
+                pendingIds.forEach(id => this.pending.add(id));
+                this.dirty = true;
+                throw error;
+            }
+        }
     }
 
     async alreadyProcessed(stripeId) {
@@ -97,8 +133,37 @@ class ProcessedStripeStore {
         };
 
         this.records.set(record.stripeId, stored);
-        await this._persist();
+        this.pending.add(record.stripeId);
+        this.dirty = true;
+        this._scheduleFlush();
+
         return stored;
+    }
+
+    async flush(options = {}) {
+        await this._ensureLoaded();
+
+        if (this.pending.size === 0 && !this.inFlight) {
+            return;
+        }
+
+        if (!this.inFlight) {
+            this._scheduleFlush();
+        }
+
+        const timeoutMs = options.timeoutMs;
+        if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+            await Promise.race([
+                this.inFlight,
+                new Promise((_, reject) => setTimeout(() => {
+                    const error = new Error('Timed out while flushing idempotency store');
+                    error.code = 'FLUSH_TIMEOUT';
+                    reject(error);
+                }, timeoutMs))
+            ]);
+        } else if (this.inFlight) {
+            await this.inFlight;
+        }
     }
 }
 

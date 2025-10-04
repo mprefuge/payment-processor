@@ -1,9 +1,23 @@
 'use strict';
 
-const { fetchStripeChargesSince, fetchStripeRefundsSince, fetchStripeDisputesSince, fetchStripePayoutsSince } = require('./fetchStripe');
+const {
+    fetchStripeChargesSince,
+    fetchStripeRefundsSince,
+    fetchStripeDisputesSince,
+    fetchStripePayoutsSince,
+    fetchBalanceTransactionsForPayout
+} = require('./fetchStripe');
 const { resolveQboCustomer, UNKNOWN_DONOR_NAME } = require('./customerResolver');
 const { ensureStripeVendor } = require('./vendor');
-const { mapBalanceTxnToEntries, buildChargeJE, computeClearingImpact, computeAmounts, buildMemo, formatDate } = require('./transactions');
+const {
+    mapBalanceTxnToEntries,
+    buildChargeJE,
+    computeClearingImpact,
+    computeAmounts,
+    buildMemo,
+    formatDate,
+    normalizeAmount
+} = require('./transactions');
 const { attachStripeArtifacts } = require('./attachments');
 const { ProcessedStripeStore } = require('./idempotencyStore');
 const { postTransferIfNew, reconcilePayout, convertPayoutAmount } = require('./payouts');
@@ -79,6 +93,7 @@ module.exports = {
     fetchStripeRefundsSince,
     fetchStripeDisputesSince,
     fetchStripePayoutsSince,
+    fetchBalanceTransactionsForPayout,
     resolveQboCustomer,
     ensureStripeVendor,
     mapBalanceTxnToEntries,
@@ -95,5 +110,6 @@ module.exports = {
     convertPayoutAmount,
     ProcessedStripeStore,
     formatDate,
+    normalizeAmount,
     UNKNOWN_DONOR_NAME
 };

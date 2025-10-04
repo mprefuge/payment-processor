@@ -407,6 +407,9 @@ class PayoutSyncService {
         const postingConfig = config.posting || {};
         const transactionLineMode = (postingConfig.transactionLineMode || 'summary').toLowerCase();
         const usePerTransactionLines = transactionLineMode === 'per-transaction' && Array.isArray(balanceTransactions) && balanceTransactions.length > 0;
+        const hasStandaloneFeeTransactions = usePerTransactionLines
+            ? balanceTransactions.some(txn => txn && ['stripe_fee', 'application_fee', 'stripe_fee_refund', 'application_fee_refund'].includes(txn.type))
+            : false;
 
         // Determine accounts
         const clearingAccount = accountConfig.stripeClearingAccount;
@@ -460,7 +463,7 @@ class PayoutSyncService {
                     feesAccount,
                     chargebackAccount,
                     adjustmentAccount,
-                    clearingAccount
+                    includeEmbeddedFees: !hasStandaloneFeeTransactions
                 });
 
                 if (!Array.isArray(lines) || lines.length === 0) {
@@ -468,18 +471,23 @@ class PayoutSyncService {
                 }
 
                 for (const line of lines) {
-                    line.description = buildSummaryDescription(line.description || line.memo || 'Stripe transaction', [
+                    const detailSegments = [
                         line.metadata && line.metadata.balanceTransactionId
                             ? `Transaction: ${line.metadata.balanceTransactionId}`
                             : null,
-                        line.metadata && (line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source)
+                        (!usePerTransactionLines && line.metadata && (line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source))
                             ? `Source: ${line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source}`
                             : null,
                         formatCurrency(line.amount) ? `Amount: ${formatCurrency(line.amount)}` : null,
-                        line.metadata && line.metadata.component
+                        (!usePerTransactionLines && line.metadata && line.metadata.component)
                             ? `Component: ${line.metadata.component}`
                             : null
-                    ]);
+                    ];
+
+                    line.description = buildSummaryDescription(
+                        line.description || line.memo || 'Stripe transaction',
+                        detailSegments
+                    );
                     line.name = line.name || this._resolveEntityName(null, 'transaction');
                     line.entityContext = line.entityContext || 'transaction';
                     jeLines.push(line);
@@ -1598,7 +1606,7 @@ class PayoutSyncService {
             feesAccount,
             chargebackAccount,
             adjustmentAccount,
-            clearingAccount
+            includeEmbeddedFees = false
         } = accounts;
 
         const memo = this._buildTransactionMemo(txn);
@@ -1656,6 +1664,11 @@ class PayoutSyncService {
         };
 
         const defaultRawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
+        const netAmount = typeof txn.net === 'number'
+            ? txn.net
+            : (typeof txn.amount === 'number'
+                ? txn.amount - (typeof txn.fee === 'number' ? txn.fee : 0)
+                : defaultRawAmount);
         const lines = [];
 
         const appendLine = ({
@@ -1710,156 +1723,180 @@ class PayoutSyncService {
             });
         };
 
-        const makeDefaultLine = (type, accountKey, accountName) => {
-            if (typeof defaultRawAmount !== 'number' || defaultRawAmount === 0) {
+        const stripeSourceId = typeof txn.source === 'string'
+            ? txn.source
+            : (txn.source && typeof txn.source === 'object' && typeof txn.source.id === 'string'
+                ? txn.source.id
+                : undefined);
+
+        const applySingleLine = ({ accountKey, accountName, component, entity, overrideType }) => {
+            if (!accountName || typeof netAmount !== 'number' || Number.isNaN(netAmount) || netAmount === 0) {
                 return;
             }
-            appendLine({ type, accountKey, accountName, rawAmount: defaultRawAmount });
-        };
 
-        const appendClearingLine = (netAmount) => {
-            if (!clearingAccount || typeof netAmount !== 'number' || Number.isNaN(netAmount) || netAmount === 0) {
-                return;
+            const lineType = overrideType || (netAmount >= 0 ? 'credit' : 'debit');
+            const metadataOverrides = {
+                grossAmount: typeof txn.amount === 'number' ? txn.amount : undefined,
+                feeAmount: typeof txn.fee === 'number' ? txn.fee : undefined
+            };
+
+            if (component) {
+                metadataOverrides.component = component;
             }
 
             appendLine({
-                type: netAmount >= 0 ? 'debit' : 'credit',
-                accountKey: 'clearing',
-                accountName: clearingAccount,
+                type: lineType,
+                accountKey,
+                accountName,
                 rawAmount: netAmount,
-                component: 'Net to Stripe Clearing',
-                metadataOverrides: { netAmount },
-                entity: null,
-                nameOverride: null
+                component: null,
+                metadataOverrides,
+                entity,
+                nameOverride: stripeSourceId
             });
         };
 
         switch (txn.type) {
             case 'charge':
             case 'payment': {
-                if (typeof txn.amount === 'number' && txn.amount !== 0) {
-                    appendLine({
-                        type: 'credit',
+                if (includeEmbeddedFees) {
+                    if (typeof txn.amount === 'number' && txn.amount !== 0) {
+                        appendLine({
+                            type: txn.amount >= 0 ? 'credit' : 'debit',
+                            accountKey: 'revenue',
+                            accountName: revenueAccount,
+                            rawAmount: txn.amount,
+                            component: null,
+                            metadataOverrides: {
+                                grossAmount: txn.amount,
+                                feeAmount: typeof txn.fee === 'number' ? txn.fee : undefined
+                            },
+                            entity: customerEntity,
+                            nameOverride: stripeSourceId
+                        });
+                    }
+
+                    if (typeof txn.fee === 'number' && txn.fee !== 0) {
+                        appendLine({
+                            type: txn.fee >= 0 ? 'debit' : 'credit',
+                            accountKey: 'fees',
+                            accountName: feesAccount,
+                            rawAmount: txn.fee,
+                            component: null,
+                            metadataOverrides: {
+                                feeAmount: txn.fee,
+                                component: 'Processing fees',
+                                vendor: 'Stripe'
+                            },
+                            entity: stripeVendorEntity,
+                            nameOverride: stripeSourceId
+                        });
+                    }
+                } else {
+                    applySingleLine({
                         accountKey: 'revenue',
                         accountName: revenueAccount,
-                        rawAmount: txn.amount,
-                        component: 'Gross amount',
-                        entity: customerEntity,
-                        metadataOverrides: { grossAmount: txn.amount }
+                        component: 'Net revenue',
+                        entity: customerEntity
                     });
-                }
-
-                if (typeof txn.fee === 'number' && txn.fee !== 0) {
-                    appendLine({
-                        type: txn.fee >= 0 ? 'debit' : 'credit',
-                        accountKey: 'fees',
-                        accountName: feesAccount,
-                        rawAmount: txn.fee,
-                        component: 'Processing fees',
-                        entity: stripeVendorEntity,
-                        metadataOverrides: { feeAmount: txn.fee, vendor: 'Stripe' }
-                    });
-                }
-
-                const netAmount = typeof txn.net === 'number'
-                    ? txn.net
-                    : (typeof txn.amount === 'number'
-                        ? txn.amount - (typeof txn.fee === 'number' ? txn.fee : 0)
-                        : 0);
-
-                appendClearingLine(netAmount);
-
-                if (lines.length === 0) {
-                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'revenue', revenueAccount);
                 }
                 break;
             }
 
             case 'refund':
             case 'payment_refund': {
-                if (typeof txn.amount === 'number' && txn.amount !== 0) {
-                    appendLine({
-                        type: txn.amount >= 0 ? 'credit' : 'debit',
+                if (includeEmbeddedFees) {
+                    if (typeof txn.amount === 'number' && txn.amount !== 0) {
+                        appendLine({
+                            type: txn.amount >= 0 ? 'credit' : 'debit',
+                            accountKey: 'refunds',
+                            accountName: refundsAccount,
+                            rawAmount: txn.amount,
+                            component: null,
+                            metadataOverrides: {
+                                grossAmount: txn.amount,
+                                feeAmount: typeof txn.fee === 'number' ? txn.fee : undefined
+                            },
+                            entity: null,
+                            nameOverride: stripeSourceId
+                        });
+                    }
+
+                    if (typeof txn.fee === 'number' && txn.fee !== 0) {
+                        appendLine({
+                            type: txn.fee >= 0 ? 'debit' : 'credit',
+                            accountKey: 'fees',
+                            accountName: feesAccount,
+                            rawAmount: txn.fee,
+                            component: null,
+                            metadataOverrides: {
+                                feeAmount: txn.fee,
+                                component: 'Processing fees',
+                                vendor: 'Stripe'
+                            },
+                            entity: stripeVendorEntity,
+                            nameOverride: stripeSourceId
+                        });
+                    }
+                } else {
+                    applySingleLine({
                         accountKey: 'refunds',
                         accountName: refundsAccount,
-                        rawAmount: txn.amount,
-                        component: 'Refund gross amount',
-                        metadataOverrides: { grossAmount: txn.amount }
+                        component: 'Refund net amount'
                     });
-                }
-
-                if (typeof txn.fee === 'number' && txn.fee !== 0) {
-                    appendLine({
-                        type: txn.fee >= 0 ? 'debit' : 'credit',
-                        accountKey: 'fees',
-                        accountName: feesAccount,
-                        rawAmount: txn.fee,
-                        component: 'Processing fees',
-                        entity: stripeVendorEntity,
-                        metadataOverrides: { feeAmount: txn.fee, vendor: 'Stripe' }
-                    });
-                }
-
-                const refundNet = typeof txn.net === 'number'
-                    ? txn.net
-                    : (typeof txn.amount === 'number'
-                        ? txn.amount - (typeof txn.fee === 'number' ? txn.fee : 0)
-                        : 0);
-
-                appendClearingLine(refundNet);
-
-                if (lines.length === 0) {
-                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'refunds', refundsAccount);
                 }
                 break;
             }
 
             case 'stripe_fee':
             case 'application_fee': {
-                if (typeof defaultRawAmount === 'number' && defaultRawAmount !== 0) {
-                    appendLine({
-                        type: defaultRawAmount >= 0 ? 'debit' : 'credit',
-                        accountKey: 'fees',
-                        accountName: feesAccount,
-                        rawAmount: defaultRawAmount,
-                        component: 'Processing fees',
-                        entity: stripeVendorEntity,
-                        metadataOverrides: { feeAmount: defaultRawAmount, vendor: 'Stripe' }
-                    });
-                } else {
-                    makeDefaultLine('debit', 'fees', feesAccount);
-                }
+                applySingleLine({
+                    accountKey: 'fees',
+                    accountName: feesAccount,
+                    component: 'Processing fees',
+                    entity: stripeVendorEntity,
+                    overrideType: netAmount <= 0 ? 'debit' : 'credit'
+                });
                 break;
             }
 
-            case 'application_fee_refund': {
-                if (typeof defaultRawAmount === 'number' && defaultRawAmount !== 0) {
-                    appendLine({
-                        type: defaultRawAmount >= 0 ? 'debit' : 'credit',
-                        accountKey: 'fees',
-                        accountName: feesAccount,
-                        rawAmount: defaultRawAmount,
-                        component: 'Processing fees',
-                        entity: stripeVendorEntity,
-                        metadataOverrides: { feeAmount: defaultRawAmount, vendor: 'Stripe' }
-                    });
-                } else {
-                    makeDefaultLine(defaultRawAmount >= 0 ? 'debit' : 'credit', 'fees', feesAccount);
-                }
+            case 'application_fee_refund':
+            case 'stripe_fee_refund': {
+                applySingleLine({
+                    accountKey: 'fees',
+                    accountName: feesAccount,
+                    component: 'Processing fee refund',
+                    entity: stripeVendorEntity,
+                    overrideType: netAmount >= 0 ? 'credit' : 'debit'
+                });
                 break;
             }
 
-            case 'adjustment':
-                makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'adjustments', adjustmentAccount);
+            case 'adjustment': {
+                applySingleLine({
+                    accountKey: 'adjustments',
+                    accountName: adjustmentAccount,
+                    component: netAmount >= 0 ? 'Positive adjustment' : 'Negative adjustment'
+                });
                 break;
+            }
 
-            default:
+            default: {
                 if (txn.type && typeof txn.type === 'string' && txn.type.includes('dispute')) {
-                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'chargebacks', chargebackAccount);
+                    applySingleLine({
+                        accountKey: 'chargebacks',
+                        accountName: chargebackAccount,
+                        component: netAmount >= 0 ? 'Dispute reversal' : 'Dispute'
+                    });
                 } else {
-                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'adjustments', adjustmentAccount);
+                    applySingleLine({
+                        accountKey: 'adjustments',
+                        accountName: adjustmentAccount,
+                        component: 'Other adjustment'
+                    });
                 }
                 break;
+            }
         }
 
         return lines;
