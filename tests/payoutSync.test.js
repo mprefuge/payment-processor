@@ -634,6 +634,152 @@ async function runTests() {
         failed++;
     }
 
+    // Test 10: Per-transaction journal line mode emits detailed lines
+    try {
+        const mockConfig = {
+            getConfig: () => ({
+                provider: 'quickbooks',
+                accounts: {
+                    stripeClearingAccount: 'Stripe Clearing',
+                    operatingBankAccount: 'Operating Bank',
+                    revenueAccount: 'Revenue',
+                    refundsAccount: 'Refunds',
+                    stripeFeeAccount: 'Stripe Fees',
+                    chargebackAccount: 'Chargebacks',
+                    adjustmentAccount: 'Adjustments'
+                },
+                posting: {
+                    strategy: 'je-transfer',
+                    transactionLineMode: 'per-transaction',
+                    dateSource: 'arrival'
+                }
+            }),
+            getStripeAccount: () => null
+        };
+
+        const syncLedger = new SyncLedger();
+        const provider = new MockAccountingProvider();
+        const service = new PayoutSyncService(mockConfig, provider, syncLedger);
+
+        const baseTime = Math.floor(Date.now() / 1000);
+        const balanceTransactions = [
+            {
+                id: 'txn_charge_1',
+                type: 'charge',
+                amount: 5000,
+                net: 4850,
+                fee: 150,
+                currency: 'usd',
+                description: 'Donation A',
+                source: 'ch_123',
+                metadata: { donationId: 'don_1' },
+                created: baseTime - 3600,
+                available_on: baseTime,
+                payout: 'po_txn_mode'
+            },
+            {
+                id: 'txn_refund_1',
+                type: 'refund',
+                amount: -2000,
+                net: -2000,
+                fee: 0,
+                currency: 'usd',
+                description: 'Refund B',
+                source: 're_123',
+                created: baseTime - 3200,
+                available_on: baseTime,
+                payout: 'po_txn_mode'
+            },
+            {
+                id: 'txn_fee_1',
+                type: 'stripe_fee',
+                amount: -150,
+                net: -150,
+                fee: 0,
+                currency: 'usd',
+                description: 'Stripe fee for payout',
+                created: baseTime - 3000,
+                available_on: baseTime,
+                payout: 'po_txn_mode'
+            },
+            {
+                id: 'txn_adjust_1',
+                type: 'adjustment',
+                amount: 100,
+                net: 100,
+                fee: 0,
+                currency: 'usd',
+                description: 'Positive adjustment',
+                metadata: { reason: 'Manual correction' },
+                created: baseTime - 2800,
+                available_on: baseTime,
+                payout: 'po_txn_mode'
+            }
+        ];
+
+        const summary = service.summarize(balanceTransactions);
+        const payout = {
+            id: 'po_txn_mode',
+            amount: summary.total,
+            arrival_date: baseTime,
+            created: baseTime
+        };
+
+        const instructions = service.generatePostingInstructions(payout, summary, null, balanceTransactions);
+        const journal = instructions.documents.find(doc => doc.type === 'journal');
+        const clearingLine = journal ? journal.lines.find(line => line.accountKey === 'clearing') : null;
+        const detailLines = journal ? journal.lines.filter(line => line.accountKey !== 'clearing') : [];
+        const chargeLine = detailLines.find(line => line.metadata?.balanceTransactionId === 'txn_charge_1');
+        const refundLine = detailLines.find(line => line.metadata?.balanceTransactionId === 'txn_refund_1');
+        const feeLine = detailLines.find(line => line.metadata?.balanceTransactionId === 'txn_fee_1');
+        const adjustmentLine = detailLines.find(line => line.metadata?.balanceTransactionId === 'txn_adjust_1');
+        const allHaveMetadata = detailLines.every(line => line.metadata && line.metadata.balanceTransactionId);
+        const metadataMode = journal?.metadata?.transactionLineMode === 'per-transaction';
+
+        const chargeTransaction = balanceTransactions.find(txn => txn.id === 'txn_charge_1');
+        const refundTransaction = balanceTransactions.find(txn => txn.id === 'txn_refund_1');
+        const feeTransaction = balanceTransactions.find(txn => txn.id === 'txn_fee_1');
+        const adjustmentTransaction = balanceTransactions.find(txn => txn.id === 'txn_adjust_1');
+
+        const chargeMemo = chargeLine?.memo || '';
+        const chargeMemoHasDetails = chargeMemo.includes('Donation A') &&
+            chargeMemo.includes('Gross USD 50.00') &&
+            chargeMemo.includes('Net USD 48.50') &&
+            chargeMemo.includes('Fee USD 1.50') &&
+            chargeMemo.includes('Balance txn txn_charge_1') &&
+            chargeMemo.includes('Metadata donationId=don_1');
+        const chargeNameMatches = chargeLine?.name === 'ch_123';
+        const chargeDescriptionMatches = chargeLine?.description === chargeMemo;
+
+        const linesValid = journal &&
+            clearingLine &&
+            clearingLine.type === 'debit' &&
+            clearingLine.amount === payout.amount &&
+            detailLines.length === balanceTransactions.length &&
+            chargeLine && chargeLine.type === 'credit' && chargeLine.accountKey === 'revenue' && chargeLine.amount === Math.abs(chargeTransaction.net) &&
+            chargeMemoHasDetails && chargeNameMatches && chargeDescriptionMatches &&
+            refundLine && refundLine.type === 'debit' && refundLine.accountKey === 'refunds' && refundLine.amount === Math.abs(refundTransaction.net) &&
+            feeLine && feeLine.type === 'debit' && feeLine.accountKey === 'fees' && feeLine.amount === Math.abs(feeTransaction.net) &&
+            adjustmentLine && adjustmentLine.type === 'credit' && adjustmentLine.accountKey === 'adjustments' && adjustmentLine.amount === Math.abs(adjustmentTransaction.net) &&
+            allHaveMetadata &&
+            chargeLine.metadata?.stripeMetadata?.donationId === 'don_1' &&
+            chargeLine.metadata?.amount === chargeTransaction.amount &&
+            chargeLine.metadata?.net === chargeTransaction.net &&
+            metadataMode;
+
+        if (linesValid) {
+            console.log('✅ Per-transaction journal line mode emits detailed lines');
+            passed++;
+        } else {
+            console.log('❌ Per-transaction journal line mode failed');
+            console.log('   Journal:', journal);
+            failed++;
+        }
+    } catch (error) {
+        console.log('❌ Per-transaction journal line mode - error:', error.message);
+        failed++;
+    }
+
     // Summary
     console.log(`\n📊 Payout Sync Test Results: ${passed}/${passed + failed} tests passed`);
 

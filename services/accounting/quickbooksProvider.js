@@ -178,18 +178,26 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 DocNumber: journalEntry.docNumber,
                 TxnDate: this._formatDate(journalEntry.date),
                 PrivateNote: journalEntry.memo || '',
-                Line: journalEntry.lines.map((line, index) => ({
-                    Id: (index + 1).toString(),
-                    Description: line.description || journalEntry.memo || '',
-                    Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
-                    DetailType: 'JournalEntryLineDetail',
-                    JournalEntryLineDetail: {
-                        PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
-                        AccountRef: {
-                            value: line.accountId
+                Line: journalEntry.lines.map((line, index) => {
+                    const linePayload = {
+                        Id: (index + 1).toString(),
+                        Description: line.memo || line.description || journalEntry.memo || '',
+                        Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
+                        DetailType: 'JournalEntryLineDetail',
+                        JournalEntryLineDetail: {
+                            PostingType: line.type === 'debit' ? 'Debit' : 'Credit',
+                            AccountRef: {
+                                value: line.accountId
+                            }
                         }
+                    };
+
+                    if (line.name) {
+                        linePayload.Name = line.name;
                     }
-                }))
+
+                    return linePayload;
+                })
             };
 
             const created = await this._executeWithTokenRefresh(() =>
@@ -400,17 +408,25 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 },
                 TxnDate: this._formatDate(deposit.date),
                 PrivateNote: `${deposit.memo || ''} [DocNum: ${deposit.docNumber}]`,
-                Line: deposit.lines.map((line, index) => ({
-                    Id: (index + 1).toString(),
-                    Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
-                    DetailType: 'DepositLineDetail',
-                    DepositLineDetail: {
-                        AccountRef: {
-                            value: line.accountId
-                        }
-                    },
-                    Description: line.description || deposit.memo || ''
-                }))
+                Line: deposit.lines.map((line, index) => {
+                    const linePayload = {
+                        Id: (index + 1).toString(),
+                        Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
+                        DetailType: 'DepositLineDetail',
+                        DepositLineDetail: {
+                            AccountRef: {
+                                value: line.accountId
+                            }
+                        },
+                        Description: line.memo || line.description || deposit.memo || ''
+                    };
+
+                    if (line.name) {
+                        linePayload.Name = line.name;
+                    }
+
+                    return linePayload;
+                })
             };
 
             const created = await this._executeWithTokenRefresh(() =>

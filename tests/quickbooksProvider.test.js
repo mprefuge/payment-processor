@@ -512,7 +512,7 @@ async function runTests() {
             date: new Date('2024-01-15'),
             memo: 'Test journal entry',
             lines: [
-                { type: 'debit', accountId: 'acc-1', amount: 1000, description: 'Debit line' },
+                { type: 'debit', accountId: 'acc-1', amount: 1000, memo: 'Debit memo', description: 'Debit line', name: 'debit-name' },
                 { type: 'credit', accountId: 'acc-2', amount: 1000, description: 'Credit line' }
             ]
         };
@@ -521,7 +521,11 @@ async function runTests() {
 
         if (result.created === true &&
             result.docNumber === 'JE-2024-001' &&
-            mockQBOClient.journalEntries.length === 1) {
+            mockQBOClient.journalEntries.length === 1 &&
+            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit memo' &&
+            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line' &&
+            mockQBOClient.journalEntries[0].Line[0].Name === 'debit-name' &&
+            typeof mockQBOClient.journalEntries[0].Line[1].Name === 'undefined') {
             console.log('✅ Create journal entry');
             passed++;
         } else {
@@ -737,8 +741,8 @@ async function runTests() {
             toAccountId: 'acc-bank',
             memo: 'Test deposit',
             lines: [
-                { accountId: 'acc-revenue', amount: 1000, description: 'Revenue line 1' },
-                { accountId: 'acc-revenue', amount: 500, description: 'Revenue line 2' }
+                { accountId: 'acc-revenue', amount: 1000, memo: 'Deposit memo line 1', description: 'Revenue line 1', name: 'donor-1' },
+                { accountId: 'acc-revenue', amount: 500 }
             ]
         };
 
@@ -748,7 +752,11 @@ async function runTests() {
             result.docNumber === 'DEP-2024-001' &&
             result.totalAmt === 1500 &&
             mockQBOClient.deposits.length === 1 &&
-            mockQBOClient.deposits[0].DocNumber === 'DEP-2024-001') {
+            mockQBOClient.deposits[0].DocNumber === 'DEP-2024-001' &&
+            mockQBOClient.deposits[0].Line[0].Description === 'Deposit memo line 1' &&
+            mockQBOClient.deposits[0].Line[1].Description === 'Test deposit' &&
+            mockQBOClient.deposits[0].Line[0].Name === 'donor-1' &&
+            typeof mockQBOClient.deposits[0].Line[1].Name === 'undefined') {
             console.log('✅ Create deposit');
             passed++;
         } else {
