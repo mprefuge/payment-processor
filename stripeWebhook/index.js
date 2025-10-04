@@ -888,9 +888,12 @@ const processCheckoutSessionCompleted = async (context, session) => {
 const processPayoutPaid = async (context, payout, stripeAccountId = null, eventId = null) => {
     try {
         context.log(`Processing payout.paid: ${payout.id}`);
+        context.log(`Stripe account ID: ${stripeAccountId || 'default'}`);
 
         // Check if accounting sync is enabled
         const accountingConfig = new AccountingSyncConfig();
+        context.log(`Accounting sync enabled: ${accountingConfig.isEnabled()}`);
+        
         if (!accountingConfig.isEnabled()) {
             context.log('Accounting sync disabled - skipping payout processing');
             return;
@@ -898,6 +901,8 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
 
         // Validate configuration
         const validation = accountingConfig.validate();
+        context.log(`Configuration validation result:`, validation);
+        
         if (!validation.isValid) {
             context.log('Accounting configuration invalid:', validation.errors);
             if (eventId) {
@@ -910,17 +915,23 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
 
         // Check if already synced (idempotency)
         const existingSync = await syncLedger.getSync(stripeAccountId, payout.id);
+        context.log(`Existing sync status:`, existingSync ? existingSync.status : 'none');
+        
         if (existingSync && existingSync.status === 'posted') {
             context.log(`Payout already synced: ${payout.id}`);
             return;
         }
 
         // Initialize accounting provider
+        context.log(`Initializing accounting provider: ${accountingConfig.getConfig().provider}`);
         const providerConfig = accountingConfig.getProviderConfig();
+        context.log(`Provider config keys:`, Object.keys(providerConfig));
+        
         const accountingProvider = AccountingProviderFactory.createProvider(
             accountingConfig.getConfig().provider,
             providerConfig
         );
+        context.log(`Accounting provider initialized successfully`);
 
         // Initialize payout sync service
         const payoutSyncService = new PayoutSyncService(
@@ -930,6 +941,12 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
             null, // ReviewTaskService integration can be added later
             getCrmServiceInstance() // Add CRM service for payout storage
         );
+        
+        // Set the context logger so we can see the logs
+        payoutSyncService.logger = context;
+        if (accountingProvider.logger) {
+            accountingProvider.logger = context;
+        }
 
         // Enqueue job for async processing
         // In production, this would use Azure Queue, Service Bus, or Durable Functions
@@ -937,12 +954,16 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
         context.log('Processing payout synchronously (production should use async queue)');
 
         await processPayoutJob(context, payout.id, stripeAccountId, payoutSyncService, eventId);
+        
+        context.log('Payout processing completed successfully');
 
     } catch (error) {
         context.log('Error processing payout.paid:', error.message);
+        context.log('Error stack:', error.stack);
         if (eventId) {
             await webhookEventStore.updateEventStatus(eventId, 'failed', {
-                error: error.message
+                error: error.message,
+                stack: error.stack
             });
         }
     }
@@ -1106,18 +1127,24 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
 
     } catch (error) {
         context.log('[PayoutJob] Error:', error.message);
+        context.log('[PayoutJob] Error stack:', error.stack);
 
         // Create review task on error
-        await payoutSyncService.createReviewTask({
-            payoutId,
-            stripeAccountId,
-            error: error.message
-        });
+        try {
+            await payoutSyncService.createReviewTask({
+                payoutId,
+                stripeAccountId,
+                error: error.message
+            });
+        } catch (reviewTaskError) {
+            context.log('[PayoutJob] Failed to create review task:', reviewTaskError.message);
+        }
 
         // Update event status
         if (eventId) {
             await webhookEventStore.updateEventStatus(eventId, 'failed', {
                 error: error.message,
+                stack: error.stack,
                 payoutId
             });
         }

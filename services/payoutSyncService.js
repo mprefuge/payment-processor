@@ -30,21 +30,30 @@ class PayoutSyncService {
      */
     async pullPayout(payoutId, stripeAccountId = null) {
         this.logger.log(`[PayoutSync] Pulling payout: ${payoutId}`);
+        this.logger.log(`[PayoutSync] Stripe account ID: ${stripeAccountId || 'default'}`);
 
         // Get Stripe configuration for account
         const stripeAccount = this.config.getStripeAccount(stripeAccountId) || {};
+        this.logger.log(`[PayoutSync] Stripe account config found: ${!!stripeAccount.secretKey || !!stripeAccount.mode}`);
+        
         const secretKey = stripeAccount.secretKey || 
             (stripeAccount.mode === 'live' ? process.env.STRIPE_LIVE_SECRET_KEY : process.env.STRIPE_TEST_SECRET_KEY);
 
         if (!secretKey) {
             throw new Error(`Stripe secret key not configured for account: ${stripeAccountId || 'default'}`);
         }
+        
+        this.logger.log(`[PayoutSync] Secret key available: ${secretKey ? 'YES' : 'NO'}`);
 
         const stripe = new Stripe(secretKey);
+        this.logger.log(`[PayoutSync] Stripe client initialized`);
 
         // Fetch payout
         const requestOptions = stripeAccountId ? { stripeAccount: stripeAccountId } : {};
+        this.logger.log(`[PayoutSync] Fetching payout from Stripe API...`);
+        
         const payout = await stripe.payouts.retrieve(payoutId, requestOptions);
+        this.logger.log(`[PayoutSync] Payout retrieved: ${payout.id}, status: ${payout.status}, amount: ${payout.amount}`);
 
         if (!payout) {
             throw new Error(`Payout not found: ${payoutId}`);
@@ -645,11 +654,20 @@ class PayoutSyncService {
             try {
                 switch (doc.type) {
                     case 'journal':
-                        // Map account names to IDs
-                        const linesWithAccountIds = doc.lines.map(line => ({
-                            ...line,
-                            accountId: accountMap[line.accountName] || `account-${line.accountName}`
-                        }));
+                        // Map account names to IDs with validation
+                        const linesWithAccountIds = doc.lines.map(line => {
+                            const accountId = accountMap[line.accountName];
+                            if (!accountId) {
+                                throw new Error(`Account ID not found for account: ${line.accountName}. Available accounts: ${Object.keys(accountMap).join(', ')}`);
+                            }
+                            return {
+                                ...line,
+                                accountId
+                            };
+                        });
+
+                        this.logger.log(`[PayoutSync] Creating journal entry with ${linesWithAccountIds.length} lines`);
+                        this.logger.log(`[PayoutSync] Journal entry lines:`, linesWithAccountIds.map(l => `${l.type} ${l.accountName}(${l.accountId}): ${l.amount}`).join(', '));
 
                         result = await this.accountingProvider.upsertJournalEntry({
                             docNumber: doc.docNumber,
@@ -661,6 +679,7 @@ class PayoutSyncService {
                                 stripeAccountId: postingInstructions.stripeAccountId
                             }
                         });
+                        this.logger.log(`[PayoutSync] Posted journal entry: ${result.id}`);
                         providerDocIds.journalEntry = result.id;
                         break;
 
@@ -714,6 +733,7 @@ class PayoutSyncService {
                 }
             } catch (error) {
                 this.logger.error(`[PayoutSync] Failed to post ${doc.type}:`, error.message);
+                this.logger.error(`[PayoutSync] Error stack:`, error.stack);
                 throw error;
             }
         }
