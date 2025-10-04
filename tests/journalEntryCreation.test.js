@@ -271,17 +271,22 @@ async function runTests() {
                 throw new Error('Some journal entry lines missing AccountRef.value');
             }
 
-            const entityNames = createdJE.Line.map(line =>
+            const entityPresence = createdJE.Line.map(line =>
                 line.JournalEntryLineDetail &&
                 line.JournalEntryLineDetail.Entity &&
                 line.JournalEntryLineDetail.Entity.EntityRef
-                    ? line.JournalEntryLineDetail.Entity.EntityRef.name
+                    ? line.JournalEntryLineDetail.Entity.EntityRef.name || line.JournalEntryLineDetail.Entity.EntityRef.value
                     : null
             );
 
-            const allEntitiesMatch = entityNames.every(name => name === 'Stripe Payout');
-            if (!allEntitiesMatch) {
-                throw new Error(`Unexpected entity names on journal lines: ${entityNames.join(', ')}`);
+            const hasEntityRefs = entityPresence.some(value => value !== null && value !== undefined);
+            if (hasEntityRefs) {
+                throw new Error(`Unexpected entity references on journal lines: ${entityPresence.join(', ')}`);
+            }
+
+            const descriptions = createdJE.Line.map(line => line.Description || '');
+            if (!descriptions.every(desc => desc.includes('Stripe Payout'))) {
+                throw new Error(`Journal line descriptions missing payout identifier: ${descriptions.join(' || ')}`);
             }
 
             // Verify accounts were created
@@ -412,21 +417,27 @@ async function runTests() {
 
         if (mockQBOClient.journalEntries.length === 1) {
             const created = mockQBOClient.journalEntries[0];
-            const nameSummary = created.Line.map(line =>
+            const entitySummary = created.Line.map(line =>
                 line.JournalEntryLineDetail &&
                 line.JournalEntryLineDetail.Entity &&
                 line.JournalEntryLineDetail.Entity.EntityRef
-                    ? line.JournalEntryLineDetail.Entity.EntityRef.name
+                    ? line.JournalEntryLineDetail.Entity.EntityRef.name || line.JournalEntryLineDetail.Entity.EntityRef.value
                     : null
             );
 
-            const payoutNameCount = nameSummary.filter(name => name === 'Stripe Payout').length;
-            const customerNameCount = nameSummary.filter(name => name === 'Alice Customer').length;
-            if (payoutNameCount !== 1 || customerNameCount !== 2) {
-                throw new Error(`Unexpected entity names on per-transaction JE: ${nameSummary.join(', ')}`);
+            if (entitySummary.some(value => value !== null && value !== undefined)) {
+                throw new Error(`Unexpected entity references on per-transaction JE: ${entitySummary.join(', ')}`);
             }
 
-            console.log('✅ Per-transaction journal entry splits gross and fee with customer name');
+            const descriptions = created.Line.map(line => line.Description || '');
+            const hasPayoutDescriptor = descriptions.some(desc => desc.includes('Stripe Payout'));
+            const hasCustomerDescriptor = descriptions.filter(desc => desc.includes('Alice Customer')).length === 2;
+
+            if (!hasPayoutDescriptor || !hasCustomerDescriptor) {
+                throw new Error(`Journal entry descriptions missing expected identifiers: ${descriptions.join(' || ')}`);
+            }
+
+            console.log('✅ Per-transaction journal entry retains customer names in instructions without invalid QBO entity refs');
             passed++;
         } else {
             console.log('❌ Per-transaction journal entry - wrong number of entries created');
