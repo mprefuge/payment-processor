@@ -633,11 +633,11 @@ class QuickBooksProvider extends BaseAccountingProvider {
         }
 
         try {
-            const refreshToken = await new Promise((resolve, reject) => {
+            const refreshResponse = await new Promise((resolve, reject) => {
                 if (!this.qbo) {
                     this._initializeClient();
                 }
-                
+
                 this.qbo.refreshAccessToken((err, data) => {
                     if (err) {
                         this.logger.error('[QBO] Error refreshing token:', err);
@@ -648,17 +648,26 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 });
             });
 
+            if (!refreshResponse || typeof refreshResponse !== 'object') {
+                throw new Error('Invalid token refresh response from QuickBooks');
+            }
+
+            if (!refreshResponse.access_token || refreshResponse.error) {
+                const errorDescription = refreshResponse.error_description || refreshResponse.error || 'Missing access token';
+                throw new Error(errorDescription);
+            }
+
             // Update stored tokens
-            this.oauthTokens.accessToken = refreshToken.access_token;
-            if (refreshToken.refresh_token) {
-                this.oauthTokens.refreshToken = refreshToken.refresh_token;
+            this.oauthTokens.accessToken = refreshResponse.access_token;
+            if (refreshResponse.refresh_token) {
+                this.oauthTokens.refreshToken = refreshResponse.refresh_token;
             }
 
             // Reinitialize client with new token
             this._initializeClient();
 
             this.logger.log('[QBO] Successfully refreshed OAuth tokens');
-            
+
             // Note: In production, you should persist these tokens to storage
             // so they can be used across sessions
             if (process.env.NODE_ENV === 'production') {
@@ -668,7 +677,8 @@ class QuickBooksProvider extends BaseAccountingProvider {
             return true;
         } catch (error) {
             this.logger.error('[QBO] Failed to refresh tokens:', error);
-            throw new Error(`Failed to refresh OAuth tokens: ${error.message}`);
+            const message = error && error.message ? error.message : 'Unknown error';
+            throw new Error(`Failed to refresh OAuth tokens: ${message}`);
         }
     }
 
