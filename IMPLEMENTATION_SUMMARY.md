@@ -176,11 +176,12 @@ QBO_ACCESS_TOKEN=your_token
 
 # Account mappings
 ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
-ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
 ACCOUNTING_REVENUE_ACCOUNT=Revenue
 ACCOUNTING_REFUNDS_ACCOUNT=Refunds
 ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
 ```
+
+> ℹ️ The operating bank account name is determined automatically from the Stripe payout destination.
 
 ### Recommended Additional
 

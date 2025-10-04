@@ -20,6 +20,7 @@ class PayoutSyncService {
         this.reviewTaskService = reviewTaskService;
         this.crmService = crmService;
         this.logger = console;
+        this.platformAccountId = null;
     }
 
     /**
@@ -52,12 +53,17 @@ class PayoutSyncService {
         const requestOptions = stripeAccountId ? { stripeAccount: stripeAccountId } : {};
         this.logger.log(`[PayoutSync] Fetching payout from Stripe API...`);
         
-        const payout = await stripe.payouts.retrieve(payoutId, requestOptions);
+        const payoutParams = { expand: ['destination'] };
+        const payout = stripeAccountId
+            ? await stripe.payouts.retrieve(payoutId, payoutParams, requestOptions)
+            : await stripe.payouts.retrieve(payoutId, payoutParams);
         this.logger.log(`[PayoutSync] Payout retrieved: ${payout.id}, status: ${payout.status}, amount: ${payout.amount}`);
 
         if (!payout) {
             throw new Error(`Payout not found: ${payoutId}`);
         }
+
+        await this._ensureOperatingBankAccount(stripe, payout, stripeAccountId);
 
         // Fetch balance transactions for this payout
         // Strategy: Try direct payout filter first for all payouts, fallback to date range if needed
@@ -393,6 +399,109 @@ class PayoutSyncService {
     }
 
     /**
+     * Ensure the operating bank account name is populated from Stripe
+     * @param {Stripe} stripe - Stripe client instance
+     * @param {Object} payout - Stripe payout object
+     * @param {string|null} stripeAccountId - Stripe account ID (null for platform account)
+     * @private
+     */
+    async _ensureOperatingBankAccount(stripe, payout, stripeAccountId) {
+        if (!this.config || typeof this.config.setOperatingBankAccountName !== 'function') {
+            return;
+        }
+
+        if (typeof this.config.getOperatingBankAccountName === 'function') {
+            const existing = this.config.getOperatingBankAccountName(stripeAccountId);
+            if (existing) {
+                return;
+            }
+        }
+
+        const expandedName = this._extractBankAccountName(payout?.destination);
+        if (expandedName) {
+            this.config.setOperatingBankAccountName(expandedName, stripeAccountId);
+            return;
+        }
+
+        const destinationId = typeof payout?.destination === 'string' ? payout.destination : null;
+        if (!destinationId) {
+            return;
+        }
+
+        try {
+            let accountId = stripeAccountId;
+
+            if (!accountId) {
+                accountId = await this._getPlatformAccountId(stripe);
+            }
+
+            if (!accountId) {
+                return;
+            }
+
+            const externalAccount = await stripe.accounts.retrieveExternalAccount(accountId, destinationId);
+            const accountName = this._extractBankAccountName(externalAccount);
+
+            if (accountName) {
+                this.config.setOperatingBankAccountName(accountName, stripeAccountId);
+            }
+        } catch (error) {
+            this.logger.warn(`[PayoutSync] Unable to load bank account name from Stripe: ${error.message}`);
+        }
+    }
+
+    /**
+     * Extract a human-readable bank account name from Stripe destination objects
+     * @param {Object|string|null} destination - Stripe payout destination
+     * @returns {string|null}
+     * @private
+     */
+    _extractBankAccountName(destination) {
+        if (!destination || typeof destination === 'string') {
+            return null;
+        }
+
+        if (destination.object === 'bank_account') {
+            return destination.account_holder_name || destination.bank_name || null;
+        }
+
+        if (destination.object === 'card') {
+            if (destination.brand && destination.last4) {
+                return `${destination.brand} ****${destination.last4}`;
+            }
+            return destination.bank_name || destination.account_holder_name || null;
+        }
+
+        if (destination.object === 'financial_connections.account') {
+            return destination.institution_name || destination.display_name || null;
+        }
+
+        return destination.account_holder_name || destination.bank_name || null;
+    }
+
+    /**
+     * Retrieve and cache the platform Stripe account ID
+     * @param {Stripe} stripe - Stripe client instance
+     * @returns {Promise<string|null>}
+     * @private
+     */
+    async _getPlatformAccountId(stripe) {
+        if (this.platformAccountId) {
+            return this.platformAccountId;
+        }
+
+        try {
+            const account = await stripe.accounts.retrieve();
+            this.platformAccountId = account?.id || null;
+        } catch (error) {
+            this.logger.warn(`[PayoutSync] Unable to retrieve platform account ID: ${error.message}`);
+            this.platformAccountId = null;
+        }
+
+        return this.platformAccountId;
+    }
+
+    /**
      * Generate provider-neutral posting instructions
      * @param {Object} payout - Stripe payout
      * @param {Object} summary - Activity summary
@@ -413,7 +522,9 @@ class PayoutSyncService {
 
         // Determine accounts
         const clearingAccount = accountConfig.stripeClearingAccount;
-        const bankAccount = accountConfig.operatingBankAccount;
+        const bankAccount = typeof this.config.getOperatingBankAccountName === 'function'
+            ? this.config.getOperatingBankAccountName(stripeAccountId)
+            : accountConfig.operatingBankAccount;
         const revenueAccount = accountConfig.revenueAccount;
         const refundsAccount = accountConfig.refundsAccount;
         const feesAccount = accountConfig.stripeFeeAccount;

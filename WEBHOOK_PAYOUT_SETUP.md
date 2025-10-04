@@ -147,12 +147,13 @@ QBO_REFRESH_TOKEN=your_refresh_token
 
 # Account mappings (use your actual account names from QuickBooks)
 ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
-ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
 ACCOUNTING_REVENUE_ACCOUNT=Revenue
 ACCOUNTING_REFUNDS_ACCOUNT=Refunds
 ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
 ACCOUNTING_DISPUTE_ACCOUNT=Customer Disputes
 ```
+
+> ℹ️ The operating bank account name is now read directly from Stripe payout destinations and no longer needs to be configured.
 
 **For other providers (Xero, Sage):**
 
@@ -224,7 +225,6 @@ QBO_COMPANY_ID
 QBO_ACCESS_TOKEN
 QBO_REFRESH_TOKEN
 ACCOUNTING_STRIPE_CLEARING_ACCOUNT
-ACCOUNTING_OPERATING_BANK_ACCOUNT
 ACCOUNTING_REVENUE_ACCOUNT
 
 # CRM (Salesforce example) - Optional

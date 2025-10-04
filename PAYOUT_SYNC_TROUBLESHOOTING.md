@@ -37,13 +37,15 @@ STRIPE_LIVE_SECRET_KEY=sk_live_...  # for live mode
 ### Optional Account Mappings
 ```
 ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
-ACCOUNTING_OPERATING_BANK_ACCOUNT=Operating Bank
 ACCOUNTING_REVENUE_ACCOUNT=Revenue
 ACCOUNTING_REFUNDS_ACCOUNT=Refunds
 ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
 ACCOUNTING_CHARGEBACK_ACCOUNT=Chargebacks
 ACCOUNTING_ADJUSTMENT_ACCOUNT=Adjustments
 ```
+
+> ℹ️ The operating bank account name is automatically synced from Stripe; you only need to provide the clearing and revenue
+> accounts.
 
 ## Diagnostic Log Messages
 
