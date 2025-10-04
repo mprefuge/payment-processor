@@ -192,7 +192,6 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 };
 
                 addPart(line.description);
-                addPart(line.name);
                 addPart(line.memo);
                 addPart(journalEntry.memo);
 
