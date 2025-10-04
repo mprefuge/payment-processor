@@ -63,6 +63,24 @@ class BaseAccountingProvider {
     }
 
     /**
+     * Ensure a customer exists in the accounting system and return its reference
+     * @param {Object} customer - Customer details {displayName, email, givenName, familyName, externalId}
+     * @returns {Promise<Object>} Customer reference {id, displayName}
+     */
+    async ensureCustomer(customer) {
+        throw new Error('ensureCustomer method must be implemented by subclass');
+    }
+
+    /**
+     * Ensure a vendor exists in the accounting system and return its reference
+     * @param {Object} vendor - Vendor details {displayName, email, externalId}
+     * @returns {Promise<Object>} Vendor reference {id, displayName}
+     */
+    async ensureVendor(vendor) {
+        throw new Error('ensureVendor method must be implemented by subclass');
+    }
+
+    /**
      * Attach a document/file to an accounting transaction
      * @param {string} transactionId - Provider transaction ID
      * @param {Object} attachment - Attachment data
