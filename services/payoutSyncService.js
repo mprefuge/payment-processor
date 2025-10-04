@@ -30,21 +30,30 @@ class PayoutSyncService {
      */
     async pullPayout(payoutId, stripeAccountId = null) {
         this.logger.log(`[PayoutSync] Pulling payout: ${payoutId}`);
+        this.logger.log(`[PayoutSync] Stripe account ID: ${stripeAccountId || 'default'}`);
 
         // Get Stripe configuration for account
         const stripeAccount = this.config.getStripeAccount(stripeAccountId) || {};
+        this.logger.log(`[PayoutSync] Stripe account config found: ${!!stripeAccount.secretKey || !!stripeAccount.mode}`);
+        
         const secretKey = stripeAccount.secretKey || 
             (stripeAccount.mode === 'live' ? process.env.STRIPE_LIVE_SECRET_KEY : process.env.STRIPE_TEST_SECRET_KEY);
 
         if (!secretKey) {
             throw new Error(`Stripe secret key not configured for account: ${stripeAccountId || 'default'}`);
         }
+        
+        this.logger.log(`[PayoutSync] Secret key available: ${secretKey ? 'YES' : 'NO'}`);
 
         const stripe = new Stripe(secretKey);
+        this.logger.log(`[PayoutSync] Stripe client initialized`);
 
         // Fetch payout
         const requestOptions = stripeAccountId ? { stripeAccount: stripeAccountId } : {};
+        this.logger.log(`[PayoutSync] Fetching payout from Stripe API...`);
+        
         const payout = await stripe.payouts.retrieve(payoutId, requestOptions);
+        this.logger.log(`[PayoutSync] Payout retrieved: ${payout.id}, status: ${payout.status}, amount: ${payout.amount}`);
 
         if (!payout) {
             throw new Error(`Payout not found: ${payoutId}`);
