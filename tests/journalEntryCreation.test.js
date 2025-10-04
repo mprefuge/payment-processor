@@ -11,6 +11,7 @@
 const PayoutSyncService = require('../services/payoutSyncService');
 const AccountingSyncConfig = require('../services/accountingSyncConfig');
 const SyncLedger = require('../services/syncLedger');
+const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock QuickBooks client that validates DocNumber length and AccountRef presence
 class MockQBOClient {
@@ -299,7 +300,7 @@ async function runTests() {
         };
 
         const provider = new QuickBooksProvider(qboConfig);
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('journal-entry');
         const payoutSyncService = new PayoutSyncService(config, provider, syncLedger);
 
         // Create a payout like the one in the logs
@@ -454,7 +455,7 @@ async function runTests() {
         };
 
         const provider = new QuickBooksProvider(qboConfig);
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('journal-entry');
         const payoutSyncService = new PayoutSyncService(config, provider, syncLedger);
 
         const payout = {

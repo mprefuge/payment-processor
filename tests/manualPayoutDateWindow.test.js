@@ -14,6 +14,7 @@
 const PayoutSyncService = require('../services/payoutSyncService');
 const SyncLedger = require('../services/syncLedger');
 const WebhookEventStore = require('../services/webhookEventStore');
+const { createTestSyncLedger, createTestWebhookEventStore } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider
 class MockAccountingProvider {
@@ -80,8 +81,8 @@ async function testManualPayoutDateWindowFix() {
     try {
         const config = createMockConfig();
         const accountingProvider = new MockAccountingProvider();
-        const syncLedger = new SyncLedger();
-        const webhookEventStore = new WebhookEventStore();
+        const syncLedger = await createTestSyncLedger('manual-date-window');
+        const webhookEventStore = await createTestWebhookEventStore('manual-date-window');
         const payoutSyncService = new PayoutSyncService(config, accountingProvider, syncLedger);
         
         // Simulate first payout with validation failure
@@ -205,7 +206,7 @@ async function testPayoutAdvanceExclusion() {
     try {
         const config = createMockConfig();
         const accountingProvider = new MockAccountingProvider();
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('manual-date-window-exclusion');
         const payoutSyncService = new PayoutSyncService(config, accountingProvider, syncLedger);
         
         // Create balance transactions matching user's log pattern

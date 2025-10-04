@@ -6,6 +6,7 @@
 const PayoutSyncService = require('../services/payoutSyncService');
 const AccountingSyncConfig = require('../services/accountingSyncConfig');
 const SyncLedger = require('../services/syncLedger');
+const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider
 class MockAccountingProvider {
@@ -42,7 +43,7 @@ async function testPayoutWithoutStripeAccount() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync-fix-no-account');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -81,7 +82,7 @@ async function testPayoutWithStripeAccount() {
             })
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync-fix-with-account');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 

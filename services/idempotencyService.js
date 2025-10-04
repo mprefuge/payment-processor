@@ -3,24 +3,27 @@
  * 
  * Prevents duplicate processing of transactions by tracking processed items
  * 
- * ⚠️ PRODUCTION WARNING: This implementation uses in-memory storage which will be
- * lost on application restart or when running in distributed environments.
- * For production use, replace with persistent storage:
- * - Redis for distributed caching
- * - Database with TTL/expiry for long-term storage
- * - Azure Cache for Redis (recommended for Azure Functions)
+ * Storage is backed by a pluggable persistence provider. By default the service
+ * stores data on disk using the file-based key/value store, but it can be
+ * configured with Azure Cache for Redis, Cosmos DB, or any other implementation
+ * that implements the same minimal interface (get/set/clear/etc.).
  */
 
+const { createPersistentStorageClients } = require('./storage/persistentStoreFactory');
+
 class IdempotencyService {
-    constructor() {
-        // WARNING: In-memory storage - not suitable for production at scale
-        // Replace with Redis, database, or Azure Cache for production deployments
-        this.processedTransactions = new Map();
-        this.logger = console;
-        
-        // Log warning in production
-        if (process.env.NODE_ENV === 'production' && !process.env.SUPPRESS_IDEMPOTENCY_WARNING) {
-            this.logger.warn('⚠️ IdempotencyService using in-memory storage. This is not suitable for production. Use Redis or database instead.');
+    constructor({ storageClient, logger = console, namespace } = {}) {
+        const storageNamespace = namespace || process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+
+        this.logger = logger;
+        const clients = storageClient
+            ? { idempotencyStore: storageClient }
+            : createPersistentStorageClients(storageNamespace);
+
+        this.storage = clients.idempotencyStore;
+
+        if (!this.storage) {
+            throw new Error('IdempotencyService requires a storage client');
         }
     }
 
@@ -43,12 +46,12 @@ class IdempotencyService {
      * @param {string} key - Idempotency key
      * @returns {Object|null} Previous processing result or null if not processed
      */
-    getProcessedResult(key) {
-        const result = this.processedTransactions.get(key);
-        
+    async getProcessedResult(key) {
+        const result = await this.storage.get(key);
+
         if (result) {
-            this.logger.log('IdempotencyService: Found existing processing result', { 
-                key, 
+            this.logger.log('IdempotencyService: Found existing processing result', {
+                key,
                 processedAt: result.processedAt,
                 action: result.decision?.action 
             });
@@ -63,7 +66,7 @@ class IdempotencyService {
      * @param {Object} result - Processing result from ContactMatcher
      * @param {Object} metadata - Additional metadata about processing
      */
-    storeResult(key, result, metadata = {}) {
+    async storeResult(key, result, metadata = {}) {
         const storedResult = {
             key,
             processedAt: new Date().toISOString(),
@@ -81,18 +84,23 @@ class IdempotencyService {
             }
         };
 
-        this.processedTransactions.set(key, storedResult);
-        
-        // Clean up old entries to prevent memory leaks (keep last 1000)
-        if (this.processedTransactions.size > 1000) {
-            const firstKey = this.processedTransactions.keys().next().value;
-            this.processedTransactions.delete(firstKey);
+        await this.storage.set(key, storedResult);
+
+        const entries = await this.storage.entries();
+        if (entries.length > 1000) {
+            const entriesToDelete = entries
+                .sort(([, a], [, b]) => new Date(a.processedAt) - new Date(b.processedAt))
+                .slice(0, entries.length - 1000);
+
+            for (const [oldKey] of entriesToDelete) {
+                await this.storage.delete(oldKey);
+            }
         }
 
-        this.logger.log('IdempotencyService: Stored processing result', { 
-            key, 
+        this.logger.log('IdempotencyService: Stored processing result', {
+            key,
             action: result.decision?.action,
-            score: result.decision?.bestScore 
+            score: result.decision?.bestScore
         });
 
         return storedResult;
@@ -104,9 +112,9 @@ class IdempotencyService {
      * @param {Object} currentInputs - Current transaction inputs
      * @returns {boolean} True if inputs have changed
      */
-    inputsChanged(key, currentInputs) {
-        const previousResult = this.getProcessedResult(key);
-        
+    async inputsChanged(key, currentInputs) {
+        const previousResult = await this.getProcessedResult(key);
+
         if (!previousResult || !previousResult.metadata.inputHash) {
             return true; // No previous result or no hash to compare
         }
@@ -158,11 +166,11 @@ class IdempotencyService {
         const key = this.generateKey(transactionData);
         
         // Check if already processed
-        const existingResult = this.getProcessedResult(key);
-        
+        const existingResult = await this.getProcessedResult(key);
+
         if (existingResult) {
             // Check if inputs have changed
-            if (!this.inputsChanged(key, transactionData)) {
+            if (!await this.inputsChanged(key, transactionData)) {
                 this.logger.log('IdempotencyService: Returning cached result (no input changes)', { key });
                 return {
                     ...existingResult,
@@ -176,10 +184,10 @@ class IdempotencyService {
 
         // Process the transaction
         const result = await processFunction(transactionData);
-        
+
         // Store the result with input hash for future comparisons
         const inputHash = this.hashInputs(transactionData);
-        const storedResult = this.storeResult(key, result, { 
+        const storedResult = await this.storeResult(key, result, {
             inputHash,
             originalTransactionData: this.sanitizeForStorage(transactionData)
         });
@@ -219,9 +227,9 @@ class IdempotencyService {
      * Get statistics about processed transactions
      * @returns {Object} Statistics
      */
-    getStats() {
-        const results = Array.from(this.processedTransactions.values());
-        
+    async getStats() {
+        const results = await this.storage.values();
+
         const stats = {
             totalProcessed: results.length,
             byAction: {},
@@ -254,8 +262,8 @@ class IdempotencyService {
     /**
      * Clear all stored results (for testing/debugging)
      */
-    clear() {
-        this.processedTransactions.clear();
+    async clear() {
+        await this.storage.clear();
         this.logger.log('IdempotencyService: Cleared all stored results');
     }
 }
