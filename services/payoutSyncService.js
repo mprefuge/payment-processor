@@ -454,7 +454,7 @@ class PayoutSyncService {
                     continue;
                 }
 
-                const line = this._mapTransactionToJournalLine(txn, {
+                const lines = this._mapTransactionToJournalLines(txn, {
                     revenueAccount,
                     refundsAccount,
                     feesAccount,
@@ -462,14 +462,22 @@ class PayoutSyncService {
                     adjustmentAccount
                 });
 
-                if (line) {
+                if (!Array.isArray(lines) || lines.length === 0) {
+                    continue;
+                }
+
+                for (const line of lines) {
                     line.description = buildSummaryDescription(line.description || line.memo || 'Stripe transaction', [
                         line.metadata && line.metadata.balanceTransactionId
                             ? `Transaction: ${line.metadata.balanceTransactionId}`
                             : null,
-                        formatCurrency(line.amount) ? `Amount: ${formatCurrency(line.amount)}` : null
+                        formatCurrency(line.amount) ? `Amount: ${formatCurrency(line.amount)}` : null,
+                        line.metadata && line.metadata.component
+                            ? `Component: ${line.metadata.component}`
+                            : null
                     ]);
-                    line.name = line.name || payout.id;
+                    line.name = line.name || this._resolveEntityName(null, 'transaction');
+                    line.entityContext = line.entityContext || 'transaction';
                     jeLines.push(line);
                     clearingNet += line.type === 'credit' ? line.amount : -line.amount;
                 }
@@ -491,7 +499,8 @@ class PayoutSyncService {
                             ? `Gross: ${formatCurrency(summary.charges.grossAmount)}`
                             : null
                     ]),
-                    name: payout.id
+                    name: this._resolveEntityName(null, 'payout'),
+                    entityContext: 'payout'
                 });
                 clearingNet += summary.charges.grossAmount;
             }
@@ -512,7 +521,8 @@ class PayoutSyncService {
                             ? `Total: ${formatCurrency(-summary.refunds.amount)}`
                             : null
                     ]),
-                    name: payout.id
+                    name: this._resolveEntityName(null, 'payout'),
+                    entityContext: 'payout'
                 });
                 clearingNet -= summary.refunds.amount;
             }
@@ -540,7 +550,8 @@ class PayoutSyncService {
                         ...feeDetails,
                         formatCurrency(totalFees) ? `Total: ${formatCurrency(totalFees)}` : null
                     ]),
-                    name: payout.id
+                    name: this._resolveEntityName(null, 'payout'),
+                    entityContext: 'payout'
                 });
                 clearingNet -= totalFees;
             }
@@ -561,7 +572,8 @@ class PayoutSyncService {
                             ? `Total: ${formatCurrency(summary.disputes.amount)}`
                             : null
                     ]),
-                    name: payout.id
+                    name: this._resolveEntityName(null, 'payout'),
+                    entityContext: 'payout'
                 });
                 clearingNet -= summary.disputes.amount;
             }
@@ -589,7 +601,8 @@ class PayoutSyncService {
                         amount: adjustmentAmount,
                         memo: `Positive Stripe adjustments`,
                         description: buildSummaryDescription(adjustmentLabel, adjustmentDetails),
-                        name: payout.id
+                        name: this._resolveEntityName(null, 'payout'),
+                        entityContext: 'payout'
                     });
                     clearingNet += adjustmentAmount;
                 } else {
@@ -600,7 +613,8 @@ class PayoutSyncService {
                         amount: adjustmentAmount,
                         memo: `Negative Stripe adjustments`,
                         description: buildSummaryDescription(adjustmentLabel, adjustmentDetails),
-                        name: payout.id
+                        name: this._resolveEntityName(null, 'payout'),
+                        entityContext: 'payout'
                     });
                     clearingNet -= adjustmentAmount;
                 }
@@ -631,7 +645,8 @@ class PayoutSyncService {
                     expectedNet ? `Expected net: ${expectedNet}` : null,
                     formatCurrency(payout.amount) ? `Payout total: ${formatCurrency(payout.amount)}` : null
                 ]),
-                name: payout.id
+                name: this._resolveEntityName(null, 'payout'),
+                entityContext: 'payout'
             });
         }
 
@@ -1118,22 +1133,119 @@ class PayoutSyncService {
     }
 
     /**
-     * Build the name to associate with a transaction line. For Stripe charges we
-     * prefer the charge identifier so it can surface in accounting Name columns.
+     * Attempt to extract a customer name from a Stripe balance transaction
      * @param {Object} txn - Stripe balance transaction
      * @returns {string|null}
      * @private
      */
-    _buildTransactionName(txn) {
+    _extractTransactionCustomerName(txn) {
         if (!txn || typeof txn !== 'object') {
             return null;
         }
 
-        if (txn.type === 'charge' || txn.type === 'payment') {
-            return txn.source || txn.id || null;
+        const candidates = [];
+
+        if (typeof txn.customer_name === 'string') {
+            candidates.push(txn.customer_name);
+        }
+        if (typeof txn.customerName === 'string') {
+            candidates.push(txn.customerName);
+        }
+
+        if (txn.customer && typeof txn.customer === 'object') {
+            if (typeof txn.customer.name === 'string') {
+                candidates.push(txn.customer.name);
+            }
+        }
+
+        if (txn.customer_details && typeof txn.customer_details === 'object') {
+            if (typeof txn.customer_details.name === 'string') {
+                candidates.push(txn.customer_details.name);
+            }
+        }
+
+        if (txn.billing_details && typeof txn.billing_details === 'object') {
+            if (typeof txn.billing_details.name === 'string') {
+                candidates.push(txn.billing_details.name);
+            }
+        }
+
+        if (txn.source && typeof txn.source === 'object') {
+            if (txn.source.billing_details && typeof txn.source.billing_details === 'object' &&
+                typeof txn.source.billing_details.name === 'string') {
+                candidates.push(txn.source.billing_details.name);
+            }
+            if (txn.source.customer && typeof txn.source.customer === 'object' &&
+                typeof txn.source.customer.name === 'string') {
+                candidates.push(txn.source.customer.name);
+            }
+        }
+
+        if (txn.metadata && typeof txn.metadata === 'object') {
+            const metadataNameFields = ['customer_name', 'customerName', 'name'];
+            for (const field of metadataNameFields) {
+                const value = txn.metadata[field];
+                if (typeof value === 'string') {
+                    candidates.push(value);
+                }
+            }
+        }
+
+        for (const candidate of candidates) {
+            if (typeof candidate !== 'string') {
+                continue;
+            }
+
+            const trimmed = candidate.trim();
+            if (trimmed.length > 0) {
+                return trimmed;
+            }
         }
 
         return null;
+    }
+
+    /**
+     * Resolve the entity name for a journal line based on context
+     * @param {string|null} customerName - Extracted customer name
+     * @param {'transaction'|'payout'} context - Context for the line
+     * @returns {string}
+     * @private
+     */
+    _resolveEntityName(customerName, context = 'transaction') {
+        if (typeof customerName === 'string' && customerName.trim().length > 0) {
+            return customerName.trim();
+        }
+
+        if (context === 'payout') {
+            return 'Stripe Payout';
+        }
+
+        return 'Stripe Transaction';
+    }
+
+    /**
+     * Append a component label to a base description without duplicates
+     * @param {string|null} description - Base description
+     * @param {string|null} componentLabel - Component label to append
+     * @returns {string|null}
+     * @private
+     */
+    _appendComponentToDescription(description, componentLabel) {
+        if (!componentLabel || typeof componentLabel !== 'string' || componentLabel.trim().length === 0) {
+            return description || null;
+        }
+
+        const trimmedComponent = componentLabel.trim();
+        if (!description || description.length === 0) {
+            return trimmedComponent;
+        }
+
+        if (description.includes(trimmedComponent)) {
+            return description;
+        }
+
+        return `${description} | ${trimmedComponent}`;
     }
 
     /**
@@ -1189,62 +1301,152 @@ class PayoutSyncService {
      * @returns {Object|null} Journal line or null if the transaction should be skipped
      * @private
      */
-    _mapTransactionToJournalLine(txn, accounts) {
+    _mapTransactionToJournalLines(txn, accounts) {
         if (!txn || typeof txn !== 'object') {
-            return null;
+            return [];
         }
 
         const { revenueAccount, refundsAccount, feesAccount, chargebackAccount, adjustmentAccount } = accounts;
         const memo = this._buildTransactionMemo(txn);
-        const description = this._buildTransactionDescription(txn);
-        const name = this._buildTransactionName(txn);
-        const metadata = this._buildTransactionMetadata(txn);
-        const rawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
-        const amount = Math.abs(rawAmount || 0);
-
-        if (!amount) {
-            return null;
+        const baseDescription = this._buildTransactionDescription(txn);
+        const baseMetadata = { ...this._buildTransactionMetadata(txn) };
+        const customerName = this._extractTransactionCustomerName(txn);
+        if (customerName) {
+            baseMetadata.customerName = customerName;
         }
 
-        const makeLine = (type, accountKey, accountName) => ({
-            type,
-            accountKey,
-            accountName,
-            amount,
-            memo,
-            description,
-            name,
-            metadata
-        });
+        const name = this._resolveEntityName(customerName, 'transaction');
+        const defaultRawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
+        const lines = [];
+
+        const appendLine = ({ type, accountKey, accountName, rawAmount, component = null, description = null, metadataOverrides = {} }) => {
+            if (!accountName || typeof rawAmount !== 'number' || Number.isNaN(rawAmount) || rawAmount === 0) {
+                return;
+            }
+
+            const normalizedAmount = Math.round(Math.abs(rawAmount));
+            if (!normalizedAmount) {
+                return;
+            }
+
+            const componentLabel = component && typeof component === 'string' ? component.trim() : null;
+            const finalDescription = this._appendComponentToDescription(description || baseDescription || memo || null, componentLabel);
+            const lineMetadata = { ...baseMetadata };
+
+            if (componentLabel) {
+                lineMetadata.component = componentLabel;
+            }
+
+            Object.entries(metadataOverrides || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null) {
+                    lineMetadata[key] = value;
+                }
+            });
+
+            lines.push({
+                type,
+                accountKey,
+                accountName,
+                amount: normalizedAmount,
+                memo,
+                description: finalDescription || memo || null,
+                name,
+                entityContext: 'transaction',
+                metadata: lineMetadata
+            });
+        };
+
+        const makeDefaultLine = (type, accountKey, accountName) => {
+            if (typeof defaultRawAmount !== 'number' || defaultRawAmount === 0) {
+                return;
+            }
+            appendLine({ type, accountKey, accountName, rawAmount: defaultRawAmount });
+        };
 
         switch (txn.type) {
             case 'charge':
-            case 'payment':
-                return makeLine('credit', 'revenue', revenueAccount);
-            case 'refund':
-            case 'payment_refund':
-                return makeLine('debit', 'refunds', refundsAccount);
-            case 'stripe_fee':
-            case 'application_fee':
-                return makeLine('debit', 'fees', feesAccount);
-            case 'application_fee_refund':
-                return makeLine('credit', 'fees', feesAccount);
-            case 'adjustment':
-                return rawAmount >= 0
-                    ? makeLine('credit', 'adjustments', adjustmentAccount)
-                    : makeLine('debit', 'adjustments', adjustmentAccount);
-            default:
-                if (txn.type && txn.type.includes('dispute')) {
-                    return rawAmount >= 0
-                        ? makeLine('credit', 'chargebacks', chargebackAccount)
-                        : makeLine('debit', 'chargebacks', chargebackAccount);
+            case 'payment': {
+                if (typeof txn.amount === 'number' && txn.amount !== 0) {
+                    appendLine({
+                        type: 'credit',
+                        accountKey: 'revenue',
+                        accountName: revenueAccount,
+                        rawAmount: txn.amount,
+                        component: 'Gross amount',
+                        metadataOverrides: { grossAmount: txn.amount }
+                    });
                 }
 
-                // Fallback: treat as adjustment using sign of amount
-                return rawAmount >= 0
-                    ? makeLine('credit', 'adjustments', adjustmentAccount)
-                    : makeLine('debit', 'adjustments', adjustmentAccount);
+                if (typeof txn.fee === 'number' && txn.fee !== 0) {
+                    appendLine({
+                        type: txn.fee >= 0 ? 'debit' : 'credit',
+                        accountKey: 'fees',
+                        accountName: feesAccount,
+                        rawAmount: txn.fee,
+                        component: 'Processing fees',
+                        metadataOverrides: { feeAmount: txn.fee }
+                    });
+                }
+
+                if (lines.length === 0) {
+                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'revenue', revenueAccount);
+                }
+                break;
+            }
+
+            case 'refund':
+            case 'payment_refund': {
+                if (typeof txn.amount === 'number' && txn.amount !== 0) {
+                    appendLine({
+                        type: txn.amount >= 0 ? 'credit' : 'debit',
+                        accountKey: 'refunds',
+                        accountName: refundsAccount,
+                        rawAmount: txn.amount,
+                        component: 'Refund gross amount',
+                        metadataOverrides: { grossAmount: txn.amount }
+                    });
+                }
+
+                if (typeof txn.fee === 'number' && txn.fee !== 0) {
+                    appendLine({
+                        type: txn.fee >= 0 ? 'debit' : 'credit',
+                        accountKey: 'fees',
+                        accountName: feesAccount,
+                        rawAmount: txn.fee,
+                        component: 'Processing fees',
+                        metadataOverrides: { feeAmount: txn.fee }
+                    });
+                }
+
+                if (lines.length === 0) {
+                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'refunds', refundsAccount);
+                }
+                break;
+            }
+
+            case 'stripe_fee':
+            case 'application_fee':
+                makeDefaultLine('debit', 'fees', feesAccount);
+                break;
+
+            case 'application_fee_refund':
+                makeDefaultLine(defaultRawAmount >= 0 ? 'debit' : 'credit', 'fees', feesAccount);
+                break;
+
+            case 'adjustment':
+                makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'adjustments', adjustmentAccount);
+                break;
+
+            default:
+                if (txn.type && typeof txn.type === 'string' && txn.type.includes('dispute')) {
+                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'chargebacks', chargebackAccount);
+                } else {
+                    makeDefaultLine(defaultRawAmount >= 0 ? 'credit' : 'debit', 'adjustments', adjustmentAccount);
+                }
+                break;
         }
+
+        return lines;
     }
 
     /**
