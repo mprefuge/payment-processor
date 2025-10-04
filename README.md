@@ -140,6 +140,63 @@ The system includes advanced customer-contact association with configurable matc
 | `CONTACT_MATCH_REVIEW_ENABLED` | Enable review task creation for uncertain matches | `true` | `false` |
 | `REVIEW_DEEP_LINK_BASE_URL` | Base URL for deep links in review tasks | `https://example.com/admin` | Your admin URL |
 
+### Stripe → QuickBooks Online configuration
+
+The Stripe clearing sync relies on the following accounting environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `ACCT_REVENUE_ID` | Income account credited for successful charges |
+| `ACCT_STRIPE_FEES_ID` | Expense account debited for Stripe fees and dispute fees |
+| `ACCT_REFUNDS_CONTRA_REV_ID` | Contra-revenue account debited for refunds and disputes |
+| `ACCT_STRIPE_CLEARING_ID` | Bank-type clearing account that accumulates Stripe balance activity |
+| `ACCT_OPERATING_BANK_ID` | Destination bank account for Stripe payouts |
+| `VENDOR_STRIPE_ID` | Optional QuickBooks Vendor ID for Stripe (auto-created when omitted) |
+| `COMPANY_HOME_CURRENCY` | Home currency used for FX conversions |
+| `STRIPE_QBO_STATE_PATH` | Optional path for the durable idempotency store (defaults to `.data/stripe-qbo-state.json`) |
+
+The new module under `services/accounting/stripe-qbo` exposes composable functions that follow the Single Responsibility Principle:
+
+```javascript
+const stripe = require('stripe')(process.env.STRIPE_TEST_SECRET_KEY);
+const quickBooksProvider = /* existing QBO provider instance */;
+const {
+    fetchStripeChargesSince,
+    resolveQboCustomer,
+    ensureStripeVendor,
+    buildChargeJE,
+    postJEIfNew,
+    postTransferIfNew,
+    ProcessedStripeStore
+} = require('./services/accounting/stripe-qbo');
+
+async function syncSince(isoDate) {
+    const store = new ProcessedStripeStore();
+    const vendor = await ensureStripeVendor(quickBooksProvider);
+    const charges = await fetchStripeChargesSince(stripe, isoDate);
+
+    for (const charge of charges) {
+        const customer = await resolveQboCustomer(charge, quickBooksProvider);
+        const { journalEntry, attachments } = buildChargeJE(charge, {
+            revenueId: process.env.ACCT_REVENUE_ID,
+            stripeFeesId: process.env.ACCT_STRIPE_FEES_ID,
+            refundsContraId: process.env.ACCT_REFUNDS_CONTRA_REV_ID,
+            stripeClearingId: process.env.ACCT_STRIPE_CLEARING_ID
+        }, vendor, customer, { companyHomeCurrency: process.env.COMPANY_HOME_CURRENCY });
+
+        await postJEIfNew(journalEntry, quickBooksProvider, {
+            store,
+            stripeId: charge.id,
+            attachments
+        });
+    }
+}
+```
+
+For payouts, use `postTransferIfNew(payout, quickBooksProvider, { accounts, store })` after confirming the clearing account balances with `reconcilePayout(payout, mappedTransactions)`. The `ProcessedStripeStore` persists processed Stripe IDs to disk, ensuring webhook replays and manual backfills stay idempotent across process restarts.
+
+Run `node tests/stripeQboSync.test.js` to exercise the charge, refund, dispute, fee, payout, attachment, and idempotency scenarios that underpin the clearing workflow.
+
 ## API Usage
 
 ### Payment Processing Endpoint
