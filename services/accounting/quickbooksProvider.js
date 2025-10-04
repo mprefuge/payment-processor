@@ -204,7 +204,15 @@ class QuickBooksProvider extends BaseAccountingProvider {
             };
         } catch (error) {
             this.logger.error('[QBO] Error upserting journal entry:', error);
-            throw new Error(`Failed to upsert journal entry: ${error.message}`);
+            
+            // Extract error message from Fault if present
+            let errorMessage = error.message;
+            if (error.Fault && error.Fault.Error && Array.isArray(error.Fault.Error)) {
+                const errors = error.Fault.Error.map(e => `${e.Message}: ${e.Detail || ''}`).join('; ');
+                errorMessage = errors;
+            }
+            
+            throw new Error(`Failed to upsert journal entry: ${errorMessage}`);
         }
     }
 
@@ -293,7 +301,15 @@ class QuickBooksProvider extends BaseAccountingProvider {
             };
         } catch (error) {
             this.logger.error('[QBO] Error upserting transfer:', error);
-            throw new Error(`Failed to upsert transfer: ${error.message}`);
+            
+            // Extract error message from Fault if present
+            let errorMessage = error.message;
+            if (error.Fault && error.Fault.Error && Array.isArray(error.Fault.Error)) {
+                const errors = error.Fault.Error.map(e => `${e.Message}: ${e.Detail || ''}`).join('; ');
+                errorMessage = errors;
+            }
+            
+            throw new Error(`Failed to upsert transfer: ${errorMessage}`);
         }
     }
 
@@ -382,7 +398,15 @@ class QuickBooksProvider extends BaseAccountingProvider {
             };
         } catch (error) {
             this.logger.error('[QBO] Error upserting deposit:', error);
-            throw new Error(`Failed to upsert deposit: ${error.message}`);
+            
+            // Extract error message from Fault if present
+            let errorMessage = error.message;
+            if (error.Fault && error.Fault.Error && Array.isArray(error.Fault.Error)) {
+                const errors = error.Fault.Error.map(e => `${e.Message}: ${e.Detail || ''}`).join('; ');
+                errorMessage = errors;
+            }
+            
+            throw new Error(`Failed to upsert deposit: ${errorMessage}`);
         }
     }
 

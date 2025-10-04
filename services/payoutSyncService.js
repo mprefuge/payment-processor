@@ -412,6 +412,7 @@ class PayoutSyncService {
             : new Date(payout.created * 1000);
 
         // Document number for idempotency
+        // Base docNumber can be used for internal tracking but needs to be shortened for QBO
         const accountPrefix = stripeAccountId ? stripeAccountId.substring(0, 8) : 'default';
         const docNumber = `STRIPE-${accountPrefix}-${payout.id}`;
 
@@ -549,7 +550,10 @@ class PayoutSyncService {
         if (jeLines.length > 0) {
             instructions.documents.push({
                 type: 'journal',
-                docNumber: `${docNumber}-JE`,
+                // DocNumber must be max 21 chars for QuickBooks
+                // Use a shortened hash-based identifier instead of full payout ID
+                docNumber: this._generateShortDocNumber(payout.id, 'JE'),
+                fullDocNumber: `${docNumber}-JE`, // Keep full docNumber for reference
                 date: postingDate,
                 reference: `Stripe Payout ${stripeAccountId ? stripeAccountId + '/' : ''}${payout.id}`,
                 memo: `Stripe payout activity for ${postingDate.toISOString().split('T')[0]}`,
@@ -562,7 +566,8 @@ class PayoutSyncService {
             if (postingConfig.strategy === 'deposit') {
                 instructions.documents.push({
                     type: 'deposit',
-                    docNumber: `${docNumber}-DEP`,
+                    docNumber: this._generateShortDocNumber(payout.id, 'DP'),
+                    fullDocNumber: `${docNumber}-DEP`,
                     date: postingDate,
                     toAccountName: bankAccount,
                     amount: payout.amount,
@@ -577,7 +582,8 @@ class PayoutSyncService {
                 // Default: JE + Transfer
                 instructions.documents.push({
                     type: 'transfer',
-                    docNumber: `${docNumber}-XFER`,
+                    docNumber: this._generateShortDocNumber(payout.id, 'XF'),
+                    fullDocNumber: `${docNumber}-XFER`,
                     date: postingDate,
                     fromAccountName: clearingAccount,
                     toAccountName: bankAccount,
@@ -602,17 +608,54 @@ class PayoutSyncService {
 
         const providerDocIds = {};
 
+        // Ensure all required accounts exist in the accounting system
+        // and get their account IDs
+        const accountsToEnsure = new Set();
+        for (const doc of postingInstructions.documents) {
+            if (doc.type === 'journal') {
+                doc.lines.forEach(line => {
+                    if (line.accountName) {
+                        accountsToEnsure.add(line.accountName);
+                    }
+                });
+            }
+        }
+
+        const accountMap = {};
+        if (accountsToEnsure.size > 0) {
+            const accountList = Array.from(accountsToEnsure).map(name => ({
+                name,
+                type: this._getAccountType(name),
+                subType: this._getAccountSubType(name)
+            }));
+
+            try {
+                const mappedAccounts = await this.accountingProvider.ensureChartOfAccounts(accountList);
+                Object.assign(accountMap, mappedAccounts);
+                this.logger.log(`[PayoutSync] Ensured ${Object.keys(accountMap).length} accounts`);
+            } catch (error) {
+                this.logger.error(`[PayoutSync] Failed to ensure chart of accounts:`, error.message);
+                throw new Error(`Failed to ensure chart of accounts: ${error.message}`);
+            }
+        }
+
         for (const doc of postingInstructions.documents) {
             let result = null;
 
             try {
                 switch (doc.type) {
                     case 'journal':
+                        // Map account names to IDs
+                        const linesWithAccountIds = doc.lines.map(line => ({
+                            ...line,
+                            accountId: accountMap[line.accountName] || `account-${line.accountName}`
+                        }));
+
                         result = await this.accountingProvider.upsertJournalEntry({
                             docNumber: doc.docNumber,
                             date: doc.date,
                             memo: doc.memo,
-                            lines: doc.lines,
+                            lines: linesWithAccountIds,
                             metadata: { 
                                 payoutId: postingInstructions.payoutId,
                                 stripeAccountId: postingInstructions.stripeAccountId
@@ -822,6 +865,72 @@ class PayoutSyncService {
         }
 
         return description;
+    }
+
+    /**
+     * Generate a shortened DocNumber that fits QuickBooks 21-character limit
+     * Uses hash of payout ID to ensure uniqueness while staying short
+     * @param {string} payoutId - Stripe payout ID
+     * @param {string} suffix - Document type suffix (JE, XF, DP)
+     * @returns {string} Short document number (max 21 chars)
+     * @private
+     */
+    _generateShortDocNumber(payoutId, suffix) {
+        const crypto = require('crypto');
+        
+        // Create hash of payout ID (first 10 chars of hex)
+        const hash = crypto.createHash('sha256')
+            .update(payoutId)
+            .digest('hex')
+            .substring(0, 10);
+        
+        // Format: ST-{hash}-{suffix}
+        // Example: ST-283ec7749e-JE (16 chars, well under 21 char limit)
+        return `ST-${hash}-${suffix}`;
+    }
+
+    /**
+     * Get default account type for common account names
+     * @private
+     */
+    _getAccountType(accountName) {
+        const normalizedName = accountName.toLowerCase();
+        
+        if (normalizedName.includes('bank') || normalizedName.includes('clearing')) {
+            return 'Bank';
+        } else if (normalizedName.includes('revenue') || normalizedName.includes('income')) {
+            return 'Income';
+        } else if (normalizedName.includes('fee') || normalizedName.includes('expense')) {
+            return 'Expense';
+        } else if (normalizedName.includes('refund')) {
+            return 'Expense';
+        } else if (normalizedName.includes('chargeback') || normalizedName.includes('dispute')) {
+            return 'Expense';
+        } else if (normalizedName.includes('adjustment')) {
+            return 'OtherExpense';
+        }
+        
+        return 'Bank'; // Default to Bank
+    }
+
+    /**
+     * Get default account sub-type for common account names
+     * @private
+     */
+    _getAccountSubType(accountName) {
+        const normalizedName = accountName.toLowerCase();
+        
+        if (normalizedName.includes('clearing')) {
+            return 'CashOnHand';
+        } else if (normalizedName.includes('bank')) {
+            return 'Checking';
+        } else if (normalizedName.includes('revenue') || normalizedName.includes('income')) {
+            return 'SalesOfProductIncome';
+        } else if (normalizedName.includes('fee') || normalizedName.includes('expense')) {
+            return 'SuppliesMaterials';
+        }
+        
+        return 'CashOnHand'; // Default
     }
 }
 
