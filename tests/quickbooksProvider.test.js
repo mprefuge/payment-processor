@@ -25,6 +25,11 @@ class MockQBOClient {
         };
         this.shouldFailAuth = false;
         this.tokenRefreshCount = 0;
+        this.refreshError = null;
+        this.refreshResponse = {
+            access_token: 'new-access-token',
+            refresh_token: 'new-refresh-token'
+        };
     }
 
     reset() {
@@ -34,6 +39,11 @@ class MockQBOClient {
         this.deposits = [];
         this.shouldFailAuth = false;
         this.tokenRefreshCount = 0;
+        this.refreshError = null;
+        this.refreshResponse = {
+            access_token: 'new-access-token',
+            refresh_token: 'new-refresh-token'
+        };
     }
 
     query(queryStr, callback) {
@@ -187,10 +197,11 @@ class MockQBOClient {
 
     refreshAccessToken(callback) {
         this.tokenRefreshCount++;
-        callback(null, {
-            access_token: 'new-access-token',
-            refresh_token: 'new-refresh-token'
-        });
+        if (this.refreshError) {
+            return callback(this.refreshError);
+        }
+
+        callback(null, this.refreshResponse);
     }
 
     // Find methods to match the real node-quickbooks API
@@ -913,7 +924,7 @@ async function runTests() {
     // Test 15: Token refresh
     try {
         mockQBOClient.reset();
-        
+
         const config = {
             companyId: 'test-company-123',
             environment: 'sandbox',
@@ -924,7 +935,7 @@ async function runTests() {
         };
 
         const provider = new QuickBooksProvider(config);
-        
+
         const initialRefreshCount = mockQBOClient.tokenRefreshCount;
         const result = await provider.refreshTokens();
 
@@ -938,6 +949,38 @@ async function runTests() {
     } catch (error) {
         console.log('❌ Token refresh - error:', error.message);
         failed++;
+    }
+
+    // Test 16: Token refresh failure surfaces error
+    try {
+        mockQBOClient.reset();
+        mockQBOClient.refreshResponse = {
+            error: 'invalid_grant',
+            error_description: 'Incorrect or invalid refresh token'
+        };
+
+        const config = {
+            companyId: 'test-company-123',
+            environment: 'sandbox',
+            oauthTokens: {
+                accessToken: 'expired-token',
+                refreshToken: 'invalid-refresh-token'
+            }
+        };
+
+        const provider = new QuickBooksProvider(config);
+
+        await provider.refreshTokens();
+        console.log('❌ Token refresh failure - expected error but succeeded');
+        failed++;
+    } catch (error) {
+        if (error.message.includes('Incorrect or invalid refresh token')) {
+            console.log('✅ Token refresh failure surfaces error');
+            passed++;
+        } else {
+            console.log('❌ Token refresh failure - unexpected error:', error.message);
+            failed++;
+        }
     }
 
     // Print summary
