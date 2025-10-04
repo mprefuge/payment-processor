@@ -523,8 +523,21 @@ async function runTests() {
             date: new Date('2024-01-15'),
             memo: 'Test journal entry',
             lines: [
-                { type: 'debit', accountId: 'acc-1', amount: 1000, memo: 'Debit memo', description: 'Debit line' },
-                { type: 'credit', accountId: 'acc-2', amount: 1000, description: 'Credit line' }
+                {
+                    type: 'debit',
+                    accountId: 'acc-1',
+                    amount: 1000,
+                    memo: 'Debit memo',
+                    description: 'Debit line',
+                    name: 'line-debit'
+                },
+                {
+                    type: 'credit',
+                    accountId: 'acc-2',
+                    amount: 1000,
+                    description: 'Credit line',
+                    name: 'line-credit'
+                }
             ]
         };
 
@@ -533,8 +546,10 @@ async function runTests() {
         if (result.created === true &&
             result.docNumber === 'JE-2024-001' &&
             mockQBOClient.journalEntries.length === 1 &&
-            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit line' &&
-            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line') {
+            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit line | Debit memo | Test journal entry' &&
+            mockQBOClient.journalEntries[0].Line[0].Name === 'line-debit' &&
+            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line | Test journal entry' &&
+            mockQBOClient.journalEntries[0].Line[1].Name === 'line-credit') {
             console.log('✅ Create journal entry');
             passed++;
         } else {

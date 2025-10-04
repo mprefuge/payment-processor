@@ -431,6 +431,23 @@ class PayoutSyncService {
         const jeLines = [];
         let clearingNet = 0;
 
+        const formatCurrency = (amount) => this._formatCurrency(amount, summary.currency);
+        const buildSummaryDescription = (label, details = []) => {
+            const parts = [
+                `Stripe payout ${payout.id}`,
+                summary.currency ? `Currency: ${summary.currency.toUpperCase()}` : null,
+                `Mode: ${transactionLineMode === 'per-transaction' ? 'Per transaction' : 'Summary'}`,
+                label,
+                ...details
+            ];
+
+            return parts
+                .filter(part => part && String(part).trim().length > 0)
+                .map(part => String(part).trim())
+                .filter((part, index, arr) => arr.indexOf(part) === index)
+                .join(' | ');
+        };
+
         if (usePerTransactionLines) {
             for (const txn of balanceTransactions) {
                 if (!this._shouldIncludeTransactionInJournal(txn)) {
@@ -446,6 +463,13 @@ class PayoutSyncService {
                 });
 
                 if (line) {
+                    line.description = buildSummaryDescription(line.description || line.memo || 'Stripe transaction', [
+                        line.metadata && line.metadata.balanceTransactionId
+                            ? `Transaction: ${line.metadata.balanceTransactionId}`
+                            : null,
+                        formatCurrency(line.amount) ? `Amount: ${formatCurrency(line.amount)}` : null
+                    ]);
+                    line.name = line.name || payout.id;
                     jeLines.push(line);
                     clearingNet += line.type === 'credit' ? line.amount : -line.amount;
                 }
@@ -458,7 +482,16 @@ class PayoutSyncService {
                     accountKey: 'revenue',
                     accountName: revenueAccount,
                     amount: summary.charges.grossAmount,
-                    memo: `Revenue from ${summary.charges.count} Stripe charges`
+                    memo: `Revenue from ${summary.charges.count} Stripe charges`,
+                    description: buildSummaryDescription('Revenue from Stripe charges', [
+                        summary.charges.count
+                            ? `${summary.charges.count} charge${summary.charges.count === 1 ? '' : 's'}`
+                            : null,
+                        formatCurrency(summary.charges.grossAmount)
+                            ? `Gross: ${formatCurrency(summary.charges.grossAmount)}`
+                            : null
+                    ]),
+                    name: payout.id
                 });
                 clearingNet += summary.charges.grossAmount;
             }
@@ -470,7 +503,16 @@ class PayoutSyncService {
                     accountKey: 'refunds',
                     accountName: refundsAccount,
                     amount: summary.refunds.amount,
-                    memo: `Stripe refunds - ${summary.refunds.count} transactions`
+                    memo: `Stripe refunds - ${summary.refunds.count} transactions`,
+                    description: buildSummaryDescription('Stripe refunds', [
+                        summary.refunds.count
+                            ? `${summary.refunds.count} refund${summary.refunds.count === 1 ? '' : 's'}`
+                            : null,
+                        formatCurrency(summary.refunds.amount)
+                            ? `Total: ${formatCurrency(-summary.refunds.amount)}`
+                            : null
+                    ]),
+                    name: payout.id
                 });
                 clearingNet -= summary.refunds.amount;
             }
@@ -478,12 +520,27 @@ class PayoutSyncService {
             // Stripe fees
             const totalFees = summary.fees.stripe.amount + summary.fees.application.amount;
             if (totalFees > 0) {
+                const feeDetails = [];
+                const stripeFees = formatCurrency(summary.fees.stripe.amount);
+                const applicationFees = formatCurrency(summary.fees.application.amount);
+                if (stripeFees) {
+                    feeDetails.push(`Stripe fees: ${stripeFees}`);
+                }
+                if (applicationFees) {
+                    feeDetails.push(`Application fees: ${applicationFees}`);
+                }
+
                 jeLines.push({
                     type: 'debit',
                     accountKey: 'fees',
                     accountName: feesAccount,
                     amount: totalFees,
-                    memo: `Stripe processing fees`
+                    memo: `Stripe processing fees`,
+                    description: buildSummaryDescription('Stripe fees', [
+                        ...feeDetails,
+                        formatCurrency(totalFees) ? `Total: ${formatCurrency(totalFees)}` : null
+                    ]),
+                    name: payout.id
                 });
                 clearingNet -= totalFees;
             }
@@ -495,7 +552,16 @@ class PayoutSyncService {
                     accountKey: 'chargebacks',
                     accountName: chargebackAccount,
                     amount: summary.disputes.amount,
-                    memo: `Chargebacks - ${summary.disputes.count} disputes`
+                    memo: `Chargebacks - ${summary.disputes.count} disputes`,
+                    description: buildSummaryDescription('Chargebacks', [
+                        summary.disputes.count
+                            ? `${summary.disputes.count} dispute${summary.disputes.count === 1 ? '' : 's'}`
+                            : null,
+                        formatCurrency(summary.disputes.amount)
+                            ? `Total: ${formatCurrency(summary.disputes.amount)}`
+                            : null
+                    ]),
+                    name: payout.id
                 });
                 clearingNet -= summary.disputes.amount;
             }
@@ -503,13 +569,27 @@ class PayoutSyncService {
             // Adjustments
             if (summary.adjustments.amount !== 0) {
                 const adjustmentAmount = Math.abs(summary.adjustments.amount);
+                const adjustmentLabel = summary.adjustments.amount > 0
+                    ? 'Positive Stripe adjustments'
+                    : 'Negative Stripe adjustments';
+                const adjustmentDetails = [
+                    summary.adjustments.count
+                        ? `${summary.adjustments.count} adjustment${summary.adjustments.count === 1 ? '' : 's'}`
+                        : null,
+                    formatCurrency(summary.adjustments.amount)
+                        ? `Net: ${formatCurrency(summary.adjustments.amount)}`
+                        : null
+                ];
+
                 if (summary.adjustments.amount > 0) {
                     jeLines.push({
                         type: 'credit',
                         accountKey: 'adjustments',
                         accountName: adjustmentAccount,
                         amount: adjustmentAmount,
-                        memo: `Positive Stripe adjustments`
+                        memo: `Positive Stripe adjustments`,
+                        description: buildSummaryDescription(adjustmentLabel, adjustmentDetails),
+                        name: payout.id
                     });
                     clearingNet += adjustmentAmount;
                 } else {
@@ -518,7 +598,9 @@ class PayoutSyncService {
                         accountKey: 'adjustments',
                         accountName: adjustmentAccount,
                         amount: adjustmentAmount,
-                        memo: `Negative Stripe adjustments`
+                        memo: `Negative Stripe adjustments`,
+                        description: buildSummaryDescription(adjustmentLabel, adjustmentDetails),
+                        name: payout.id
                     });
                     clearingNet -= adjustmentAmount;
                 }
@@ -534,12 +616,22 @@ class PayoutSyncService {
         }
 
         if (clearingNet !== 0) {
+            const netFormatted = formatCurrency(clearingNet);
+            const expectedNet = typeof expectedClearing === 'number'
+                ? formatCurrency(expectedClearing)
+                : null;
             jeLines.unshift({
                 type: clearingNet > 0 ? 'debit' : 'credit',
                 accountKey: 'clearing',
                 accountName: clearingAccount,
                 amount: Math.abs(clearingNet),
-                memo: `Stripe clearing balance impact`
+                memo: `Stripe clearing balance impact`,
+                description: buildSummaryDescription('Clearing balance impact', [
+                    netFormatted ? `Net change: ${netFormatted}` : null,
+                    expectedNet ? `Expected net: ${expectedNet}` : null,
+                    formatCurrency(payout.amount) ? `Payout total: ${formatCurrency(payout.amount)}` : null
+                ]),
+                name: payout.id
             });
         }
 
