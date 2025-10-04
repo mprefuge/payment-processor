@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { createPersistentStorageClients } = require('./storage/persistentStoreFactory');
 
 /**
  * Sync Ledger Service
@@ -6,21 +7,25 @@ const crypto = require('crypto');
  * Tracks payout sync state and links payouts to accounting documents
  * Provides idempotency and audit trail for accounting sync operations
  * 
- * ⚠️ PRODUCTION WARNING: This implementation uses in-memory storage which will be
- * lost on application restart. For production use, replace with persistent storage:
- * - Database with proper indexes on payout_id and stripe_account_id
- * - Support for concurrent access and locks
+ * Backed by the shared persistence layer so sync history is retained across
+ * function executions and scale-out scenarios. The default implementation uses
+ * the file-based key/value store but can be swapped for Redis, Cosmos DB, etc.
  */
 
 class SyncLedger {
-    constructor() {
-        // WARNING: In-memory storage - not suitable for production
-        this.ledger = new Map(); // key: {stripeAccountId}:{payoutId}
-        this.logger = console;
-        
-        if (process.env.NODE_ENV === 'production' && !process.env.SUPPRESS_SYNC_LEDGER_WARNING) {
-            this.logger.warn('⚠️ SyncLedger using in-memory storage. Use database for production.');
+    constructor({ storageClient, logger = console, namespace } = {}) {
+        const storageNamespace = namespace || process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+
+        const clients = storageClient
+            ? { syncLedgerStore: storageClient }
+            : createPersistentStorageClients(storageNamespace);
+
+        this.storage = clients.syncLedgerStore;
+        if (!this.storage) {
+            throw new Error('SyncLedger requires a storage client');
         }
+
+        this.logger = logger;
     }
 
     /**
@@ -100,7 +105,7 @@ class SyncLedger {
             updatedAt: new Date().toISOString()
         };
 
-        this.ledger.set(key, record);
+        await this.storage.set(key, record);
         this.logger.log(`[SyncLedger] Recorded sync for payout: ${payoutId}`);
 
         return record;
@@ -114,7 +119,7 @@ class SyncLedger {
      */
     async getSync(stripeAccountId, payoutId) {
         const key = this._generateKey(stripeAccountId, payoutId);
-        return this.ledger.get(key) || null;
+        return await this.storage.get(key);
     }
 
     /**
@@ -138,7 +143,7 @@ class SyncLedger {
      */
     async updateStatus(stripeAccountId, payoutId, status, metadata = {}) {
         const key = this._generateKey(stripeAccountId, payoutId);
-        const record = this.ledger.get(key);
+        const record = await this.storage.get(key);
 
         if (!record) {
             throw new Error(`Sync record not found for payout: ${payoutId}`);
@@ -155,7 +160,7 @@ class SyncLedger {
             record.providerDocIds = { ...record.providerDocIds, ...metadata.providerDocIds };
         }
 
-        this.ledger.set(key, record);
+        await this.storage.set(key, record);
         this.logger.log(`[SyncLedger] Updated sync status for payout ${payoutId} to: ${status}`);
 
         return record;
@@ -191,7 +196,8 @@ class SyncLedger {
      * @returns {Array<Object>} Matching records
      */
     async getSyncsByStatus(status) {
-        return Array.from(this.ledger.values()).filter(r => r.status === status);
+        const records = await this.storage.values();
+        return records.filter(r => r.status === status);
     }
 
     /**
@@ -200,7 +206,13 @@ class SyncLedger {
      * @returns {Array<Object>} Matching records
      */
     async getSyncsByAccount(stripeAccountId) {
-        return Array.from(this.ledger.values()).filter(r => r.stripeAccountId === stripeAccountId);
+        const records = await this.storage.values();
+        return records.filter(r => r.stripeAccountId === stripeAccountId);
+    }
+
+    async clear() {
+        await this.storage.clear();
+        this.logger.log('[SyncLedger] Cleared all records');
     }
 }
 

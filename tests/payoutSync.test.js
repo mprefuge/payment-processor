@@ -11,6 +11,7 @@
 const PayoutSyncService = require('../services/payoutSyncService');
 const AccountingSyncConfig = require('../services/accountingSyncConfig');
 const SyncLedger = require('../services/syncLedger');
+const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider
 class MockAccountingProvider {
@@ -113,7 +114,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -144,7 +145,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -185,7 +186,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -238,7 +239,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -299,7 +300,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -365,7 +366,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -419,7 +420,7 @@ async function runTests() {
 
     // Test 6: Posting hash generation and idempotency
     try {
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
 
         const instructions1 = {
             payoutId: 'po_test',
@@ -461,7 +462,7 @@ async function runTests() {
 
     // Test 7: Sync ledger idempotency
     try {
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
 
         const syncRecord = {
             stripeAccountId: 'acct_test',
@@ -502,7 +503,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -598,7 +599,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 
@@ -657,7 +658,7 @@ async function runTests() {
             getStripeAccount: () => null
         };
 
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
 

@@ -108,6 +108,7 @@ func azure functionapp publish payment-processing-function
 |----------|-------------|---------|
 | `DEBUG_EMAIL` | Email address for debug notifications (leave empty to disable) | `debug@example.com` |
 | `NOTIFICATION_POLICY` | Controls when payment success notifications are sent. Options: `ALL` (all payments), `FIRST` (first payment per customer only), `NONE` (no notifications), `ABOVE #` (only if payment exceeds amount, e.g., `ABOVE 100`), `MINIMUM #` (only if payment meets or exceeds amount, e.g., `MINIMUM 50`) | `ALL` |
+| `STRIPE_MODE` | Stripe operating mode; set to `live` to use live credentials. Defaults to test mode when omitted. | `live` |
 
 ### CRM Integration Variables (Optional)
 
@@ -218,7 +219,6 @@ POST /api/transaction
   "frequency": "onetime",
   "category": "General",
   "coverFee": false,
-  "livemode": false,
   "address": {
     "line1": "123 Main St",
     "city": "New York",
@@ -240,8 +240,9 @@ POST /api/transaction
 - `frequency` (required): Payment frequency - "onetime", "week", "biweek", "month", or "year"
 - `category` (optional): Transaction category. Defaults to "General".
 - `coverFee` (optional): Whether customer covers processing fees
-- `livemode` (optional): Use live Stripe keys (true) or test keys (false)
 - `address` (optional): Customer address object
+
+> **Note:** The function always determines whether to use live or test Stripe keys from server-side configuration. Client payloads cannot switch modes.
 
 ### Response
 

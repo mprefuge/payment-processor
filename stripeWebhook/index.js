@@ -13,6 +13,7 @@ const AccountingProviderFactory = require('../services/accounting/accountingProv
 const PayoutSyncService = require('../services/payoutSyncService');
 const WebhookEventStore = require('../services/webhookEventStore');
 const SyncLedger = require('../services/syncLedger');
+const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
 
 const createContextLogger = (context) => {
     const baseLog = (...args) => context.log(...args);
@@ -38,10 +39,17 @@ const createContextLogger = (context) => {
 };
 
 // Global service instances
-const idempotencyService = new IdempotencyService();
+const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+const {
+    idempotencyStore,
+    webhookEventStore: webhookEventStoreClient,
+    syncLedgerStore
+} = createPersistentStorageClients(storageNamespace);
+
+const idempotencyService = new IdempotencyService({ storageClient: idempotencyStore });
 const metricsService = new MetricsService();
-const webhookEventStore = new WebhookEventStore();
-const syncLedger = new SyncLedger();
+const webhookEventStore = new WebhookEventStore({ storageClient: webhookEventStoreClient });
+const syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
 
 /**
  * Redact sensitive information from headers
@@ -234,19 +242,29 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         description: paymentIntent.description
     });
 
-    // Send notification email for successful payment
+    const paymentData = {
+        email: customer.email,
+        firstname: transactionData.firstName || 'Valued',
+        lastname: transactionData.lastName || 'Customer',
+        amount: paymentIntent.amount,
+        frequency: transactionData.frequency,
+        category: transactionData.category || 'General',
+        livemode: paymentIntent.livemode
+    };
+
     try {
-        const paymentData = {
-            email: customer.email,
-            firstname: transactionData.firstName || 'Valued',
-            lastname: transactionData.lastName || 'Customer',
-            amount: paymentIntent.amount,
-            frequency: transactionData.frequency,
-            category: transactionData.category || 'General',
-            livemode: paymentIntent.livemode
-        };
-        await sendPaymentSuccessEmail(paymentData, paymentIntent, stripe);
-        context.log('Payment success notification email sent');
+        const emailResult = await sendPaymentSuccessEmail(paymentData, paymentIntent, stripe);
+
+        if (emailResult?.status === 'sent') {
+            context.log('Payment success notification email sent');
+        } else if (emailResult?.status === 'skipped') {
+            context.log(`Payment success notification email skipped: ${emailResult.reason}`);
+        } else if (emailResult?.status === 'failed') {
+            const errorMessage = emailResult.error?.message || emailResult.reason || 'unknown_error';
+            context.log('Failed to send payment success email:', errorMessage);
+        } else {
+            context.log('Payment success notification email status unknown');
+        }
     } catch (emailError) {
         context.log('Failed to send payment success email:', emailError.message);
         // Continue processing - email failure shouldn't break the flow

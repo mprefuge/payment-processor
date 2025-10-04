@@ -1,7 +1,18 @@
 const sgMail = require('@sendgrid/mail');
 
-// Initialize SendGrid
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+const sendGridApiKey = process.env.SENDGRID_API_KEY;
+let isSendGridEnabled = false;
+
+if (sendGridApiKey) {
+    try {
+        sgMail.setApiKey(sendGridApiKey);
+        isSendGridEnabled = true;
+    } catch (error) {
+        console.error('Failed to initialize SendGrid API key:', error.message);
+    }
+} else {
+    console.warn('SENDGRID_API_KEY not configured. Email delivery disabled.');
+}
 
 /**
  * Determine if an email notification should be sent based on configuration
@@ -87,14 +98,19 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
 
 // Send notification email for successful payment
 const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
+    if (!isSendGridEnabled) {
+        console.warn('SendGrid API key not configured. Skipping payment success email delivery.');
+        return { status: 'skipped', reason: 'sendgrid_disabled' };
+    }
+
     const isLiveMode = paymentData.livemode || paymentIntent.livemode;
-    const toEmail = isLiveMode 
-        ? process.env.NOTIFICATION_EMAIL_LIVE 
+    const toEmail = isLiveMode
+        ? process.env.NOTIFICATION_EMAIL_LIVE
         : process.env.NOTIFICATION_EMAIL_TEST;
-    
+
     if (!toEmail) {
         console.log('No notification email configured');
-        return;
+        return { status: 'skipped', reason: 'missing_recipient' };
     }
 
     // Check notification policy
@@ -112,7 +128,7 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
 
     if (!shouldSend) {
         console.log(`Notification skipped based on policy: ${notificationPolicy}`);
-        return;
+        return { status: 'skipped', reason: 'policy_skip' };
     }
     
     const subject = `Payment Received - ${paymentData.firstname} ${paymentData.lastname}`;
@@ -165,9 +181,11 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
     try {
         await sgMail.send(msg);
         console.log('Payment success notification email sent successfully');
+        return { status: 'sent' };
     } catch (error) {
         console.error('Error sending payment success notification email:', error);
         // Don't throw here - email failure shouldn't break the payment flow
+        return { status: 'failed', error };
     }
 };
 

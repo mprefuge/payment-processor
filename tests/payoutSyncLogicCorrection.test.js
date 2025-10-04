@@ -11,6 +11,7 @@
 
 const PayoutSyncService = require('../services/payoutSyncService');
 const SyncLedger = require('../services/syncLedger');
+const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider
 class MockAccountingProvider {
@@ -159,7 +160,7 @@ async function testDiagnosticLogging() {
     
     try {
         const mockConfig = createMockConfig();
-        const syncLedger = new SyncLedger();
+        const syncLedger = await createTestSyncLedger('payout-sync-logic');
         const provider = new MockAccountingProvider();
         const service = new PayoutSyncService(mockConfig, provider, syncLedger);
         
