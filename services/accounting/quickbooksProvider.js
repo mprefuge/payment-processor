@@ -180,7 +180,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 PrivateNote: journalEntry.memo || '',
                 Line: journalEntry.lines.map((line, index) => ({
                     Id: (index + 1).toString(),
-                    Description: line.description || journalEntry.memo || '',
+                    Description: line.memo || line.description || journalEntry.memo || '',
                     Amount: (line.amount / 100).toFixed(2), // Convert cents to dollars
                     DetailType: 'JournalEntryLineDetail',
                     JournalEntryLineDetail: {
@@ -409,7 +409,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                             value: line.accountId
                         }
                     },
-                    Description: line.description || deposit.memo || ''
+                    Description: line.memo || line.description || deposit.memo || ''
                 }))
             };
 

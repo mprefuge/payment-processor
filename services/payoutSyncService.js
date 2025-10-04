@@ -399,12 +399,14 @@ class PayoutSyncService {
      * @param {string} stripeAccountId - Stripe account ID
      * @returns {Object} Posting instructions
      */
-    generatePostingInstructions(payout, summary, stripeAccountId = null) {
+    generatePostingInstructions(payout, summary, stripeAccountId = null, balanceTransactions = []) {
         this.logger.log(`[PayoutSync] Generating posting instructions for payout: ${payout.id}`);
 
         const config = this.config.getConfig();
-        const accountConfig = config.accounts;
-        const postingConfig = config.posting;
+        const accountConfig = config.accounts || {};
+        const postingConfig = config.posting || {};
+        const transactionLineMode = (postingConfig.transactionLineMode || 'summary').toLowerCase();
+        const usePerTransactionLines = transactionLineMode === 'per-transaction' && Array.isArray(balanceTransactions) && balanceTransactions.length > 0;
 
         // Determine accounts
         const clearingAccount = accountConfig.stripeClearingAccount;
@@ -429,76 +431,97 @@ class PayoutSyncService {
         const jeLines = [];
         let clearingNet = 0;
 
-        // Revenue (charges)
-        if (summary.charges.grossAmount > 0) {
-            jeLines.push({
-                type: 'credit',
-                accountKey: 'revenue',
-                accountName: revenueAccount,
-                amount: summary.charges.grossAmount,
-                memo: `Revenue from ${summary.charges.count} Stripe charges`
-            });
-            clearingNet += summary.charges.grossAmount;
-        }
+        if (usePerTransactionLines) {
+            for (const txn of balanceTransactions) {
+                if (!this._shouldIncludeTransactionInJournal(txn)) {
+                    continue;
+                }
 
-        // Refunds
-        if (summary.refunds.amount > 0) {
-            jeLines.push({
-                type: 'debit',
-                accountKey: 'refunds',
-                accountName: refundsAccount,
-                amount: summary.refunds.amount,
-                memo: `Stripe refunds - ${summary.refunds.count} transactions`
-            });
-            clearingNet -= summary.refunds.amount;
-        }
+                const line = this._mapTransactionToJournalLine(txn, {
+                    revenueAccount,
+                    refundsAccount,
+                    feesAccount,
+                    chargebackAccount,
+                    adjustmentAccount
+                });
 
-        // Stripe fees
-        const totalFees = summary.fees.stripe.amount + summary.fees.application.amount;
-        if (totalFees > 0) {
-            jeLines.push({
-                type: 'debit',
-                accountKey: 'fees',
-                accountName: feesAccount,
-                amount: totalFees,
-                memo: `Stripe processing fees`
-            });
-            clearingNet -= totalFees;
-        }
-
-        // Disputes/chargebacks
-        if (summary.disputes.amount > 0) {
-            jeLines.push({
-                type: 'debit',
-                accountKey: 'chargebacks',
-                accountName: chargebackAccount,
-                amount: summary.disputes.amount,
-                memo: `Chargebacks - ${summary.disputes.count} disputes`
-            });
-            clearingNet -= summary.disputes.amount;
-        }
-
-        // Adjustments
-        if (summary.adjustments.amount !== 0) {
-            const adjustmentAmount = Math.abs(summary.adjustments.amount);
-            if (summary.adjustments.amount > 0) {
+                if (line) {
+                    jeLines.push(line);
+                    clearingNet += line.type === 'credit' ? line.amount : -line.amount;
+                }
+            }
+        } else {
+            // Revenue (charges)
+            if (summary.charges.grossAmount > 0) {
                 jeLines.push({
                     type: 'credit',
-                    accountKey: 'adjustments',
-                    accountName: adjustmentAccount,
-                    amount: adjustmentAmount,
-                    memo: `Positive Stripe adjustments`
+                    accountKey: 'revenue',
+                    accountName: revenueAccount,
+                    amount: summary.charges.grossAmount,
+                    memo: `Revenue from ${summary.charges.count} Stripe charges`
                 });
-                clearingNet += adjustmentAmount;
-            } else {
+                clearingNet += summary.charges.grossAmount;
+            }
+
+            // Refunds
+            if (summary.refunds.amount > 0) {
                 jeLines.push({
                     type: 'debit',
-                    accountKey: 'adjustments',
-                    accountName: adjustmentAccount,
-                    amount: adjustmentAmount,
-                    memo: `Negative Stripe adjustments`
+                    accountKey: 'refunds',
+                    accountName: refundsAccount,
+                    amount: summary.refunds.amount,
+                    memo: `Stripe refunds - ${summary.refunds.count} transactions`
                 });
-                clearingNet -= adjustmentAmount;
+                clearingNet -= summary.refunds.amount;
+            }
+
+            // Stripe fees
+            const totalFees = summary.fees.stripe.amount + summary.fees.application.amount;
+            if (totalFees > 0) {
+                jeLines.push({
+                    type: 'debit',
+                    accountKey: 'fees',
+                    accountName: feesAccount,
+                    amount: totalFees,
+                    memo: `Stripe processing fees`
+                });
+                clearingNet -= totalFees;
+            }
+
+            // Disputes/chargebacks
+            if (summary.disputes.amount > 0) {
+                jeLines.push({
+                    type: 'debit',
+                    accountKey: 'chargebacks',
+                    accountName: chargebackAccount,
+                    amount: summary.disputes.amount,
+                    memo: `Chargebacks - ${summary.disputes.count} disputes`
+                });
+                clearingNet -= summary.disputes.amount;
+            }
+
+            // Adjustments
+            if (summary.adjustments.amount !== 0) {
+                const adjustmentAmount = Math.abs(summary.adjustments.amount);
+                if (summary.adjustments.amount > 0) {
+                    jeLines.push({
+                        type: 'credit',
+                        accountKey: 'adjustments',
+                        accountName: adjustmentAccount,
+                        amount: adjustmentAmount,
+                        memo: `Positive Stripe adjustments`
+                    });
+                    clearingNet += adjustmentAmount;
+                } else {
+                    jeLines.push({
+                        type: 'debit',
+                        accountKey: 'adjustments',
+                        accountName: adjustmentAccount,
+                        amount: adjustmentAmount,
+                        memo: `Negative Stripe adjustments`
+                    });
+                    clearingNet -= adjustmentAmount;
+                }
             }
         }
 
@@ -550,7 +573,10 @@ class PayoutSyncService {
                 date: postingDate,
                 reference: `Stripe Payout ${stripeAccountId ? stripeAccountId + '/' : ''}${payout.id}`,
                 memo: `Stripe payout activity for ${postingDate.toISOString().split('T')[0]}`,
-                lines: jeLines
+                lines: jeLines,
+                metadata: {
+                    transactionLineMode
+                }
             });
         }
 
@@ -897,6 +923,154 @@ class PayoutSyncService {
         }
 
         return description;
+    }
+
+    /**
+     * Determine whether a balance transaction should be translated into a journal line
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {boolean}
+     * @private
+     */
+    _shouldIncludeTransactionInJournal(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return false;
+        }
+
+        const excludedTypes = new Set(['payout', 'advance', 'payout_cancel']);
+        return !excludedTypes.has(txn.type);
+    }
+
+    /**
+     * Build a memo for a per-transaction journal line
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {string}
+     * @private
+     */
+    _buildTransactionMemo(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return 'Stripe transaction';
+        }
+
+        if (txn.description) {
+            return txn.description;
+        }
+
+        if (txn.metadata && txn.metadata.statement_descriptor) {
+            return txn.metadata.statement_descriptor;
+        }
+
+        if (txn.source) {
+            return `Stripe ${txn.type || 'transaction'} ${txn.source}`;
+        }
+
+        return `Stripe ${txn.type || 'transaction'} ${txn.id || ''}`.trim();
+    }
+
+    /**
+     * Build metadata for a per-transaction journal line
+     * @param {Object} txn - Stripe balance transaction
+     * @returns {Object}
+     * @private
+     */
+    _buildTransactionMetadata(txn) {
+        if (!txn || typeof txn !== 'object') {
+            return {};
+        }
+
+        const metadata = {
+            balanceTransactionId: txn.id || null,
+            stripeType: txn.type || null,
+            source: txn.source || null,
+            payoutId: txn.payout || null,
+            amount: typeof txn.amount === 'number' ? txn.amount : null,
+            net: typeof txn.net === 'number' ? txn.net : null,
+            fee: typeof txn.fee === 'number' ? txn.fee : null,
+            currency: txn.currency || null,
+            description: txn.description || null,
+            reportingCategory: txn.reporting_category || null,
+            created: txn.created || null,
+            availableOn: txn.available_on || null
+        };
+
+        if (txn.metadata && Object.keys(txn.metadata).length > 0) {
+            metadata.stripeMetadata = txn.metadata;
+        }
+
+        if (Array.isArray(txn.fee_details) && txn.fee_details.length > 0) {
+            metadata.feeDetails = txn.fee_details.map(detail => ({
+                type: detail.type,
+                amount: detail.amount,
+                application: detail.application || null,
+                description: detail.description || null
+            }));
+        }
+
+        if (txn.exchange_rate) {
+            metadata.exchangeRate = txn.exchange_rate;
+        }
+
+        return metadata;
+    }
+
+    /**
+     * Map a Stripe balance transaction to a journal entry line in per-transaction mode
+     * @param {Object} txn - Stripe balance transaction
+     * @param {Object} accounts - Account mapping
+     * @returns {Object|null} Journal line or null if the transaction should be skipped
+     * @private
+     */
+    _mapTransactionToJournalLine(txn, accounts) {
+        if (!txn || typeof txn !== 'object') {
+            return null;
+        }
+
+        const { revenueAccount, refundsAccount, feesAccount, chargebackAccount, adjustmentAccount } = accounts;
+        const memo = this._buildTransactionMemo(txn);
+        const metadata = this._buildTransactionMetadata(txn);
+        const rawAmount = typeof txn.net === 'number' ? txn.net : txn.amount;
+        const amount = Math.abs(rawAmount || 0);
+
+        if (!amount) {
+            return null;
+        }
+
+        const makeLine = (type, accountKey, accountName) => ({
+            type,
+            accountKey,
+            accountName,
+            amount,
+            memo,
+            metadata
+        });
+
+        switch (txn.type) {
+            case 'charge':
+            case 'payment':
+                return makeLine('credit', 'revenue', revenueAccount);
+            case 'refund':
+            case 'payment_refund':
+                return makeLine('debit', 'refunds', refundsAccount);
+            case 'stripe_fee':
+            case 'application_fee':
+                return makeLine('debit', 'fees', feesAccount);
+            case 'application_fee_refund':
+                return makeLine('credit', 'fees', feesAccount);
+            case 'adjustment':
+                return rawAmount >= 0
+                    ? makeLine('credit', 'adjustments', adjustmentAccount)
+                    : makeLine('debit', 'adjustments', adjustmentAccount);
+            default:
+                if (txn.type && txn.type.includes('dispute')) {
+                    return rawAmount >= 0
+                        ? makeLine('credit', 'chargebacks', chargebackAccount)
+                        : makeLine('debit', 'chargebacks', chargebackAccount);
+                }
+
+                // Fallback: treat as adjustment using sign of amount
+                return rawAmount >= 0
+                    ? makeLine('credit', 'adjustments', adjustmentAccount)
+                    : makeLine('debit', 'adjustments', adjustmentAccount);
+        }
     }
 
     /**

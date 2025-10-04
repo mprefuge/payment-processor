@@ -59,6 +59,7 @@ class AccountingSyncConfig {
                 granularity: process.env.ACCOUNTING_POSTING_GRANULARITY || 'per-payout', // per-payout, per-day, per-transaction
                 strategy: process.env.ACCOUNTING_POSTING_STRATEGY || 'je-transfer', // je-transfer, deposit
                 dateSource: process.env.ACCOUNTING_POSTING_DATE_SOURCE || 'arrival', // arrival, created
+                transactionLineMode: (process.env.ACCOUNTING_POSTING_TRANSACTION_LINE_MODE || 'summary').toLowerCase(),
                 timezone: process.env.ACCOUNTING_TIMEZONE || 'America/New_York',
                 autoCreateAccounts: process.env.ACCOUNTING_AUTO_CREATE_ACCOUNTS === 'true'
             },
