@@ -216,10 +216,6 @@ class QuickBooksProvider extends BaseAccountingProvider {
                         }
                     };
 
-                    if (line.name) {
-                        jeLine.Name = line.name;
-                    }
-
                     return jeLine;
                 })
             };

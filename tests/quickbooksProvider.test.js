@@ -543,13 +543,15 @@ async function runTests() {
 
         const result = await provider.upsertJournalEntry(journalEntry);
 
+        const createdLine = mockQBOClient.journalEntries[0]?.Line || [];
+
         if (result.created === true &&
             result.docNumber === 'JE-2024-001' &&
             mockQBOClient.journalEntries.length === 1 &&
-            mockQBOClient.journalEntries[0].Line[0].Description === 'Debit line | Debit memo | Test journal entry' &&
-            mockQBOClient.journalEntries[0].Line[0].Name === 'line-debit' &&
-            mockQBOClient.journalEntries[0].Line[1].Description === 'Credit line | Test journal entry' &&
-            mockQBOClient.journalEntries[0].Line[1].Name === 'line-credit') {
+            createdLine[0]?.Description === 'Debit line | line-debit | Debit memo | Test journal entry' &&
+            createdLine[1]?.Description === 'Credit line | line-credit | Test journal entry' &&
+            !('Name' in (createdLine[0] || {})) &&
+            !('Name' in (createdLine[1] || {}))) {
             console.log('✅ Create journal entry');
             passed++;
         } else {
