@@ -65,19 +65,31 @@ class MockQBOClient {
             }
             return callback(null, { QueryResponse: { JournalEntry: this.journalEntries } });
         } else if (queryStr.includes('FROM Transfer')) {
-            const noteMatch = queryStr.match(/PrivateNote LIKE '%([^%]+)%'/);
-            if (noteMatch) {
-                const transfer = this.transfers.find(t => t.PrivateNote && t.PrivateNote.includes(noteMatch[1]));
-                return callback(null, { QueryResponse: { Transfer: transfer ? [transfer] : [] } });
+            const dateMatch = queryStr.match(/TxnDate = '([^']+)'/);
+            const amountMatch = queryStr.match(/Amount = '([^']+)'/);
+
+            let transfers = this.transfers;
+
+            if (dateMatch) {
+                transfers = transfers.filter(t => t.TxnDate === dateMatch[1]);
             }
-            return callback(null, { QueryResponse: { Transfer: this.transfers } });
+
+            if (amountMatch) {
+                transfers = transfers.filter(t =>
+                    parseFloat(t.Amount).toFixed(2) === parseFloat(amountMatch[1]).toFixed(2)
+                );
+            }
+
+            return callback(null, { QueryResponse: { Transfer: transfers } });
         } else if (queryStr.includes('FROM Deposit')) {
-            const noteMatch = queryStr.match(/PrivateNote LIKE '%([^%]+)%'/);
-            if (noteMatch) {
-                const deposit = this.deposits.find(d => d.PrivateNote && d.PrivateNote.includes(noteMatch[1]));
-                return callback(null, { QueryResponse: { Deposit: deposit ? [deposit] : [] } });
+            const docNumberMatch = queryStr.match(/DocNumber = '([^']+)'/);
+            let deposits = this.deposits;
+
+            if (docNumberMatch) {
+                deposits = deposits.filter(d => d.DocNumber === docNumberMatch[1]);
             }
-            return callback(null, { QueryResponse: { Deposit: this.deposits } });
+
+            return callback(null, { QueryResponse: { Deposit: deposits } });
         }
 
         callback(null, { QueryResponse: {} });
@@ -157,6 +169,7 @@ class MockQBOClient {
             DepositToAccountRef: deposit.DepositToAccountRef,
             TxnDate: deposit.TxnDate,
             PrivateNote: deposit.PrivateNote,
+            DocNumber: deposit.DocNumber,
             Line: deposit.Line,
             TotalAmt: totalAmt.toFixed(2)
         };
@@ -249,13 +262,25 @@ class MockQBOClient {
 
         let filteredTransfers = this.transfers;
 
-        // Handle array criteria with LIKE operator
+        // Handle array criteria
         if (Array.isArray(criteria)) {
             criteria.forEach(c => {
-                if (c.field === 'PrivateNote' && c.operator === 'LIKE') {
-                    const searchValue = c.value.replace(/%/g, '');
-                    filteredTransfers = filteredTransfers.filter(t => 
-                        t.PrivateNote && t.PrivateNote.includes(searchValue)
+                if (c.field === 'TxnDate') {
+                    filteredTransfers = filteredTransfers.filter(t => t.TxnDate === c.value);
+                }
+                if (c.field === 'Amount') {
+                    filteredTransfers = filteredTransfers.filter(t =>
+                        parseFloat(t.Amount).toFixed(2) === parseFloat(c.value).toFixed(2)
+                    );
+                }
+                if (c.field === 'FromAccountRef') {
+                    filteredTransfers = filteredTransfers.filter(t =>
+                        t.FromAccountRef && t.FromAccountRef.value === c.value
+                    );
+                }
+                if (c.field === 'ToAccountRef') {
+                    filteredTransfers = filteredTransfers.filter(t =>
+                        t.ToAccountRef && t.ToAccountRef.value === c.value
                     );
                 }
             });
@@ -271,14 +296,11 @@ class MockQBOClient {
 
         let filteredDeposits = this.deposits;
 
-        // Handle array criteria with LIKE operator
+        // Handle array criteria
         if (Array.isArray(criteria)) {
             criteria.forEach(c => {
-                if (c.field === 'PrivateNote' && c.operator === 'LIKE') {
-                    const searchValue = c.value.replace(/%/g, '');
-                    filteredDeposits = filteredDeposits.filter(d => 
-                        d.PrivateNote && d.PrivateNote.includes(searchValue)
-                    );
+                if (c.field === 'DocNumber') {
+                    filteredDeposits = filteredDeposits.filter(d => d.DocNumber === c.value);
                 }
             });
         }
@@ -652,7 +674,7 @@ async function runTests() {
             Id: 'transfer-existing',
             FromAccountRef: { value: 'acc-1' },
             ToAccountRef: { value: 'acc-2' },
-            Amount: '5000.00',
+            Amount: '50.00',
             TxnDate: '2024-01-15',
             PrivateNote: 'Test transfer [DocNum: XFER-2024-001]'
         });
@@ -725,7 +747,8 @@ async function runTests() {
         if (result.created === true &&
             result.docNumber === 'DEP-2024-001' &&
             result.totalAmt === 1500 &&
-            mockQBOClient.deposits.length === 1) {
+            mockQBOClient.deposits.length === 1 &&
+            mockQBOClient.deposits[0].DocNumber === 'DEP-2024-001') {
             console.log('✅ Create deposit');
             passed++;
         } else {
@@ -747,7 +770,8 @@ async function runTests() {
             TxnDate: '2024-01-15',
             TotalAmt: '1500.00',
             PrivateNote: 'Test deposit [DocNum: DEP-2024-001]',
-            Line: []
+            Line: [],
+            DocNumber: 'DEP-2024-001'
         });
         
         const config = {
