@@ -56,6 +56,45 @@ class QuickBooksProvider extends BaseAccountingProvider {
         }
     }
 
+    _extractQboErrorMessage(error, fallback = 'Unknown QuickBooks error') {
+        if (!error) {
+            return fallback;
+        }
+
+        if (error.Fault && Array.isArray(error.Fault.Error) && error.Fault.Error.length > 0) {
+            const parts = error.Fault.Error.map(err => {
+                if (!err) {
+                    return null;
+                }
+
+                const segments = [];
+                if (err.Message && typeof err.Message === 'string') {
+                    segments.push(err.Message.trim());
+                }
+                if (err.Detail && typeof err.Detail === 'string') {
+                    segments.push(err.Detail.trim());
+                }
+
+                const message = segments.filter(Boolean).join(': ').trim();
+                return message.length > 0 ? message : null;
+            }).filter(Boolean);
+
+            if (parts.length > 0) {
+                return parts.join('; ');
+            }
+        }
+
+        if (typeof error.message === 'string' && error.message.trim().length > 0) {
+            return error.message;
+        }
+
+        if (typeof error === 'string' && error.trim().length > 0) {
+            return error.trim();
+        }
+
+        return fallback;
+    }
+
     /**
      * Ensure required chart of accounts exist
      */
@@ -228,8 +267,9 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 displayName: created.DisplayName || displayName
             };
         } catch (error) {
-            this.logger.error('[QBO] Error creating customer:', error.message);
-            throw new Error(`Failed to create customer "${displayName}": ${error.message}`);
+            const errorMessage = this._extractQboErrorMessage(error);
+            this.logger.error('[QBO] Error creating customer:', errorMessage);
+            throw new Error(`Failed to create customer "${displayName}": ${errorMessage}`);
         }
     }
 
@@ -343,8 +383,9 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 displayName: created.DisplayName || displayName
             };
         } catch (error) {
-            this.logger.error('[QBO] Error creating vendor:', error.message);
-            throw new Error(`Failed to create vendor "${displayName}": ${error.message}`);
+            const errorMessage = this._extractQboErrorMessage(error);
+            this.logger.error('[QBO] Error creating vendor:', errorMessage);
+            throw new Error(`Failed to create vendor "${displayName}": ${errorMessage}`);
         }
     }
 
