@@ -236,28 +236,25 @@ class QuickBooksProvider extends BaseAccountingProvider {
                             || line.entityType
                             || (line.entityContext === 'transaction' ? 'Customer' : 'Other');
 
-                        if (entityId || (entityName && entityName.trim().length > 0)) {
-                            const trimmedName = typeof entityName === 'string' ? entityName.trim() : '';
-
+                        if (entityId) {
                             jeLine.JournalEntryLineDetail.Entity = {
                                 Type: entityType,
-                                EntityRef: {}
+                                EntityRef: {
+                                    value: entityId
+                                }
                             };
 
-                            if (entityId) {
-                                jeLine.JournalEntryLineDetail.Entity.EntityRef.value = entityId;
+                            if (entityName) {
+                                jeLine.JournalEntryLineDetail.Entity.EntityRef.name = entityName;
                             }
+                        } else if (entityName) {
+                            this.logger.warn(
+                                `[QBO] Skipping entity reference for journal line ${index + 1} (${entityName}) - missing entity identifier`
+                            );
 
-                            if (trimmedName.length > 0) {
-                                jeLine.JournalEntryLineDetail.Entity.EntityRef.name = trimmedName;
-
-                                if (!entityId) {
-                                    this.logger.warn(
-                                        `[QBO] Journal line ${index + 1} using entity name without identifier: ${trimmedName}`
-                                    );
-                                }
-
-                                if (typeof jeLine.Description === 'string' && !jeLine.Description.includes(trimmedName)) {
+                            if (typeof jeLine.Description === 'string') {
+                                const trimmedName = entityName.trim();
+                                if (trimmedName.length > 0 && !jeLine.Description.includes(trimmedName)) {
                                     jeLine.Description = jeLine.Description.length > 0
                                         ? `${jeLine.Description} | ${trimmedName}`
                                         : trimmedName;
