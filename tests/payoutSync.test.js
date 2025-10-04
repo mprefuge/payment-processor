@@ -53,8 +53,12 @@ class MockAccountingProvider {
     async ensureChartOfAccounts(accounts) {
         // Mock implementation - returns account IDs for all account names
         const accountMap = {};
-        accounts.forEach((account, index) => {
-            accountMap[account.name] = `account-${index + 1}`;
+        accounts.forEach((account) => {
+            const normalized = account.name
+                .toLowerCase()
+                .replace(/\s+/g, '_')
+                .replace(/[^a-z0-9_]/g, '');
+            accountMap[account.name] = `acct-${normalized}`;
         });
         return accountMap;
     }
@@ -340,6 +344,79 @@ async function runTests() {
         failed++;
     }
 
+    // Test 5b: Journal entry net clearing amount
+    try {
+        const mockConfig = {
+            getConfig: () => ({
+                provider: 'quickbooks',
+                accounts: {
+                    stripeClearingAccount: 'Stripe Clearing',
+                    operatingBankAccount: 'Operating Bank',
+                    revenueAccount: 'Revenue',
+                    refundsAccount: 'Refunds',
+                    stripeFeeAccount: 'Stripe Fees',
+                    chargebackAccount: 'Chargebacks',
+                    adjustmentAccount: 'Adjustments'
+                },
+                posting: {
+                    strategy: 'je-transfer'
+                }
+            }),
+            getStripeAccount: () => null
+        };
+
+        const syncLedger = new SyncLedger();
+        const provider = new MockAccountingProvider();
+        const service = new PayoutSyncService(mockConfig, provider, syncLedger);
+
+        const payout = {
+            id: 'po_net_test',
+            amount: 6159,
+            arrival_date: Math.floor(Date.now() / 1000),
+            created: Math.floor(Date.now() / 1000)
+        };
+
+        const summary = {
+            charges: { count: 3, grossAmount: 6500 },
+            refunds: { count: 0, amount: 0 },
+            fees: { stripe: { count: 1, amount: 341 }, application: { count: 0, amount: 0 } },
+            disputes: { count: 0, amount: 0 },
+            adjustments: { count: 0, amount: 0 },
+            total: 6159,
+            currency: 'usd'
+        };
+
+        const instructions = service.generatePostingInstructions(payout, summary);
+        const jeDoc = instructions.documents.find(d => d.type === 'journal');
+
+        if (jeDoc && jeDoc.lines) {
+            const clearingLine = jeDoc.lines.find(l => l.accountKey === 'clearing');
+            const revenueLine = jeDoc.lines.find(l => l.accountKey === 'revenue');
+            const feesLine = jeDoc.lines.find(l => l.accountKey === 'fees');
+
+            const clearingMatches = clearingLine && clearingLine.type === 'debit' && clearingLine.amount === payout.amount;
+            const revenueMatches = revenueLine && revenueLine.amount === summary.charges.grossAmount;
+            const feesMatches = feesLine && feesLine.amount === summary.fees.stripe.amount;
+
+            if (clearingMatches && revenueMatches && feesMatches) {
+                console.log('✅ Journal entry uses net clearing amount');
+                passed++;
+            } else {
+                console.log('❌ Journal entry does not reflect expected amounts');
+                console.log('   Clearing line:', clearingLine);
+                console.log('   Revenue line:', revenueLine);
+                console.log('   Fees line:', feesLine);
+                failed++;
+            }
+        } else {
+            console.log('❌ Journal entry not found when validating net amounts');
+            failed++;
+        }
+    } catch (error) {
+        console.log('❌ Journal entry net clearing check - error:', error.message);
+        failed++;
+    }
+
     // Test 6: Posting hash generation and idempotency
     try {
         const syncLedger = new SyncLedger();
@@ -451,6 +528,16 @@ async function runTests() {
                     toAccountName: 'Operating Bank',
                     amount: 1000,
                     memo: 'Test transfer'
+                },
+                {
+                    type: 'deposit',
+                    docNumber: 'STRIPE-default-po_post_test-DEP',
+                    date: new Date(),
+                    toAccountName: 'Operating Bank',
+                    memo: 'Test deposit',
+                    lines: [
+                        { accountName: 'Stripe Clearing', amount: 1000, memo: 'Deposit from clearing' }
+                    ]
                 }
             ]
         };
@@ -459,15 +546,38 @@ async function runTests() {
 
         if (providerDocIds.journalEntry &&
             providerDocIds.transfer &&
+            providerDocIds.deposit &&
             provider.journalEntries.length === 1 &&
-            provider.transfers.length === 1) {
-            console.log('✅ Post to accounting provider');
-            passed++;
+            provider.transfers.length === 1 &&
+            provider.deposits.length === 1) {
+            const expectedId = (name) => `acct-${name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')}`;
+            const transfer = provider.transfers[0];
+            const deposit = provider.deposits[0];
+
+            const transferAccountsCorrect =
+                transfer.fromAccountId === expectedId('Stripe Clearing') &&
+                transfer.toAccountId === expectedId('Operating Bank');
+
+            const depositAccountsCorrect =
+                deposit.toAccountId === expectedId('Operating Bank') &&
+                deposit.lines.length === 1 &&
+                deposit.lines[0].accountId === expectedId('Stripe Clearing');
+
+            if (transferAccountsCorrect && depositAccountsCorrect) {
+                console.log('✅ Post to accounting provider');
+                passed++;
+            } else {
+                console.log('❌ Post to accounting provider - incorrect account IDs');
+                console.log('   Transfer:', transfer);
+                console.log('   Deposit:', deposit);
+                failed++;
+            }
         } else {
             console.log('❌ Post to accounting provider - failed');
             console.log('   Provider doc IDs:', providerDocIds);
             console.log('   JE count:', provider.journalEntries.length);
             console.log('   Transfer count:', provider.transfers.length);
+            console.log('   Deposit count:', provider.deposits.length);
             failed++;
         }
     } catch (error) {

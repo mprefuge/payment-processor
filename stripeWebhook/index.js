@@ -14,6 +14,29 @@ const PayoutSyncService = require('../services/payoutSyncService');
 const WebhookEventStore = require('../services/webhookEventStore');
 const SyncLedger = require('../services/syncLedger');
 
+const createContextLogger = (context) => {
+    const baseLog = (...args) => context.log(...args);
+
+    const resolveMethod = (method) => {
+        if (context.log && typeof context.log[method] === 'function') {
+            return (...args) => context.log[method](...args);
+        }
+
+        if (typeof context[method] === 'function') {
+            return (...args) => context[method](...args);
+        }
+
+        return baseLog;
+    };
+
+    return {
+        log: baseLog,
+        info: resolveMethod('info'),
+        warn: resolveMethod('warn'),
+        error: resolveMethod('error')
+    };
+};
+
 // Global service instances
 const idempotencyService = new IdempotencyService();
 const metricsService = new MetricsService();
@@ -943,9 +966,10 @@ const processPayoutPaid = async (context, payout, stripeAccountId = null, eventI
         );
         
         // Set the context logger so we can see the logs
-        payoutSyncService.logger = context;
+        const contextLogger = createContextLogger(context);
+        payoutSyncService.logger = contextLogger;
         if (accountingProvider.logger) {
-            accountingProvider.logger = context;
+            accountingProvider.logger = contextLogger;
         }
 
         // Enqueue job for async processing

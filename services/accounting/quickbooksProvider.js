@@ -250,30 +250,47 @@ class QuickBooksProvider extends BaseAccountingProvider {
         }
 
         try {
-            // Search for existing Transfer by PrivateNote containing docNumber
-            // Use array criteria with LIKE operator
-            const existingTransfers = await this._executeWithTokenRefresh(() =>
-                new Promise((resolve, reject) => {
-                    this.qbo.findTransfers([
-                        { field: 'PrivateNote', value: `%${transfer.docNumber}%`, operator: 'LIKE' }
-                    ], (err, data) => {
-                        if (err) reject(err);
-                        else resolve(data.QueryResponse.Transfer || []);
-                    });
-                })
-            );
+            const transferDate = this._formatDate(transfer.date);
+            const transferAmount = (transfer.amount / 100).toFixed(2);
 
-            if (existingTransfers.length > 0) {
-                // Transfer exists - return existing
-                const existing = existingTransfers[0];
-                this.logger.log(`[QBO] Transfer already exists: ${transfer.docNumber} (ID: ${existing.Id})`);
+            // Search for an existing transfer by date/amount and validate with metadata
+            let existingTransfers = [];
+            try {
+                existingTransfers = await this._executeWithTokenRefresh(() =>
+                    new Promise((resolve, reject) => {
+                        this.qbo.findTransfers([
+                            { field: 'TxnDate', value: transferDate, operator: '=' },
+                            { field: 'Amount', value: transferAmount, operator: '=' }
+                        ], (err, data) => {
+                            if (err) reject(err);
+                            else resolve(data.QueryResponse.Transfer || []);
+                        });
+                    })
+                );
+            } catch (searchError) {
+                this.logger.warn('[QBO] Transfer lookup failed, will attempt to create new transfer:', searchError.message);
+                existingTransfers = [];
+            }
+
+            const matchingTransfer = existingTransfers.find(existing => {
+                const note = existing.PrivateNote || '';
+                const fromAccountId = existing.FromAccountRef && existing.FromAccountRef.value;
+                const toAccountId = existing.ToAccountRef && existing.ToAccountRef.value;
+
+                return note.includes(transfer.docNumber) &&
+                    fromAccountId === transfer.fromAccountId &&
+                    toAccountId === transfer.toAccountId;
+            });
+
+            if (matchingTransfer) {
+                this.logger.log(`[QBO] Transfer already exists: ${transfer.docNumber} (ID: ${matchingTransfer.Id})`);
                 return {
-                    id: existing.Id,
+                    id: matchingTransfer.Id,
                     docNumber: transfer.docNumber,
-                    txnDate: existing.TxnDate,
-                    fromAccountRef: existing.FromAccountRef,
-                    toAccountRef: existing.ToAccountRef,
-                    amount: Math.round(parseFloat(existing.Amount) * 100), // Convert dollars back to cents
+                    txnDate: matchingTransfer.TxnDate,
+                    fromAccountRef: matchingTransfer.FromAccountRef,
+                    toAccountRef: matchingTransfer.ToAccountRef,
+                    amount: Math.round(parseFloat(matchingTransfer.Amount) * 100), // Convert dollars back to cents
                     provider: 'quickbooks',
                     created: false
                 };
@@ -288,7 +305,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                     value: transfer.toAccountId
                 },
                 Amount: (transfer.amount / 100).toFixed(2), // Convert cents to dollars
-                TxnDate: this._formatDate(transfer.date),
+                TxnDate: transferDate,
                 PrivateNote: `${transfer.memo || ''} [DocNum: ${transfer.docNumber}]`
             };
 
@@ -342,18 +359,23 @@ class QuickBooksProvider extends BaseAccountingProvider {
         }
 
         try {
-            // Search for existing Deposit by PrivateNote containing docNumber
-            // Use array criteria with LIKE operator
-            const existingDeposits = await this._executeWithTokenRefresh(() =>
-                new Promise((resolve, reject) => {
-                    this.qbo.findDeposits([
-                        { field: 'PrivateNote', value: `%${deposit.docNumber}%`, operator: 'LIKE' }
-                    ], (err, data) => {
-                        if (err) reject(err);
-                        else resolve(data.QueryResponse.Deposit || []);
-                    });
-                })
-            );
+            // Search for existing deposit by DocNumber
+            let existingDeposits = [];
+            try {
+                existingDeposits = await this._executeWithTokenRefresh(() =>
+                    new Promise((resolve, reject) => {
+                        this.qbo.findDeposits([
+                            { field: 'DocNumber', value: deposit.docNumber, operator: '=' }
+                        ], (err, data) => {
+                            if (err) reject(err);
+                            else resolve(data.QueryResponse.Deposit || []);
+                        });
+                    })
+                );
+            } catch (searchError) {
+                this.logger.warn('[QBO] Deposit lookup failed, will attempt to create new deposit:', searchError.message);
+                existingDeposits = [];
+            }
 
             if (existingDeposits.length > 0) {
                 // Deposit exists - return existing
@@ -372,6 +394,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
             // Create new deposit
             const depositData = {
+                DocNumber: deposit.docNumber,
                 DepositToAccountRef: {
                     value: deposit.toAccountId
                 },
