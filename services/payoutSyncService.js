@@ -439,7 +439,6 @@ class PayoutSyncService {
             const parts = [
                 `Stripe payout ${payout.id}`,
                 summary.currency ? `Currency: ${summary.currency.toUpperCase()}` : null,
-                `Mode: ${transactionLineMode === 'per-transaction' ? 'Per transaction' : 'Summary'}`,
                 label,
                 ...details
             ];

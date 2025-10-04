@@ -744,7 +744,6 @@ async function runTests() {
         const expectedChargeDescription = [
             'Stripe payout po_txn_mode',
             'Currency: USD',
-            'Mode: Per transaction',
             'Donation A',
             'Gross: $50.00, Fees: $1.50, Net: $48.50',
             'Transaction: txn_charge_1',
