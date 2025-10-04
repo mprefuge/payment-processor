@@ -5,13 +5,23 @@ const { loadConfig, normalizeTransactionCategory, generateTransactionName } = re
 
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
-    const stripeKey = isLiveMode 
-        ? process.env.STRIPE_LIVE_SECRET_KEY 
+    const stripeKey = isLiveMode
+        ? process.env.STRIPE_LIVE_SECRET_KEY
         : process.env.STRIPE_TEST_SECRET_KEY;
-    
+
     const stripe = new Stripe(stripeKey);
-    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-    
+
+    const sendgridKey = process.env.SENDGRID_API_KEY;
+    if (sendgridKey) {
+        try {
+            sgMail.setApiKey(sendgridKey);
+        } catch (error) {
+            console.error('Failed to initialize SendGrid:', error.message);
+        }
+    } else {
+        console.log('SendGrid API key not configured. Email notifications disabled.');
+    }
+
     return { stripe };
 };
 
