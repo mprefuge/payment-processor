@@ -169,10 +169,39 @@ async function fetchStripePayoutsSince(stripe, since, options) {
     return fetcher(since, options);
 }
 
+async function fetchBalanceTransactionsForPayout(stripe, payoutId, options = {}) {
+    if (!stripe || !stripe.balanceTransactions || typeof stripe.balanceTransactions.list !== 'function') {
+        throw new Error('Stripe client with balanceTransactions.list is required');
+    }
+    if (!payoutId) {
+        throw new Error('A payoutId is required to fetch balance transactions');
+    }
+
+    const logger = options.logger || console;
+    const expand = Array.from(new Set([
+        'data.source',
+        'data.source.charge',
+        'data.source.refund',
+        'data.source.dispute',
+        ...(options.params?.expand || [])
+    ]));
+
+    return fetchAll(
+        stripe.balanceTransactions.list.bind(stripe.balanceTransactions),
+        {
+            payout: payoutId,
+            limit: options.limit || DEFAULT_LIMIT,
+            expand
+        },
+        logger
+    );
+}
+
 module.exports = {
     fetchStripeChargesSince,
     fetchStripeRefundsSince,
     fetchStripeDisputesSince,
     fetchStripePayoutsSince,
+    fetchBalanceTransactionsForPayout,
     normalizeSince
 };
