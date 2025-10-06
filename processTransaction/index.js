@@ -1,7 +1,8 @@
 const { randomUUID } = require('crypto');
 const Stripe = require('stripe');
 const sgMail = require('@sendgrid/mail');
-const { createCrmSyncServiceFromEnv } = require('../services/crm/crmSyncService');
+const CrmFactory = require('../services/crm/crmFactory');
+const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
 
 const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
 const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
@@ -78,29 +79,6 @@ const resetStripeClientFactory = () => {
     stripeClientFactory = defaultStripeClientFactory;
 };
 
-const createContextLogger = (context) => {
-    const baseLog = (...args) => context.log(...args);
-
-    const resolveMethod = (method) => {
-        if (context.log && typeof context.log[method] === 'function') {
-            return (...args) => context.log[method](...args);
-        }
-
-        if (typeof context[method] === 'function') {
-            return (...args) => context[method](...args);
-        }
-
-        return baseLog;
-    };
-
-    return {
-        log: baseLog,
-        info: resolveMethod('info'),
-        warn: resolveMethod('warn'),
-        error: resolveMethod('error')
-    };
-};
-
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
     const stripeKey = isLiveMode
@@ -121,6 +99,219 @@ const initializeServices = (isLiveMode) => {
     }
 
     return { stripe };
+};
+
+// Get CRM configuration from environment variables
+const getCrmConfig = () => {
+    const provider = process.env.CRM_PROVIDER;
+    
+    if (!provider) {
+        console.log('No CRM provider configured, skipping CRM integration');
+        return null;
+    }
+
+    switch (provider.toLowerCase()) {
+        case 'salesforce':
+            return {
+                provider: 'salesforce',
+                config: {
+                    username: process.env.SALESFORCE_USERNAME,
+                    password: process.env.SALESFORCE_PASSWORD,
+                    securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
+                    loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com'
+                }
+            };
+        
+        default:
+            console.error(`Unsupported CRM provider: ${provider}`);
+            return null;
+    }
+};
+
+// Sync contact to CRM after checkout session is created
+const syncContactToCrm = async (context, customerData) => {
+    try {
+        const crmConfig = getCrmConfig();
+        
+        if (!crmConfig) {
+            context.log('CRM integration disabled - skipping contact sync');
+            return null;
+        }
+
+        // Validate CRM configuration
+        const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+        if (!validation.isValid) {
+            context.log(`CRM configuration invalid: ${validation.error}`);
+            return null;
+        }
+
+        // Create CRM service
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        // Prepare search criteria
+        const searchCriteria = {
+            email: customerData.email,
+            firstName: customerData.firstname,
+            lastName: customerData.lastname,
+            phone: customerData.phone
+        };
+
+        context.log('Searching for existing contact in CRM...');
+        const existingContacts = await crmService.searchContact(searchCriteria);
+
+        let contact = null;
+        
+        if (existingContacts && existingContacts.length > 0) {
+            // Validate that name matches before accepting a contact
+            // This prevents updating wrong contacts when email/phone match but name differs
+            const matchingContact = existingContacts.find(c => {
+                const firstNameMatch = c.FirstName && 
+                    c.FirstName.toLowerCase() === searchCriteria.firstName.toLowerCase();
+                const lastNameMatch = c.LastName && 
+                    c.LastName.toLowerCase() === searchCriteria.lastName.toLowerCase();
+                return firstNameMatch && lastNameMatch;
+            });
+            
+            if (matchingContact) {
+                // Contact exists with matching name - update with new information
+                contact = matchingContact;
+                context.log(`Found existing contact with matching name: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+                
+                // Update contact with address information if available
+                // Handle both nested address object and flat address fields
+                const addressData = customerData.address && typeof customerData.address === 'object'
+                    ? {
+                        line1: customerData.address.line1,
+                        city: customerData.address.city,
+                        state: customerData.address.state,
+                        postal_code: customerData.address.postal_code,
+                        country: 'US'
+                    }
+                    : {
+                        line1: customerData.address,
+                        city: customerData.city,
+                        state: customerData.state,
+                        postal_code: customerData.zipcode,
+                        country: 'US'
+                    };
+                
+                // Only update if we have address data
+                if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
+                    try {
+                        const updatedContact = await crmService.updateContact(contact.Id, {
+                            address: addressData
+                        });
+                        if (updatedContact) {
+                            contact = updatedContact;
+                            context.log(`Updated contact address for: ${contact.FirstName} ${contact.LastName}`);
+                        }
+                    } catch (error) {
+                        context.log(`Failed to update contact address: ${error.message}`);
+                        // Continue - don't fail for address update issues
+                    }
+                }
+            } else {
+                // Found contacts by email/phone but name doesn't match
+                // Create new contact instead of updating wrong person
+                context.log('Found contacts by email/phone but name does not match. Creating new contact...');
+                contact = null; // Will trigger creation below
+            }
+        }
+        
+        if (!contact) {
+            // Contact doesn't exist - create new contact
+            context.log('No existing contact found, creating new contact...');
+            
+            const contactData = {
+                email: customerData.email,
+                firstName: customerData.firstname,
+                lastName: customerData.lastname,
+                phone: customerData.phone,
+                address: customerData.address && typeof customerData.address === 'object'
+                    ? {
+                        line1: customerData.address.line1,
+                        city: customerData.address.city,
+                        state: customerData.address.state,
+                        postal_code: customerData.address.postal_code,
+                        country: 'US'
+                    }
+                    : {
+                        line1: customerData.address,
+                        city: customerData.city,
+                        state: customerData.state,
+                        postal_code: customerData.zipcode,
+                        country: 'US'
+                    }
+            };
+            
+            contact = await crmService.createContact(contactData);
+            context.log(`Created new contact: ${contact.FirstName} ${contact.LastName} (${contact.Email})`);
+        }
+
+        return contact;
+    } catch (error) {
+        // Log error but don't fail the checkout process
+        context.log(`Error syncing contact to CRM: ${error.message}`);
+        console.error('CRM sync error details:', error);
+        return null;
+    }
+};
+
+// Create pending transaction in CRM after checkout session is created
+const createPendingTransaction = async (context, session, contactId, transactionData) => {
+    try {
+        const crmConfig = getCrmConfig();
+        
+        if (!crmConfig) {
+            context.log('CRM integration disabled - skipping pending transaction creation');
+            return null;
+        }
+
+        // Validate CRM configuration
+        const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+        if (!validation.isValid) {
+            context.log(`CRM configuration invalid: ${validation.error}`);
+            return null;
+        }
+
+        // Create CRM service
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        // Load matching configuration for transaction naming
+        const matchingConfig = loadConfig();
+
+        // Prepare transaction data
+        const category = session.metadata?.category || transactionData.category || 'General';
+        const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
+        const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
+            amount: `$${(transactionData.amount / 100).toFixed(2)}`,
+            date: new Date().toLocaleDateString(),
+            id: session.id
+        });
+
+        const txnData = {
+            amount: transactionData.amount,
+            currency: 'usd',
+            paymentMethod: 'Pending',
+            transactionId: null, // Will be set when payment_intent.succeeded fires
+            sessionId: session.id,
+            status: 'Pending',
+            description: transactionName,
+            frequency: transactionData.frequency || 'onetime',
+            category: normalizedCategory,
+            name: transactionName
+        };
+
+        const transaction = await crmService.createTransaction(contactId, txnData);
+        context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
+
+        return transaction;
+    } catch (error) {
+        // Log error but don't fail the checkout process
+        context.log(`Error creating pending transaction: ${error.message}`);
+        console.error('Pending transaction creation error details:', error);
+        return null;
+    }
 };
 
 // Validate required request parameters
@@ -362,8 +553,6 @@ module.exports = async function (context, req) {
         // Initialize services
         const isLiveMode = getConfiguredMode(context);
         const { stripe } = initializeServices(isLiveMode);
-        const crmLogger = createContextLogger(context);
-        const crmSyncService = createCrmSyncServiceFromEnv({ logger: crmLogger });
 
         // Search for existing customer
         const fullName = `${body.firstname} ${body.lastname}`;
@@ -390,17 +579,11 @@ module.exports = async function (context, req) {
         
         // Sync contact to CRM (Salesforce) if configured
         // This happens after checkout session creation to not block the payment flow
-        if (crmSyncService) {
-            const contactResult = await crmSyncService.findOrCreateContact(body);
-            const contact = contactResult?.contact;
-
-            if (contact) {
-                await crmSyncService.createPendingTransaction({
-                    session,
-                    contactId: contact.Id,
-                    transactionData: body
-                });
-            }
+        const contact = await syncContactToCrm(context, body);
+        
+        // Create pending transaction in CRM if contact was synced successfully
+        if (contact) {
+            await createPendingTransaction(context, session, contact.Id, body);
         }
         
         // Return success response with checkout URL
