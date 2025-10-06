@@ -510,28 +510,73 @@ class SalesforceCrmService extends BaseCrmService {
      * @param {Object} transactionData - Transaction information to update
      * @returns {Promise<Object>} Updated transaction object
      */
-    async updateTransaction(transactionId, transactionData) {
+    async updateTransaction(transactionId, transactionData = {}) {
         await this.connect();
 
-        const { 
+        const {
             status,
             paymentMethod,
-            transactionId: stripeTransactionId
+            transactionId: stripeTransactionId,
+            amount,
+            currency,
+            description,
+            frequency,
+            category,
+            name,
+            sessionId
         } = transactionData;
 
         // Build update record with only provided fields
         const updateRecord = {};
-        
+
         if (status !== undefined) {
             updateRecord.Status__c = status;
         }
-        
+
         if (paymentMethod !== undefined) {
             updateRecord.Payment_Method__c = paymentMethod;
         }
 
         if (stripeTransactionId !== undefined) {
             updateRecord.Transaction_ID__c = stripeTransactionId;
+        }
+
+        if (typeof amount === 'number') {
+            updateRecord.Amount__c = amount / 100;
+        }
+
+        if (currency) {
+            updateRecord.Currency__c = currency.toUpperCase();
+        }
+
+        if (frequency) {
+            updateRecord.Frequency__c = frequency;
+        }
+
+        if (category) {
+            updateRecord.Category__c = category;
+        }
+
+        if (sessionId) {
+            updateRecord.Session_ID__c = sessionId;
+        }
+
+        if (name || description) {
+            updateRecord.Name = name || description;
+        }
+
+        const descriptionKeys = ['description', 'name', 'amount', 'currency', 'frequency', 'category', 'sessionId'];
+        const hasDescriptionFields = descriptionKeys.some((key) => {
+            const value = transactionData[key];
+            return value !== undefined && value !== null && value !== '';
+        });
+
+        let fullDescription = '';
+        if (hasDescriptionFields) {
+            fullDescription = this.buildTransactionDescription(transactionData);
+            if (fullDescription) {
+                updateRecord.Description__c = fullDescription;
+            }
         }
 
         // Only proceed if we have at least one field to update
@@ -546,7 +591,7 @@ class SalesforceCrmService extends BaseCrmService {
                 Id: transactionId,
                 ...updateRecord
             });
-            
+
             if (result.success) {
                 console.log(`Updated Salesforce transaction ${transactionId} with status: ${status}`);
                 const updatedTransaction = await this.conn.sobject('Transaction__c').retrieve(transactionId);
@@ -556,19 +601,20 @@ class SalesforceCrmService extends BaseCrmService {
             }
         } catch (error) {
             console.log('Custom Transaction object not available, trying Opportunity');
-            
+
             // Fallback to Opportunity record
             try {
                 // Map status to Opportunity StageName
-                let stageName = updateRecord.Status__c;
-                if (stageName === 'Completed') {
-                    stageName = 'Closed Won';
-                } else if (stageName === 'Pending') {
-                    stageName = 'Prospecting';
-                } else if (stageName === 'Failed') {
-                    stageName = 'Closed Lost';
-                } else if (stageName === 'Canceled') {
-                    stageName = 'Closed Lost';
+                let stageName = null;
+                if (status !== undefined) {
+                    stageName = status;
+                    if (stageName === 'Completed') {
+                        stageName = 'Closed Won';
+                    } else if (stageName === 'Pending') {
+                        stageName = 'Prospecting';
+                    } else if (stageName === 'Failed' || stageName === 'Canceled') {
+                        stageName = 'Closed Lost';
+                    }
                 }
 
                 const oppUpdateRecord = {};
@@ -576,11 +622,32 @@ class SalesforceCrmService extends BaseCrmService {
                     oppUpdateRecord.StageName = stageName;
                 }
 
+                if (typeof amount === 'number') {
+                    oppUpdateRecord.Amount = amount / 100;
+                }
+
+                if (name || description) {
+                    oppUpdateRecord.Name = name || description;
+                }
+
+                if (currency) {
+                    oppUpdateRecord.CurrencyIsoCode = currency.toUpperCase();
+                }
+
+                if (hasDescriptionFields && fullDescription) {
+                    oppUpdateRecord.Description = fullDescription;
+                }
+
+                if (Object.keys(oppUpdateRecord).length === 0) {
+                    console.log('No opportunity data to update');
+                    return null;
+                }
+
                 const result = await this.conn.sobject('Opportunity').update({
                     Id: transactionId,
                     ...oppUpdateRecord
                 });
-                
+
                 if (result.success) {
                     console.log(`Updated Salesforce opportunity ${transactionId}`);
                     const updatedOpportunity = await this.conn.sobject('Opportunity').retrieve(transactionId);
