@@ -14,7 +14,10 @@ type TestCase = {
 };
 
 const createContext = (): ServiceContext => ({
-  env: {} as Env,
+  env: {
+    ENABLE_QBO: false,
+    ENABLE_SF: false,
+  } as Env,
 });
 
 const iso = () => new Date().toISOString();
@@ -91,7 +94,7 @@ const testCases: TestCase[] = [
   },
 ];
 
-const run = async () => {
+export const runProcessRouteSpec = async () => {
   const context = createContext();
 
   for (const testCase of testCases) {
@@ -132,12 +135,3 @@ const run = async () => {
     );
   }
 };
-
-run()
-  .then(() => {
-    console.log("process.route.spec.ts passed");
-  })
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });

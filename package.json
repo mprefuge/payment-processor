@@ -2,10 +2,11 @@
   "name": "payment-processing-function",
   "version": "1.0.0",
   "description": "Azure Function for payment processing with Stripe integration",
-  "main": "processTransaction/index.js",
+  "main": "dist/app/processTransaction/index.js",
   "scripts": {
     "start": "func start",
-    "test": "node tests/integration.test.js && node tests/transactionCreationFlow.test.js && node tests/failedCanceledTransactions.test.js && node tests/payoutSync.test.js && node tests/payoutCrmIntegration.test.js && node tests/payoutSyncFix.test.js && node tests/manualPayoutSync.test.js && node tests/payoutDateRangeFix.test.js && node tests/connectedAccountPayoutFix.test.js && node tests/payoutArrivalDateFix.test.js && node tests/payoutSyncLogicCorrection.test.js && node tests/payoutAdvanceExclusion.test.js && node tests/productionScenarioSimulation.test.js && node tests/manualPayoutDateWindow.test.js && node tests/persistentStorage.test.js && node tests/quickbooksProvider.test.js && node tests/journalEntryCreation.test.js && node tests/amountConversion.test.js && node tests/stripeQboSync.test.js && node tests/loggingSecurity.test.js && node tests/stripeSearchSanitization.test.js && node tests/stripeWebhookEmail.test.js && node tests/livemodeConfiguration.test.js && node tests/stripeTrueUp.test.js && node tests/reconPayout.test.js"
+    "test": "ts-node --transpile-only tests/run.ts",
+    "report:v2": "ts-node --transpile-only scripts/v2_processor_report.ts"
   },
   "dependencies": {
     "@azure/functions": "^4.5.0",

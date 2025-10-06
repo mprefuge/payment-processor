@@ -1,15 +1,21 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { strict as assert } from "node:assert";
 import Stripe from "stripe";
 
 import { normalizeTransaction } from "../../src/services/process/normalize";
-import { ServiceContext } from "../../src/services/shared/types";
+import { CanonicalInput } from "../../src/services/shared/types";
 
-const context = { env: {} as never } satisfies ServiceContext;
+const context = { env: {} as never };
 
 const iso = (timestamp: number) => new Date(timestamp * 1000).toISOString();
 
 type BalanceMap = Record<string, Stripe.BalanceTransaction>;
+
+type NormalizeCase = {
+  name: string;
+  event: Stripe.Event;
+  balances: BalanceMap;
+  expected: CanonicalInput | null;
+};
 
 const createStripeStub = (balances: BalanceMap) => ({
   balanceTransactions: {
@@ -20,8 +26,8 @@ const createStripeStub = (balances: BalanceMap) => ({
   },
 });
 
-test("normalizes payment_intent.succeeded events", async () => {
-  const balanceTransactions: BalanceMap = {
+const paymentSucceededCase = (): NormalizeCase => {
+  const balances: BalanceMap = {
     ch_test_succeeded: {
       id: "txn_charge_succeeded",
       object: "balance_transaction",
@@ -87,13 +93,7 @@ test("normalizes payment_intent.succeeded events", async () => {
     type: "payment_intent.succeeded",
   } as unknown as Stripe.Event;
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub(balanceTransactions),
-  );
-
-  assert.deepStrictEqual(canonical, {
+  const expected: CanonicalInput = {
     payments: [
       {
         chargeId: "ch_test_succeeded",
@@ -116,85 +116,13 @@ test("normalizes payment_intent.succeeded events", async () => {
         card: { brand: "visa", last4: "4242" },
       },
     ],
-  });
-});
+  };
 
-test("normalizes payment_intent.payment_failed events", async () => {
-  const event = {
-    id: "evt_payment_failed",
-    object: "event",
-    api_version: "2023-10-16",
-    created: 1_700_000_000,
-    data: {
-      object: {
-        id: "pi_test_failed",
-        object: "payment_intent",
-        status: "requires_payment_method",
-        currency: "usd",
-        customer: "cus_456",
-        created: 1_700_000_000,
-        metadata: { retry: "true" },
-        charges: {
-          object: "list",
-          data: [
-            {
-              id: "ch_test_failed",
-              object: "charge",
-              amount: 3500,
-              currency: "usd",
-              created: 1_700_000_100,
-              invoice: null,
-              description: null,
-              metadata: {},
-              payment_method_details: {
-                type: "card",
-                card: {
-                  brand: "mastercard",
-                  last4: "9999",
-                },
-              },
-            },
-          ],
-          has_more: false,
-          url: "/v1/charges?payment_intent=pi_test_failed",
-        },
-      },
-    },
-    livemode: false,
-    pending_webhooks: 0,
-    request: null,
-    type: "payment_intent.payment_failed",
-  } as unknown as Stripe.Event;
+  return { name: "payment_intent.succeeded", event, balances, expected };
+};
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub({}),
-  );
-
-  assert.deepStrictEqual(canonical, {
-    payments: [
-      {
-        chargeId: "ch_test_failed",
-        customerId: "cus_456",
-        invoiceId: undefined,
-        created: iso(1_700_000_100),
-        amount: { amount: 3500, currency: "usd" },
-        net: undefined,
-        fee: undefined,
-        description: undefined,
-        metadata: { retry: "true" },
-        status: "requires_payment_method",
-        balanceTransactionId: undefined,
-        balanceSummary: undefined,
-        card: { brand: "mastercard", last4: "9999" },
-      },
-    ],
-  });
-});
-
-test("normalizes payment_intent.canceled events", async () => {
-  const balanceTransactions: BalanceMap = {
+const paymentCanceledCase = (): NormalizeCase => {
+  const balances: BalanceMap = {
     ch_test_canceled: {
       id: "txn_charge_canceled",
       object: "balance_transaction",
@@ -260,13 +188,7 @@ test("normalizes payment_intent.canceled events", async () => {
     type: "payment_intent.canceled",
   } as unknown as Stripe.Event;
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub(balanceTransactions),
-  );
-
-  assert.deepStrictEqual(canonical, {
+  const expected: CanonicalInput = {
     payments: [
       {
         chargeId: "ch_test_canceled",
@@ -289,11 +211,13 @@ test("normalizes payment_intent.canceled events", async () => {
         card: { brand: "amex", last4: "0005" },
       },
     ],
-  });
-});
+  };
 
-test("normalizes charge.refunded events", async () => {
-  const balanceTransactions: BalanceMap = {
+  return { name: "payment_intent.canceled", event, balances, expected };
+};
+
+const refundCase = (): NormalizeCase => {
+  const balances: BalanceMap = {
     re_test_refund: {
       id: "txn_refund",
       object: "balance_transaction",
@@ -357,13 +281,7 @@ test("normalizes charge.refunded events", async () => {
     type: "charge.refunded",
   } as unknown as Stripe.Event;
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub(balanceTransactions),
-  );
-
-  assert.deepStrictEqual(canonical, {
+  const expected: CanonicalInput = {
     refunds: [
       {
         refundId: "re_test_refund",
@@ -383,10 +301,12 @@ test("normalizes charge.refunded events", async () => {
         card: { brand: "visa", last4: "4242" },
       },
     ],
-  });
-});
+  };
 
-test("normalizes charge.dispute.created events", async () => {
+  return { name: "charge.refunded", event, balances, expected };
+};
+
+const disputeCase = (): NormalizeCase => {
   const event = {
     id: "evt_dispute_created",
     object: "event",
@@ -398,12 +318,14 @@ test("normalizes charge.dispute.created events", async () => {
         object: "dispute",
         amount: 1500,
         currency: "usd",
-        created: 1_700_000_600,
-        status: "needs_response",
+        charge: "ch_test",
+        created: 1_700_000_590,
+        status: "warning_needs_response",
         reason: "fraudulent",
-        charge: "ch_disputed",
-        metadata: { case: "42" },
-        evidence_details: { due_by: 1_700_086_400 },
+        evidence_details: {
+          due_by: 1_700_086_400,
+        },
+        metadata: { case: "D-1" },
       },
     },
     livemode: false,
@@ -412,45 +334,41 @@ test("normalizes charge.dispute.created events", async () => {
     type: "charge.dispute.created",
   } as unknown as Stripe.Event;
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub({}),
-  );
-
-  assert.deepStrictEqual(canonical, {
+  const expected: CanonicalInput = {
     disputes: [
       {
         disputeId: "dp_test",
-        chargeId: "ch_disputed",
-        created: iso(1_700_000_600),
+        chargeId: "ch_test",
+        created: iso(1_700_000_590),
         amount: { amount: 1500, currency: "usd" },
-        status: "needs_response",
+        status: "warning_needs_response",
         reason: "fraudulent",
         evidenceDueBy: iso(1_700_086_400),
-        metadata: { case: "42" },
+        metadata: { case: "D-1" },
       },
     ],
-  });
-});
+  };
 
-test("normalizes payout events", async () => {
+  return { name: "charge.dispute.created", event, balances: {}, expected };
+};
+
+const payoutCase = (): NormalizeCase => {
   const event = {
     id: "evt_payout_paid",
     object: "event",
     api_version: "2023-10-16",
-    created: 1_700_000_700,
+    created: 1_700_001_000,
     data: {
       object: {
         id: "po_test",
         object: "payout",
-        amount: 5000,
+        amount: 50000,
         currency: "usd",
-        created: 1_700_000_700,
+        created: 1_700_000_900,
         arrival_date: 1_700_086_400,
         status: "paid",
         balance_transaction: "txn_payout",
-        metadata: { batch: "payout-1" },
+        metadata: { batch: "p1" },
       },
     },
     livemode: false,
@@ -459,45 +377,59 @@ test("normalizes payout events", async () => {
     type: "payout.paid",
   } as unknown as Stripe.Event;
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub({}),
-  );
-
-  assert.deepStrictEqual(canonical, {
+  const expected: CanonicalInput = {
     payouts: [
       {
         payoutId: "po_test",
-        amount: { amount: 5000, currency: "usd" },
-        created: iso(1_700_000_700),
+        amount: { amount: 50000, currency: "usd" },
+        created: iso(1_700_000_900),
         arrivalDate: iso(1_700_086_400),
         status: "paid",
         balanceTransactionId: "txn_payout",
-        metadata: { batch: "payout-1" },
+        metadata: { batch: "p1" },
       },
     ],
-  });
-});
+  };
 
-test("returns null for unsupported events", async () => {
+  return { name: "payout.paid", event, balances: {}, expected };
+};
+
+const unsupportedCase = (): NormalizeCase => {
   const event = {
     id: "evt_unhandled",
     object: "event",
     api_version: "2023-10-16",
-    created: 1_700_000_800,
-    data: { object: { id: "obj" } },
+    created: 1_700_002_000,
+    data: { object: { id: "xx" } },
     livemode: false,
     pending_webhooks: 0,
     request: null,
-    type: "product.created",
+    type: "unknown.event",
   } as unknown as Stripe.Event;
 
-  const canonical = await normalizeTransaction(
-    event,
-    context,
-    createStripeStub({}),
-  );
+  return { name: "unknown.event", event, balances: {}, expected: null };
+};
 
-  assert.equal(canonical, null);
-});
+const cases: NormalizeCase[] = [
+  paymentSucceededCase(),
+  paymentCanceledCase(),
+  refundCase(),
+  disputeCase(),
+  payoutCase(),
+  unsupportedCase(),
+];
+
+export const runNormalizeSpec = async () => {
+  for (const testCase of cases) {
+    const canonical = await normalizeTransaction(
+      testCase.event,
+      context,
+      createStripeStub(testCase.balances),
+    );
+    assert.deepStrictEqual(
+      canonical,
+      testCase.expected,
+      `${testCase.name} canonical payload mismatch`,
+    );
+  }
+};

@@ -6,7 +6,7 @@ import {
   save_event_if_new,
 } from "../../src/services/persistence/repository";
 
-const run = async () => {
+export const runLedgerSpec = async () => {
   __testing.reset();
 
   const firstSave = await save_event_if_new("evt_123");
@@ -42,12 +42,3 @@ const run = async () => {
   assert.equal(errored.error, "boom");
   assert.ok(errored.updated_at >= postedUpdatedAt);
 };
-
-run()
-  .then(() => {
-    console.log("ledger.spec.ts passed");
-  })
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
