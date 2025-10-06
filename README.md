@@ -66,6 +66,10 @@ npm start
 
 The function will be available at `http://localhost:7071/api/transaction`
 
+> **Note:** A parallel TypeScript implementation is exposed at
+> `http://localhost:7071/api/process-transaction-v2` for testing without
+> impacting the original route.
+
 ### 4. Run Tests
 
 ```bash

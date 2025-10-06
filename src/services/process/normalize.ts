@@ -9,7 +9,7 @@ import {
 type StripeClient = {
   balanceTransactions: {
     list: (
-      params: { source?: string | null; limit?: number },
+      params: { source?: string; limit?: number },
     ) => Promise<{ data: Stripe.BalanceTransaction[] }>;
   };
 };
@@ -299,5 +299,16 @@ export const normalizeTransaction = async (
       return null;
   }
 };
+
+export type NormalizeStripeEventDependencies = {
+  stripe: StripeClient;
+};
+
+export const normalizeStripeEvent = async (
+  payload: Stripe.Event,
+  context: ServiceContext,
+  dependencies: NormalizeStripeEventDependencies,
+): Promise<CanonicalInput | null> =>
+  normalizeTransaction(payload, context, dependencies.stripe);
 
 export type NormalizedTransaction = CanonicalInput;
