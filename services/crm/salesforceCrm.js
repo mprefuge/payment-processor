@@ -81,43 +81,21 @@ class SalesforceCrmService extends BaseCrmService {
             'name',
             'description',
             'amount',
-            'amountAuthorized',
-            'amountReceived',
-            'amountCapturable',
-            'amountTotal',
-            'amountSubtotal',
             'currency',
             'paymentMethod',
             'transactionId',
-            'stripeStatus',
             'status',
             'frequency',
             'category',
-            'sessionId',
-            'stripeCustomerId',
-            'invoiceId',
-            'latestChargeId',
-            'applicationFeeAmount',
-            'transferData',
-            'stripeDetails'
+            'sessionId'
         ];
-
-        const amountKeys = new Set([
-            'amount',
-            'amountAuthorized',
-            'amountReceived',
-            'amountCapturable',
-            'amountTotal',
-            'amountSubtotal',
-            'applicationFeeAmount'
-        ]);
 
         const entries = Object.entries(transactionData)
             .filter(([, value]) => value !== undefined && value !== null && value !== '')
             .map(([key, value]) => {
                 let formattedValue = this.formatDescriptionValue(value);
 
-                if (amountKeys.has(key) && typeof value === 'number') {
+                if (key === 'amount' && typeof value === 'number') {
                     const dollars = (value / 100).toFixed(2);
                     formattedValue = `$${dollars} (${value})`;
                 } else if (key === 'currency' && typeof value === 'string') {
@@ -535,64 +513,25 @@ class SalesforceCrmService extends BaseCrmService {
     async updateTransaction(transactionId, transactionData) {
         await this.connect();
 
-        const {
+        const { 
             status,
             paymentMethod,
-            transactionId: stripeTransactionId,
-            amount,
-            currency,
-            description,
-            frequency,
-            category,
-            name,
-            sessionId
+            transactionId: stripeTransactionId
         } = transactionData;
-
-        const fullDescription = this.buildTransactionDescription(transactionData);
 
         // Build update record with only provided fields
         const updateRecord = {};
-
+        
         if (status !== undefined) {
             updateRecord.Status__c = status;
         }
-
+        
         if (paymentMethod !== undefined) {
             updateRecord.Payment_Method__c = paymentMethod;
         }
 
         if (stripeTransactionId !== undefined) {
             updateRecord.Transaction_ID__c = stripeTransactionId;
-        }
-
-        if (typeof amount === 'number') {
-            updateRecord.Amount__c = amount / 100;
-        }
-
-        if (currency) {
-            updateRecord.Currency__c = currency;
-        }
-
-        if (frequency) {
-            updateRecord.Frequency__c = frequency;
-        }
-
-        if (category) {
-            updateRecord.Category__c = category;
-        }
-
-        if (sessionId) {
-            updateRecord.Session_ID__c = sessionId;
-        }
-
-        if (name) {
-            updateRecord.Name = name;
-        }
-
-        if (fullDescription) {
-            updateRecord.Description__c = fullDescription;
-        } else if (description) {
-            updateRecord.Description__c = description;
         }
 
         // Only proceed if we have at least one field to update
@@ -635,20 +574,6 @@ class SalesforceCrmService extends BaseCrmService {
                 const oppUpdateRecord = {};
                 if (stageName) {
                     oppUpdateRecord.StageName = stageName;
-                }
-
-                if (typeof amount === 'number') {
-                    oppUpdateRecord.Amount = amount / 100;
-                }
-
-                if (name) {
-                    oppUpdateRecord.Name = name;
-                }
-
-                if (fullDescription) {
-                    oppUpdateRecord.Description = fullDescription;
-                } else if (description) {
-                    oppUpdateRecord.Description = description;
                 }
 
                 const result = await this.conn.sobject('Opportunity').update({
