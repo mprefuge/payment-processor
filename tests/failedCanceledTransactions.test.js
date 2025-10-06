@@ -37,6 +37,15 @@ class MockCrmService {
             Status__c: transactionData.status,
             Payment_Method__c: transactionData.paymentMethod
         };
+        if (transactionData.description) {
+            transaction.Description__c = transactionData.description;
+        }
+        if (transactionData.frequency) {
+            transaction.Frequency__c = transactionData.frequency;
+        }
+        if (transactionData.currency) {
+            transaction.Currency__c = transactionData.currency.toUpperCase();
+        }
         this.transactions.push(transaction);
         return transaction;
     }
@@ -46,7 +55,9 @@ class MockCrmService {
         if (!transaction) {
             throw new Error(`Transaction not found: ${transactionId}`);
         }
-        
+
+        transaction.LastUpdatePayload = { ...transactionData };
+
         if (transactionData.status) {
             transaction.Status__c = transactionData.status;
         }
@@ -56,7 +67,28 @@ class MockCrmService {
         if (transactionData.transactionId) {
             transaction.Transaction_ID__c = transactionData.transactionId;
         }
-        
+        if (typeof transactionData.amount === 'number') {
+            transaction.Amount__c = transactionData.amount / 100;
+        }
+        if (transactionData.currency) {
+            transaction.Currency__c = transactionData.currency.toUpperCase();
+        }
+        if (transactionData.description) {
+            transaction.Description__c = transactionData.description;
+        }
+        if (transactionData.name) {
+            transaction.Name = transactionData.name;
+        }
+        if (transactionData.frequency) {
+            transaction.Frequency__c = transactionData.frequency;
+        }
+        if (transactionData.category) {
+            transaction.Category__c = transactionData.category;
+        }
+        if (transactionData.sessionId) {
+            transaction.Session_ID__c = transactionData.sessionId;
+        }
+
         return transaction;
     }
 
