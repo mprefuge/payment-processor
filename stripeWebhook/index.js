@@ -1,4 +1,5 @@
 const Stripe = require('stripe');
+const path = require('path');
 const CrmFactory = require('../services/crm/crmFactory');
 const { ContactMatcher } = require('../services/contactMatcher');
 const ReviewTaskService = require('../services/reviewTaskService');
@@ -36,6 +37,189 @@ const createContextLogger = (context) => {
         warn: resolveMethod('warn'),
         error: resolveMethod('error')
     };
+};
+
+const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
+const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
+
+const parseBooleanFlag = (value) => {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    if (typeof value === 'number') {
+        return value !== 0;
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+
+        if (TRUTHY_VALUES.has(normalized)) {
+            return true;
+        }
+
+        if (FALSY_VALUES.has(normalized)) {
+            return false;
+        }
+    }
+
+    return Boolean(value);
+};
+
+const isV2ProcessorEnabled = () => parseBooleanFlag(process.env.USE_V2_PROCESSOR);
+
+let cachedV2ProcessorModules = null;
+let tsNodeRegistered = false;
+
+const loadV2ProcessorModules = () => {
+    if (cachedV2ProcessorModules) {
+        return cachedV2ProcessorModules;
+    }
+
+    const projectRoot = path.join(__dirname, '..');
+
+    const attemptLoad = (relativeBase) => {
+        const basePath = path.join(projectRoot, relativeBase);
+        const normalizeModule = require(path.join(basePath, 'services', 'process', 'normalize'));
+        const processModule = require(path.join(basePath, 'services', 'process', 'process_transaction'));
+        const envModule = require(path.join(basePath, 'config', 'env'));
+
+        const normalizeStripeEvent = normalizeModule.normalizeStripeEvent;
+        const processTransaction = processModule.processTransaction;
+        const getCachedEnv = envModule.getCachedEnv || envModule.getEnv;
+
+        if (typeof normalizeStripeEvent !== 'function' || typeof processTransaction !== 'function') {
+            throw new Error('V2 processor modules missing required exports');
+        }
+
+        if (typeof getCachedEnv !== 'function') {
+            throw new Error('V2 processor env module missing getCachedEnv export');
+        }
+
+        return {
+            normalizeStripeEvent,
+            processTransaction,
+            getCachedEnv,
+            source: relativeBase,
+            loggedSource: false
+        };
+    };
+
+    try {
+        cachedV2ProcessorModules = attemptLoad('dist');
+    } catch (distError) {
+        try {
+            if (!tsNodeRegistered) {
+                require('ts-node/register/transpile-only');
+                tsNodeRegistered = true;
+            }
+            cachedV2ProcessorModules = attemptLoad('src');
+        } catch (srcError) {
+            distError.message = `Failed to load V2 processor from dist: ${distError.message}`;
+            srcError.message = `Failed to load V2 processor from src: ${srcError.message}`;
+            const error = new Error('Unable to load V2 processor modules');
+            error.distError = distError;
+            error.srcError = srcError;
+            throw error;
+        }
+    }
+
+    return cachedV2ProcessorModules;
+};
+
+const processEventWithV2 = async (context, event, logger) => {
+    const modules = loadV2ProcessorModules();
+    if (!modules.loggedSource && logger) {
+        logger.info('[Webhook] V2 processor modules loaded', {
+            source: modules.source
+        });
+        modules.loggedSource = true;
+    }
+
+    const env = modules.getCachedEnv();
+
+    if (!env || !env.STRIPE_SECRET) {
+        throw new Error('STRIPE_SECRET is not configured for V2 processor');
+    }
+
+    const stripeClient = new Stripe(env.STRIPE_SECRET);
+    const serviceContext = { env };
+
+    const canonical = await modules.normalizeStripeEvent(event, serviceContext, { stripe: stripeClient });
+
+    if (!canonical) {
+        logger.info('[Webhook] V2 processor skipped event during normalization', {
+            eventId: event?.id,
+            eventType: event?.type
+        });
+
+        return { handled: false };
+    }
+
+    const summary = await modules.processTransaction({
+        payload: event,
+        payments: canonical.payments,
+        refunds: canonical.refunds,
+        disputes: canonical.disputes,
+        payouts: canonical.payouts
+    }, serviceContext);
+
+    logger.info('[Webhook] V2 processor completed successfully', {
+        eventId: event?.id,
+        eventType: event?.type
+    });
+
+    return { handled: true, summary };
+};
+
+const processEventWithLegacy = async (context, event, stripeAccountId) => {
+    switch (event.type) {
+        case 'payment_intent.succeeded':
+            await processPaymentSuccess(context, event.data.object);
+            break;
+
+        case 'payment_intent.payment_failed':
+            await processPaymentFailure(context, event.data.object);
+            break;
+
+        case 'payment_intent.canceled':
+            await processPaymentCanceled(context, event.data.object);
+            break;
+
+        case 'checkout.session.completed':
+            await processCheckoutSessionCompleted(context, event.data.object);
+            break;
+
+        case 'invoice.payment_succeeded': {
+            const invoice = event.data.object;
+            if (invoice.payment_intent) {
+                const stripe = initializeStripe(event.livemode);
+                const paymentIntent = await stripe.paymentIntents.retrieve(invoice.payment_intent);
+                await processPaymentSuccess(context, paymentIntent);
+            }
+            break;
+        }
+
+        case 'payout.paid':
+            await processPayoutPaid(context, event.data.object, stripeAccountId, event.id);
+            break;
+
+        case 'payout.failed':
+            await processPayoutFailed(context, event.data.object, stripeAccountId);
+            break;
+
+        case 'payout.canceled':
+            await processPayoutCanceled(context, event.data.object, stripeAccountId);
+            break;
+
+        case 'payout.created':
+            context.log(`Payout created: ${event.data.object.id} - will post when paid`);
+            break;
+
+        default:
+            context.log(`Unhandled event type: ${event.type}`);
+            break;
+    }
 };
 
 // Global service instances
@@ -1200,6 +1384,7 @@ const processPayoutJob = async (context, payoutId, stripeAccountId, payoutSyncSe
 // Main webhook handler
 module.exports = async function (context, req) {
     try {
+        const logger = createContextLogger(context);
         context.log('Stripe webhook received');
 
         // Get raw body for signature verification
@@ -1249,63 +1434,54 @@ module.exports = async function (context, req) {
 
         await webhookEventStore.recordEvent(event);
 
-        // Handle different event types
-        switch (event.type) {
-            case 'payment_intent.succeeded':
-                await processPaymentSuccess(context, event.data.object);
-                break;
+        const useV2Processor = isV2ProcessorEnabled();
+        const initialHandlerPath = useV2Processor ? 'v2' : 'legacy';
+        logger.info('[Webhook] Selected handler path', {
+            eventId: event.id,
+            eventType: event.type,
+            handlerPath: initialHandlerPath
+        });
 
-            case 'payment_intent.payment_failed':
-                await processPaymentFailure(context, event.data.object);
-                break;
+        let handlerPathUsed = initialHandlerPath;
 
-            case 'payment_intent.canceled':
-                await processPaymentCanceled(context, event.data.object);
-                break;
+        if (useV2Processor) {
+            try {
+                const v2Result = await processEventWithV2(context, event, logger);
 
-            case 'checkout.session.completed':
-                await processCheckoutSessionCompleted(context, event.data.object);
-                break;
-
-            case 'invoice.payment_succeeded':
-                // Handle recurring payment success
-                const invoice = event.data.object;
-                if (invoice.payment_intent) {
-                    const stripe = initializeStripe(event.livemode);
-                    const paymentIntent = await stripe.paymentIntents.retrieve(invoice.payment_intent);
-                    await processPaymentSuccess(context, paymentIntent);
+                if (!v2Result || !v2Result.handled) {
+                    handlerPathUsed = 'legacy';
+                    logger.info('[Webhook] V2 processor skipped event, delegating to legacy handler', {
+                        eventId: event.id,
+                        eventType: event.type
+                    });
+                    await processEventWithLegacy(context, event, stripeAccountId);
                 }
-                break;
-
-            // Payout events for accounting sync
-            case 'payout.paid':
-                await processPayoutPaid(context, event.data.object, stripeAccountId, event.id);
-                break;
-
-            case 'payout.failed':
-                await processPayoutFailed(context, event.data.object, stripeAccountId);
-                break;
-
-            case 'payout.canceled':
-                await processPayoutCanceled(context, event.data.object, stripeAccountId);
-                break;
-
-            case 'payout.created':
-                // Optional: stage/pre-warm but do not post until paid
-                context.log(`Payout created: ${event.data.object.id} - will post when paid`);
-                break;
-
-            default:
-                context.log(`Unhandled event type: ${event.type}`);
-                break;
+            } catch (v2Error) {
+                handlerPathUsed = 'legacy';
+                logger.warn('[Webhook] V2 processor failed, falling back to legacy handler', {
+                    eventId: event.id,
+                    eventType: event.type,
+                    error: v2Error.message
+                });
+                await processEventWithLegacy(context, event, stripeAccountId);
+            }
+        } else {
+            await processEventWithLegacy(context, event, stripeAccountId);
         }
+
+        logger.info('[Webhook] Event handled', {
+            eventId: event.id,
+            eventType: event.type,
+            handlerPath: handlerPathUsed
+        });
 
         // Return success response
         context.res = {
             status: 200,
             body: JSON.stringify({
                 received: true,
-                eventType: event.type
+                eventType: event.type,
+                handlerPath: handlerPathUsed
             })
         };
 
