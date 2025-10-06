@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const booleanFromEnv = (defaultValue: boolean) =>
-  z.preprocess((value) => {
+  z.preprocess((value: unknown) => {
     if (value === undefined || value === "") {
       return defaultValue;
     }
