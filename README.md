@@ -10,6 +10,7 @@ This Azure Function app processes payments through Stripe, handling customer man
 - Support for both test and live modes
 - **Stripe webhook handling for payment confirmations**
 - **Webhook-only payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
+- **Manual true-up endpoint for backfilling and reconciliation with automatic pagination and rate limiting**
 - **Automatic CRM payout tracking (Salesforce, extensible to other CRMs)**
 - **Salesforce contact sync on checkout session creation**
 - **Enhanced CRM integration with robust customer-contact association**
@@ -327,6 +328,38 @@ The payment processor includes automated **Stripe Payout Sync to Accounting** wi
    QBO_ACCESS_TOKEN=your_access_token
    QBO_REFRESH_TOKEN=your_refresh_token
    ```
+
+### Manual True-Up Endpoint
+
+While payout sync is automated via webhooks, you may need to manually backfill or reconcile data in certain scenarios:
+
+```
+POST /api/sync/stripe/true-up
+```
+
+**Use cases:**
+- Initial data migration
+- Recovering from webhook failures
+- Periodic reconciliation
+- Backfilling historical data
+
+**Example request:**
+```json
+{
+  "since": "2024-01-01T00:00:00Z",
+  "resources": ["payouts"],
+  "dryRun": false
+}
+```
+
+**Features:**
+- ✅ Automatic pagination for large datasets
+- ✅ Rate limiting with exponential backoff
+- ✅ Idempotent (skips already synced payouts)
+- ✅ Dry run mode for preview
+- ✅ Multi-account support
+
+See [STRIPE_TRUE_UP.md](./STRIPE_TRUE_UP.md) for complete documentation.
 
 3. **Set account mappings**:
    ```bash
