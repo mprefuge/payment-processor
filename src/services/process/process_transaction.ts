@@ -14,7 +14,8 @@ export interface ProcessTransactionInput {
 }
 
 export interface SyncSummary {
-  action: "skipped";
+  action: "skipped" | "noop" | "created" | "updated";
+  id?: string | null;
 }
 
 export interface ProcessTransactionResult {
@@ -37,9 +38,12 @@ export const processTransaction = async (
   };
 
   return withIdempotency(normalized, async () => {
-    const sf = decision.shouldSyncSalesforce
-      ? await postToSalesforce(normalized, context)
-      : { action: "skipped" as const };
+    const isSalesforceEnabled = context.env.ENABLE_SF !== false;
+
+    const sf =
+      decision.shouldSyncSalesforce && isSalesforceEnabled
+        ? await postToSalesforce(normalized, context)
+        : { action: "skipped" as const };
 
     const qbo = decision.shouldSyncQuickBooks
       ? await postToQuickBooks(normalized, context)
