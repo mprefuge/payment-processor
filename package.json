@@ -12,6 +12,12 @@
     "@sendgrid/mail": "^8.1.0",
     "jsforce": "^3.10.7",
     "node-quickbooks": "^2.0.46",
-    "stripe": "^14.7.0"
+    "stripe": "^14.7.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.3"
   }
 }
