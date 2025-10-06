@@ -31,3 +31,8 @@ export const docnum_fee_daily = (
 
 export const docnum_payout = (payoutId: string): string =>
   formatDocnum("payout", payoutId);
+
+export const docnum_dispute = (
+  disputeId: string,
+  status: string,
+): string => formatDocnum("dispute", disputeId, status);
