@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 npm-debug.log*
+dist/
 
 # Azure Functions artifacts
 bin

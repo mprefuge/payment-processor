@@ -1,12 +1,14 @@
 {
+  "scriptFile": "../dist/app/health/index.js",
+  "entryPoint": "healthHandler",
   "bindings": [
     {
-      "authLevel": "function",
+      "authLevel": "anonymous",
       "type": "httpTrigger",
       "direction": "in",
       "name": "req",
-      "methods": ["post"],
-      "route": "transaction"
+      "methods": ["get"],
+      "route": "health"
     },
     {
       "type": "http",
