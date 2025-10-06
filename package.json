@@ -4,9 +4,12 @@
   "description": "Azure Function for payment processing with Stripe integration",
   "main": "dist/app/processTransaction/index.js",
   "scripts": {
+    "build": "tsc",
+    "prestart": "npm run build",
     "start": "func start",
     "test": "ts-node --transpile-only tests/run.ts",
-    "report:v2": "ts-node --transpile-only scripts/v2_processor_report.ts"
+    "report:v2": "ts-node --transpile-only scripts/v2_processor_report.ts",
+    "postinstall": "npm run build"
   },
   "dependencies": {
     "@azure/functions": "^4.5.0",

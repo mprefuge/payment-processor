@@ -1,12 +1,14 @@
 {
+  "scriptFile": "../dist/app/processTransaction/index.js",
+  "entryPoint": "processTransactionHandler",
   "bindings": [
     {
-      "authLevel": "anonymous",
+      "authLevel": "function",
       "type": "httpTrigger",
       "direction": "in",
       "name": "req",
-      "methods": ["get"],
-      "route": "health"
+      "methods": ["post"],
+      "route": "transaction"
     },
     {
       "type": "http",
