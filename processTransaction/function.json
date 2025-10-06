@@ -1,4 +1,6 @@
 {
+  "scriptFile": "../dist/src/app/processTransaction/index.js",
+  "entryPoint": "processTransactionHandler",
   "bindings": [
     {
       "authLevel": "function",
