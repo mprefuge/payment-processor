@@ -14,18 +14,21 @@ function createStore(filePath) {
 }
 
 function createPersistentStorageClients(namespace = 'default') {
-    if (storeCache.has(namespace)) {
-        return storeCache.get(namespace);
+    const basePath = getBasePath(namespace);
+    const cacheKey = `${namespace}:${basePath}`;
+
+    if (storeCache.has(cacheKey)) {
+        return storeCache.get(cacheKey);
     }
 
-    const basePath = getBasePath(namespace);
     const clients = {
         idempotencyStore: createStore(path.join(basePath, 'idempotency.json')),
         webhookEventStore: createStore(path.join(basePath, 'webhook-events.json')),
-        syncLedgerStore: createStore(path.join(basePath, 'sync-ledger.json'))
+        syncLedgerStore: createStore(path.join(basePath, 'sync-ledger.json')),
+        canonicalStore: createStore(path.join(basePath, 'canonical-ledger.json'))
     };
 
-    storeCache.set(namespace, clients);
+    storeCache.set(cacheKey, clients);
     return clients;
 }
 

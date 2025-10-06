@@ -12,6 +12,13 @@
       "type": "http",
       "direction": "out",
       "name": "res"
+    },
+    {
+      "type": "queue",
+      "direction": "out",
+      "name": "processTransactionQueue",
+      "queueName": "process-transaction",
+      "connection": "AZURE_STORAGE_CONNECTION_STRING"
     }
   ]
 }

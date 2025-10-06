@@ -1,18 +1,32 @@
 const sgMail = require('@sendgrid/mail');
 
-const sendGridApiKey = process.env.SENDGRID_API_KEY;
 let isSendGridEnabled = false;
+let configuredApiKey = null;
 
-if (sendGridApiKey) {
-    try {
-        sgMail.setApiKey(sendGridApiKey);
-        isSendGridEnabled = true;
-    } catch (error) {
-        console.error('Failed to initialize SendGrid API key:', error.message);
+const configureSendGrid = () => {
+    const apiKey = process.env.SENDGRID_API_KEY || null;
+
+    if (configuredApiKey === apiKey) {
+        return;
     }
-} else {
-    console.warn('SENDGRID_API_KEY not configured. Email delivery disabled.');
-}
+
+    configuredApiKey = apiKey;
+
+    if (apiKey) {
+        try {
+            sgMail.setApiKey(apiKey);
+            isSendGridEnabled = true;
+        } catch (error) {
+            console.error('Failed to initialize SendGrid API key:', error.message);
+            isSendGridEnabled = false;
+        }
+    } else {
+        console.warn('SENDGRID_API_KEY not configured. Email delivery disabled.');
+        isSendGridEnabled = false;
+    }
+};
+
+configureSendGrid();
 
 /**
  * Determine if an email notification should be sent based on configuration
@@ -98,6 +112,8 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
 
 // Send notification email for successful payment
 const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
+    configureSendGrid();
+
     if (!isSendGridEnabled) {
         console.warn('SendGrid API key not configured. Skipping payment success email delivery.');
         return { status: 'skipped', reason: 'sendgrid_disabled' };

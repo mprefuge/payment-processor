@@ -1,3 +1,6 @@
+const fs = require('fs');
+const path = require('path');
+
 function createMockSendGrid() {
     return {
         setApiKeyCalls: [],
@@ -197,9 +200,11 @@ async function run() {
                     NOTIFICATION_EMAIL_FROM: 'from@example.com',
                     NOTIFICATION_POLICY: 'ALL',
                     PERSISTENT_STORAGE_NAMESPACE: 'stripe-webhook-email-sendgrid',
+                    PERSISTENT_STORAGE_BASE_PATH: path.join(__dirname, '.tmp-webhook-email', 'sendgrid'),
                     CRM_PROVIDER: undefined,
                     STRIPE_TEST_SECRET_KEY: 'sk_test_mock'
                 }, async () => {
+                    fs.rmSync(path.join(__dirname, '.tmp-webhook-email', 'sendgrid'), { recursive: true, force: true });
                     const { webhook, restore } = loadWebhookWithMocks({ stripeClass, sendGridMock });
 
                     try {
@@ -236,9 +241,11 @@ async function run() {
                     NOTIFICATION_EMAIL_FROM: 'from@example.com',
                     NOTIFICATION_POLICY: 'ALL',
                     PERSISTENT_STORAGE_NAMESPACE: 'stripe-webhook-email-disabled',
+                    PERSISTENT_STORAGE_BASE_PATH: path.join(__dirname, '.tmp-webhook-email', 'disabled'),
                     CRM_PROVIDER: undefined,
                     STRIPE_TEST_SECRET_KEY: 'sk_test_mock'
                 }, async () => {
+                    fs.rmSync(path.join(__dirname, '.tmp-webhook-email', 'disabled'), { recursive: true, force: true });
                     const { webhook, restore } = loadWebhookWithMocks({ stripeClass, sendGridMock });
 
                     try {

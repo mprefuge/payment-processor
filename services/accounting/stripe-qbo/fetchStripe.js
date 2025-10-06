@@ -186,8 +186,10 @@ async function fetchBalanceTransactionsForPayout(stripe, payoutId, options = {})
         ...(options.params?.expand || [])
     ]));
 
+    const requestOptions = options.requestOptions || undefined;
+
     return fetchAll(
-        stripe.balanceTransactions.list.bind(stripe.balanceTransactions),
+        (params) => stripe.balanceTransactions.list(params, requestOptions),
         {
             payout: payoutId,
             limit: options.limit || DEFAULT_LIMIT,

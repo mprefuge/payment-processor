@@ -1,0 +1,84 @@
+{
+  "balanceTransactions": [
+    {
+      "id": "txn_charge_fixture",
+      "type": "charge",
+      "reporting_category": "charge",
+      "amount": 5000,
+      "currency": "usd",
+      "fee": 200,
+      "net": 4800,
+      "created": 1699991000,
+      "source": {
+        "object": "charge",
+        "id": "ch_fixture",
+        "amount": 5000,
+        "currency": "usd",
+        "created": 1699991000,
+        "customer": "cus_fixture",
+        "invoice": "in_fixture",
+        "metadata": {
+          "campaign": "fall"
+        },
+        "payment_method_details": {
+          "type": "card",
+          "card": {
+            "brand": "visa",
+            "last4": "4242"
+          }
+        },
+        "status": "succeeded"
+      }
+    },
+    {
+      "id": "txn_refund_fixture",
+      "type": "refund",
+      "reporting_category": "refund",
+      "amount": -2000,
+      "currency": "usd",
+      "fee": 0,
+      "net": -2000,
+      "created": 1699992000,
+      "source": {
+        "object": "refund",
+        "id": "re_fixture",
+        "amount": 2000,
+        "currency": "usd",
+        "created": 1699992000,
+        "status": "succeeded",
+        "reason": "requested_by_customer",
+        "metadata": {},
+        "charge": {
+          "id": "ch_fixture",
+          "object": "charge",
+          "payment_method_details": {
+            "type": "card",
+            "card": {
+              "brand": "visa",
+              "last4": "4242"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "txn_payout_fixture",
+      "type": "payout",
+      "reporting_category": "payout",
+      "amount": -2800,
+      "currency": "usd",
+      "fee": 0,
+      "net": -2800,
+      "created": 1699993000,
+      "source": {
+        "object": "payout",
+        "id": "po_fixture",
+        "amount": 2800,
+        "currency": "usd",
+        "created": 1699993000,
+        "arrival_date": 1700000000,
+        "status": "paid"
+      }
+    }
+  ]
+}
