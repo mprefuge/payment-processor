@@ -6,7 +6,7 @@ name: Build and deploy Node.js project to Azure Function App - payment-processin
 on:
   push:
     branches:
-      - main
+      - prod
   workflow_dispatch:
 
 env:
@@ -67,4 +67,5 @@ jobs:
           app-name: 'payment-processing-function'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_FA090DCEEE59435FA572FA7E342A8755 }}
