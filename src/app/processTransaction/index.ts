@@ -4,6 +4,7 @@ import { getCachedEnv } from "../../config/env";
 import { normalizeStripeEvent } from "../../services/process/normalize";
 import { processTransaction } from "../../services/process/process_transaction";
 import { createLogger } from "../../services/shared/logger";
+import { incrementCounter } from "../../services/shared/metrics";
 import { ServiceContext } from "../../services/shared/types";
 
 type AzureHttpHeaders = Record<string, string | undefined> | undefined;
@@ -33,6 +34,14 @@ type AzureFunctionHandler = (
 
 const logger = createLogger("app:processTransaction");
 
+const getCorrelationId = (
+  req: AzureHttpRequest,
+  context: AzureContext,
+): string =>
+  req.headers?.["x-correlation-id"] ??
+  req.headers?.["X-Correlation-Id"] ??
+  context.invocationId;
+
 const getStripeSignature = (req: AzureHttpRequest) =>
   req.headers?.["stripe-signature"] ?? req.headers?.["Stripe-Signature"];
 
@@ -57,15 +66,18 @@ export const processTransactionHandler: AzureFunctionHandler = async (
   req: AzureHttpRequest,
 ): Promise<void> => {
   const env = getCachedEnv();
-  const serviceContext: ServiceContext = { env };
-
-  logger.debug("processTransaction invoked", {
+  const correlationId = getCorrelationId(req, context);
+  const requestLogger = logger.child({
+    correlationId,
     invocationId: context.invocationId,
   });
+  const serviceContext: ServiceContext = { env };
+
+  requestLogger.debug("processTransaction invoked");
 
   const signature = getStripeSignature(req);
   if (!signature) {
-    logger.warn("Missing Stripe signature header");
+    requestLogger.warn("Missing Stripe signature header");
     context.res = {
       status: 400,
       body: { error: "Missing Stripe-Signature header" },
@@ -86,7 +98,7 @@ export const processTransactionHandler: AzureFunctionHandler = async (
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.warn("Stripe signature verification failed", { message });
+    requestLogger.warn("Stripe signature verification failed", { message });
     context.res = {
       status: 400,
       body: { error: "Invalid Stripe signature" },
@@ -94,13 +106,15 @@ export const processTransactionHandler: AzureFunctionHandler = async (
     return;
   }
 
+  incrementCounter("events_ingested");
+
   try {
     const canonical = await normalizeStripeEvent(event, serviceContext, {
       stripe,
     });
 
     if (!canonical) {
-      logger.info("Stripe event ignored after normalization", {
+      requestLogger.info("Stripe event ignored after normalization", {
         eventId: event.id,
         type: event.type,
       });
@@ -124,7 +138,7 @@ export const processTransactionHandler: AzureFunctionHandler = async (
       body: summary,
     };
   } catch (error) {
-    logger.error("Failed to process Stripe transaction", {
+    requestLogger.error("Failed to process Stripe transaction", {
       eventId: event.id,
       error,
     });

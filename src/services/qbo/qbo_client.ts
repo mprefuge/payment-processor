@@ -283,6 +283,24 @@ export class QuickBooksClient {
   createTransfer(payload: Record<string, unknown>) {
     return this.createEntity("Transfer", payload);
   }
+
+  async getCompanyInfo(): Promise<Record<string, unknown>> {
+    const path = `/v3/company/${this.context.env.QBO_REALM_ID}/companyinfo/${this.context.env.QBO_REALM_ID}`;
+    const result = await this.request<Record<string, unknown> | null>(
+      "GET",
+      path,
+    );
+
+    if (result && typeof result === "object") {
+      const companyInfo = result["CompanyInfo"];
+      if (companyInfo && typeof companyInfo === "object") {
+        return companyInfo as Record<string, unknown>;
+      }
+      return result;
+    }
+
+    throw new Error("Unexpected QuickBooks response when retrieving company info");
+  }
 }
 
 export const createQboClient = (
