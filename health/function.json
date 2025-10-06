@@ -1,5 +1,5 @@
 {
-  "scriptFile": "../dist/app/health/index.js",
+  "scriptFile": "../dist/src/app/health/index.js",
   "entryPoint": "healthHandler",
   "bindings": [
     {

@@ -1,5 +1,5 @@
 {
-  "scriptFile": "../dist/app/processTransaction/index.js",
+  "scriptFile": "../dist/src/app/processTransaction/index.js",
   "entryPoint": "processTransactionHandler",
   "bindings": [
     {
