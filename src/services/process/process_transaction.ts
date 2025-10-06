@@ -18,10 +18,16 @@ export interface SyncSummary {
   id?: string | null;
 }
 
+export interface QuickBooksSummary {
+  action: "skipped" | "noop" | "created";
+  doc_type?: string | null;
+  doc_id?: string | null;
+}
+
 export interface ProcessTransactionResult {
   decision: DecisionResult;
   sf: SyncSummary;
-  qbo: SyncSummary;
+  qbo: QuickBooksSummary;
 }
 
 export const processTransaction = async (
@@ -45,9 +51,12 @@ export const processTransaction = async (
         ? await postToSalesforce(normalized, context)
         : { action: "skipped" as const };
 
-    const qbo = decision.shouldSyncQuickBooks
-      ? await postToQuickBooks(normalized, context)
-      : { action: "skipped" as const };
+    const isQuickBooksEnabled = context.env.ENABLE_QBO !== false;
+
+    const qbo =
+      decision.shouldSyncQuickBooks && isQuickBooksEnabled
+        ? await postToQuickBooks(normalized, decision.quickbooksRoute, context)
+        : { action: "skipped" as const };
 
     return {
       decision,
