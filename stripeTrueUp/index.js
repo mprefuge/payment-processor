@@ -1,34 +1,32 @@
+'use strict';
+
+const fs = require('fs');
 const Stripe = require('stripe');
-const { 
-    fetchStripePayoutsSince,
-    fetchStripeChargesSince,
-    fetchStripeRefundsSince,
-    fetchStripeDisputesSince
-} = require('../services/accounting/stripe-qbo/fetchStripe');
-
-// Import webhook processing logic
-const processPayoutPaid = require('../stripeWebhook/payoutProcessor');
-const { createContextLogger } = require('../stripeWebhook/payoutProcessor');
-
-// Storage services
-const WebhookEventStore = require('../services/webhookEventStore');
-const SyncLedger = require('../services/syncLedger');
+const { normalizeSince } = require('../services/accounting/stripe-qbo/fetchStripe');
+const CanonicalStore = require('../services/canonicalStore');
 const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
 
-// Initialize storage
 const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
-const {
-    webhookEventStore: webhookEventStoreClient,
-    syncLedgerStore
-} = createPersistentStorageClients(storageNamespace);
+const { canonicalStore: canonicalStoreClient } = createPersistentStorageClients(storageNamespace);
+const canonicalStore = new CanonicalStore({ storageClient: canonicalStoreClient });
 
-const webhookEventStore = new WebhookEventStore({ storageClient: webhookEventStoreClient });
-const syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
+const loadFixture = () => {
+    const fixturePath = process.env.STRIPE_TRUE_UP_FIXTURE;
+    if (!fixturePath) {
+        return null;
+    }
 
-/**
- * Rate limiter for Stripe API calls
- * Implements exponential backoff with jitter
- */
+    try {
+        const contents = fs.readFileSync(fixturePath, 'utf8');
+        return JSON.parse(contents);
+    } catch (error) {
+        if (error.code !== 'ENOENT') {
+            throw error;
+        }
+        return null;
+    }
+};
+
 class RateLimiter {
     constructor(maxRetries = 3, baseDelay = 1000) {
         this.maxRetries = maxRetries;
@@ -37,34 +35,31 @@ class RateLimiter {
 
     async executeWithRetry(fn, context) {
         let lastError;
-        
+
         for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
             try {
                 return await fn();
             } catch (error) {
                 lastError = error;
-                
-                // Check if it's a rate limit error
+
                 if (error.type === 'StripeRateLimitError' && attempt < this.maxRetries) {
                     const delay = this.calculateDelay(attempt);
                     context.log(`Rate limited by Stripe. Retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
                     await this.sleep(delay);
                     continue;
                 }
-                
-                // For other errors, don't retry
+
                 throw error;
             }
         }
-        
+
         throw lastError;
     }
 
     calculateDelay(attempt) {
-        // Exponential backoff with jitter
         const exponentialDelay = this.baseDelay * Math.pow(2, attempt);
         const jitter = Math.random() * 1000;
-        return Math.min(exponentialDelay + jitter, 30000); // Max 30 seconds
+        return Math.min(exponentialDelay + jitter, 30000);
     }
 
     sleep(ms) {
@@ -72,29 +67,304 @@ class RateLimiter {
     }
 }
 
-/**
- * Manual True-Up Endpoint
- * 
- * POST /api/sync/stripe/true-up
- * 
- * Manually syncs Stripe payouts, payments, refunds, and disputes since a given date.
- * Uses proper pagination and rate limiting to handle Stripe API best practices.
- * 
- * Request Body:
- * {
- *   "since": "2024-01-01T00:00:00Z",  // ISO 8601 date or Unix timestamp
- *   "account": "acct_123",             // Optional: Stripe Connect account ID
- *   "dryRun": false,                   // Optional: If true, only fetch and report, don't process
- *   "resources": ["payouts"]           // Optional: Resources to sync (payouts, charges, refunds, disputes)
- * }
- */
+const toMoney = (amount, currency) => {
+    if (typeof amount !== 'number' || !currency) {
+        return undefined;
+    }
+
+    return { amount, currency };
+};
+
+const toIso = (timestamp) => {
+    if (typeof timestamp !== 'number') {
+        return undefined;
+    }
+
+    return new Date(timestamp * 1000).toISOString();
+};
+
+const mapMetadata = (metadata) => {
+    if (!metadata || typeof metadata !== 'object') {
+        return undefined;
+    }
+
+    const entries = {};
+    for (const [key, value] of Object.entries(metadata)) {
+        if (typeof value === 'string' && value.trim() !== '') {
+            entries[key] = value;
+        }
+    }
+
+    return Object.keys(entries).length > 0 ? entries : undefined;
+};
+
+const buildBalanceSummary = (txn) => {
+    if (!txn) {
+        return undefined;
+    }
+
+    const gross = toMoney(txn.amount, txn.currency);
+    const fee = toMoney(typeof txn.fee === 'number' ? txn.fee : 0, txn.currency);
+    const net = toMoney(txn.net, txn.currency);
+
+    if (!gross || !fee || !net) {
+        return undefined;
+    }
+
+    return {
+        gross,
+        fee_total: fee,
+        net,
+        available_on: typeof txn.available_on === 'number' ? toIso(txn.available_on) : undefined
+    };
+};
+
+const extractCardSnapshot = (charge) => {
+    const paymentMethod = charge?.payment_method_details;
+    if (!paymentMethod || paymentMethod.type !== 'card') {
+        return undefined;
+    }
+
+    const card = paymentMethod.card;
+    if (!card || !card.brand || !card.last4) {
+        return undefined;
+    }
+
+    return {
+        brand: card.brand,
+        last4: card.last4
+    };
+};
+
+const getId = (value) => {
+    if (!value) {
+        return undefined;
+    }
+
+    if (typeof value === 'string') {
+        return value;
+    }
+
+    if (typeof value === 'object' && typeof value.id === 'string') {
+        return value.id;
+    }
+
+    return undefined;
+};
+
+const normalizeCharge = (charge, balanceTxn) => {
+    if (!charge || !balanceTxn) {
+        return null;
+    }
+
+    const created = toIso(charge.created);
+    const amount = toMoney(charge.amount, charge.currency || balanceTxn.currency);
+
+    if (!created || !amount) {
+        return null;
+    }
+
+    return {
+        entityType: 'payment',
+        entityId: charge.id,
+        canonical: {
+            payments: [
+                {
+                    chargeId: charge.id,
+                    customerId: getId(charge.customer),
+                    invoiceId: getId(charge.invoice),
+                    created,
+                    amount,
+                    net: toMoney(balanceTxn.net, balanceTxn.currency),
+                    fee: toMoney(typeof balanceTxn.fee === 'number' ? balanceTxn.fee : 0, balanceTxn.currency),
+                    description: charge.description || undefined,
+                    metadata: mapMetadata({ ...charge.metadata, ...charge.payment_intent?.metadata }),
+                    status: charge.status,
+                    balanceTransactionId: balanceTxn.id,
+                    balanceSummary: buildBalanceSummary(balanceTxn),
+                    card: extractCardSnapshot(charge)
+                }
+            ]
+        }
+    };
+};
+
+const normalizeRefund = (refund, balanceTxn) => {
+    if (!refund || !balanceTxn) {
+        return null;
+    }
+
+    const created = toIso(refund.created);
+    const amount = toMoney(refund.amount, refund.currency || balanceTxn.currency);
+
+    if (!created || !amount) {
+        return null;
+    }
+
+    const charge = refund.charge && typeof refund.charge === 'object' ? refund.charge : refund.charge_object;
+    const chargeRef = typeof refund.charge === 'string' ? refund.charge : getId(refund.charge);
+    const sourceCharge = charge || (refund.charge && typeof refund.charge === 'object' ? refund.charge : undefined);
+
+    return {
+        entityType: 'refund',
+        entityId: refund.id,
+        canonical: {
+            refunds: [
+                {
+                    refundId: refund.id,
+                    chargeId: chargeRef || getId(sourceCharge) || 'unknown',
+                    created,
+                    amount,
+                    status: refund.status || undefined,
+                    reason: refund.reason || undefined,
+                    metadata: mapMetadata(refund.metadata),
+                    balanceTransactionId: balanceTxn.id,
+                    balanceSummary: buildBalanceSummary(balanceTxn),
+                    card: extractCardSnapshot(sourceCharge)
+                }
+            ]
+        }
+    };
+};
+
+const normalizeDispute = (dispute, balanceTxn) => {
+    if (!dispute) {
+        return null;
+    }
+
+    const created = toIso(dispute.created);
+    const amount = toMoney(dispute.amount, dispute.currency || balanceTxn?.currency);
+
+    if (!created || !amount) {
+        return null;
+    }
+
+    return {
+        entityType: 'dispute',
+        entityId: dispute.id,
+        canonical: {
+            disputes: [
+                {
+                    disputeId: dispute.id,
+                    chargeId: getId(dispute.charge) || 'unknown',
+                    created,
+                    amount,
+                    status: dispute.status,
+                    reason: dispute.reason || undefined,
+                    evidenceDueBy: toIso(dispute.evidence_details?.due_by),
+                    metadata: mapMetadata(dispute.metadata)
+                }
+            ]
+        }
+    };
+};
+
+const normalizePayout = (payout, balanceTxn) => {
+    if (!payout) {
+        return null;
+    }
+
+    const amount = toMoney(payout.amount, payout.currency || balanceTxn?.currency);
+    const created = toIso(payout.created);
+    const arrivalDate = toIso(payout.arrival_date);
+
+    if (!amount || !created || !arrivalDate) {
+        return null;
+    }
+
+    return {
+        entityType: 'payout',
+        entityId: payout.id,
+        canonical: {
+            payouts: [
+                {
+                    payoutId: payout.id,
+                    amount,
+                    created,
+                    arrivalDate,
+                    status: payout.status,
+                    balanceTransactionId: payout.balance_transaction ? getId(payout.balance_transaction) : balanceTxn?.id,
+                    metadata: mapMetadata(payout.metadata)
+                }
+            ]
+        }
+    };
+};
+
+const mapBalanceTransactionToCanonical = (txn) => {
+    const source = txn?.source;
+    if (!source || typeof source !== 'object') {
+        return null;
+    }
+
+    switch (source.object) {
+        case 'charge':
+            return normalizeCharge(source, txn);
+        case 'refund':
+            return normalizeRefund(source, txn);
+        case 'dispute':
+            return normalizeDispute(source, txn);
+        case 'payout':
+            return normalizePayout(source, txn);
+        default:
+            return null;
+    }
+};
+
+const fetchBalanceTransactionsSince = async (stripe, since, { stripeAccountId, limit = 100, logger = console } = {}) => {
+    const sinceEpoch = normalizeSince(since);
+    const params = {
+        limit,
+        created: { gte: sinceEpoch },
+        expand: [
+            'data.source',
+            'data.source.charge',
+            'data.source.charge.balance_transaction',
+            'data.source.payment_intent',
+            'data.source.balance_transaction',
+            'data.source.destination',
+            'data.source.source_transfer',
+            'data.source.transfer_data',
+            'data.source.refund'
+        ]
+    };
+
+    const options = stripeAccountId ? { stripeAccount: stripeAccountId } : undefined;
+
+    const transactions = [];
+    let startingAfter;
+
+    do {
+        const response = await stripe.balanceTransactions.list(
+            { ...params, starting_after: startingAfter },
+            options
+        );
+
+        if (!response || !Array.isArray(response.data)) {
+            throw new Error('Unexpected response from Stripe balance transactions API');
+        }
+
+        response.data.forEach(item => transactions.push(item));
+
+        if (!response.has_more) {
+            break;
+        }
+
+        if (response.data.length === 0) {
+            logger.warn('[Stripe True-Up] Pagination halted: received empty page while has_more=true');
+            break;
+        }
+
+        startingAfter = response.data[response.data.length - 1].id;
+    } while (true);
+
+    return transactions;
+};
+
 module.exports = async function (context, req) {
     const rateLimiter = new RateLimiter();
-    
-    try {
-        context.log('Stripe True-Up endpoint called');
 
-        // Validate request
+    try {
         if (!req.body || !req.body.since) {
             context.res = {
                 status: 400,
@@ -106,22 +376,18 @@ module.exports = async function (context, req) {
             return;
         }
 
-        const { since, account: stripeAccountId, dryRun = false, resources = ['payouts'] } = req.body;
-        
-        context.log(`True-up parameters:`, {
-            since,
-            stripeAccountId: stripeAccountId || 'default',
-            dryRun,
-            resources
-        });
+        const since = req.body.since;
+        const stripeAccountId = req.body.account || null;
 
-        // Initialize Stripe client
         const isLiveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
-        const stripeKey = isLiveMode 
-            ? process.env.STRIPE_LIVE_SECRET_KEY 
+        const stripeKey = isLiveMode
+            ? process.env.STRIPE_LIVE_SECRET_KEY
             : process.env.STRIPE_TEST_SECRET_KEY;
 
-        if (!stripeKey) {
+        let transactions;
+        const fixture = loadFixture();
+
+        if (!fixture && !stripeKey) {
             context.res = {
                 status: 500,
                 body: {
@@ -132,205 +398,96 @@ module.exports = async function (context, req) {
             return;
         }
 
-        const stripe = new Stripe(stripeKey);
-        const logger = createContextLogger(context);
+        if (fixture && Array.isArray(fixture.balanceTransactions)) {
+            transactions = fixture.balanceTransactions;
+            context.log('Using fixture data for true-up run');
+        } else {
+            const stripe = new Stripe(stripeKey);
 
-        // Results tracking
-        const results = {
-            payouts: { fetched: 0, processed: 0, skipped: 0, errors: [] },
-            charges: { fetched: 0, processed: 0, skipped: 0, errors: [] },
-            refunds: { fetched: 0, processed: 0, skipped: 0, errors: [] },
-            disputes: { fetched: 0, processed: 0, skipped: 0, errors: [] }
-        };
+            context.log('Fetching Stripe balance transactions', { since, stripeAccountId: stripeAccountId || 'default' });
 
-        // Process payouts
-        if (resources.includes('payouts')) {
-            context.log('Fetching payouts from Stripe...');
-            
-            try {
-                const payouts = await rateLimiter.executeWithRetry(
-                    () => fetchStripePayoutsSince(stripe, since, { logger }),
-                    context
-                );
-                
-                results.payouts.fetched = payouts.length;
-                context.log(`Fetched ${payouts.length} payouts`);
-
-                if (!dryRun) {
-                    // Process each payout through the webhook flow
-                    for (const payout of payouts) {
-                        try {
-                            // Check if already synced
-                            const existingSync = await syncLedger.getSync(
-                                stripeAccountId || 'default', 
-                                payout.id
-                            );
-                            
-                            if (existingSync && existingSync.status === 'posted') {
-                                context.log(`Payout ${payout.id} already synced - skipping`);
-                                results.payouts.skipped++;
-                                continue;
-                            }
-
-                            // Only process 'paid' payouts
-                            if (payout.status === 'paid') {
-                                context.log(`Processing payout ${payout.id}...`);
-                                
-                                // Create a synthetic webhook event for tracking
-                                const syntheticEventId = `evt_trueup_${Date.now()}_${payout.id}`;
-                                await webhookEventStore.recordEvent({
-                                    id: syntheticEventId,
-                                    type: 'payout.paid',
-                                    created: Math.floor(Date.now() / 1000),
-                                    livemode: isLiveMode,
-                                    data: { object: payout }
-                                });
-
-                                // Process through webhook flow
-                                await processPayoutPaid(
-                                    context,
-                                    payout,
-                                    stripeAccountId || 'default',
-                                    syntheticEventId
-                                );
-                                
-                                results.payouts.processed++;
-                                context.log(`Successfully processed payout ${payout.id}`);
-                            } else {
-                                context.log(`Payout ${payout.id} status is ${payout.status} - skipping`);
-                                results.payouts.skipped++;
-                            }
-                        } catch (error) {
-                            context.log(`Error processing payout ${payout.id}:`, error.message);
-                            results.payouts.errors.push({
-                                payoutId: payout.id,
-                                error: error.message
-                            });
-                        }
-
-                        // Add a small delay between payouts to avoid rate limits
-                        await rateLimiter.sleep(100);
-                    }
-                }
-            } catch (error) {
-                context.log('Error fetching payouts:', error.message);
-                results.payouts.errors.push({
-                    error: error.message,
-                    phase: 'fetch'
-                });
-            }
+            transactions = await rateLimiter.executeWithRetry(
+                () => fetchBalanceTransactionsSince(stripe, since, { stripeAccountId, logger: context }),
+                context
+            );
         }
 
-        // Process charges (if requested)
-        if (resources.includes('charges')) {
-            context.log('Fetching charges from Stripe...');
-            
-            try {
-                const charges = await rateLimiter.executeWithRetry(
-                    () => fetchStripeChargesSince(stripe, since, { logger }),
-                    context
-                );
-                
-                results.charges.fetched = charges.length;
-                context.log(`Fetched ${charges.length} charges`);
-                
-                // Charges are typically processed via payment_intent webhooks
-                // For true-up, we just report them
-                if (!dryRun) {
-                    context.log('Charge processing not implemented in true-up - use webhooks for real-time processing');
-                }
-            } catch (error) {
-                context.log('Error fetching charges:', error.message);
-                results.charges.errors.push({
-                    error: error.message,
-                    phase: 'fetch'
-                });
+        const enqueued = [];
+        const persisted = [];
+        const skipped = [];
+
+        for (const txn of transactions) {
+            const canonicalResult = mapBalanceTransactionToCanonical(txn);
+
+            if (!canonicalResult) {
+                skipped.push({ balanceTransactionId: txn.id, reason: 'unsupported_source_type' });
+                continue;
             }
+
+            const { entityType, entityId, canonical } = canonicalResult;
+            const metadata = {
+                balanceTransactionId: txn.id,
+                stripeAccountId: stripeAccountId || 'default',
+                type: txn.type
+            };
+
+            await canonicalStore.save({
+                entityType,
+                entityId,
+                payload: canonical,
+                metadata
+            });
+            persisted.push({ entityType, entityId, balanceTransactionId: txn.id });
+
+            const existing = await canonicalStore.get(entityType, entityId);
+
+            if (existing && existing.ledgerStatus === 'posted') {
+                skipped.push({ balanceTransactionId: txn.id, reason: 'already_posted', entityType, entityId });
+                continue;
+            }
+
+            const job = {
+                entityType,
+                entityId,
+                balanceTransactionId: txn.id,
+                stripeAccountId: stripeAccountId || 'default',
+                canonical
+            };
+
+            enqueued.push(job);
         }
 
-        // Process refunds (if requested)
-        if (resources.includes('refunds')) {
-            context.log('Fetching refunds from Stripe...');
-            
-            try {
-                const refunds = await rateLimiter.executeWithRetry(
-                    () => fetchStripeRefundsSince(stripe, since, { logger }),
-                    context
-                );
-                
-                results.refunds.fetched = refunds.length;
-                context.log(`Fetched ${refunds.length} refunds`);
-                
-                // Refunds are typically processed as part of payout sync
-                if (!dryRun) {
-                    context.log('Refund processing not implemented in true-up - they are included in payout sync');
-                }
-            } catch (error) {
-                context.log('Error fetching refunds:', error.message);
-                results.refunds.errors.push({
-                    error: error.message,
-                    phase: 'fetch'
-                });
-            }
+        if (!context.bindings) {
+            context.bindings = {};
         }
 
-        // Process disputes (if requested)
-        if (resources.includes('disputes')) {
-            context.log('Fetching disputes from Stripe...');
-            
-            try {
-                const disputes = await rateLimiter.executeWithRetry(
-                    () => fetchStripeDisputesSince(stripe, since, { logger }),
-                    context
-                );
-                
-                results.disputes.fetched = disputes.length;
-                context.log(`Fetched ${disputes.length} disputes`);
-                
-                // Disputes are typically processed as part of payout sync
-                if (!dryRun) {
-                    context.log('Dispute processing not implemented in true-up - they are included in payout sync');
-                }
-            } catch (error) {
-                context.log('Error fetching disputes:', error.message);
-                results.disputes.errors.push({
-                    error: error.message,
-                    phase: 'fetch'
-                });
-            }
-        }
-
-        // Prepare response
-        const hasErrors = Object.values(results).some(r => r.errors.length > 0);
-        const status = hasErrors ? 207 : 200; // 207 Multi-Status if there were any errors
+        context.bindings.processTransactionQueue = enqueued.map(job => JSON.stringify(job));
 
         context.res = {
-            status,
+            status: 200,
             body: {
-                message: dryRun ? 'Dry run completed - no data was processed' : 'True-up completed',
+                message: 'True-up completed',
                 since,
                 stripeAccountId: stripeAccountId || 'default',
-                dryRun,
                 liveMode: isLiveMode,
-                results,
                 summary: {
-                    totalFetched: Object.values(results).reduce((sum, r) => sum + r.fetched, 0),
-                    totalProcessed: Object.values(results).reduce((sum, r) => sum + r.processed, 0),
-                    totalSkipped: Object.values(results).reduce((sum, r) => sum + r.skipped, 0),
-                    totalErrors: Object.values(results).reduce((sum, r) => sum + r.errors.length, 0)
-                }
+                    fetched: transactions.length,
+                    persisted: persisted.length,
+                    enqueued: enqueued.length,
+                    skipped: skipped.length
+                },
+                persisted,
+                enqueued,
+                skipped
             }
         };
-
     } catch (error) {
         context.log('Error in true-up endpoint:', error);
-
         context.res = {
             status: 500,
             body: {
                 error: 'Internal Server Error',
-                message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                message: error.message
             }
         };
     }

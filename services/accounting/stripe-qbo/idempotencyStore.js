@@ -165,6 +165,15 @@ class ProcessedStripeStore {
             await this.inFlight;
         }
     }
+
+    async listByPayout(payoutId) {
+        if (!payoutId) {
+            return [];
+        }
+
+        await this._ensureLoaded();
+        return Array.from(this.records.values()).filter(record => record.payoutId === payoutId);
+    }
 }
 
 module.exports = {
