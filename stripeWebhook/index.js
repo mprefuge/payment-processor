@@ -316,45 +316,25 @@ const processPaymentSuccess = async (context, paymentIntent) => {
             }
             
             existingTransaction = await crmService.findTransactionByStripeId(paymentIntent.id);
-
+            
             if (existingTransaction) {
                 context.log(`Transaction ${paymentIntent.id} already exists in CRM: ${existingTransaction.Id} (found on attempt ${attempt + 1}/${maxRetries + 1})`);
-
+                
                 // Check if the existing transaction is in Pending status
                 const isPending = existingTransaction.Status__c === 'Pending' || existingTransaction.StageName === 'Pending';
-
+                
                 if (isPending) {
                     context.log(`Transaction ${existingTransaction.Id} is in Pending status, updating to Completed`);
-
-                    const normalizedCategory = normalizeTransactionCategory(transactionData.category, matchingConfig);
-                    const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
-                        amount: `$${(paymentIntent.amount / 100).toFixed(2)}`,
-                        date: new Date().toLocaleDateString(),
-                        id: paymentIntent.id
-                    });
-
-                    const updatePayload = {
+                    
+                    // Update the pending transaction to completed
+                    const updatedTransaction = await crmService.updateTransaction(existingTransaction.Id, {
                         status: 'Completed',
                         paymentMethod: determinePaymentMethod(paymentIntent),
-                        transactionId: paymentIntent.id,
-                        amount: paymentIntent.amount,
-                        currency: paymentIntent.currency,
-                        frequency: transactionData.frequency,
-                        category: normalizedCategory,
-                        description: transactionName,
-                        name: transactionName
-                    };
-
-                    const existingSessionId = existingTransaction.Session_ID__c || existingTransaction.SessionId;
-                    if (existingSessionId) {
-                        updatePayload.sessionId = existingSessionId;
-                    }
-
-                    // Update the pending transaction to completed
-                    const updatedTransaction = await crmService.updateTransaction(existingTransaction.Id, updatePayload);
-
+                        transactionId: paymentIntent.id
+                    });
+                    
                     context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
-
+                    
                     // Record metrics and exit
                     metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
                     context.log('CRM integration completed successfully - updated pending transaction');
@@ -421,36 +401,16 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 
                 if (pendingTransaction) {
                     context.log(`Found pending transaction: ${pendingTransaction.Id} (attempt ${attempt + 1}/${maxRetries + 1}), will update to completed`);
-
-                    const normalizedCategory = normalizeTransactionCategory(transactionData.category, matchingConfig);
-                    const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
-                        amount: `$${(paymentIntent.amount / 100).toFixed(2)}`,
-                        date: new Date().toLocaleDateString(),
-                        id: paymentIntent.id
-                    });
-
-                    const updatePayload = {
+                    
+                    // Update the pending transaction to completed
+                    const updatedTransaction = await crmService.updateTransaction(pendingTransaction.Id, {
                         status: 'Completed',
                         paymentMethod: determinePaymentMethod(paymentIntent),
-                        transactionId: paymentIntent.id,
-                        amount: paymentIntent.amount,
-                        currency: paymentIntent.currency,
-                        frequency: transactionData.frequency,
-                        category: normalizedCategory,
-                        description: transactionName,
-                        name: transactionName
-                    };
-
-                    const sessionId = pendingTransaction.Session_ID__c || pendingTransaction.SessionId || checkoutSessionId;
-                    if (sessionId) {
-                        updatePayload.sessionId = sessionId;
-                    }
-
-                    // Update the pending transaction to completed
-                    const updatedTransaction = await crmService.updateTransaction(pendingTransaction.Id, updatePayload);
-
+                        transactionId: paymentIntent.id
+                    });
+                    
                     context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
-
+                    
                     // Record metrics and exit early
                     metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
                     context.log('CRM integration completed successfully - updated pending transaction');
