@@ -17,6 +17,22 @@ export type Money = z.infer<typeof MoneySchema>;
 export const isMoney = (value: unknown): value is Money =>
   MoneySchema.safeParse(value).success;
 
+export const CardSnapshotSchema = z.object({
+  brand: z.string().min(1),
+  last4: z.string().min(1),
+});
+
+export type CardSnapshot = z.infer<typeof CardSnapshotSchema>;
+
+export const BalanceSummarySchema = z.object({
+  gross: MoneySchema,
+  fee_total: MoneySchema,
+  net: MoneySchema,
+  available_on: isoDateTimeString.optional(),
+});
+
+export type BalanceSummary = z.infer<typeof BalanceSummarySchema>;
+
 export const PaymentSchema = z.object({
   chargeId: z.string().min(1),
   customerId: z.string().min(1).optional(),
@@ -27,6 +43,10 @@ export const PaymentSchema = z.object({
   fee: MoneySchema.optional(),
   description: z.string().optional(),
   metadata: z.record(z.string()).optional(),
+  status: z.string().min(1).optional(),
+  balanceTransactionId: z.string().min(1).optional(),
+  balanceSummary: BalanceSummarySchema.optional(),
+  card: CardSnapshotSchema.optional(),
 });
 
 export type Payment = z.infer<typeof PaymentSchema>;
@@ -42,6 +62,9 @@ export const RefundSchema = z.object({
   status: z.string().min(1).optional(),
   reason: z.string().optional(),
   metadata: z.record(z.string()).optional(),
+  balanceTransactionId: z.string().min(1).optional(),
+  balanceSummary: BalanceSummarySchema.optional(),
+  card: CardSnapshotSchema.optional(),
 });
 
 export type Refund = z.infer<typeof RefundSchema>;
@@ -88,7 +111,12 @@ export const CanonicalInputSchema = z
     payouts: z.array(PayoutSchema).optional(),
   })
   .refine(
-    (value) =>
+    (value: {
+      payments?: unknown[];
+      refunds?: unknown[];
+      disputes?: unknown[];
+      payouts?: unknown[];
+    }) =>
       Boolean(
         (value.payments && value.payments.length > 0) ||
           (value.refunds && value.refunds.length > 0) ||
