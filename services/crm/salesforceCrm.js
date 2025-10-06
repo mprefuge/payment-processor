@@ -12,6 +12,133 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     /**
+     * Format a field name into a user friendly label for descriptions
+     * @param {string} fieldName
+     * @returns {string}
+     */
+    formatDescriptionFieldName(fieldName) {
+        if (!fieldName) {
+            return '';
+        }
+
+        return fieldName
+            .replace(/_/g, ' ')
+            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+            .replace(/\s+/g, ' ')
+            .split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ')
+            .trim();
+    }
+
+    /**
+     * Format values so nested objects/arrays are human readable
+     * @param {*} value
+     * @returns {string}
+     */
+    formatDescriptionValue(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
+
+        if (Array.isArray(value)) {
+            return value
+                .map(item => this.formatDescriptionValue(item))
+                .filter(Boolean)
+                .join(', ');
+        }
+
+        if (typeof value === 'object') {
+            try {
+                return JSON.stringify(value, null, 2);
+            } catch (error) {
+                return String(value);
+            }
+        }
+
+        if (typeof value === 'boolean') {
+            return value ? 'Yes' : 'No';
+        }
+
+        return String(value);
+    }
+
+    /**
+     * Build a descriptive multi-line string containing all transaction data
+     * @param {Object} transactionData
+     * @returns {string}
+     */
+    buildTransactionDescription(transactionData) {
+        if (!transactionData || typeof transactionData !== 'object') {
+            return '';
+        }
+
+        const prioritizedKeys = [
+            'name',
+            'description',
+            'amount',
+            'currency',
+            'paymentMethod',
+            'transactionId',
+            'status',
+            'frequency',
+            'category',
+            'sessionId'
+        ];
+
+        const entries = Object.entries(transactionData)
+            .filter(([, value]) => value !== undefined && value !== null && value !== '')
+            .map(([key, value]) => {
+                let formattedValue = this.formatDescriptionValue(value);
+
+                if (key === 'amount' && typeof value === 'number') {
+                    const dollars = (value / 100).toFixed(2);
+                    formattedValue = `$${dollars} (${value})`;
+                } else if (key === 'currency' && typeof value === 'string') {
+                    formattedValue = value.toUpperCase();
+                } else if (key === 'paymentMethod' && typeof value === 'string') {
+                    formattedValue = value
+                        .split(/\s+/)
+                        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                        .join(' ');
+                }
+
+                return {
+                    key,
+                    label: this.formatDescriptionFieldName(key),
+                    value: formattedValue
+                };
+            });
+
+        const prioritizedEntries = [];
+        const remainingEntries = [];
+
+        for (const entry of entries) {
+            if (prioritizedKeys.includes(entry.key)) {
+                prioritizedEntries.push(entry);
+            } else {
+                remainingEntries.push(entry);
+            }
+        }
+
+        // Preserve priority order while keeping remaining entries alphabetized for readability
+        prioritizedEntries.sort(
+            (a, b) => prioritizedKeys.indexOf(a.key) - prioritizedKeys.indexOf(b.key)
+        );
+        remainingEntries.sort((a, b) => a.label.localeCompare(b.label));
+
+        const orderedEntries = [...prioritizedEntries, ...remainingEntries];
+
+        return orderedEntries
+            .map(entry => `${entry.label}: ${entry.value}`)
+            .join('\n');
+    }
+
+    /**
      * Initialize Salesforce connection
      */
     async connect() {
@@ -269,9 +396,9 @@ class SalesforceCrmService extends BaseCrmService {
     async createTransaction(contactId, transactionData) {
         await this.connect();
 
-        const { 
-            amount, 
-            currency = 'USD', 
+        const {
+            amount,
+            currency = 'USD',
             paymentMethod = 'Credit Card',
             transactionId,
             status = 'Completed',
@@ -281,6 +408,8 @@ class SalesforceCrmService extends BaseCrmService {
             name, // New field for proper transaction naming
             sessionId // New field for checkout session ID
         } = transactionData;
+
+        const fullDescription = this.buildTransactionDescription(transactionData);
 
         // Try creating a custom Transaction record first
         // If it fails, fall back to creating an Opportunity
@@ -293,7 +422,7 @@ class SalesforceCrmService extends BaseCrmService {
                 Payment_Method__c: paymentMethod,
                 Transaction_ID__c: transactionId,
                 Status__c: status,
-                Description__c: description,
+                Description__c: fullDescription,
                 Frequency__c: frequency,
                 Category__c: category,
                 Transaction_Date__c: new Date().toISOString()
@@ -317,7 +446,7 @@ class SalesforceCrmService extends BaseCrmService {
             console.log('Custom Transaction object not available, falling back to Opportunity');
             
             // Fallback to Opportunity record
-            return await this.createOpportunityAsTransaction(contactId, transactionData);
+            return await this.createOpportunityAsTransaction(contactId, transactionData, fullDescription);
         }
     }
 
@@ -327,15 +456,14 @@ class SalesforceCrmService extends BaseCrmService {
      * @param {Object} transactionData - Transaction information
      * @returns {Promise<Object>} Created opportunity object
      */
-    async createOpportunityAsTransaction(contactId, transactionData) {
-        const { 
-            amount, 
+    async createOpportunityAsTransaction(contactId, transactionData, precomputedDescription = null) {
+        const {
+            amount,
             transactionId,
             description,
             frequency,
             category,
             name, // New field for proper transaction naming
-            sessionId, // New field for checkout session ID
             status = 'Completed'
         } = transactionData;
 
@@ -347,14 +475,7 @@ class SalesforceCrmService extends BaseCrmService {
             stageName = 'Closed Lost';
         }
 
-        // Include session ID and transaction ID in description if provided
-        let fullDescription = description || '';
-        if (sessionId) {
-            fullDescription = `${fullDescription}\nCheckout Session: ${sessionId}`.trim();
-        }
-        if (transactionId) {
-            fullDescription = `${fullDescription}\nPayment Intent: ${transactionId}`.trim();
-        }
+        const fullDescription = precomputedDescription || this.buildTransactionDescription(transactionData);
 
         const opportunityRecord = {
             Name: name || description || `Transaction - ${category || 'Uncategorized'}`, // Use new naming format
