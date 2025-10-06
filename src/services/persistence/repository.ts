@@ -1,3 +1,5 @@
+import { incrementCounter } from "../shared/metrics";
+
 export type LedgerStatus = "pending" | "posted" | "error";
 
 export interface WebhookEventRecord {
@@ -47,6 +49,9 @@ export const saveLedgerAttempt = async (
   const key = ledgerKey(entityType, entityId);
   const existing = postingLedger.get(key);
   if (existing) {
+    if (existing.status === "pending") {
+      incrementCounter("ledger_stuck");
+    }
     return existing;
   }
   const now = new Date();
@@ -79,8 +84,10 @@ export const finalizeLedger = async (
   existing.updated_at = new Date();
   if (status === "error") {
     existing.error = errorMessage ?? "Unknown error";
+    incrementCounter("post_failure");
   } else {
     delete existing.error;
+    incrementCounter("post_success");
   }
   return existing;
 };

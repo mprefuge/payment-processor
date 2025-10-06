@@ -20,6 +20,7 @@ This Azure Function app processes payments through Stripe, handling customer man
 - **Improved transaction naming: "Transaction - {Category}" format**
 - **Idempotency checking to prevent duplicate processing**
 - **Metrics and observability for matching performance**
+- **Environment health endpoint for infrastructure readiness checks**
 
 ## Prerequisites
 
@@ -77,6 +78,47 @@ npm test
 ```
 
 This will run the integration tests to verify the payment processing flow.
+
+## Health Monitoring & Observability
+
+### Runtime Health Endpoint
+
+- `GET /api/health` returns the readiness of critical dependencies:
+  - PostgreSQL database connectivity
+  - Azure Storage queues
+  - Stripe API availability
+  - Salesforce (when enabled)
+  - QuickBooks Online (when enabled)
+- Responses include a `status` value of `healthy`, `degraded`, or `unhealthy`,
+  per-component diagnostics, and current metric counters. Degraded checks still
+  return HTTP 503 so that monitors can alert on partial outages.
+- All log lines emitted from request handlers now include a correlation ID that
+  is sourced from the `x-correlation-id` header when available (falling back to
+  the Azure Functions invocation ID) for easier end-to-end tracing.
+
+### Metric Counters
+
+The function tracks lightweight counters in-memory for operational awareness:
+
+| Counter | Description |
+|---------|-------------|
+| `events_ingested` | Total Stripe webhook events accepted for processing. |
+| `post_success` | Number of ledger operations that completed successfully. |
+| `post_failure` | Number of ledger operations that ended in failure. |
+| `ledger_stuck` | Number of attempts that discovered an existing pending ledger entry (potentially stuck work). |
+
+### Suggested Alert Thresholds
+
+- **Low ingestion volume**: Alert if `events_ingested` does not increase for 15
+  consecutive minutes during expected traffic windows (possible upstream outage).
+- **Posting success ratio**: Alert when `post_failure / (post_success + post_failure)`
+  exceeds 5% over a 10 minute rolling window.
+- **Ledger stuck accumulation**: Alert if `ledger_stuck` increases by more than
+  3 within 10 minutes, indicating retries are not clearing.
+- **Health endpoint degradation**: Page immediately when `/api/health` returns
+  HTTP 503 or reports `unhealthy`, and create a warning when the status is
+  `degraded` for longer than 10 minutes (often due to intentionally disabled
+  integrations).
 
 ## Azure Deployment
 
