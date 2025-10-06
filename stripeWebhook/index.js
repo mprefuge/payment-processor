@@ -1,5 +1,6 @@
 const Stripe = require('stripe');
 const CrmFactory = require('../services/crm/crmFactory');
+const { mapStripeStatusToCrmStatus, buildStripeTransactionDetails } = require('../services/crm/stripeTransactionUtils');
 const { ContactMatcher } = require('../services/contactMatcher');
 const ReviewTaskService = require('../services/reviewTaskService');
 const IdempotencyService = require('../services/idempotencyService');
@@ -189,7 +190,7 @@ const verifyWebhookSignature = (payload, signature, endpointSecret) => {
 };
 
 // Process payment success and integrate with CRM
-const processPaymentSuccess = async (context, paymentIntent) => {
+const processPaymentSuccess = async (context, paymentIntent, eventContext = {}) => {
     // Extract customer information from payment intent first
     const customerId = paymentIntent.customer;
     if (!customerId) {
@@ -205,6 +206,21 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         context.log(`Customer not found: ${customerId}`);
         return;
     }
+
+    const stripeDetails = buildStripeTransactionDetails(paymentIntent, {
+        ...eventContext,
+        source: eventContext.source || eventContext.eventType || 'payment_intent'
+    }) || {};
+
+    const stripeStatus = stripeDetails?.summary?.status || paymentIntent.status;
+    const crmStatus = mapStripeStatusToCrmStatus(stripeStatus, 'Completed');
+    const amountAuthorized = typeof paymentIntent.amount === 'number' ? paymentIntent.amount : null;
+    const amountReceived = typeof paymentIntent.amount_received === 'number'
+        ? paymentIntent.amount_received
+        : null;
+    const amountCapturable = typeof paymentIntent.amount_capturable === 'number'
+        ? paymentIntent.amount_capturable
+        : null;
 
     context.log(`Processing payment for customer: ${customer.name || 'Unknown'} (${customer.email})`);
 
@@ -294,6 +310,52 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         const contactMatcher = new ContactMatcher(matchingConfig);
         const reviewTaskService = new ReviewTaskService(crmService, matchingConfig.review);
 
+        const resolvedAmount = typeof amountReceived === 'number' && amountReceived > 0
+            ? amountReceived
+            : (amountAuthorized !== null ? amountAuthorized : transactionData.amount);
+
+        const normalizedCategory = normalizeTransactionCategory(transactionData.category, matchingConfig);
+
+        const amountForName = typeof resolvedAmount === 'number'
+            ? resolvedAmount
+            : (typeof transactionData.amount === 'number' ? transactionData.amount : 0);
+
+        const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
+            amount: `$${(amountForName / 100).toFixed(2)}`,
+            date: new Date().toLocaleDateString(),
+            id: paymentIntent.id
+        });
+
+        const buildTransactionPayload = (sessionIdValue = null) => {
+            const payload = {
+                status: crmStatus,
+                paymentMethod: determinePaymentMethod(paymentIntent),
+                transactionId: paymentIntent.id,
+                amount: resolvedAmount,
+                amountAuthorized,
+                amountReceived,
+                amountCapturable,
+                currency: paymentIntent.currency,
+                description: transactionName,
+                frequency: transactionData.frequency,
+                category: normalizedCategory,
+                name: transactionName,
+                stripeStatus,
+                stripeDetails,
+                applicationFeeAmount: paymentIntent.application_fee_amount,
+                transferData: paymentIntent.transfer_data,
+                stripeCustomerId: paymentIntent.customer,
+                invoiceId: paymentIntent.invoice,
+                latestChargeId: paymentIntent.latest_charge
+            };
+
+            if (sessionIdValue) {
+                payload.sessionId = sessionIdValue;
+            }
+
+            return payload;
+        };
+
         // Early idempotency check - if this transaction was already processed, skip everything
         const idempotencyKey = idempotencyService.generateKey(transactionData);
         const existingResult = idempotencyService.getProcessedResult(idempotencyKey);
@@ -324,16 +386,15 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 const isPending = existingTransaction.Status__c === 'Pending' || existingTransaction.StageName === 'Pending';
                 
                 if (isPending) {
-                    context.log(`Transaction ${existingTransaction.Id} is in Pending status, updating to Completed`);
-                    
-                    // Update the pending transaction to completed
-                    const updatedTransaction = await crmService.updateTransaction(existingTransaction.Id, {
-                        status: 'Completed',
-                        paymentMethod: determinePaymentMethod(paymentIntent),
-                        transactionId: paymentIntent.id
-                    });
-                    
-                    context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
+                    context.log(`Transaction ${existingTransaction.Id} is in Pending status, updating to ${crmStatus}`);
+
+                    // Update the pending transaction to match the latest Stripe data
+                    const updatedTransaction = await crmService.updateTransaction(
+                        existingTransaction.Id,
+                        buildTransactionPayload(existingTransaction.Session_ID__c || null)
+                    );
+
+                    context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to ${crmStatus} status`);
                     
                     // Record metrics and exit
                     metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
@@ -402,14 +463,13 @@ const processPaymentSuccess = async (context, paymentIntent) => {
                 if (pendingTransaction) {
                     context.log(`Found pending transaction: ${pendingTransaction.Id} (attempt ${attempt + 1}/${maxRetries + 1}), will update to completed`);
                     
-                    // Update the pending transaction to completed
-                    const updatedTransaction = await crmService.updateTransaction(pendingTransaction.Id, {
-                        status: 'Completed',
-                        paymentMethod: determinePaymentMethod(paymentIntent),
-                        transactionId: paymentIntent.id
-                    });
-                    
-                    context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to completed status`);
+                    // Update the pending transaction to reflect the latest Stripe state
+                    const updatedTransaction = await crmService.updateTransaction(
+                        pendingTransaction.Id,
+                        buildTransactionPayload(checkoutSessionId || pendingTransaction.Session_ID__c || null)
+                    );
+
+                    context.log(`Updated transaction ${updatedTransaction.Id || 'N/A'} to ${crmStatus} status`);
                     
                     // Record metrics and exit early
                     metricsService.recordDecision({ action: 'update', reason: 'pending_transaction_completed' }, 0, false);
@@ -522,31 +582,8 @@ const processPaymentSuccess = async (context, paymentIntent) => {
         }
 
         if (contact) {
-            // Normalize category and generate proper transaction name
-            const normalizedCategory = normalizeTransactionCategory(transactionData.category, matchingConfig);
-            const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
-                amount: `$${(paymentIntent.amount / 100).toFixed(2)}`,
-                date: new Date().toLocaleDateString(),
-                id: paymentIntent.id
-            });
-
             // Create transaction record with proper naming (no duplicate task needed)
-            const enhancedTransactionData = {
-                amount: paymentIntent.amount,
-                currency: paymentIntent.currency,
-                paymentMethod: determinePaymentMethod(paymentIntent),
-                transactionId: paymentIntent.id,
-                status: 'Completed',
-                description: transactionName, // Use new naming format
-                frequency: transactionData.frequency,
-                category: normalizedCategory,
-                name: transactionName // Explicit name field
-            };
-
-            // Include sessionId if we found one (for duplicate prevention)
-            if (checkoutSessionId) {
-                enhancedTransactionData.sessionId = checkoutSessionId;
-            }
+            const enhancedTransactionData = buildTransactionPayload(checkoutSessionId || null);
 
             const transaction = await crmService.createTransaction(contact.Id, enhancedTransactionData);
             context.log(`Created transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
@@ -683,7 +720,7 @@ const determinePaymentMethod = (paymentIntent) => {
 };
 
 // Helper function to prepare transaction data from checkout session
-const prepareTransactionDataFromSession = async (context, session, stripe, matchingConfig) => {
+const prepareTransactionDataFromSession = async (context, session, stripe, matchingConfig, eventContext = {}) => {
     // Extract customer information
     const customerId = session.customer;
     if (!customerId) {
@@ -728,11 +765,17 @@ const prepareTransactionDataFromSession = async (context, session, stripe, match
         id: session.id
     });
 
+    const stripeDetails = buildStripeTransactionDetails(session, {
+        ...eventContext,
+        source: eventContext.source || eventContext.eventType || 'checkout.session'
+    }) || {};
+
     return {
         transactionData,
         customer,
         normalizedCategory,
-        transactionName
+        transactionName,
+        stripeDetails
     };
 };
 
@@ -774,7 +817,7 @@ const extractProductName = async (stripe, paymentIntent) => {
 };
 
 // Process checkout session completed event
-const processCheckoutSessionCompleted = async (context, session) => {
+const processCheckoutSessionCompleted = async (context, session, eventContext = {}) => {
     try {
         context.log(`Processing checkout session completed: ${session.id}`);
         
@@ -831,8 +874,14 @@ const processCheckoutSessionCompleted = async (context, session) => {
                 }
 
                 // Prepare transaction data from session
-                const { transactionData, customer, normalizedCategory, transactionName } = 
-                    await prepareTransactionDataFromSession(context, expandedSession, stripe, matchingConfig);
+                const { transactionData, customer, normalizedCategory, transactionName, stripeDetails } =
+                    await prepareTransactionDataFromSession(
+                        context,
+                        expandedSession,
+                        stripe,
+                        matchingConfig,
+                        eventContext
+                    );
 
                 // Process contact matching
                 const result = await contactMatcher.processMatch(transactionData, async (normalized) => {
@@ -877,18 +926,44 @@ const processCheckoutSessionCompleted = async (context, session) => {
 
                 if (contact) {
                     // Create pending transaction with session information
+                    const pendingStripeStatus = stripeDetails?.summary?.payment_status ||
+                        stripeDetails?.summary?.status || session.payment_status || session.status || 'pending';
+                    const pendingCrmStatus = mapStripeStatusToCrmStatus(pendingStripeStatus, 'Pending');
+
                     const pendingTransactionData = {
                         amount: transactionData.amount,
                         currency: transactionData.currency,
                         paymentMethod: 'Pending', // Will be updated when payment completes
                         transactionId: session.payment_intent, // Store payment intent ID for lookup
                         sessionId: session.id, // Store session ID for lookup
-                        status: 'Pending',
+                        status: pendingCrmStatus,
+                        stripeStatus: pendingStripeStatus,
                         description: transactionName,
                         frequency: transactionData.frequency,
                         category: normalizedCategory,
-                        name: transactionName
+                        name: transactionName,
+                        stripeDetails
                     };
+
+                    if (typeof stripeDetails?.summary?.amount_total === 'number') {
+                        pendingTransactionData.amountTotal = stripeDetails.summary.amount_total;
+                    }
+
+                    if (typeof stripeDetails?.summary?.amount === 'number' && pendingTransactionData.amount === undefined) {
+                        pendingTransactionData.amount = stripeDetails.summary.amount;
+                    }
+
+                    if (typeof stripeDetails?.summary?.amount_subtotal === 'number') {
+                        pendingTransactionData.amountSubtotal = stripeDetails.summary.amount_subtotal;
+                    }
+
+                    if (session.mode) {
+                        pendingTransactionData.checkoutMode = session.mode;
+                    }
+
+                    if (session.subscription) {
+                        pendingTransactionData.subscriptionId = session.subscription;
+                    }
 
                     const transaction = await crmService.createTransaction(contact.Id, pendingTransactionData);
                     context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
@@ -914,7 +989,16 @@ const processCheckoutSessionCompleted = async (context, session) => {
                 const invoice = await stripe.invoices.retrieve(subscription.latest_invoice);
                 if (invoice.payment_intent) {
                     const paymentIntent = await stripe.paymentIntents.retrieve(invoice.payment_intent);
-                    await processPaymentSuccess(context, paymentIntent);
+                    const subscriptionEventContext = {
+                        ...eventContext,
+                        eventType: 'subscription.initial_payment',
+                        eventId: invoice.id || eventContext.eventId,
+                        eventCreated: typeof invoice.created !== 'undefined' ? invoice.created : eventContext.eventCreated,
+                        livemode: typeof invoice.livemode === 'boolean' ? invoice.livemode : eventContext.livemode,
+                        source: 'checkout.session.completed.subscription'
+                    };
+
+                    await processPaymentSuccess(context, paymentIntent, subscriptionEventContext);
                 }
             }
         } else {
@@ -1252,7 +1336,14 @@ module.exports = async function (context, req) {
         // Handle different event types
         switch (event.type) {
             case 'payment_intent.succeeded':
-                await processPaymentSuccess(context, event.data.object);
+                await processPaymentSuccess(context, event.data.object, {
+                    eventType: event.type,
+                    eventId: event.id,
+                    eventCreated: event.created,
+                    livemode: event.livemode,
+                    accountId: stripeAccountId,
+                    source: event.type
+                });
                 break;
 
             case 'payment_intent.payment_failed':
@@ -1264,7 +1355,14 @@ module.exports = async function (context, req) {
                 break;
 
             case 'checkout.session.completed':
-                await processCheckoutSessionCompleted(context, event.data.object);
+                await processCheckoutSessionCompleted(context, event.data.object, {
+                    eventType: event.type,
+                    eventId: event.id,
+                    eventCreated: event.created,
+                    livemode: event.livemode,
+                    accountId: stripeAccountId,
+                    source: event.type
+                });
                 break;
 
             case 'invoice.payment_succeeded':
@@ -1273,7 +1371,14 @@ module.exports = async function (context, req) {
                 if (invoice.payment_intent) {
                     const stripe = initializeStripe(event.livemode);
                     const paymentIntent = await stripe.paymentIntents.retrieve(invoice.payment_intent);
-                    await processPaymentSuccess(context, paymentIntent);
+                    await processPaymentSuccess(context, paymentIntent, {
+                        eventType: event.type,
+                        eventId: event.id,
+                        eventCreated: event.created,
+                        livemode: event.livemode,
+                        accountId: stripeAccountId,
+                        source: event.type
+                    });
                 }
                 break;
 

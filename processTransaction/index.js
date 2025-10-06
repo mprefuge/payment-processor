@@ -2,6 +2,7 @@ const { randomUUID } = require('crypto');
 const Stripe = require('stripe');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/crm/crmFactory');
+const { mapStripeStatusToCrmStatus, buildStripeTransactionDetails } = require('../services/crm/stripeTransactionUtils');
 const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
 
 const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
@@ -289,18 +290,39 @@ const createPendingTransaction = async (context, session, contactId, transaction
             id: session.id
         });
 
+        const stripeDetails = buildStripeTransactionDetails(session, {
+            eventType: 'checkout.session.created',
+            eventCreated: session.created,
+            livemode: session.livemode,
+            source: 'processTransaction.createPending'
+        }) || {};
+
+        const stripeStatus = stripeDetails?.summary?.payment_status || stripeDetails?.summary?.status ||
+            session.payment_status || session.status || 'pending';
+        const crmStatus = mapStripeStatusToCrmStatus(stripeStatus, 'Pending');
+
         const txnData = {
             amount: transactionData.amount,
-            currency: 'usd',
+            currency: transactionData.currency || session.currency || 'usd',
             paymentMethod: 'Pending',
-            transactionId: null, // Will be set when payment_intent.succeeded fires
+            transactionId: session.payment_intent || null, // Will be set when payment_intent.succeeded fires
             sessionId: session.id,
-            status: 'Pending',
+            status: crmStatus,
+            stripeStatus,
             description: transactionName,
             frequency: transactionData.frequency || 'onetime',
             category: normalizedCategory,
-            name: transactionName
+            name: transactionName,
+            stripeDetails
         };
+
+        if (typeof session.amount_total === 'number') {
+            txnData.amountTotal = session.amount_total;
+        }
+
+        if (typeof session.amount_subtotal === 'number') {
+            txnData.amountSubtotal = session.amount_subtotal;
+        }
 
         const transaction = await crmService.createTransaction(contactId, txnData);
         context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
