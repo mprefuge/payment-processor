@@ -30,6 +30,12 @@ const runSequentially = async () => {
   const { runEnvAliasSpec } = await import("./unit/env.aliases.spec");
   runEnvAliasSpec();
 
+  console.log("Running checkout session spec...");
+  const { runCheckoutSessionSpec } = await import(
+    "./unit/checkout.session.spec"
+  );
+  runCheckoutSessionSpec();
+
   console.log("Running process transaction integration spec...");
   const { runProcessTransactionIntegration } = await import(
     "./integration/process_transaction.integration.spec"
