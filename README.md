@@ -14,20 +14,6 @@ The Functions host exposes two HTTP endpoints:
 |-------|-------------|
 | `POST /api/transaction` | Primary Stripe webhook entry point backed by the new orchestrator. |
 | `GET /api/health` | Lightweight readiness probe for infrastructure dependencies. |
-| `GET /api/oauth/callback` | Salesforce OAuth redirect handler that exchanges authorization codes for tokens. |
-
-### Salesforce OAuth callback
-
-The OAuth callback is designed to be the redirect target for a Salesforce
-connected app. After the user authorises access, Salesforce will redirect back
-to `/api/oauth/callback` with an authorization code. The handler exchanges the
-code for tokens and renders the response as a copy-and-paste friendly HTML page
-so the resulting `refresh_token`, `access_token`, and `instance_url` can be
-stored in your secret manager. Set the connected app redirect URI to the fully
-qualified callback URL (for example,
-`https://payment-processing-function.azurewebsites.net/api/oauth/callback`). If
-your app is hosted behind a custom domain you can override the detected
-callback URL via the optional `SF_OAUTH_REDIRECT_URI` environment variable.
 
 All new automation and playbooks should target `/api/transaction`. The legacy
 JavaScript handlers have been removed in favour of the consolidated TypeScript
