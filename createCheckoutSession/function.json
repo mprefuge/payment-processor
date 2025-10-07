@@ -1,0 +1,19 @@
+{
+  "scriptFile": "../dist/src/app/createCheckoutSession/index.js",
+  "entryPoint": "createCheckoutSessionHandler",
+  "bindings": [
+    {
+      "authLevel": "function",
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "methods": ["post"],
+      "route": "checkout/session"
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "res"
+    }
+  ]
+}

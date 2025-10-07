@@ -126,6 +126,8 @@ export const envSchema = z
     AZURE_STORAGE_CONNECTION_STRING: z
       .string()
       .min(1, "AZURE_STORAGE_CONNECTION_STRING is required"),
+    SUCCESS_URL: z.string().url().optional(),
+    CANCEL_URL: z.string().url().optional(),
   })
   .passthrough();
 
