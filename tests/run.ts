@@ -26,6 +26,10 @@ const runSequentially = async () => {
   const { runTypesSpec } = await import("./unit/types.keys.spec");
   runTypesSpec();
 
+  console.log("Running env alias spec...");
+  const { runEnvAliasSpec } = await import("./unit/env.aliases.spec");
+  runEnvAliasSpec();
+
   console.log("Running process transaction integration spec...");
   const { runProcessTransactionIntegration } = await import(
     "./integration/process_transaction.integration.spec"
