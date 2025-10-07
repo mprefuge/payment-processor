@@ -1,4 +1,4 @@
-import { getCachedEnv } from "../../config/env";
+import { EnvValidationError, getCachedEnv } from "../../config/env";
 import { runHealthChecks } from "../../services/health/checks";
 import { createLogger } from "../../services/shared/logger";
 import { ServiceContext } from "../../services/shared/types";
@@ -28,16 +28,64 @@ const getCorrelationId = (
   req.headers?.["X-Correlation-Id"] ??
   context.invocationId;
 
+const formatEnvIssues = (issues: EnvValidationError["issues"]): string[] =>
+  issues.map((issue) => {
+    const path = issue.path.join(".") || "env";
+    return `${path}: ${issue.message}`;
+  });
+
 export const healthHandler = async (
   context: AzureContext,
   req: AzureHttpRequest,
 ): Promise<void> => {
-  const env = getCachedEnv();
   const correlationId = getCorrelationId(req, context);
   const requestLogger = logger.child({
     correlationId,
     invocationId: context.invocationId,
   });
+
+  let env: ReturnType<typeof getCachedEnv>;
+
+  try {
+    env = getCachedEnv();
+  } catch (error) {
+    const baseResponse = {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "X-Health-Status": "unhealthy",
+      },
+    } satisfies AzureHttpResponse;
+
+    if (error instanceof EnvValidationError) {
+      const details = formatEnvIssues(error.issues);
+      requestLogger.error("Invalid environment configuration", {
+        details,
+      });
+      context.res = {
+        ...baseResponse,
+        body: {
+          status: "unhealthy",
+          timestamp: new Date().toISOString(),
+          error: "Invalid environment configuration",
+          details,
+        },
+      };
+      return;
+    }
+
+    requestLogger.error("Failed to read environment configuration", { error });
+    context.res = {
+      ...baseResponse,
+      body: {
+        status: "unhealthy",
+        timestamp: new Date().toISOString(),
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+    return;
+  }
 
   const serviceContext: ServiceContext = { env };
 
