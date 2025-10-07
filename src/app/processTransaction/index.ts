@@ -1,6 +1,6 @@
 import Stripe from "stripe";
 
-import { getCachedEnv } from "../../config/env";
+import { EnvValidationError, getCachedEnv } from "../../config/env";
 import { normalizeStripeEvent } from "../../services/process/normalize";
 import { processTransaction } from "../../services/process/process_transaction";
 import { createLogger } from "../../services/shared/logger";
@@ -61,16 +61,52 @@ const getRawPayload = (req: AzureHttpRequest): string | Buffer => {
   return "";
 };
 
+const formatEnvIssues = (issues: EnvValidationError["issues"]): string[] =>
+  issues.map((issue) => {
+    const path = issue.path.join(".") || "env";
+    return `${path}: ${issue.message}`;
+  });
+
 export const processTransactionHandler: AzureFunctionHandler = async (
   context: AzureContext,
   req: AzureHttpRequest,
 ): Promise<void> => {
-  const env = getCachedEnv();
   const correlationId = getCorrelationId(req, context);
   const requestLogger = logger.child({
     correlationId,
     invocationId: context.invocationId,
   });
+
+  let env: ReturnType<typeof getCachedEnv>;
+
+  try {
+    env = getCachedEnv();
+  } catch (error) {
+    if (error instanceof EnvValidationError) {
+      const details = formatEnvIssues(error.issues);
+      requestLogger.error("Invalid environment configuration", {
+        details,
+      });
+      context.res = {
+        status: 500,
+        body: {
+          error: "Invalid environment configuration",
+          details,
+        },
+      };
+      return;
+    }
+
+    requestLogger.error("Failed to read environment configuration", { error });
+    context.res = {
+      status: 500,
+      body: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+    return;
+  }
+
   const serviceContext: ServiceContext = { env };
 
   requestLogger.debug("processTransaction invoked");
