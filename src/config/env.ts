@@ -23,6 +23,74 @@ const booleanFromEnv = (defaultValue: boolean) =>
     return value;
   }, z.boolean());
 
+type EnvSource = NodeJS.ProcessEnv;
+
+const assignFromAliases = (
+  target: EnvSource,
+  canonicalKey: keyof EnvSource,
+  aliases: string[],
+) => {
+  const current = target[canonicalKey];
+  if (current !== undefined && current !== "") {
+    return;
+  }
+
+  for (const alias of aliases) {
+    const value = target[alias];
+    if (value !== undefined && value !== "") {
+      target[canonicalKey] = value;
+      return;
+    }
+  }
+};
+
+const normalizeEnvSource = (
+  base: EnvSource,
+  overrides?: EnvSource,
+): EnvSource => {
+  const merged: EnvSource = { ...base, ...overrides };
+
+  assignFromAliases(merged, "STRIPE_SECRET", [
+    "STRIPE_TEST_SECRET_KEY",
+    "STRIPE_LIVE_SECRET_KEY",
+  ]);
+  assignFromAliases(merged, "STRIPE_WEBHOOK_SECRET", [
+    "STRIPE_WEBHOOK_SECRET_TEST",
+    "STRIPE_WEBHOOK_SECRET_LIVE",
+  ]);
+  assignFromAliases(merged, "AZURE_STORAGE_CONNECTION_STRING", [
+    "AzureWebJobsStorage",
+  ]);
+
+  assignFromAliases(merged, "SF_CLIENT_ID", [
+    "SALESFORCE_CLIENT_ID",
+    "SALESFORCE_CONSUMER_KEY",
+  ]);
+  assignFromAliases(merged, "SF_CLIENT_SECRET", [
+    "SALESFORCE_CLIENT_SECRET",
+    "SALESFORCE_CONSUMER_SECRET",
+  ]);
+  assignFromAliases(merged, "SF_USERNAME", ["SALESFORCE_USERNAME"]);
+  assignFromAliases(merged, "SF_PASSWORD", ["SALESFORCE_PASSWORD"]);
+
+  assignFromAliases(merged, "QBO_CLIENT_ID", ["QUICKBOOKS_CLIENT_ID"]);
+  assignFromAliases(merged, "QBO_CLIENT_SECRET", ["QUICKBOOKS_CLIENT_SECRET"]);
+  assignFromAliases(merged, "QBO_REALM_ID", ["QUICKBOOKS_REALM_ID"]);
+  assignFromAliases(merged, "QBO_ENV", ["QUICKBOOKS_ENV"]);
+
+  if (merged.ENABLE_SF === undefined && merged.CRM_PROVIDER) {
+    const provider = merged.CRM_PROVIDER.toLowerCase();
+    merged.ENABLE_SF = provider === "salesforce" ? "true" : "false";
+  }
+
+  if (merged.ENABLE_QBO === undefined && merged.ACCOUNTING_PROVIDER) {
+    const provider = merged.ACCOUNTING_PROVIDER.toLowerCase();
+    merged.ENABLE_QBO = provider === "quickbooks" ? "true" : "false";
+  }
+
+  return merged;
+};
+
 export const envSchema = z
   .object({
     STRIPE_SECRET: z.string().min(1, "STRIPE_SECRET is required"),
@@ -72,7 +140,7 @@ export class EnvValidationError extends Error {
 let cachedEnv: Env | null = null;
 
 export const getEnv = (overrides?: NodeJS.ProcessEnv): Env => {
-  const source = { ...process.env, ...overrides };
+  const source = normalizeEnvSource(process.env, overrides);
   const result = envSchema.safeParse(source);
 
   if (!result.success) {
