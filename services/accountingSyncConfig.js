@@ -29,11 +29,27 @@ class AccountingSyncConfig {
             // QuickBooks configuration
             quickbooks: {
                 companyId: process.env.QBO_COMPANY_ID,
-                environment: process.env.QBO_ENVIRONMENT || 'sandbox',
+                environment: process.env.QBO_ENV || process.env.QBO_ENVIRONMENT || 'sandbox',
                 oauthTokens: {
                     accessToken: process.env.QBO_ACCESS_TOKEN,
                     refreshToken: process.env.QBO_REFRESH_TOKEN,
                     realmId: process.env.QBO_REALM_ID
+                },
+                accounts: {
+                    stripeClearingAccount:
+                        process.env.QBO_ACCOUNT_STRIPE_CLEARING ||
+                        process.env.ACCOUNTING_STRIPE_CLEARING_ACCOUNT ||
+                        'Stripe Clearing',
+                    checkingAccount:
+                        process.env.QBO_ACCOUNT_CHECKING ||
+                        process.env.ACCOUNTING_OPERATING_BANK_ACCOUNT ||
+                        null,
+                    stripeFeesAccount:
+                        process.env.QBO_ACCOUNT_STRIPE_FEES ||
+                        process.env.ACCOUNTING_STRIPE_FEE_ACCOUNT ||
+                        'Stripe Fees',
+                    donationItem: process.env.QBO_ITEM_DONATION || null,
+                    revenueAccount: process.env.ACCOUNTING_REVENUE_ACCOUNT || 'Revenue'
                 }
             },
 
@@ -45,11 +61,20 @@ class AccountingSyncConfig {
 
             // Account mappings
             accounts: {
-                stripeClearingAccount: process.env.ACCOUNTING_STRIPE_CLEARING_ACCOUNT || 'Stripe Clearing',
-                operatingBankAccount: null,
+                stripeClearingAccount:
+                    process.env.QBO_ACCOUNT_STRIPE_CLEARING ||
+                    process.env.ACCOUNTING_STRIPE_CLEARING_ACCOUNT ||
+                    'Stripe Clearing',
+                operatingBankAccount:
+                    process.env.ACCOUNTING_OPERATING_BANK_ACCOUNT ||
+                    process.env.QBO_ACCOUNT_CHECKING ||
+                    null,
                 revenueAccount: process.env.ACCOUNTING_REVENUE_ACCOUNT || 'Revenue',
                 refundsAccount: process.env.ACCOUNTING_REFUNDS_ACCOUNT || 'Refunds',
-                stripeFeeAccount: process.env.ACCOUNTING_STRIPE_FEE_ACCOUNT || 'Stripe Fees',
+                stripeFeeAccount:
+                    process.env.QBO_ACCOUNT_STRIPE_FEES ||
+                    process.env.ACCOUNTING_STRIPE_FEE_ACCOUNT ||
+                    'Stripe Fees',
                 chargebackAccount: process.env.ACCOUNTING_CHARGEBACK_ACCOUNT || 'Chargebacks',
                 adjustmentAccount: process.env.ACCOUNTING_ADJUSTMENT_ACCOUNT || 'Adjustments',
                 
