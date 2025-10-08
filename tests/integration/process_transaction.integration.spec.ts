@@ -13,10 +13,10 @@ const createEnv = (): Env =>
   ({
     STRIPE_SECRET: "sk_test_123",
     STRIPE_WEBHOOK_SECRET: "whsec_123",
-    SF_CLIENT_ID: "sf_client",
-    SF_CLIENT_SECRET: "sf_secret",
+    SF_LOGIN_URL: "https://login.salesforce.com",
     SF_USERNAME: "sf_user",
     SF_PASSWORD: "sf_password",
+    SF_SECURITY_TOKEN: "sf_token",
     QBO_CLIENT_ID: "qbo_client",
     QBO_CLIENT_SECRET: "qbo_secret",
     QBO_ENV: "sandbox",

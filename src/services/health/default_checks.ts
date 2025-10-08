@@ -74,10 +74,11 @@ const salesforceCheck = async (
 
   try {
     const client = new SalesforceClient({
-      clientId: context.env.SF_CLIENT_ID,
-      clientSecret: context.env.SF_CLIENT_SECRET,
       username: context.env.SF_USERNAME,
       password: context.env.SF_PASSWORD,
+      securityToken: context.env.SF_SECURITY_TOKEN,
+    }, {
+      loginUrl: context.env.SF_LOGIN_URL,
     });
     await client.query("SELECT Id FROM Account LIMIT 1");
     return { status: "healthy", detail: "Salesforce API reachable" };
