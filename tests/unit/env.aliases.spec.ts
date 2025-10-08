@@ -6,10 +6,10 @@ export const runEnvAliasSpec = () => {
   const env = getEnv({
     STRIPE_TEST_SECRET_KEY: "sk_test_alias",
     STRIPE_WEBHOOK_SECRET_TEST: "whsec_alias",
-    SALESFORCE_CLIENT_ID: "sf_client",
-    SALESFORCE_CLIENT_SECRET: "sf_secret",
+    SALESFORCE_LOGIN_URL: "https://login.salesforce.com",
     SALESFORCE_USERNAME: "sf_user",
     SALESFORCE_PASSWORD: "sf_pass",
+    SALESFORCE_SECURITY_TOKEN: "sf_token",
     QUICKBOOKS_CLIENT_ID: "qbo_client",
     QUICKBOOKS_CLIENT_SECRET: "qbo_secret",
     QUICKBOOKS_REALM_ID: "realm",
@@ -26,10 +26,10 @@ export const runEnvAliasSpec = () => {
 
   assert.equal(env.STRIPE_SECRET, "sk_test_alias");
   assert.equal(env.STRIPE_WEBHOOK_SECRET, "whsec_alias");
-  assert.equal(env.SF_CLIENT_ID, "sf_client");
-  assert.equal(env.SF_CLIENT_SECRET, "sf_secret");
+  assert.equal(env.SF_LOGIN_URL, "https://login.salesforce.com");
   assert.equal(env.SF_USERNAME, "sf_user");
   assert.equal(env.SF_PASSWORD, "sf_pass");
+  assert.equal(env.SF_SECURITY_TOKEN, "sf_token");
   assert.equal(env.QBO_CLIENT_ID, "qbo_client");
   assert.equal(env.QBO_CLIENT_SECRET, "qbo_secret");
   assert.equal(env.QBO_REALM_ID, "realm");

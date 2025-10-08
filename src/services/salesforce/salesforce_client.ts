@@ -1,7 +1,7 @@
 import { IncomingHttpHeaders } from "node:http";
 import http from "node:http";
 import https from "node:https";
-import { URL, URLSearchParams } from "node:url";
+import { URL } from "node:url";
 
 export interface SalesforceClientOptions {
   loginUrl?: string;
@@ -9,16 +9,9 @@ export interface SalesforceClientOptions {
 }
 
 export interface SalesforceCredentials {
-  clientId: string;
-  clientSecret: string;
   username: string;
   password: string;
-}
-
-export interface SalesforceAuthResponse {
-  access_token: string;
-  instance_url: string;
-  token_type: string;
+  securityToken?: string;
 }
 
 export interface SalesforceQueryResult<T> {
@@ -95,33 +88,69 @@ export class SalesforceClient {
     });
   }
 
+  private escapeXml(value: string) {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  }
+
+  private extractTagValue(body: string, tagName: string) {
+    const regex = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`);
+    const match = body.match(regex);
+    return match?.[1];
+  }
+
   private async authenticate() {
-    const params = new URLSearchParams({
-      grant_type: "password",
-      client_id: this.credentials.clientId,
-      client_secret: this.credentials.clientSecret,
-      username: this.credentials.username,
-      password: this.credentials.password,
-    });
+    const soapVersion = this.apiVersion.startsWith("v")
+      ? this.apiVersion.slice(1)
+      : this.apiVersion;
+    const passwordWithToken = `${this.credentials.password}${
+      this.credentials.securityToken ?? ""
+    }`;
+
+    const envelope = `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/">` +
+      `<env:Body>` +
+      `<n:login xmlns:n="urn:partner.soap.sforce.com">` +
+      `<n:username>${this.escapeXml(this.credentials.username)}</n:username>` +
+      `<n:password>${this.escapeXml(passwordWithToken)}</n:password>` +
+      `</n:login>` +
+      `</env:Body>` +
+      `</env:Envelope>`;
 
     const response = await this.performRequest({
       method: "POST",
-      url: `${this.loginUrl}/services/oauth2/token`,
+      url: `${this.loginUrl}/services/Soap/u/${soapVersion}`,
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "text/xml",
+        SOAPAction: "login",
       },
-      body: params.toString(),
+      body: envelope,
     });
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      const fault =
+        this.extractTagValue(response.body, "faultstring") ?? response.body;
       throw new Error(
-        `Failed to authenticate with Salesforce: ${response.statusCode} ${response.body}`,
+        `Failed to authenticate with Salesforce: ${response.statusCode} ${fault}`,
       );
     }
 
-    const payload = JSON.parse(response.body) as SalesforceAuthResponse;
-    this.accessToken = payload.access_token;
-    this.instanceUrl = payload.instance_url;
+    const sessionId = this.extractTagValue(response.body, "sessionId");
+    const serverUrl = this.extractTagValue(response.body, "serverUrl");
+
+    if (!sessionId || !serverUrl) {
+      throw new Error(
+        "Failed to authenticate with Salesforce: session not returned in response",
+      );
+    }
+
+    const parsedServer = new URL(serverUrl);
+    this.accessToken = sessionId;
+    this.instanceUrl = `${parsedServer.protocol}//${parsedServer.host}`;
   }
 
   private async ensureSession() {

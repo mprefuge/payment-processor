@@ -62,16 +62,10 @@ const normalizeEnvSource = (
     "AzureWebJobsStorage",
   ]);
 
-  assignFromAliases(merged, "SF_CLIENT_ID", [
-    "SALESFORCE_CLIENT_ID",
-    "SALESFORCE_CONSUMER_KEY",
-  ]);
-  assignFromAliases(merged, "SF_CLIENT_SECRET", [
-    "SALESFORCE_CLIENT_SECRET",
-    "SALESFORCE_CONSUMER_SECRET",
-  ]);
+  assignFromAliases(merged, "SF_LOGIN_URL", ["SALESFORCE_LOGIN_URL"]);
   assignFromAliases(merged, "SF_USERNAME", ["SALESFORCE_USERNAME"]);
   assignFromAliases(merged, "SF_PASSWORD", ["SALESFORCE_PASSWORD"]);
+  assignFromAliases(merged, "SF_SECURITY_TOKEN", ["SALESFORCE_SECURITY_TOKEN"]);
 
   assignFromAliases(merged, "QBO_CLIENT_ID", ["QUICKBOOKS_CLIENT_ID"]);
   assignFromAliases(merged, "QBO_CLIENT_SECRET", ["QUICKBOOKS_CLIENT_SECRET"]);
@@ -97,10 +91,13 @@ export const envSchema = z
     STRIPE_WEBHOOK_SECRET: z
       .string()
       .min(1, "STRIPE_WEBHOOK_SECRET is required"),
-    SF_CLIENT_ID: z.string().min(1, "SF_CLIENT_ID is required"),
-    SF_CLIENT_SECRET: z.string().min(1, "SF_CLIENT_SECRET is required"),
+    SF_LOGIN_URL: z
+      .string()
+      .url("SF_LOGIN_URL must be a valid URL")
+      .default("https://login.salesforce.com"),
     SF_USERNAME: z.string().min(1, "SF_USERNAME is required"),
     SF_PASSWORD: z.string().min(1, "SF_PASSWORD is required"),
+    SF_SECURITY_TOKEN: z.string().min(1).optional(),
     QBO_CLIENT_ID: z.string().min(1, "QBO_CLIENT_ID is required"),
     QBO_CLIENT_SECRET: z
       .string()
