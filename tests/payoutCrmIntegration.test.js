@@ -3,8 +3,8 @@
  * Tests the CRM payout storage capability
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const BaseCrmService = require('../services/crm/baseCrm');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const BaseCrmService = require('../dist/services/salesforce/baseCrm');
 
 // Mock CRM service for testing
 class MockCrmService extends BaseCrmService {

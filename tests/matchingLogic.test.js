@@ -8,7 +8,7 @@
  * 4. Otherwise → create new contact (no review)
  */
 
-const { ContactMatcher } = require('../services/contactMatcher');
+const { ContactMatcher } = require('../dist/services/payoutRecon/contactMatcher');
 
 // Simple test runner
 function runTests() {

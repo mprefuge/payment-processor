@@ -11,9 +11,9 @@
  * 3. This tightens the date window and prevents overlap
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const SyncLedger = require('../services/syncLedger');
-const WebhookEventStore = require('../services/webhookEventStore');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
+const WebhookEventStore = require('../dist/services/idempotency/webhookEventStore');
 const { createTestSyncLedger, createTestWebhookEventStore } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider

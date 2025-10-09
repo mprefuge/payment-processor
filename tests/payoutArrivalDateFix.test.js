@@ -12,8 +12,8 @@
  * - New code uses: arrival_date - 30 days to arrival_date
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const SyncLedger = require('../services/syncLedger');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
 
 // Mock accounting provider
 class MockAccountingProvider {

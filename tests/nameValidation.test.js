@@ -8,7 +8,7 @@
  * but names differ, preventing data corruption.
  */
 
-const SalesforceCrmService = require('../services/crm/salesforceCrm');
+const SalesforceCrmService = require('../dist/services/salesforce/salesforceCrm');
 
 // Simple test runner
 function runTests() {

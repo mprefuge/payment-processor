@@ -4,7 +4,7 @@
  * Tests that pending transactions are properly updated when payments fail or are canceled
  */
 
-const CrmFactory = require('../services/crm/crmFactory');
+const CrmFactory = require('../dist/services/salesforce/crmFactory');
 
 // Mock CRM service for testing
 class MockCrmService {

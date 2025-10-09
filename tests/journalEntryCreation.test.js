@@ -8,9 +8,9 @@
  * - Journal entry creation with proper AccountRef values
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const AccountingSyncConfig = require('../services/accountingSyncConfig');
-const SyncLedger = require('../services/syncLedger');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const AccountingSyncConfig = require('../dist/services/payoutRecon/accountingSyncConfig');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
 const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock QuickBooks client that validates DocNumber length and AccountRef presence
@@ -255,7 +255,7 @@ Module.prototype.require = function(id) {
     return originalRequire.apply(this, arguments);
 };
 
-const QuickBooksProvider = require('../services/accounting/quickbooksProvider');
+const QuickBooksProvider = require('../dist/services/qbo/quickbooksProvider');
 
 // Test runner
 async function runTests() {

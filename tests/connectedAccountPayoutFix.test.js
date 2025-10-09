@@ -7,8 +7,8 @@
  * - This test verifies that the code correctly handles connected accounts by using date-range filtering
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const SyncLedger = require('../services/syncLedger');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
 
 // Mock accounting provider
 class MockAccountingProvider {

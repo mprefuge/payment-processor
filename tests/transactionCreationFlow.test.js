@@ -5,8 +5,8 @@
  * and properly updated when payment succeeds
  */
 
-const CrmFactory = require('../services/crm/crmFactory');
-const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
+const CrmFactory = require('../dist/services/salesforce/crmFactory');
+const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../dist/config/contactMatching');
 
 // Mock CRM service for testing
 class MockCrmService {

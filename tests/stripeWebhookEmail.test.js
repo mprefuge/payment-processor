@@ -101,7 +101,7 @@ function loadWebhookWithMocks({ stripeClass, sendGridMock }) {
     const stripePath = require.resolve('stripe');
     const sendGridPath = require.resolve('@sendgrid/mail');
     const webhookPath = require.resolve('../stripeWebhook');
-    const emailServicePath = require.resolve('../services/emailService');
+    const emailServicePath = require.resolve('../dist/services/payoutRecon/emailService');
 
     const originalStripe = require.cache[stripePath];
     const originalSendGrid = require.cache[sendGridPath];

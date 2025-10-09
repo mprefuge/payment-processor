@@ -16,7 +16,7 @@ const {
     ensureStripeVendor,
     convertPayoutAmount,
     normalizeAmount
-} = require('../services/accounting/stripe-qbo');
+} = require('../dist/services/qbo/stripe');
 
 const accounts = {
     revenueId: 'acct-revenue',

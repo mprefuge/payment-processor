@@ -459,7 +459,7 @@ Module.prototype.require = function(id) {
     return originalRequire.apply(this, arguments);
 };
 
-const QuickBooksProvider = require('../services/accounting/quickbooksProvider');
+const QuickBooksProvider = require('../dist/services/qbo/quickbooksProvider');
 
 // Test runner
 async function runTests() {

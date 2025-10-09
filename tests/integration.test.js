@@ -4,9 +4,9 @@
  * Tests the full integration flow with ContactMatcher and transaction naming
  */
 
-const { ContactMatcher } = require('../services/contactMatcher');
-const ReviewTaskService = require('../services/reviewTaskService');
-const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../config/contactMatching');
+const { ContactMatcher } = require('../dist/services/payoutRecon/contactMatcher');
+const ReviewTaskService = require('../dist/services/payoutRecon/reviewTaskService');
+const { loadConfig, normalizeTransactionCategory, generateTransactionName } = require('../dist/config/contactMatching');
 
 // Mock CRM service for testing
 class MockCrmService {

@@ -1,10 +1,10 @@
-const AccountingSyncConfig = require('../services/accountingSyncConfig');
-const AccountingProviderFactory = require('../services/accounting/accountingProviderFactory');
-const PayoutSyncService = require('../services/payoutSyncService');
-const WebhookEventStore = require('../services/webhookEventStore');
-const SyncLedger = require('../services/syncLedger');
-const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
-const CrmFactory = require('../services/crm/crmFactory');
+const AccountingSyncConfig = require('../payoutRecon/accountingSyncConfig');
+const AccountingProviderFactory = require('../qbo/accountingProviderFactory');
+const PayoutSyncService = require('../payoutRecon/payoutSyncService');
+const WebhookEventStore = require('../idempotency/webhookEventStore');
+const SyncLedger = require('../payoutRecon/syncLedger');
+const { createPersistentStorageClients } = require('../idempotency/storage/persistentStoreFactory');
+const CrmFactory = require('../salesforce/crmFactory');
 
 // Global service instances
 const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
