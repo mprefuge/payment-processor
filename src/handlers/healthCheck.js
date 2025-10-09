@@ -50,7 +50,11 @@ const checkStripeConnection = async (mode, secretKey) => {
 
     try {
         const stripe = dependencies.stripeFactory(secretKey, { timeout: STRIPE_HEALTH_TIMEOUT_MS });
-        await stripe.accounts.retrieve();
+        if (!stripe?.payouts?.list) {
+            throw new Error('Stripe client does not support payouts.list');
+        }
+
+        await stripe.payouts.list({ limit: 1 });
 
         return createConnectionStatus({
             name: connectionName,
@@ -166,7 +170,7 @@ const checkCrmConnection = async () => {
         });
     }
 
-        const validation = dependencies.crmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+    const validation = dependencies.crmFactory.validateConfig(crmConfig.provider, crmConfig.config);
     if (!validation.isValid) {
         return createConnectionStatus({
             name: `crm_${crmConfig.provider}`,
@@ -179,6 +183,20 @@ const checkCrmConnection = async () => {
 
     try {
         const crmService = dependencies.crmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        if (typeof crmService.healthCheck === 'function') {
+            const health = await crmService.healthCheck();
+
+            return createConnectionStatus({
+                name: `crm_${crmConfig.provider}`,
+                type: 'crm',
+                healthy: Boolean(health?.healthy),
+                status: health?.healthy ? 'healthy' : 'unhealthy',
+                message: health?.message || `${crmConfig.provider} health check completed`,
+                details: health?.details || { provider: crmConfig.provider }
+            });
+        }
+
         if (typeof crmService.connect === 'function') {
             await crmService.connect();
         }
@@ -233,24 +251,59 @@ const checkAccountingConnection = async () => {
         const providerConfig = config.getProviderConfig();
         const provider = dependencies.accountingProviderFactory.createProvider(providerName, providerConfig);
 
+        let providerHealth = null;
         if (typeof provider.healthCheck === 'function') {
-            const health = await provider.healthCheck();
-            return createConnectionStatus({
-                name: `accounting_${providerName}`,
-                type: 'accounting',
-                healthy: Boolean(health?.healthy),
-                status: health?.healthy ? 'healthy' : 'unhealthy',
-                message: health?.message || `${providerName} health check completed`,
-                details: health?.details || { provider: providerName }
-            });
+            providerHealth = await provider.healthCheck();
+        }
+
+        let tokenExchangeResult = null;
+        let tokenExchangeError = null;
+
+        if (providerName.toLowerCase() === 'quickbooks' && typeof provider.refreshTokens === 'function') {
+            try {
+                tokenExchangeResult = await provider.refreshTokens({ persist: false });
+            } catch (error) {
+                tokenExchangeError = error;
+            }
+        }
+
+        const healthy = Boolean(providerHealth?.healthy !== false) && !tokenExchangeError;
+        const status = healthy ? 'healthy' : 'unhealthy';
+
+        const messageParts = [];
+        if (providerHealth?.message) {
+            messageParts.push(providerHealth.message);
+        } else {
+            messageParts.push(`${providerName} health check completed`);
+        }
+
+        if (tokenExchangeError) {
+            messageParts.push(`Token exchange failed: ${tokenExchangeError.message}`);
+        } else if (tokenExchangeResult) {
+            messageParts.push('Token exchange successful');
+        }
+
+        const details = {
+            provider: providerName,
+            providerHealth,
+            tokenExchange: tokenExchangeError
+                ? { success: false, error: tokenExchangeError.message }
+                : tokenExchangeResult
+                    ? { success: true }
+                    : undefined
+        };
+
+        if (!details.tokenExchange) {
+            delete details.tokenExchange;
         }
 
         return createConnectionStatus({
             name: `accounting_${providerName}`,
             type: 'accounting',
-            healthy: true,
-            status: 'healthy',
-            message: `${providerName} provider does not expose a health check`
+            healthy,
+            status,
+            message: messageParts.join(' | '),
+            details
         });
     } catch (error) {
         return createConnectionStatus({
@@ -295,6 +348,86 @@ const checkPersistentStorageConnection = async () => {
     }
 };
 
+const REQUIRED_ENVIRONMENT_KEYS = [
+    { key: 'STRIPE_TEST_SECRET_KEY', label: 'Stripe test secret key', when: () => true },
+    { key: 'STRIPE_LIVE_SECRET_KEY', label: 'Stripe live secret key', when: () => true },
+    { key: 'SENDGRID_API_KEY', label: 'SendGrid API key', when: () => true },
+    {
+        key: 'SALESFORCE_USERNAME',
+        label: 'Salesforce username',
+        when: () => (process.env.CRM_PROVIDER || '').toLowerCase() === 'salesforce'
+    },
+    {
+        key: 'SALESFORCE_PASSWORD',
+        label: 'Salesforce password',
+        when: () => (process.env.CRM_PROVIDER || '').toLowerCase() === 'salesforce'
+    },
+    {
+        key: 'SALESFORCE_SECURITY_TOKEN',
+        label: 'Salesforce security token',
+        when: () => (process.env.CRM_PROVIDER || '').toLowerCase() === 'salesforce'
+    },
+    {
+        key: 'QBO_CLIENT_ID',
+        label: 'QuickBooks client ID',
+        when: () => process.env.ACCOUNTING_SYNC_ENABLED === 'true' && (process.env.ACCOUNTING_PROVIDER || 'quickbooks').toLowerCase() === 'quickbooks'
+    },
+    {
+        key: 'QBO_CLIENT_SECRET',
+        label: 'QuickBooks client secret',
+        when: () => process.env.ACCOUNTING_SYNC_ENABLED === 'true' && (process.env.ACCOUNTING_PROVIDER || 'quickbooks').toLowerCase() === 'quickbooks'
+    },
+    {
+        key: 'QBO_REFRESH_TOKEN',
+        label: 'QuickBooks refresh token',
+        when: () => process.env.ACCOUNTING_SYNC_ENABLED === 'true' && (process.env.ACCOUNTING_PROVIDER || 'quickbooks').toLowerCase() === 'quickbooks'
+    },
+    {
+        key: 'QBO_ACCESS_TOKEN',
+        label: 'QuickBooks access token',
+        when: () => process.env.ACCOUNTING_SYNC_ENABLED === 'true' && (process.env.ACCOUNTING_PROVIDER || 'quickbooks').toLowerCase() === 'quickbooks'
+    },
+    {
+        key: 'QBO_COMPANY_ID',
+        label: 'QuickBooks company ID',
+        when: () => process.env.ACCOUNTING_SYNC_ENABLED === 'true' && (process.env.ACCOUNTING_PROVIDER || 'quickbooks').toLowerCase() === 'quickbooks'
+    }
+];
+
+const checkEnvironmentConfiguration = async () => {
+    const applicableKeys = REQUIRED_ENVIRONMENT_KEYS.filter(def => {
+        try {
+            return def.when();
+        } catch (error) {
+            return false;
+        }
+    });
+
+    const missingKeys = applicableKeys
+        .filter(def => !process.env[def.key] || process.env[def.key].trim() === '')
+        .map(def => def.key);
+
+    if (missingKeys.length === 0) {
+        return createConnectionStatus({
+            name: 'environment',
+            type: 'configuration',
+            healthy: true,
+            status: 'healthy',
+            message: 'All required environment variables are set',
+            details: { checkedKeys: applicableKeys.map(def => def.key) }
+        });
+    }
+
+    return createConnectionStatus({
+        name: 'environment',
+        type: 'configuration',
+        healthy: false,
+        status: 'unhealthy',
+        message: 'Missing required environment variables',
+        details: { missingKeys }
+    });
+};
+
 module.exports = async function healthCheck(context, req) {
     const now = new Date();
     context.log('Health check requested');
@@ -305,7 +438,8 @@ module.exports = async function healthCheck(context, req) {
         checkSendGridConnection(),
         checkCrmConnection(),
         checkAccountingConnection(),
-        checkPersistentStorageConnection()
+        checkPersistentStorageConnection(),
+        checkEnvironmentConfiguration()
     ];
 
     const connections = await Promise.all(connectionChecks);
@@ -313,6 +447,12 @@ module.exports = async function healthCheck(context, req) {
     const overallStatus = degraded ? 'degraded' : 'ok';
 
     context.log('Health check connection statuses', connections);
+
+    const components = connections.map(connection => ({
+        component: connection.name,
+        status: connection.status,
+        healthy: connection.healthy
+    }));
 
     context.res = {
         status: 200,
@@ -324,7 +464,8 @@ module.exports = async function healthCheck(context, req) {
             timestamp: now.toISOString(),
             uptime: process.uptime(),
             version: process.env.APP_VERSION || null,
-            connections
+            connections,
+            components
         }
     };
 };

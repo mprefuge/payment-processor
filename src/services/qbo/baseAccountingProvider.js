@@ -121,9 +121,11 @@ class BaseAccountingProvider {
 
     /**
      * Refresh OAuth tokens if needed
-     * @returns {Promise<boolean>} True if refresh successful
+     * @param {Object} [options]
+     * @param {boolean} [options.persist=true] - Whether refreshed tokens should be persisted on the provider instance
+     * @returns {Promise<*>} Implementation specific
      */
-    async refreshTokens() {
+    async refreshTokens(options = {}) {
         throw new Error('refreshTokens method must be implemented by subclass');
     }
 }
