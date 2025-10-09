@@ -110,7 +110,7 @@ export const getBalanceTransaction = ({
   return stripe.balanceTransactions.retrieve(id, params);
 };
 
-export const listPayouts = async ({
+export const listPayouts = ({
   stripe,
   from,
   to,

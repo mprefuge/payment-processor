@@ -1,0 +1,164 @@
+import type { Connection } from 'jsforce/lib/connection';
+import type { UpsertResult } from 'jsforce/lib/types';
+
+import type { TransactionUpsertDTO } from '../domain/transactions';
+
+type TransactionFieldValue = string | number | boolean | null;
+export type TransactionExternalIdField =
+  | 'stripe_payment_intent_id__c'
+  | 'stripe_refund_id__c'
+  | 'stripe_dispute_id__c'
+  | 'stripe_balance_transaction_id__c'
+  | 'stripe_checkout_session_id__c';
+
+export interface QuickBooksDocumentReference {
+  type: string;
+  id: string;
+}
+
+export interface SalesforceSvcOptions {
+  connection: Connection;
+}
+
+export interface SalesforceSvc {
+  upsertTransactionByExternalId: (
+    dto: TransactionUpsertDTO,
+    key: TransactionExternalIdField,
+  ) => Promise<UpsertResult>;
+  linkPayoutOnTransactions: (payoutId: string, btIds: string[]) => Promise<UpsertResult[]>;
+  markPostedToQbo: (salesforceId: string, doc: QuickBooksDocumentReference) => Promise<void>;
+}
+
+type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
+  Id?: string;
+};
+
+type TransactionRecord = Record<string, TransactionFieldValue>;
+
+const TRANSACTION_OBJECT = 'Transaction__c';
+
+const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {
+  const record: TransactionRecord = {};
+  for (const [field, value] of Object.entries(input)) {
+    if (value !== undefined) {
+      record[field] = value as TransactionFieldValue;
+    }
+  }
+  return record;
+};
+
+const toArray = <T>(value: T | T[]): T[] => (Array.isArray(value) ? value : [value]);
+
+type FailedUpsertResult = Extract<UpsertResult, { success: false }>;
+
+const isFailedUpsertResult = (result: UpsertResult): result is FailedUpsertResult => !result.success;
+
+const collectErrorMessages = (results: UpsertResult[]): string =>
+  results
+    .filter(isFailedUpsertResult)
+    .flatMap((result) => result.errors.map((error) => error.message))
+    .join('; ');
+
+const ensureNonEmpty = (value: string, fieldName: string): string => {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`${fieldName} is required.`);
+  }
+  return trimmed;
+};
+
+export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): SalesforceSvc => {
+  const upsertTransactionByExternalId = async (
+    dto: TransactionUpsertDTO,
+    key: TransactionExternalIdField,
+  ): Promise<UpsertResult> => {
+    const externalId = dto[key];
+    if (typeof externalId !== 'string' || externalId.trim().length === 0) {
+      throw new Error(`Transaction payload must include a value for ${key}.`);
+    }
+    const normalizedExternalId = externalId.trim();
+    const records = [
+      sanitizeTransactionRecord({
+        ...dto,
+        [key]: normalizedExternalId,
+      }),
+    ];
+    const [result] = toArray(
+      await connection.upsert(TRANSACTION_OBJECT, records, key, {
+        allOrNone: true,
+      }),
+    );
+    if (!result.success) {
+      const message =
+        collectErrorMessages([result]) || `Failed to upsert transaction with ${key}=${normalizedExternalId}.`;
+      throw new Error(message);
+    }
+    return result;
+  };
+
+  const linkPayoutOnTransactions = async (
+    payoutId: string,
+    btIds: string[],
+  ): Promise<UpsertResult[]> => {
+    const normalizedPayoutId = ensureNonEmpty(payoutId, 'Stripe payout ID');
+    const normalizedIds = Array.from(
+      new Set(btIds.map((value) => ensureNonEmpty(value, 'Stripe balance transaction ID'))),
+    );
+    if (normalizedIds.length === 0) {
+      return [];
+    }
+    const records = normalizedIds.map((balanceTransactionId) =>
+      sanitizeTransactionRecord({
+        stripe_balance_transaction_id__c: balanceTransactionId,
+        stripe_payout_id__c: normalizedPayoutId,
+      }),
+    );
+    const results = toArray(
+      await connection.upsert(TRANSACTION_OBJECT, records, 'stripe_balance_transaction_id__c', {
+        allOrNone: true,
+      }),
+    );
+    const failures = results.filter((result) => !result.success);
+    if (failures.length > 0) {
+      const message =
+        collectErrorMessages(failures) || `Failed to link payout ${normalizedPayoutId} to one or more transactions.`;
+      throw new Error(message);
+    }
+    return results;
+  };
+
+  const markPostedToQbo = async (
+    salesforceId: string,
+    doc: QuickBooksDocumentReference,
+  ): Promise<void> => {
+    const normalizedId = ensureNonEmpty(salesforceId, 'Salesforce transaction ID');
+    const normalizedDocType = ensureNonEmpty(doc.type, 'QuickBooks document type');
+    const normalizedDocId = ensureNonEmpty(doc.id, 'QuickBooks document ID');
+    const record = sanitizeTransactionRecord({
+      Id: normalizedId,
+      posted_to_qbo__c: true,
+      qbo_doc_type__c: normalizedDocType,
+      qbo_doc_id__c: normalizedDocId,
+      qbo_posted_at__c: new Date().toISOString(),
+      posting_error__c: null,
+    });
+    const [result] = toArray(
+      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', {
+        allOrNone: true,
+      }),
+    );
+    if (!result.success) {
+      const message =
+        collectErrorMessages([result]) || `Failed to mark transaction ${normalizedId} as posted to QuickBooks.`;
+      throw new Error(message);
+    }
+  };
+
+  return {
+    upsertTransactionByExternalId,
+    linkPayoutOnTransactions,
+    markPostedToQbo,
+  };
+};
+
+export default createSalesforceSvc;
