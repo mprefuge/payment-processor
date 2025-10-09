@@ -1,3 +1,4 @@
+const { createLogger } = require('../../lib/logger');
 /**
  * ContactMatcher Service
  * 
@@ -106,7 +107,7 @@ class JaroWinkler {
 class ContactMatcher {
     constructor(config = {}) {
         this.config = this._mergeConfig(DEFAULT_CONFIG, config);
-        this.logger = console; // Can be replaced with structured logger
+        this.logger = createLogger({ scope: 'ContactMatcher' }); // Can be replaced with structured logger
     }
     
     /**
@@ -148,7 +149,7 @@ class ContactMatcher {
             normalized.fullName = `${normalized.firstName} ${normalized.lastName}`;
         }
         
-        this.logger.log('ContactMatcher: Normalized input', { 
+        this.logger.info('ContactMatcher: Normalized input', { 
             original: this._redactPII(payload), 
             normalized: this._redactPII(normalized) 
         });
@@ -374,7 +375,7 @@ class ContactMatcher {
             decision.reviewRequired = false;
         }
         
-        this.logger.log('ContactMatcher: Decision made', {
+        this.logger.info('ContactMatcher: Decision made', {
             action: decision.action,
             reason: decision.reason,
             score: decision.bestScore,

@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const {
     fetchStripeChargesSince,
     fetchStripeRefundsSince,
@@ -33,7 +35,7 @@ async function postJEIfNew(journalEntry, quickbooksProvider, options = {}) {
     }
 
     const store = options.store || defaultStore;
-    const logger = options.logger || console;
+    const logger = options.logger || rootLogger;
     const stripeId = options.stripeId || (journalEntry.docNumber.startsWith('STRIPE-')
         ? journalEntry.docNumber.substring(7)
         : journalEntry.docNumber);

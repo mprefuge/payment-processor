@@ -1,3 +1,4 @@
+const { createLogger } = require('../../lib/logger');
 /**
  * Review Task Service
  * 
@@ -16,7 +17,7 @@ class ReviewTaskService {
             deepLinkBaseUrl: config.deepLinkBaseUrl || 'https://example.com/admin',
             ...config
         };
-        this.logger = console;
+        this.logger = createLogger({ scope: 'ReviewTaskService' });
     }
 
     /**
@@ -52,7 +53,7 @@ class ReviewTaskService {
             // Create the task in CRM
             const createdTask = await this.crmService.createTask(contactId, taskData);
             
-            this.logger.log('ReviewTaskService: Created review task', {
+            this.logger.info('ReviewTaskService: Created review task', {
                 taskId: createdTask.Id,
                 reason: matchResult.decision.reason,
                 score: matchResult.decision.bestScore,

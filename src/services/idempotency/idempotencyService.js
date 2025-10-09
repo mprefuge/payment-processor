@@ -1,3 +1,4 @@
+const { logger: rootLogger } = require('../../lib/logger');
 /**
  * Idempotency Service
  * 
@@ -12,7 +13,7 @@
 const { createPersistentStorageClients } = require('./storage/persistentStoreFactory');
 
 class IdempotencyService {
-    constructor({ storageClient, logger = console, namespace } = {}) {
+    constructor({ storageClient, logger = rootLogger, namespace } = {}) {
         const storageNamespace = namespace || process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
 
         this.logger = logger;
@@ -50,7 +51,7 @@ class IdempotencyService {
         const result = await this.storage.get(key);
 
         if (result) {
-            this.logger.log('IdempotencyService: Found existing processing result', {
+            this.logger.info('IdempotencyService: Found existing processing result', {
                 key,
                 processedAt: result.processedAt,
                 action: result.decision?.action 
@@ -97,7 +98,7 @@ class IdempotencyService {
             }
         }
 
-        this.logger.log('IdempotencyService: Stored processing result', {
+        this.logger.info('IdempotencyService: Stored processing result', {
             key,
             action: result.decision?.action,
             score: result.decision?.bestScore
@@ -123,7 +124,7 @@ class IdempotencyService {
         const inputsChanged = currentHash !== previousResult.metadata.inputHash;
 
         if (inputsChanged) {
-            this.logger.log('IdempotencyService: Inputs changed since last processing', { 
+            this.logger.info('IdempotencyService: Inputs changed since last processing', { 
                 key,
                 previousHash: previousResult.metadata.inputHash,
                 currentHash 
@@ -171,14 +172,14 @@ class IdempotencyService {
         if (existingResult) {
             // Check if inputs have changed
             if (!await this.inputsChanged(key, transactionData)) {
-                this.logger.log('IdempotencyService: Returning cached result (no input changes)', { key });
+                this.logger.info('IdempotencyService: Returning cached result (no input changes)', { key });
                 return {
                     ...existingResult,
                     fromCache: true,
                     message: 'Transaction already processed with same inputs'
                 };
             } else {
-                this.logger.log('IdempotencyService: Inputs changed, reprocessing', { key });
+                this.logger.info('IdempotencyService: Inputs changed, reprocessing', { key });
             }
         }
 
@@ -264,7 +265,7 @@ class IdempotencyService {
      */
     async clear() {
         await this.storage.clear();
-        this.logger.log('IdempotencyService: Cleared all stored results');
+        this.logger.info('IdempotencyService: Cleared all stored results');
     }
 }
 

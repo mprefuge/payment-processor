@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 const jsforce = require('jsforce');
 const BaseCrmService = require('./baseCrm');
 
@@ -25,10 +26,10 @@ class SalesforceCrmService extends BaseCrmService {
 
         try {
             await this.conn.login(this.config.username, this.config.password + (this.config.securityToken || ''));
-            console.log('Successfully connected to Salesforce');
+            logger.info('Successfully connected to Salesforce');
             return this.conn;
         } catch (error) {
-            console.error('Failed to connect to Salesforce:', error);
+            logger.error('Failed to connect to Salesforce:', error);
             throw new Error(`Salesforce connection failed: ${error.message}`);
         }
     }
@@ -97,13 +98,13 @@ class SalesforceCrmService extends BaseCrmService {
                           ORDER BY CreatedDate DESC 
                           LIMIT 10`;
 
-            console.log('Executing Salesforce query:', query);
+            logger.info('Executing Salesforce query:', query);
             const result = await this.conn.query(query);
             
-            console.log(`Found ${result.records.length} matching contacts`);
+            logger.info(`Found ${result.records.length} matching contacts`);
             return result.records;
         } catch (error) {
-            console.error('Error searching Salesforce contacts:', error);
+            logger.error('Error searching Salesforce contacts:', error);
             throw new Error(`Salesforce contact search failed: ${error.message}`);
         }
     }
@@ -135,7 +136,7 @@ class SalesforceCrmService extends BaseCrmService {
             const result = await this.conn.sobject('Contact').create(contactRecord);
             
             if (result.success) {
-                console.log(`Created new Salesforce contact with ID: ${result.id}`);
+                logger.info(`Created new Salesforce contact with ID: ${result.id}`);
                 
                 // Fetch the created contact to return complete data
                 const createdContact = await this.conn.sobject('Contact').retrieve(result.id);
@@ -144,7 +145,7 @@ class SalesforceCrmService extends BaseCrmService {
                 throw new Error(`Contact creation failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.error('Error creating Salesforce contact:', error);
+            logger.error('Error creating Salesforce contact:', error);
             throw new Error(`Salesforce contact creation failed: ${error.message}`);
         }
     }
@@ -182,7 +183,7 @@ class SalesforceCrmService extends BaseCrmService {
 
         // Only proceed if we have at least one field to update
         if (Object.keys(updateRecord).length === 0) {
-            console.log('No meaningful address data to update');
+            logger.info('No meaningful address data to update');
             return null;
         }
         try {
@@ -192,7 +193,7 @@ class SalesforceCrmService extends BaseCrmService {
             });
             
             if (result.success) {
-                console.log(`Updated Salesforce contact ${contactId} with address information`);
+                logger.info(`Updated Salesforce contact ${contactId} with address information`);
                 
                 // Fetch the updated contact to return complete data
                 const updatedContact = await this.conn.sobject('Contact').retrieve(contactId);
@@ -201,7 +202,7 @@ class SalesforceCrmService extends BaseCrmService {
                 throw new Error(`Contact update failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.error('Error updating Salesforce contact:', error);
+            logger.error('Error updating Salesforce contact:', error);
             throw new Error(`Salesforce contact update failed: ${error.message}`);
         }
     }
@@ -231,7 +232,7 @@ class SalesforceCrmService extends BaseCrmService {
             const result = await this.conn.sobject('Task').create(taskRecord);
             
             if (result.success) {
-                console.log(`Created Salesforce task with ID: ${result.id}`);
+                logger.info(`Created Salesforce task with ID: ${result.id}`);
                 
                 // Fetch the created task to return complete data
                 const createdTask = await this.conn.sobject('Task').retrieve(result.id);
@@ -240,7 +241,7 @@ class SalesforceCrmService extends BaseCrmService {
                 throw new Error(`Task creation failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.error('Error creating Salesforce task:', error);
+            logger.error('Error creating Salesforce task:', error);
             throw new Error(`Salesforce task creation failed: ${error.message}`);
         }
     }
@@ -256,7 +257,7 @@ class SalesforceCrmService extends BaseCrmService {
         try {
             // First try custom Transaction object
             const query = `SELECT Id, Name, Transaction_ID__c, Status__c FROM Transaction__c WHERE Transaction_ID__c = '${stripeId}' LIMIT 1`;
-            console.log(`Executing Salesforce query: ${query}`);
+            logger.info(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
             
@@ -264,14 +265,14 @@ class SalesforceCrmService extends BaseCrmService {
                 return result.records[0];
             }
         } catch (error) {
-            console.log('Custom Transaction object not available, checking Opportunities');
+            logger.info('Custom Transaction object not available, checking Opportunities');
         }
 
         try {
             // Fallback to Opportunity records (if using them as transaction fallback)
             // Search in Description field for "Payment Intent: {stripeId}"
             const query = `SELECT Id, Name, Description, StageName FROM Opportunity WHERE Description LIKE '%${stripeId}%' LIMIT 1`;
-            console.log(`Executing Salesforce query: ${query}`);
+            logger.info(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
             
@@ -279,7 +280,7 @@ class SalesforceCrmService extends BaseCrmService {
                 return result.records[0];
             }
         } catch (error) {
-            console.log('Error checking Opportunities for existing transaction:', error.message);
+            logger.info('Error checking Opportunities for existing transaction:', error.message);
         }
 
         return null;
@@ -334,14 +335,14 @@ class SalesforceCrmService extends BaseCrmService {
             const result = await this.conn.sobject('Transaction__c').create(transactionRecord);
             
             if (result.success) {
-                console.log(`Created Salesforce transaction with ID: ${result.id}`);
+                logger.info(`Created Salesforce transaction with ID: ${result.id}`);
                 const createdTransaction = await this.conn.sobject('Transaction__c').retrieve(result.id);
                 return createdTransaction;
             } else {
                 throw new Error(`Transaction creation failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.log('Custom Transaction object not available, falling back to Opportunity');
+            logger.info('Custom Transaction object not available, falling back to Opportunity');
             
             // Fallback to Opportunity record
             return await this.createOpportunityAsTransaction(contactId, transactionData);
@@ -379,7 +380,7 @@ class SalesforceCrmService extends BaseCrmService {
 
             return result;
         } catch (error) {
-            console.error('Error upserting Salesforce transaction:', error);
+            logger.error('Error upserting Salesforce transaction:', error);
             throw new Error(`Salesforce transaction upsert failed: ${error.message}`);
         }
     }
@@ -434,14 +435,14 @@ class SalesforceCrmService extends BaseCrmService {
             const result = await this.conn.sobject('Opportunity').create(opportunityRecord);
             
             if (result.success) {
-                console.log(`Created Salesforce opportunity with ID: ${result.id}`);
+                logger.info(`Created Salesforce opportunity with ID: ${result.id}`);
                 const createdOpportunity = await this.conn.sobject('Opportunity').retrieve(result.id);
                 return createdOpportunity;
             } else {
                 throw new Error(`Opportunity creation failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.error('Error creating Salesforce opportunity:', error);
+            logger.error('Error creating Salesforce opportunity:', error);
             throw new Error(`Salesforce opportunity creation failed: ${error.message}`);
         }
     }
@@ -478,7 +479,7 @@ class SalesforceCrmService extends BaseCrmService {
 
         // Only proceed if we have at least one field to update
         if (Object.keys(updateRecord).length === 0) {
-            console.log('No transaction data to update');
+            logger.info('No transaction data to update');
             return null;
         }
 
@@ -490,14 +491,14 @@ class SalesforceCrmService extends BaseCrmService {
             });
             
             if (result.success) {
-                console.log(`Updated Salesforce transaction ${transactionId} with status: ${status}`);
+                logger.info(`Updated Salesforce transaction ${transactionId} with status: ${status}`);
                 const updatedTransaction = await this.conn.sobject('Transaction__c').retrieve(transactionId);
                 return updatedTransaction;
             } else {
                 throw new Error(`Transaction update failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.log('Custom Transaction object not available, trying Opportunity');
+            logger.info('Custom Transaction object not available, trying Opportunity');
             
             // Fallback to Opportunity record
             try {
@@ -524,14 +525,14 @@ class SalesforceCrmService extends BaseCrmService {
                 });
                 
                 if (result.success) {
-                    console.log(`Updated Salesforce opportunity ${transactionId}`);
+                    logger.info(`Updated Salesforce opportunity ${transactionId}`);
                     const updatedOpportunity = await this.conn.sobject('Opportunity').retrieve(transactionId);
                     return updatedOpportunity;
                 } else {
                     throw new Error(`Opportunity update failed: ${JSON.stringify(result.errors)}`);
                 }
             } catch (oppError) {
-                console.error('Error updating Salesforce opportunity:', oppError);
+                logger.error('Error updating Salesforce opportunity:', oppError);
                 throw new Error(`Salesforce transaction/opportunity update failed: ${oppError.message}`);
             }
         }
@@ -548,7 +549,7 @@ class SalesforceCrmService extends BaseCrmService {
         try {
             // First try custom Transaction object
             const query = `SELECT Id, Name, Transaction_ID__c, Status__c, Session_ID__c FROM Transaction__c WHERE Session_ID__c = '${sessionId}' LIMIT 1`;
-            console.log(`Executing Salesforce query: ${query}`);
+            logger.info(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
             
@@ -556,7 +557,7 @@ class SalesforceCrmService extends BaseCrmService {
                 return result.records[0];
             }
         } catch (error) {
-            console.log('Custom Transaction object not available or Session_ID__c field not found, checking Opportunities');
+            logger.info('Custom Transaction object not available or Session_ID__c field not found, checking Opportunities');
         }
 
         try {
@@ -564,7 +565,7 @@ class SalesforceCrmService extends BaseCrmService {
             // Note: Opportunities don't have a standard field for session ID, 
             // so we'll look in the Description field
             const query = `SELECT Id, Name, StageName, Description FROM Opportunity WHERE Description LIKE '%${sessionId}%' LIMIT 1`;
-            console.log(`Executing Salesforce query: ${query}`);
+            logger.info(`Executing Salesforce query: ${query}`);
             
             const result = await this.conn.query(query);
             
@@ -572,7 +573,7 @@ class SalesforceCrmService extends BaseCrmService {
                 return result.records[0];
             }
         } catch (error) {
-            console.log('Error checking Opportunities for existing transaction:', error.message);
+            logger.info('Error checking Opportunities for existing transaction:', error.message);
         }
 
         return null;
@@ -635,18 +636,18 @@ class SalesforceCrmService extends BaseCrmService {
             const result = await this.conn.sobject('Payout__c').create(payoutRecord);
             
             if (result.success) {
-                console.log(`Created Salesforce payout with ID: ${result.id}`);
+                logger.info(`Created Salesforce payout with ID: ${result.id}`);
                 const createdPayout = await this.conn.sobject('Payout__c').retrieve(result.id);
                 return createdPayout;
             } else {
                 throw new Error(`Payout creation failed: ${JSON.stringify(result.errors)}`);
             }
         } catch (error) {
-            console.error('Error creating Salesforce payout:', error);
+            logger.error('Error creating Salesforce payout:', error);
             
             // If custom Payout object doesn't exist, log and return null gracefully
             if (error.message.includes('sObject type') || error.message.includes('Payout__c')) {
-                console.log('Custom Payout__c object not available in Salesforce - skipping payout storage in CRM');
+                logger.info('Custom Payout__c object not available in Salesforce - skipping payout storage in CRM');
                 return null;
             }
             
@@ -683,7 +684,7 @@ class SalesforceCrmService extends BaseCrmService {
 
         // If no contacts have matching names, return null to create new contact
         if (contactsWithMatchingNames.length === 0) {
-            console.log('No contacts found with matching name, will create new contact');
+            logger.info('No contacts found with matching name, will create new contact');
             return null;
         }
 
@@ -721,7 +722,7 @@ class SalesforceCrmService extends BaseCrmService {
         // Sort by score (highest first) and return best match
         const bestMatch = scoredContacts.sort((a, b) => b.score - a.score)[0];
         
-        console.log(`Selected contact with score ${bestMatch.score}: ${bestMatch.contact.FirstName} ${bestMatch.contact.LastName} (${bestMatch.contact.Email})`);
+        logger.info(`Selected contact with score ${bestMatch.score}: ${bestMatch.contact.FirstName} ${bestMatch.contact.LastName} (${bestMatch.contact.Email})`);
         
         return bestMatch.contact;
     }

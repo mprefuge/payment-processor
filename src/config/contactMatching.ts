@@ -1,3 +1,4 @@
+import { logger } from '../lib/logger';
 export interface ContactMatchWeights {
   emailExact: number;
   phoneExact: number;
@@ -121,7 +122,7 @@ export function validateConfig(config: ContactMatchConfig): true {
 
   const totalMaxWeight = Object.values(config.weights).reduce((sum, weight) => sum + weight, 0);
   if (totalMaxWeight < config.thresholds.high) {
-    console.warn(
+    logger.warn(
       `Warning: Maximum possible score (${totalMaxWeight}) is less than high threshold (${config.thresholds.high})`,
     );
   }

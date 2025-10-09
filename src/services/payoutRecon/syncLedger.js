@@ -1,3 +1,4 @@
+const { logger: rootLogger } = require('../../lib/logger');
 const crypto = require('crypto');
 const { createPersistentStorageClients } = require('../idempotency/storage/persistentStoreFactory');
 
@@ -13,7 +14,7 @@ const { createPersistentStorageClients } = require('../idempotency/storage/persi
  */
 
 class SyncLedger {
-    constructor({ storageClient, logger = console, namespace } = {}) {
+    constructor({ storageClient, logger = rootLogger, namespace } = {}) {
         const storageNamespace = namespace || process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
 
         const clients = storageClient
@@ -106,7 +107,7 @@ class SyncLedger {
         };
 
         await this.storage.set(key, record);
-        this.logger.log(`[SyncLedger] Recorded sync for payout: ${payoutId}`);
+        this.logger.info(`[SyncLedger] Recorded sync for payout: ${payoutId}`);
 
         return record;
     }
@@ -161,7 +162,7 @@ class SyncLedger {
         }
 
         await this.storage.set(key, record);
-        this.logger.log(`[SyncLedger] Updated sync status for payout ${payoutId} to: ${status}`);
+        this.logger.info(`[SyncLedger] Updated sync status for payout ${payoutId} to: ${status}`);
 
         return record;
     }
@@ -212,7 +213,7 @@ class SyncLedger {
 
     async clear() {
         await this.storage.clear();
-        this.logger.log('[SyncLedger] Cleared all records');
+        this.logger.info('[SyncLedger] Cleared all records');
     }
 }
 

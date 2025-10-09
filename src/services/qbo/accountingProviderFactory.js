@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 const QuickBooksProvider = require('./quickbooksProvider');
 
 /**
@@ -91,7 +92,7 @@ class AccountingProviderFactory {
 
         if (!config.oauthTokens.refreshToken) {
             // Warning but not fatal - can still work without refresh
-            console.warn('[QBO] Warning: No refresh token provided. Token refresh will not be available.');
+            logger.warn('[QBO] Warning: No refresh token provided. Token refresh will not be available.');
         }
 
         return { isValid: true };

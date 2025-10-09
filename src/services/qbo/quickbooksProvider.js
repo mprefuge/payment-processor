@@ -1,3 +1,4 @@
+const { logger: rootLogger, createLogger } = require('../../lib/logger');
 const BaseAccountingProvider = require('./baseAccountingProvider');
 const QuickBooks = require('node-quickbooks');
 
@@ -14,7 +15,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
         this.companyId = config.companyId;
         this.oauthTokens = config.oauthTokens || {};
         this.environment = config.environment || 'sandbox'; // 'sandbox' or 'production'
-        this.logger = console;
+        this.logger = createLogger({ scope: 'QuickBooksProvider' });
         
         // Initialize QuickBooks client if tokens are available
         this.qbo = null;
@@ -51,7 +52,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
         } catch (error) {
             // If 401, try to refresh token and retry once
             if (error.fault && error.fault.type === 'AUTHENTICATION') {
-                this.logger.log('[QBO] Access token expired, refreshing...');
+                this.logger.info('[QBO] Access token expired, refreshing...');
                 await this.refreshTokens();
                 return await apiCall();
             }
@@ -144,7 +145,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Ensure required chart of accounts exist
      */
     async ensureChartOfAccounts(accounts) {
-        this.logger.log('[QBO] Ensuring chart of accounts:', accounts.map(a => a.name));
+        this.logger.info('[QBO] Ensuring chart of accounts:', accounts.map(a => a.name));
 
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -167,7 +168,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 if (existingAccounts.length > 0) {
                     // Account exists
                     accountMap[account.name] = existingAccounts[0].Id;
-                    this.logger.log(`[QBO] Found existing account: ${account.name} (ID: ${existingAccounts[0].Id})`);
+                    this.logger.info(`[QBO] Found existing account: ${account.name} (ID: ${existingAccounts[0].Id})`);
                 } else {
                     // Create new account
                     const newAccount = {
@@ -186,7 +187,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                     );
 
                     accountMap[account.name] = created.Id;
-                    this.logger.log(`[QBO] Created account: ${account.name} (ID: ${created.Id})`);
+                    this.logger.info(`[QBO] Created account: ${account.name} (ID: ${created.Id})`);
                 }
             } catch (error) {
                 this.logger.error(`[QBO] Error ensuring account ${account.name}:`, error.message);
@@ -271,7 +272,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
         });
 
         if (matchedCustomer) {
-            this.logger.log(`[QBO] Found existing customer: ${matchedCustomer.DisplayName} (ID: ${matchedCustomer.Id})`);
+            this.logger.info(`[QBO] Found existing customer: ${matchedCustomer.DisplayName} (ID: ${matchedCustomer.Id})`);
             return {
                 id: matchedCustomer.Id,
                 displayName: matchedCustomer.DisplayName || displayName
@@ -305,7 +306,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 })
             );
 
-            this.logger.log(`[QBO] Created customer: ${created.DisplayName || displayName} (ID: ${created.Id})`);
+            this.logger.info(`[QBO] Created customer: ${created.DisplayName || displayName} (ID: ${created.Id})`);
 
             return {
                 id: created.Id,
@@ -393,7 +394,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
         });
 
         if (matchedVendor) {
-            this.logger.log(`[QBO] Found existing vendor: ${matchedVendor.DisplayName} (ID: ${matchedVendor.Id})`);
+            this.logger.info(`[QBO] Found existing vendor: ${matchedVendor.DisplayName} (ID: ${matchedVendor.Id})`);
             return {
                 id: matchedVendor.Id,
                 displayName: matchedVendor.DisplayName || displayName
@@ -423,7 +424,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 })
             );
 
-            this.logger.log(`[QBO] Created vendor: ${created.DisplayName || displayName} (ID: ${created.Id})`);
+            this.logger.info(`[QBO] Created vendor: ${created.DisplayName || displayName} (ID: ${created.Id})`);
 
             return {
                 id: created.Id,
@@ -440,7 +441,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Upsert a journal entry (idempotent)
      */
     async upsertJournalEntry(journalEntry) {
-        this.logger.log('[QBO] Upserting journal entry:', journalEntry.docNumber);
+        this.logger.info('[QBO] Upserting journal entry:', journalEntry.docNumber);
 
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -469,7 +470,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             }
         }
 
-        this.logger.log(`[QBO] Journal entry has ${journalEntry.lines.length} lines, debits=$${(totalDebits / 100).toFixed(2)}, credits=$${(totalCredits / 100).toFixed(2)}`);
+        this.logger.info(`[QBO] Journal entry has ${journalEntry.lines.length} lines, debits=$${(totalDebits / 100).toFixed(2)}, credits=$${(totalCredits / 100).toFixed(2)}`);
 
         try {
             // Search for existing JE by DocNumber using findJournalEntries
@@ -485,7 +486,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             if (existingEntries.length > 0) {
                 // Entry exists - return existing
                 const existing = existingEntries[0];
-                this.logger.log(`[QBO] Journal entry already exists: ${journalEntry.docNumber} (ID: ${existing.Id})`);
+                this.logger.info(`[QBO] Journal entry already exists: ${journalEntry.docNumber} (ID: ${existing.Id})`);
                 return {
                     id: existing.Id,
                     docNumber: existing.DocNumber,
@@ -603,7 +604,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 })
             );
 
-            this.logger.log(`[QBO] Created journal entry: ${created.DocNumber} (ID: ${created.Id})`);
+            this.logger.info(`[QBO] Created journal entry: ${created.DocNumber} (ID: ${created.Id})`);
             
             return {
                 id: created.Id,
@@ -636,7 +637,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Upsert a transfer between accounts (idempotent)
      */
     async upsertTransfer(transfer) {
-        this.logger.log('[QBO] Upserting transfer:', transfer.docNumber);
+        this.logger.info('[QBO] Upserting transfer:', transfer.docNumber);
         
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -681,7 +682,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             });
 
             if (matchingTransfer) {
-                this.logger.log(`[QBO] Transfer already exists: ${transfer.docNumber} (ID: ${matchingTransfer.Id})`);
+                this.logger.info(`[QBO] Transfer already exists: ${transfer.docNumber} (ID: ${matchingTransfer.Id})`);
                 return {
                     id: matchingTransfer.Id,
                     docNumber: transfer.docNumber,
@@ -720,7 +721,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 })
             );
 
-            this.logger.log(`[QBO] Created transfer: ${transfer.docNumber} (ID: ${created.Id})`);
+            this.logger.info(`[QBO] Created transfer: ${transfer.docNumber} (ID: ${created.Id})`);
             
             return {
                 id: created.Id,
@@ -750,7 +751,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Upsert a bank deposit (idempotent)
      */
     async upsertDeposit(deposit) {
-        this.logger.log('[QBO] Upserting deposit:', deposit.docNumber);
+        this.logger.info('[QBO] Upserting deposit:', deposit.docNumber);
         
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -778,7 +779,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
             if (existingDeposits.length > 0) {
                 // Deposit exists - return existing
                 const existing = existingDeposits[0];
-                this.logger.log(`[QBO] Deposit already exists: ${deposit.docNumber} (ID: ${existing.Id})`);
+                this.logger.info(`[QBO] Deposit already exists: ${deposit.docNumber} (ID: ${existing.Id})`);
                 return {
                     id: existing.Id,
                     docNumber: deposit.docNumber,
@@ -824,7 +825,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 })
             );
 
-            this.logger.log(`[QBO] Created deposit: ${deposit.docNumber} (ID: ${created.Id})`);
+            this.logger.info(`[QBO] Created deposit: ${deposit.docNumber} (ID: ${created.Id})`);
             
             return {
                 id: created.Id,
@@ -853,7 +854,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Attach a document to a transaction
      */
     async attachDocument(transactionId, attachment) {
-        this.logger.log('[QBO] Attaching document to transaction:', transactionId);
+        this.logger.info('[QBO] Attaching document to transaction:', transactionId);
         
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -916,7 +917,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 })
             );
 
-            this.logger.log(`[QBO] Successfully connected to: ${companyInfo.CompanyName}`);
+            this.logger.info(`[QBO] Successfully connected to: ${companyInfo.CompanyName}`);
             
             return {
                 healthy: true,
@@ -942,7 +943,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Get account by ID
      */
     async getAccount(accountId) {
-        this.logger.log('[QBO] Getting account:', accountId);
+        this.logger.info('[QBO] Getting account:', accountId);
         
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -975,7 +976,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      * Find accounts by criteria
      */
     async findAccounts(criteria) {
-        this.logger.log('[QBO] Finding accounts:', criteria);
+        this.logger.info('[QBO] Finding accounts:', criteria);
         
         if (!this.qbo) {
             throw new Error('QuickBooks client not initialized. Check configuration.');
@@ -1025,7 +1026,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
      */
     async refreshTokens(options = {}) {
         const { persist = true } = options;
-        this.logger.log(`[QBO] Refreshing OAuth tokens${persist ? '' : ' (validation only)'}`);
+        this.logger.info(`[QBO] Refreshing OAuth tokens${persist ? '' : ' (validation only)'}`);
 
         if (!this.oauthTokens.refreshToken) {
             throw new Error('No refresh token available');
@@ -1073,7 +1074,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 // Reinitialize client with new token
                 this._initializeClient();
 
-                this.logger.log('[QBO] Successfully refreshed OAuth tokens');
+                this.logger.info('[QBO] Successfully refreshed OAuth tokens');
 
                 // Note: In production, you should persist these tokens to storage
                 // so they can be used across sessions
@@ -1084,7 +1085,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 return true;
             }
 
-            this.logger.log('[QBO] Successfully validated OAuth token exchange');
+            this.logger.info('[QBO] Successfully validated OAuth token exchange');
             return refreshedTokens;
         } catch (error) {
             this.logger.error('[QBO] Failed to refresh tokens:', error);

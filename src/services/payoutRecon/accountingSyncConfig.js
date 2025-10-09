@@ -1,3 +1,4 @@
+const { createLogger } = require('../../lib/logger');
 /**
  * Accounting Sync Configuration Service
  * 
@@ -11,7 +12,7 @@
 class AccountingSyncConfig {
     constructor() {
         this.config = this._loadFromEnvironment();
-        this.logger = console;
+        this.logger = createLogger({ scope: 'AccountingSyncConfig' });
         this.accountOverrides = {
             operatingBank: {}
         };

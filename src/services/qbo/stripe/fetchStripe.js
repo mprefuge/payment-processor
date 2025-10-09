@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const DEFAULT_LIMIT = 100;
 const MAX_AUTOPAGE = 1000;
 
@@ -30,7 +32,7 @@ function normalizeSince(since) {
     throw new Error(`Unsupported since value: ${since}`);
 }
 
-async function fetchAll(stripeListFn, params, logger = console) {
+async function fetchAll(stripeListFn, params, logger = rootLogger) {
     const items = [];
     let startingAfter;
     let page = 0;
@@ -73,7 +75,7 @@ function createListFetcher({ listFn, baseParams }) {
 
         const sinceEpoch = normalizeSince(since);
         const limit = options.limit || DEFAULT_LIMIT;
-        const logger = options.logger || console;
+        const logger = options.logger || rootLogger;
 
         const { createdField, expand: baseExpandParam, ...restBaseParams } = baseParams || {};
 
@@ -188,7 +190,7 @@ async function fetchBalanceTransactionsForPayout(stripe, payoutId, options = {})
         throw new Error('A payoutId is required to fetch balance transactions');
     }
 
-    const logger = options.logger || console;
+    const logger = options.logger || rootLogger;
     const expand = Array.from(new Set([
         'data.source',
         'data.source.charge',

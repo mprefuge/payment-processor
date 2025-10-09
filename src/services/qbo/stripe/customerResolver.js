@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const UNKNOWN_DONOR_NAME = 'Unknown Donor (Stripe)';
 
 function sanitizeString(value) {
@@ -39,7 +41,7 @@ async function resolveQboCustomer(charge, quickbooksProvider, options = {}) {
         throw new Error('A QuickBooks provider with ensureCustomer is required to resolve customers');
     }
 
-    const logger = options.logger || console;
+    const logger = options.logger || rootLogger;
     const customerDetails = extractCustomerDetails(charge);
 
     const payload = {

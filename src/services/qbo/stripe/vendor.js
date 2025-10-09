@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const DEFAULT_STRIPE_VENDOR = {
     displayName: 'Stripe',
     email: 'support@stripe.com',
@@ -11,7 +13,7 @@ async function ensureStripeVendor(quickbooksProvider, options = {}) {
         throw new Error('A QuickBooks provider with ensureVendor is required to resolve the Stripe vendor');
     }
 
-    const logger = options.logger || console;
+    const logger = options.logger || rootLogger;
     const configuredVendorId = options.vendorId || process.env.VENDOR_STRIPE_ID;
 
     if (configuredVendorId) {
