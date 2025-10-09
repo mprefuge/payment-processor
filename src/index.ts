@@ -1,5 +1,7 @@
 import type { FunctionHandler } from '@azure/functions';
 
+import './config/env';
+
 const healthCheck: FunctionHandler = require('./handlers/healthCheck');
 const processTransaction: FunctionHandler = require('./handlers/processTransaction');
 const stripeWebhook: FunctionHandler = require('./handlers/stripeWebhook');
