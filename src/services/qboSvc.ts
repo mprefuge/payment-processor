@@ -135,6 +135,21 @@ export interface PostChargeToQboResult {
   type: Extract<QuickBooksDocType, 'sales-receipt' | 'journal-entry'>;
 }
 
+export interface PostRefundToQboInput {
+  amount: number;
+  memo?: string;
+  date: string | Date;
+  options?: PostOptions;
+}
+
+export interface PostDisputeToQboInput {
+  lossAmount: number;
+  feeAmount: number;
+  memo?: string;
+  date: string | Date;
+  options?: PostOptions;
+}
+
 const ensurePositiveAmount = (value: number, label: string): number => {
   if (!Number.isFinite(value) || value < 0) {
     throw new Error(`${label} must be a non-negative finite number.`);
@@ -499,6 +514,101 @@ export const postChargeToQbo = async ({
   return { qboId: journalResult.id, type: 'journal-entry' };
 };
 
+export const postRefundToQbo = async ({
+  amount,
+  memo,
+  date,
+  options,
+}: PostRefundToQboInput): Promise<PostChargeToQboResult> => {
+  const refundAmount = ensurePositiveAmount(amount, 'Refund amount');
+
+  if (refundAmount === 0) {
+    throw new Error('Refund amount must be greater than zero.');
+  }
+
+  const docNumber = buildDocNumber('REF', date, refundAmount);
+  const lines = [
+    createJournalEntryLine('debit', env.quickBooks.accounts.refunds, refundAmount, memo),
+    createJournalEntryLine('credit', env.quickBooks.accounts.stripeClearing, refundAmount, memo),
+  ].filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
+
+  const journalEntry: QuickBooksJournalEntry = {
+    DocNumber: docNumber,
+    TxnDate: normalizeDate(date),
+    PrivateNote: memo?.trim() || undefined,
+    Line: lines,
+  };
+
+  const result = await postJournalEntry(journalEntry, options);
+  return { qboId: result.id, type: 'journal-entry' };
+};
+
+export const postDisputeToQbo = async ({
+  lossAmount,
+  feeAmount,
+  memo,
+  date,
+  options,
+}: PostDisputeToQboInput): Promise<PostChargeToQboResult> => {
+  const normalizedLoss = ensurePositiveAmount(lossAmount, 'Dispute loss amount');
+  const normalizedFee = ensurePositiveAmount(feeAmount, 'Dispute fee amount');
+  const total = normalizedLoss + normalizedFee;
+
+  if (total === 0) {
+    throw new Error('Dispute posting requires a non-zero amount.');
+  }
+
+  const docNumber = buildDocNumber('DSP', date, total);
+  const privateNote = memo?.trim() || undefined;
+  const lines: QuickBooksJournalEntryLine[] = [];
+
+  if (normalizedLoss > 0) {
+    const lossLine = createJournalEntryLine(
+      'debit',
+      env.quickBooks.accounts.disputeLosses,
+      normalizedLoss,
+      memo,
+    );
+    if (lossLine) {
+      lines.push(lossLine);
+    }
+  }
+
+  if (normalizedFee > 0) {
+    const feeLine = createJournalEntryLine(
+      'debit',
+      env.quickBooks.accounts.fees,
+      normalizedFee,
+      memo,
+    );
+    if (feeLine) {
+      lines.push(feeLine);
+    }
+  }
+
+  const clearingLine = createJournalEntryLine(
+    'credit',
+    env.quickBooks.accounts.stripeClearing,
+    total,
+    memo,
+  );
+  if (clearingLine) {
+    lines.push(clearingLine);
+  }
+
+  const filteredLines = lines.filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
+
+  const journalEntry: QuickBooksJournalEntry = {
+    DocNumber: docNumber,
+    TxnDate: normalizeDate(date),
+    PrivateNote: privateNote,
+    Line: filteredLines,
+  };
+
+  const result = await postJournalEntry(journalEntry, options);
+  return { qboId: result.id, type: 'journal-entry' };
+};
+
 export default {
   buildSalesReceipt,
   buildFeesJE,
@@ -508,4 +618,6 @@ export default {
   postJournalEntry,
   postBankDeposit,
   postChargeToQbo,
+  postRefundToQbo,
+  postDisputeToQbo,
 };

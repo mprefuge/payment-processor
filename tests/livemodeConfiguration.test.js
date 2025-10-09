@@ -118,7 +118,8 @@ async function runLivemodeConfigurationTests() {
         assert(context.res.status === 200, 'Expected successful response status');
 
         const response = JSON.parse(context.res.body);
-        assert(response.success === true, 'Response should indicate success');
+        assert(typeof response.url === 'string' && response.url.length > 0, 'Response should include checkout session URL');
+        assert(typeof response.id === 'string' && response.id.length > 0, 'Response should include checkout session ID');
     });
 
     await runTest('Uses test configuration even when request supplies live flag', async () => {
