@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const fs = require('fs/promises');
 const path = require('path');
 
@@ -8,7 +10,7 @@ class ProcessedStripeStore {
         this.storagePath = options.storagePath
             || process.env.STRIPE_QBO_STATE_PATH
             || path.join(process.cwd(), '.data', 'stripe-qbo-state.json');
-        this.logger = options.logger || console;
+        this.logger = options.logger || rootLogger;
         this.fs = options.fs || fs;
         this.records = new Map();
         this.pending = new Set();

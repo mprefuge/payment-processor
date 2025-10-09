@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 const AccountingSyncConfig = require('../payoutRecon/accountingSyncConfig');
 const AccountingProviderFactory = require('../qbo/accountingProviderFactory');
 const PayoutSyncService = require('../payoutRecon/payoutSyncService');
@@ -35,7 +36,7 @@ function getCrmServiceInstance() {
         
         return CrmFactory.createCrmService(crmConfig);
     } catch (error) {
-        console.warn('Failed to initialize CRM service:', error.message);
+        logger.warn('Failed to initialize CRM service:', error.message);
         return null;
     }
 }

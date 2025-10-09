@@ -1,3 +1,4 @@
+const { logger: rootLogger } = require('../../lib/logger');
 /**
  * Webhook Event Store
  * 
@@ -11,7 +12,7 @@
 const { createPersistentStorageClients } = require('./storage/persistentStoreFactory');
 
 class WebhookEventStore {
-    constructor({ storageClient, logger = console, namespace } = {}) {
+    constructor({ storageClient, logger = rootLogger, namespace } = {}) {
         const storageNamespace = namespace || process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
 
         const clients = storageClient
@@ -47,7 +48,7 @@ class WebhookEventStore {
         };
 
         await this.storage.set(event.id, record);
-        this.logger.log(`[WebhookEventStore] Recorded event: ${event.id} (${event.type})`);
+        this.logger.info(`[WebhookEventStore] Recorded event: ${event.id} (${event.type})`);
 
         return record;
     }
@@ -99,7 +100,7 @@ class WebhookEventStore {
         }
 
         await this.storage.set(eventId, event);
-        this.logger.log(`[WebhookEventStore] Updated event ${eventId} to status: ${status}`);
+        this.logger.info(`[WebhookEventStore] Updated event ${eventId} to status: ${status}`);
 
         return event;
     }
@@ -143,7 +144,7 @@ class WebhookEventStore {
         }
 
         if (removed > 0) {
-            this.logger.log(`[WebhookEventStore] Cleaned up ${removed} old events`);
+            this.logger.info(`[WebhookEventStore] Cleaned up ${removed} old events`);
         }
 
         return removed;
@@ -151,7 +152,7 @@ class WebhookEventStore {
 
     async clear() {
         await this.storage.clear();
-        this.logger.log('[WebhookEventStore] Cleared all events');
+        this.logger.info('[WebhookEventStore] Cleared all events');
     }
 }
 

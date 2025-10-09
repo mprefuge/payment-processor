@@ -1,3 +1,4 @@
+const { logger } = require('../lib/logger');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const Stripe = require('stripe');
@@ -329,10 +330,10 @@ const initializeServices = (isLiveMode) => {
         try {
             sgMail.setApiKey(sendgridKey);
         } catch (error) {
-            console.error('Failed to initialize SendGrid:', error.message);
+            logger.error('Failed to initialize SendGrid:', error.message);
         }
     } else {
-        console.log('SendGrid API key not configured. Email notifications disabled.');
+        logger.info('SendGrid API key not configured. Email notifications disabled.');
     }
 
     return { stripe };
@@ -343,7 +344,7 @@ const getCrmConfig = () => {
     const provider = process.env.CRM_PROVIDER;
     
     if (!provider) {
-        console.log('No CRM provider configured, skipping CRM integration');
+        logger.info('No CRM provider configured, skipping CRM integration');
         return null;
     }
 
@@ -360,7 +361,7 @@ const getCrmConfig = () => {
             };
         
         default:
-            console.error(`Unsupported CRM provider: ${provider}`);
+            logger.error(`Unsupported CRM provider: ${provider}`);
             return null;
     }
 };
@@ -489,7 +490,7 @@ const syncContactToCrm = async (context, customerData) => {
     } catch (error) {
         // Log error but don't fail the checkout process
         context.log(`Error syncing contact to CRM: ${error.message}`);
-        console.error('CRM sync error details:', error);
+        logger.error('CRM sync error details:', error);
         return null;
     }
 };
@@ -546,7 +547,7 @@ const createPendingTransaction = async (context, session, contactId, transaction
     } catch (error) {
         // Log error but don't fail the checkout process
         context.log(`Error creating pending transaction: ${error.message}`);
-        console.error('Pending transaction creation error details:', error);
+        logger.error('Pending transaction creation error details:', error);
         return null;
     }
 };
@@ -589,7 +590,7 @@ const upsertSalesforceTransaction = async (context, session, requestData) => {
         return transactionRecord;
     } catch (error) {
         context.log(`Error upserting pending transaction: ${error.message}`);
-        console.error('Pending transaction upsert error details:', error);
+        logger.error('Pending transaction upsert error details:', error);
         return null;
     }
 };
@@ -653,7 +654,7 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
         
         return validCustomers;
     } catch (error) {
-        console.error('Error searching Stripe customer:', error);
+        logger.error('Error searching Stripe customer:', error);
         throw error;
     }
 };
@@ -686,7 +687,7 @@ const createStripeCustomer = async (stripe, customerData) => {
         });
         return customer;
     } catch (error) {
-        console.error('Error creating Stripe customer:', error);
+        logger.error('Error creating Stripe customer:', error);
         throw error;
     }
 };
@@ -725,7 +726,7 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
         const customer = await stripe.customers.update(customerId, updateData);
         return customer;
     } catch (error) {
-        console.error('Error updating Stripe customer:', error);
+        logger.error('Error updating Stripe customer:', error);
         throw error;
     }
 };
@@ -766,7 +767,7 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
         const session = await stripe.checkout.sessions.create(baseParams);
         return session;
     } catch (error) {
-        console.error('Error creating checkout session:', error);
+        logger.error('Error creating checkout session:', error);
         throw error;
     }
 };
@@ -894,7 +895,7 @@ module.exports = async function (context, req) {
 
     } catch (error) {
         log('Error processing donation', { error: error.message });
-        console.error('Donation processing error details:', { requestId, stack: error.stack });
+        logger.error('Donation processing error details:', { requestId, stack: error.stack });
 
         context.res = {
             status: 500,

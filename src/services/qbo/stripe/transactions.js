@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const { UNKNOWN_DONOR_NAME } = require('./customerResolver');
 
 const CENT_TOLERANCE = 1; // one cent
@@ -276,7 +278,7 @@ function mapCharge(balanceTransaction, context) {
         throw new Error('Customer reference is required for revenue postings');
     }
 
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const amounts = computeAmounts(balanceTransaction, context.companyHomeCurrency);
     validateAmounts(amounts, logger, { balanceTransactionId: balanceTransaction.id });
 
@@ -370,7 +372,7 @@ function createFeeLine(amounts, accounts, vendor, context, descriptionBuilder) {
 
 function mapRefund(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const vendor = context.vendor;
     const refund = context.refund || {};
     const charge = context.charge || {};
@@ -431,7 +433,7 @@ function mapRefund(balanceTransaction, context) {
 
 function mapDispute(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const vendor = context.vendor;
     const dispute = context.dispute || {};
     const charge = context.charge || {};
@@ -490,7 +492,7 @@ function mapDispute(balanceTransaction, context) {
 
 function mapDisputeReversal(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const vendor = context.vendor;
     const dispute = context.dispute || {};
     const charge = context.charge || {};
@@ -550,7 +552,7 @@ function mapDisputeReversal(balanceTransaction, context) {
 function mapFee(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
     const vendor = context.vendor;
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const amounts = computeAmounts(balanceTransaction, context.companyHomeCurrency);
     validateAmounts(amounts, logger, { balanceTransactionId: balanceTransaction.id });
 
@@ -604,7 +606,7 @@ function mapFee(balanceTransaction, context) {
 function mapFeeRefund(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
     const vendor = context.vendor;
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const amounts = computeAmounts(balanceTransaction, context.companyHomeCurrency);
     validateAmounts(amounts, logger, { balanceTransactionId: balanceTransaction.id });
 
@@ -657,7 +659,7 @@ function mapFeeRefund(balanceTransaction, context) {
 
 function mapAdjustment(balanceTransaction, context) {
     const accounts = ensureAccounts(context.accounts);
-    const logger = context.logger || console;
+    const logger = context.logger || rootLogger;
     const amounts = computeAmounts(balanceTransaction, context.companyHomeCurrency);
     validateAmounts(amounts, logger, { balanceTransactionId: balanceTransaction.id });
 
@@ -763,7 +765,7 @@ function buildChargeJE(charge, accounts, vendor, customer, options = {}) {
         customer,
         charge,
         companyHomeCurrency: options.companyHomeCurrency || process.env.COMPANY_HOME_CURRENCY,
-        logger: options.logger || console
+        logger: options.logger || rootLogger
     };
 
     const mapped = mapCharge(balanceTransaction, context);

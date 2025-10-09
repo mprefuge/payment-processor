@@ -1,8 +1,9 @@
+const { logger: rootLogger } = require('../../../lib/logger');
 const fs = require('fs');
 const path = require('path');
 
 class FileKeyValueStore {
-    constructor({ filePath, logger = console } = {}) {
+    constructor({ filePath, logger = rootLogger } = {}) {
         if (!filePath) {
             throw new Error('filePath is required for FileKeyValueStore');
         }

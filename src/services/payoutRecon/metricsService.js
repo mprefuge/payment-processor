@@ -1,3 +1,4 @@
+const { createLogger } = require('../../lib/logger');
 /**
  * Metrics Service
  * 
@@ -44,7 +45,7 @@ class MetricsService {
             errors: 0,
             cacheHits: 0
         };
-        this.logger = console;
+        this.logger = createLogger({ scope: 'MetricsService' });
     }
 
     /**
@@ -99,7 +100,7 @@ class MetricsService {
             this.metrics.noMatchesFound++;
         }
 
-        this.logger.log('MetricsService: Recorded decision', {
+        this.logger.info('MetricsService: Recorded decision', {
             action: decision.action,
             reason: decision.reason,
             confidence: decision.confidence,
@@ -309,7 +310,7 @@ class MetricsService {
             cacheHits: 0
         };
         
-        this.logger.log('MetricsService: Reset all metrics');
+        this.logger.info('MetricsService: Reset all metrics');
     }
 }
 

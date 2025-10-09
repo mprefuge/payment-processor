@@ -1,3 +1,4 @@
+const { createLogger } = require('../../lib/logger');
 const Stripe = require('stripe');
 
 /**
@@ -19,7 +20,7 @@ class PayoutSyncService {
         this.syncLedger = syncLedger;
         this.reviewTaskService = reviewTaskService;
         this.crmService = crmService;
-        this.logger = console;
+        this.logger = createLogger({ scope: 'PayoutSyncService' });
         this.platformAccountId = null;
     }
 

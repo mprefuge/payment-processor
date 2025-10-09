@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 const sgMail = require('@sendgrid/mail');
 
 const sendGridApiKey = process.env.SENDGRID_API_KEY;
@@ -8,10 +9,10 @@ if (sendGridApiKey) {
         sgMail.setApiKey(sendGridApiKey);
         isSendGridEnabled = true;
     } catch (error) {
-        console.error('Failed to initialize SendGrid API key:', error.message);
+        logger.error('Failed to initialize SendGrid API key:', error.message);
     }
 } else {
-    console.warn('SENDGRID_API_KEY not configured. Email delivery disabled.');
+    logger.warn('SENDGRID_API_KEY not configured. Email delivery disabled.');
 }
 
 /**
@@ -55,7 +56,7 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
             // If this is the first successful payment, send notification
             return succeededPayments.length <= 1;
         } catch (error) {
-            console.error('Error checking payment history for FIRST policy:', error);
+            logger.error('Error checking payment history for FIRST policy:', error);
             // On error, default to sending the notification
             return true;
         }
@@ -67,7 +68,7 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
         const threshold = parseFloat(thresholdStr);
         
         if (isNaN(threshold)) {
-            console.error(`Invalid ABOVE threshold: ${thresholdStr}, defaulting to send notification`);
+            logger.error(`Invalid ABOVE threshold: ${thresholdStr}, defaulting to send notification`);
             return true;
         }
 
@@ -82,7 +83,7 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
         const threshold = parseFloat(thresholdStr);
         
         if (isNaN(threshold)) {
-            console.error(`Invalid MINIMUM threshold: ${thresholdStr}, defaulting to send notification`);
+            logger.error(`Invalid MINIMUM threshold: ${thresholdStr}, defaulting to send notification`);
             return true;
         }
 
@@ -92,14 +93,14 @@ const shouldSendNotification = async (stripe, customer, amount, notificationPoli
     }
 
     // Unknown policy, default to sending notification
-    console.warn(`Unknown notification policy: ${notificationPolicy}, defaulting to ALL`);
+    logger.warn(`Unknown notification policy: ${notificationPolicy}, defaulting to ALL`);
     return true;
 };
 
 // Send notification email for successful payment
 const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
     if (!isSendGridEnabled) {
-        console.warn('SendGrid API key not configured. Skipping payment success email delivery.');
+        logger.warn('SendGrid API key not configured. Skipping payment success email delivery.');
         return { status: 'skipped', reason: 'sendgrid_disabled' };
     }
 
@@ -109,7 +110,7 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
         : process.env.NOTIFICATION_EMAIL_TEST;
 
     if (!toEmail) {
-        console.log('No notification email configured');
+        logger.info('No notification email configured');
         return { status: 'skipped', reason: 'missing_recipient' };
     }
 
@@ -127,7 +128,7 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
     );
 
     if (!shouldSend) {
-        console.log(`Notification skipped based on policy: ${notificationPolicy}`);
+        logger.info(`Notification skipped based on policy: ${notificationPolicy}`);
         return { status: 'skipped', reason: 'policy_skip' };
     }
     
@@ -180,10 +181,10 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
     
     try {
         await sgMail.send(msg);
-        console.log('Payment success notification email sent successfully');
+        logger.info('Payment success notification email sent successfully');
         return { status: 'sent' };
     } catch (error) {
-        console.error('Error sending payment success notification email:', error);
+        logger.error('Error sending payment success notification email:', error);
         // Don't throw here - email failure shouldn't break the payment flow
         return { status: 'failed', error };
     }

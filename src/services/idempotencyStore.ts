@@ -1,3 +1,5 @@
+import type { Logger } from '../lib/logger';
+import { logger as rootLogger } from '../lib/logger';
 import { TableClient, RestError } from '@azure/data-tables';
 import type { TableEntityResult } from '@azure/data-tables';
 
@@ -19,7 +21,7 @@ export interface AzureIdempotencyStoreOptions {
   /** Base delay (in milliseconds) between lock attempts. */
   lockRetryDelayMs?: number;
   /** Optional logger implementation. */
-  logger?: Pick<typeof console, 'debug' | 'info' | 'warn' | 'error'>;
+  logger?: Pick<Logger, 'debug' | 'info' | 'warn' | 'error'>;
 }
 
 export interface IdempotencyStore {
@@ -64,7 +66,7 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   private readonly lockTtlSeconds: number;
   private readonly lockMaxAttempts: number;
   private readonly lockRetryDelayMs: number;
-  private readonly logger: Pick<typeof console, 'debug' | 'info' | 'warn' | 'error'>;
+  private readonly logger: Pick<Logger, 'debug' | 'info' | 'warn' | 'error'>;
   private readonly ensureTablePromise: Promise<void>;
 
   private readonly processedKeys = new Set<string>();
@@ -73,7 +75,7 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   private reschedulePersist = false;
 
   constructor(options: AzureIdempotencyStoreOptions = {}) {
-    const logger = options.logger ?? console;
+    const logger = options.logger ?? rootLogger;
     this.logger = logger;
 
     const tableName = options.tableName ?? process.env.IDEMPOTENCY_TABLE_NAME ?? DEFAULT_TABLE_NAME;

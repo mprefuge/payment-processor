@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger: rootLogger } = require('../../../lib/logger');
+
 const MAX_ATTACHMENT_BYTES = 1.5 * 1024 * 1024; // 1.5MB guardrail
 
 function serializeArtifact(artifact) {
@@ -48,7 +50,7 @@ async function attachStripeArtifacts(quickbooksProvider, transactionId, artifact
         throw new Error('QuickBooks provider with attachDocument is required to attach artifacts');
     }
 
-    const logger = options.logger || console;
+    const logger = options.logger || rootLogger;
     const attachments = artifacts
         .map((artifact, index) => buildAttachment(artifact, index))
         .filter(Boolean);
