@@ -4,13 +4,18 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { createContext } = require('./testUtils');
 
+vi.mock('../src/services/salesforceSvc', () => ({
+    createSalesforceSvc: vi.fn()
+}), { virtual: true });
+
 describe('payoutSyncTrigger', () => {
     let handler;
     let internals;
 
     beforeEach(() => {
-        vi.resetModules();
-        handler = require('../payoutSyncTrigger');
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2024-05-20T12:00:00Z'));
+        handler = require('../src/handlers/payoutSyncTrigger.js');
         internals = handler.__internals;
     });
 
@@ -20,22 +25,141 @@ describe('payoutSyncTrigger', () => {
         }
         handler = undefined;
         internals = undefined;
+        vi.useRealTimers();
         vi.restoreAllMocks();
     });
 
-    it('completes without throwing when no payouts are available', async () => {
-        const syncLedger = {
-            getSync: vi.fn().mockResolvedValue(null)
+    it('posts bank deposits for new payouts and links Salesforce transactions', async () => {
+        const payout = {
+            id: 'po_123',
+            amount: 2500,
+            arrival_date: Math.floor(Date.now() / 1000)
         };
 
-        internals.setDependencies({ syncLedger });
+        const payoutsList = vi.fn().mockResolvedValue({
+            data: [payout],
+            has_more: false
+        });
 
-        const { context } = createContext({ bindingData: { payoutId: 'po_missing' } });
-        const req = { method: 'GET', query: {} };
+        const balanceTransactionsList = vi.fn().mockResolvedValue({
+            data: [{ id: 'bt_1' }, { id: 'bt_2' }],
+            has_more: false
+        });
+
+        const buildBankDeposit = vi.fn(({ docNumber, amountCents, memo, date }) => ({
+            docNumber,
+            amountCents,
+            memo,
+            date
+        }));
+
+        const bankDepositResult = { id: 'dep_1' };
+        const postBankDeposit = vi.fn().mockResolvedValue(bankDepositResult);
+        const linkPayoutOnTransactions = vi.fn().mockResolvedValue([]);
+        const processedStore = {
+            isProcessed: vi.fn().mockResolvedValue(false),
+            markProcessed: vi.fn().mockResolvedValue(undefined)
+        };
+
+        internals.setDependencies({
+            stripe: {
+                payouts: { list: payoutsList },
+                balanceTransactions: { list: balanceTransactionsList }
+            },
+            accounting: { buildBankDeposit, postBankDeposit },
+            salesforce: { linkPayoutOnTransactions },
+            processedStore,
+            lookbackDays: 8,
+            now: () => Date.now()
+        });
+
+        const { context } = createContext();
+        const req = { method: 'POST' };
 
         await handler(context, req);
 
-        expect(context.res.status).toBe(404);
-        expect(syncLedger.getSync).toHaveBeenCalledWith('default', 'po_missing');
+        expect(payoutsList).toHaveBeenCalledTimes(1);
+        expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_123');
+        expect(buildBankDeposit).toHaveBeenCalledWith(expect.objectContaining({
+            docNumber: 'payout_po_123',
+            amountCents: 2500,
+            memo: 'payout_po_123',
+            date: expect.any(Date)
+        }));
+        expect(postBankDeposit).toHaveBeenCalledWith({
+            docNumber: 'payout_po_123',
+            amountCents: 2500,
+            memo: 'payout_po_123',
+            date: expect.any(Date)
+        });
+        expect(linkPayoutOnTransactions).toHaveBeenCalledWith('po_123', ['bt_1', 'bt_2']);
+        expect(processedStore.markProcessed).toHaveBeenCalledWith('po_po_123');
+
+        expect(context.res.status).toBe(200);
+        expect(context.res.body.summary).toEqual({
+            lookbackDays: 8,
+            total: 1,
+            processed: 1,
+            skipped: 0,
+            errors: 0
+        });
+        expect(context.res.body.processed).toEqual([
+            {
+                status: 'processed',
+                payoutId: 'po_123',
+                bankDepositId: 'dep_1'
+            }
+        ]);
+    });
+
+    it('skips payouts that were already processed', async () => {
+        const payout = {
+            id: 'po_999',
+            amount: 1500,
+            arrival_date: Math.floor(Date.now() / 1000)
+        };
+
+        const payoutsList = vi.fn().mockResolvedValue({
+            data: [payout],
+            has_more: false
+        });
+
+        const balanceTransactionsList = vi.fn();
+
+        const processedStore = {
+            isProcessed: vi.fn().mockResolvedValue(true),
+            markProcessed: vi.fn()
+        };
+
+        const buildBankDeposit = vi.fn();
+        const postBankDeposit = vi.fn();
+        const linkPayoutOnTransactions = vi.fn();
+
+        internals.setDependencies({
+            stripe: {
+                payouts: { list: payoutsList },
+                balanceTransactions: { list: balanceTransactionsList }
+            },
+            accounting: { buildBankDeposit, postBankDeposit },
+            salesforce: { linkPayoutOnTransactions },
+            processedStore,
+            lookbackDays: 7,
+            now: () => Date.now()
+        });
+
+        const { context } = createContext();
+        const req = { method: 'POST' };
+
+        await handler(context, req);
+
+        expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_999');
+        expect(balanceTransactionsList).not.toHaveBeenCalled();
+        expect(buildBankDeposit).not.toHaveBeenCalled();
+        expect(postBankDeposit).not.toHaveBeenCalled();
+        expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
+
+        expect(context.res.status).toBe(200);
+        expect(context.res.body.summary.processed).toBe(0);
+        expect(context.res.body.summary.skipped).toBe(1);
     });
 });
