@@ -2,11 +2,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const FileKeyValueStore = require('../../services/storage/fileKeyValueStore');
-const { createPersistentStorageClients } = require('../../services/storage/persistentStoreFactory');
-const IdempotencyService = require('../../services/idempotencyService');
-const SyncLedger = require('../../services/syncLedger');
-const WebhookEventStore = require('../../services/webhookEventStore');
+const FileKeyValueStore = require('../../dist/services/idempotency/storage/fileKeyValueStore');
+const { createPersistentStorageClients } = require('../../dist/services/idempotency/storage/persistentStoreFactory');
+const IdempotencyService = require('../../dist/services/idempotency/idempotencyService');
+const SyncLedger = require('../../dist/services/payoutRecon/syncLedger');
+const WebhookEventStore = require('../../dist/services/idempotency/webhookEventStore');
 
 function createTempFile(prefix) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `payment-processor-${prefix}-`));

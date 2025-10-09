@@ -49,7 +49,7 @@ async function testValidateRequestBody() {
 async function testSinceParameterFormats() {
     console.log('Test 2: Validate since parameter formats');
     
-    const { normalizeSince } = require('../services/accounting/stripe-qbo/fetchStripe');
+    const { normalizeSince } = require('../dist/services/qbo/stripe/fetchStripe');
     
     // Test Unix timestamp
     const timestamp1 = normalizeSince(1609459200);

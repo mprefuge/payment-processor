@@ -5,7 +5,7 @@
  * to verify that name validation works correctly in the CRM sync process.
  */
 
-const SalesforceCrmService = require('../services/crm/salesforceCrm');
+const SalesforceCrmService = require('../dist/services/salesforce/salesforceCrm');
 
 // Mock CRM service for testing
 class MockCrmService extends SalesforceCrmService {

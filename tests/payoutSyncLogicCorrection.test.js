@@ -9,8 +9,8 @@
  * 5. Diagnostic logging: Verify transaction samples are logged on validation mismatch
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const SyncLedger = require('../services/syncLedger');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
 const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider

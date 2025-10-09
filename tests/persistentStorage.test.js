@@ -5,10 +5,10 @@
  * service instances and simulate application restarts.
  */
 
-const IdempotencyService = require('../services/idempotencyService');
-const SyncLedger = require('../services/syncLedger');
-const WebhookEventStore = require('../services/webhookEventStore');
-const FileKeyValueStore = require('../services/storage/fileKeyValueStore');
+const IdempotencyService = require('../dist/services/idempotency/idempotencyService');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
+const WebhookEventStore = require('../dist/services/idempotency/webhookEventStore');
+const FileKeyValueStore = require('../dist/services/idempotency/storage/fileKeyValueStore');
 const { createPersistentClientsForTest } = require('./helpers/persistentTestUtils');
 
 async function testIdempotencyPersistence() {

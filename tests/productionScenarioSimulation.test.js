@@ -8,7 +8,7 @@
  * - Summary showing total: 0 (before fix)
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
 
 // Mock accounting provider
 class MockAccountingProvider {

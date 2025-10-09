@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { createPersistentStorageClients } = require('./storage/persistentStoreFactory');
+const { createPersistentStorageClients } = require('../idempotency/storage/persistentStoreFactory');
 
 /**
  * Sync Ledger Service

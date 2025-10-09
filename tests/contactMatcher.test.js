@@ -4,8 +4,8 @@
  * Basic tests to verify core functionality of the ContactMatcher service
  */
 
-const { ContactMatcher, JaroWinkler } = require('../services/contactMatcher');
-const { loadConfig } = require('../config/contactMatching');
+const { ContactMatcher, JaroWinkler } = require('../dist/services/payoutRecon/contactMatcher');
+const { loadConfig } = require('../dist/config/contactMatching');
 
 // Simple test runner since we don't have a testing framework installed
 function runTests() {

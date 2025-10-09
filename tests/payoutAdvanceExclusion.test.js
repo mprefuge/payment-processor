@@ -13,7 +13,7 @@
  * The fix excludes these internal Stripe balance movement types from the summary.
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
 
 // Mock accounting provider
 class MockAccountingProvider {

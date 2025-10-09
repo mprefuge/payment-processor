@@ -8,9 +8,9 @@
  * - Idempotency and drift detection
  */
 
-const PayoutSyncService = require('../services/payoutSyncService');
-const AccountingSyncConfig = require('../services/accountingSyncConfig');
-const SyncLedger = require('../services/syncLedger');
+const PayoutSyncService = require('../dist/services/payoutRecon/payoutSyncService');
+const AccountingSyncConfig = require('../dist/services/payoutRecon/accountingSyncConfig');
+const SyncLedger = require('../dist/services/payoutRecon/syncLedger');
 const { createTestSyncLedger } = require('./helpers/persistentTestUtils');
 
 // Mock accounting provider
