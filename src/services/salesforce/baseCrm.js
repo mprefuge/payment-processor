@@ -56,6 +56,16 @@ class BaseCrmService {
     }
 
     /**
+     * Upsert a transaction record in the CRM
+     * @param {Object} transactionData - Transaction information
+     * @param {string} externalIdField - External ID field used for upsert
+     * @returns {Promise<Object>} Upsert result
+     */
+    async upsertTransactionsRecord(transactionData, externalIdField) {
+        throw new Error('upsertTransactionsRecord method must be implemented by subclass');
+    }
+
+    /**
      * Update an existing transaction record in the CRM
      * @param {string} transactionId - ID of the transaction to update
      * @param {Object} transactionData - Transaction information to update

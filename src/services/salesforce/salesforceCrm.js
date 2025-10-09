@@ -269,8 +269,8 @@ class SalesforceCrmService extends BaseCrmService {
     async createTransaction(contactId, transactionData) {
         await this.connect();
 
-        const { 
-            amount, 
+        const {
+            amount,
             currency = 'USD', 
             paymentMethod = 'Credit Card',
             transactionId,
@@ -318,6 +318,42 @@ class SalesforceCrmService extends BaseCrmService {
             
             // Fallback to Opportunity record
             return await this.createOpportunityAsTransaction(contactId, transactionData);
+        }
+    }
+
+    /**
+     * Upsert a transaction record in Salesforce
+     * @param {Object} transactionData - Transaction information
+     * @param {string} externalIdField - External ID field for upsert
+     * @returns {Promise<Object>} Upsert result
+     */
+    async upsertTransactionsRecord(transactionData, externalIdField = 'stripe_checkout_session_id__c') {
+        await this.connect();
+
+        if (!externalIdField) {
+            throw new Error('External ID field is required for transaction upsert');
+        }
+
+        try {
+            const result = await this.conn.sobject('Transactions__c').upsert(transactionData, externalIdField);
+
+            if (Array.isArray(result)) {
+                const [firstResult] = result;
+                if (firstResult && firstResult.success) {
+                    return firstResult;
+                }
+
+                throw new Error(`Transaction upsert failed: ${JSON.stringify(firstResult?.errors || result)}`);
+            }
+
+            if (!result.success) {
+                throw new Error(`Transaction upsert failed: ${JSON.stringify(result.errors)}`);
+            }
+
+            return result;
+        } catch (error) {
+            console.error('Error upserting Salesforce transaction:', error);
+            throw new Error(`Salesforce transaction upsert failed: ${error.message}`);
         }
     }
 

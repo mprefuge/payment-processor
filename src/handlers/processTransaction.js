@@ -1,4 +1,5 @@
 const { randomUUID } = require('crypto');
+const { z } = require('zod');
 const Stripe = require('stripe');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
@@ -78,6 +79,242 @@ const setStripeClientFactory = (factory) => {
 const resetStripeClientFactory = () => {
     stripeClientFactory = defaultStripeClientFactory;
 };
+
+const FREQUENCY_VALUES = ['onetime', 'week', 'biweek', 'month', 'year'];
+
+const frequencySchema = z.preprocess(
+    value => (typeof value === 'string' ? value.trim().toLowerCase() : value),
+    z.enum(FREQUENCY_VALUES)
+);
+
+const amountSchema = z.preprocess(value => {
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.length === 0) {
+            return value;
+        }
+
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed)) {
+            return value;
+        }
+
+        return parsed;
+    }
+
+    return value;
+}, z.number().int().positive());
+
+const metadataSchema = z.preprocess(value => {
+    if (value === null || value === undefined) {
+        return undefined;
+    }
+
+    return value;
+}, z.record(z.any())).optional();
+
+const addressSchema = z
+    .object({
+        line1: z.string().min(1).optional(),
+        line2: z.string().optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+        postal_code: z.string().optional(),
+        postalCode: z.string().optional(),
+        country: z.string().optional()
+    })
+    .partial()
+    .passthrough();
+
+const customerSchema = z
+    .object({
+        email: z.string().email(),
+        firstname: z.string().min(1).optional(),
+        lastname: z.string().min(1).optional(),
+        firstName: z.string().min(1).optional(),
+        lastName: z.string().min(1).optional(),
+        phone: z.string().optional(),
+        address: z.union([addressSchema, z.string().min(1)]).optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+        zipcode: z.string().optional(),
+        postalCode: z.string().optional()
+    })
+    .passthrough()
+    .superRefine((data, ctx) => {
+        if (!data.firstname && !data.firstName) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer first name is required' });
+        }
+
+        if (!data.lastname && !data.lastName) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer last name is required' });
+        }
+    });
+
+const modernRequestSchema = z
+    .object({
+        amount: amountSchema,
+        frequency: frequencySchema,
+        customer: customerSchema,
+        metadata: metadataSchema,
+        attribution: z.string().optional()
+    })
+    .passthrough();
+
+const legacyRequestSchema = z
+    .object({
+        amount: amountSchema,
+        frequency: frequencySchema,
+        email: z.string().email(),
+        firstname: z.string().min(1),
+        lastname: z.string().min(1),
+        phone: z.string().optional(),
+        address: z.union([addressSchema, z.string().min(1)]).optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+        zipcode: z.string().optional(),
+        postalCode: z.string().optional(),
+        metadata: metadataSchema,
+        attribution: z.string().optional()
+    })
+    .passthrough();
+
+const requestSchema = z.union([modernRequestSchema, legacyRequestSchema]);
+
+function ensurePlainObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return {};
+    }
+
+    return { ...value };
+}
+
+function extractAttribution(directAttribution, metadata) {
+    if (typeof directAttribution === 'string' && directAttribution.trim().length > 0) {
+        return directAttribution.trim();
+    }
+
+    const metadataAttribution = metadata?.attribution;
+    if (typeof metadataAttribution === 'string' && metadataAttribution.trim().length > 0) {
+        return metadataAttribution.trim();
+    }
+
+    return undefined;
+}
+
+function normalizeAddressData(addressInput, fallback = {}) {
+    const normalized = {
+        line1: undefined,
+        line2: undefined,
+        city: fallback.city,
+        state: fallback.state,
+        postal_code: fallback.postal_code || fallback.postalCode || fallback.zipcode,
+        country: fallback.country || 'US'
+    };
+
+    if (typeof addressInput === 'string') {
+        const trimmed = addressInput.trim();
+        if (trimmed) {
+            normalized.line1 = trimmed;
+        }
+    } else if (addressInput && typeof addressInput === 'object' && !Array.isArray(addressInput)) {
+        normalized.line1 = addressInput.line1 ?? addressInput.Line1 ?? normalized.line1;
+        normalized.line2 = addressInput.line2 ?? addressInput.Line2 ?? normalized.line2;
+        normalized.city = addressInput.city ?? addressInput.City ?? normalized.city;
+        normalized.state = addressInput.state ?? addressInput.State ?? normalized.state;
+        normalized.postal_code =
+            addressInput.postal_code ??
+            addressInput.postalCode ??
+            addressInput.PostalCode ??
+            normalized.postal_code;
+        normalized.country = addressInput.country ?? addressInput.Country ?? normalized.country;
+    }
+
+    if (!normalized.country) {
+        normalized.country = 'US';
+    }
+
+    return normalized;
+}
+
+function normalizeCustomerData(customerData) {
+    const firstname = customerData.firstname || customerData.firstName;
+    const lastname = customerData.lastname || customerData.lastName;
+    const fallbackAddress = {
+        city: customerData.city,
+        state: customerData.state,
+        postal_code: customerData.zipcode || customerData.postalCode,
+        country: customerData.country
+    };
+    const address = normalizeAddressData(customerData.address, fallbackAddress);
+
+    return {
+        email: customerData.email,
+        firstname,
+        lastname,
+        phone: customerData.phone || null,
+        address,
+        city: customerData.city || address.city,
+        state: customerData.state || address.state,
+        zipcode: customerData.zipcode || customerData.postalCode || address.postal_code
+    };
+}
+
+function normalizeRequestData(data) {
+    const metadata = ensurePlainObject(data.metadata);
+    const customerSource = 'customer' in data ? data.customer : data;
+    const customer = normalizeCustomerData(customerSource);
+    const attribution = extractAttribution(data.attribution, metadata);
+
+    const normalized = {
+        amount: data.amount,
+        frequency: data.frequency,
+        customer,
+        metadata,
+        attribution
+    };
+
+    if (data.category) {
+        normalized.category = data.category;
+    }
+
+    if (data.transactionType) {
+        normalized.transactionType = data.transactionType;
+    }
+
+    return normalized;
+}
+
+function sanitizeStripeMetadata(metadata) {
+    return Object.entries(metadata).reduce((accumulator, [key, value]) => {
+        if (value === undefined || value === null) {
+            return accumulator;
+        }
+
+        if (typeof value === 'object') {
+            try {
+                accumulator[key] = JSON.stringify(value);
+            } catch (error) {
+                accumulator[key] = String(value);
+            }
+            return accumulator;
+        }
+
+        accumulator[key] = String(value);
+        return accumulator;
+    }, {});
+}
+
+function formatStripeMetadata(transactionData) {
+    const baseMetadata = {
+        category: transactionData.category || 'General',
+        frequency: transactionData.frequency || 'onetime',
+        transactionType: transactionData.transactionType || 'Payment'
+    };
+
+    const additionalMetadata = sanitizeStripeMetadata(transactionData.metadata || {});
+    return { ...baseMetadata, ...additionalMetadata };
+}
 
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
@@ -261,7 +498,7 @@ const syncContactToCrm = async (context, customerData) => {
 const createPendingTransaction = async (context, session, contactId, transactionData) => {
     try {
         const crmConfig = getCrmConfig();
-        
+
         if (!crmConfig) {
             context.log('CRM integration disabled - skipping pending transaction creation');
             return null;
@@ -314,19 +551,77 @@ const createPendingTransaction = async (context, session, contactId, transaction
     }
 };
 
+const upsertSalesforceTransaction = async (context, session, requestData) => {
+    try {
+        const crmConfig = getCrmConfig();
+
+        if (!crmConfig) {
+            context.log('CRM integration disabled - skipping transaction upsert');
+            return null;
+        }
+
+        const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+        if (!validation.isValid) {
+            context.log(`CRM configuration invalid: ${validation.error}`);
+            return null;
+        }
+
+        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+
+        if (typeof crmService.upsertTransactionsRecord !== 'function') {
+            context.log('CRM service does not support transaction upsert');
+            return null;
+        }
+
+        const transactionRecord = {
+            stripe_checkout_session_id__c: session.id,
+            transaction_type__c: 'charge',
+            status__c: 'pending'
+        };
+
+        if (requestData.attribution) {
+            transactionRecord.attribution__c = requestData.attribution;
+        }
+
+        await crmService.upsertTransactionsRecord(transactionRecord, 'stripe_checkout_session_id__c');
+        context.log('Upserted pending transaction in CRM', { sessionId: session.id });
+
+        return transactionRecord;
+    } catch (error) {
+        context.log(`Error upserting pending transaction: ${error.message}`);
+        console.error('Pending transaction upsert error details:', error);
+        return null;
+    }
+};
+
 // Validate required request parameters
 const validateRequest = (body) => {
-    const required = ['email', 'firstname', 'lastname', 'amount', 'frequency'];
-    const missing = required.filter(field => !body[field]);
-    
-    if (missing.length > 0) {
+    const result = requestSchema.safeParse(body);
+
+    if (!result.success) {
+        const message = result.error.issues
+            .map(issue => issue.message)
+            .filter(Boolean)
+            .join('; ') || 'Invalid request body';
+
         return {
             isValid: false,
-            error: `Missing required fields: ${missing.join(', ')}`
+            error: message
         };
     }
-    
-    return { isValid: true };
+
+    try {
+        const value = normalizeRequestData(result.data);
+        return {
+            isValid: true,
+            value
+        };
+    } catch (error) {
+        return {
+            isValid: false,
+            error: error.message || 'Invalid request body'
+        };
+    }
 };
 
 // Escape values for safe usage in Stripe search queries
@@ -438,7 +733,7 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
 // Create Stripe checkout session
 const createCheckoutSession = async (stripe, customerId, transactionData) => {
     const isOneTime = transactionData.frequency === 'onetime';
-    
+
     const baseParams = {
         customer: customerId,
         success_url: process.env.SUCCESS_URL || process.env.CANCEL_URL || 'https://example.com/thankyou',
@@ -454,11 +749,7 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
             },
             quantity: 1
         }],
-        metadata: {
-            category: transactionData.category || 'General',
-            frequency: transactionData.frequency || 'onetime',
-            transactionType: transactionData.transactionType || 'Payment'
-        }
+        metadata: formatStripeMetadata(transactionData)
     };
     
     if (isOneTime) {
@@ -550,19 +841,22 @@ module.exports = async function (context, req) {
             return;
         }
 
+        const requestData = validation.value;
+        const customerDetails = requestData.customer;
+
         // Initialize services
         const isLiveMode = getConfiguredMode(context);
         const { stripe } = initializeServices(isLiveMode);
 
         // Search for existing customer
-        const fullName = `${body.firstname} ${body.lastname}`;
-        const existingCustomers = await searchStripeCustomer(stripe, body.email, fullName);
-        
+        const fullName = `${customerDetails.firstname} ${customerDetails.lastname}`;
+        const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
+
         // Get or create customer
         let customerId;
         if (existingCustomers.length === 0) {
             log('Creating new Stripe customer');
-            const newCustomer = await createStripeCustomer(stripe, body);
+            const newCustomer = await createStripeCustomer(stripe, customerDetails);
             customerId = newCustomer.id;
         } else {
             log('Using existing Stripe customer');
@@ -570,22 +864,20 @@ module.exports = async function (context, req) {
 
             // Update existing customer with latest information
             log('Updating existing Stripe customer with latest information');
-            await updateStripeCustomer(stripe, customerId, body);
+            await updateStripeCustomer(stripe, customerId, customerDetails);
         }
 
         // Create checkout session
         log('Creating Stripe checkout session');
-        const session = await createCheckoutSession(stripe, customerId, body);
-        
+        const session = await createCheckoutSession(stripe, customerId, requestData);
+
         // Sync contact to CRM (Salesforce) if configured
         // This happens after checkout session creation to not block the payment flow
-        const contact = await syncContactToCrm(context, body);
-        
-        // Create pending transaction in CRM if contact was synced successfully
-        if (contact) {
-            await createPendingTransaction(context, session, contact.Id, body);
-        }
-        
+        await syncContactToCrm(context, customerDetails);
+
+        // Upsert pending transaction in CRM
+        await upsertSalesforceTransaction(context, session, requestData);
+
         // Return success response with checkout URL
         context.res = {
             status: 200,
@@ -593,9 +885,8 @@ module.exports = async function (context, req) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                success: true,
-                checkoutUrl: session.url,
-                sessionId: session.id
+                url: session.url,
+                id: session.id
             })
         };
         
