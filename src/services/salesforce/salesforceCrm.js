@@ -33,6 +33,33 @@ class SalesforceCrmService extends BaseCrmService {
         }
     }
 
+    async healthCheck() {
+        try {
+            const connection = await this.connect();
+            const result = await connection.query('SELECT Id FROM User LIMIT 1');
+
+            const recordCount = Array.isArray(result?.records) ? result.records.length : 0;
+
+            return {
+                healthy: true,
+                message: 'Salesforce SOQL query succeeded',
+                details: {
+                    provider: 'salesforce',
+                    recordCount
+                }
+            };
+        } catch (error) {
+            return {
+                healthy: false,
+                message: `Salesforce health check failed: ${error.message}`,
+                details: {
+                    provider: 'salesforce',
+                    error: error.message
+                }
+            };
+        }
+    }
+
     /**
      * Search for contacts in Salesforce using email, phone, or name
      * @param {Object} searchCriteria - Search criteria

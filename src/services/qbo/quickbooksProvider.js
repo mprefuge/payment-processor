@@ -1023,9 +1023,10 @@ class QuickBooksProvider extends BaseAccountingProvider {
     /**
      * Refresh OAuth tokens
      */
-    async refreshTokens() {
-        this.logger.log('[QBO] Refreshing OAuth tokens');
-        
+    async refreshTokens(options = {}) {
+        const { persist = true } = options;
+        this.logger.log(`[QBO] Refreshing OAuth tokens${persist ? '' : ' (validation only)'}`);
+
         if (!this.oauthTokens.refreshToken) {
             throw new Error('No refresh token available');
         }
@@ -1055,24 +1056,36 @@ class QuickBooksProvider extends BaseAccountingProvider {
                 throw new Error(errorDescription);
             }
 
-            // Update stored tokens
-            this.oauthTokens.accessToken = refreshResponse.access_token;
-            if (refreshResponse.refresh_token) {
-                this.oauthTokens.refreshToken = refreshResponse.refresh_token;
+            const refreshedTokens = {
+                accessToken: refreshResponse.access_token,
+                refreshToken: refreshResponse.refresh_token || this.oauthTokens.refreshToken,
+                tokenType: refreshResponse.token_type,
+                expiresIn: refreshResponse.expires_in
+            };
+
+            if (persist) {
+                // Update stored tokens
+                this.oauthTokens.accessToken = refreshedTokens.accessToken;
+                if (refreshResponse.refresh_token) {
+                    this.oauthTokens.refreshToken = refreshResponse.refresh_token;
+                }
+
+                // Reinitialize client with new token
+                this._initializeClient();
+
+                this.logger.log('[QBO] Successfully refreshed OAuth tokens');
+
+                // Note: In production, you should persist these tokens to storage
+                // so they can be used across sessions
+                if (process.env.NODE_ENV === 'production') {
+                    this.logger.warn('[QBO] WARNING: Refreshed tokens should be persisted to storage (e.g., env vars, key vault)');
+                }
+
+                return true;
             }
 
-            // Reinitialize client with new token
-            this._initializeClient();
-
-            this.logger.log('[QBO] Successfully refreshed OAuth tokens');
-
-            // Note: In production, you should persist these tokens to storage
-            // so they can be used across sessions
-            if (process.env.NODE_ENV === 'production') {
-                this.logger.warn('[QBO] WARNING: Refreshed tokens should be persisted to storage (e.g., env vars, key vault)');
-            }
-
-            return true;
+            this.logger.log('[QBO] Successfully validated OAuth token exchange');
+            return refreshedTokens;
         } catch (error) {
             this.logger.error('[QBO] Failed to refresh tokens:', error);
             const message = error && error.message ? error.message : 'Unknown error';
