@@ -1,4 +1,5 @@
 const { createLogger } = require('../../lib/logger');
+const { registerSecretValue } = require('../../lib/secretRedactor');
 /**
  * Accounting Sync Configuration Service
  * 
@@ -98,6 +99,9 @@ class AccountingSyncConfig {
         accountsEnv.split(',').forEach(entry => {
             const [accountId, mode, secretKey] = entry.trim().split(':');
             if (accountId && mode) {
+                if (secretKey) {
+                    registerSecretValue(secretKey);
+                }
                 accounts[accountId] = { mode, secretKey };
             }
         });
@@ -122,6 +126,7 @@ class AccountingSyncConfig {
         secretsEnv.split(',').forEach(entry => {
             const [accountId, secret] = entry.trim().split(':');
             if (accountId && secret) {
+                registerSecretValue(secret);
                 secrets[accountId] = secret;
             }
         });

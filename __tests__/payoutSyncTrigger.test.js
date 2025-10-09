@@ -15,7 +15,7 @@ describe('payoutSyncTrigger', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2024-05-20T12:00:00Z'));
-        handler = require('../src/handlers/payoutSyncTrigger.js');
+        handler = require('../payoutSyncTrigger');
         internals = handler.__internals;
     });
 
