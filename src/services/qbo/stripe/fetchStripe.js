@@ -78,8 +78,19 @@ function createListFetcher({ listFn, baseParams }) {
         const { createdField, expand: baseExpandParam, ...restBaseParams } = baseParams || {};
 
         const baseExpand = Array.isArray(baseExpandParam) ? baseExpandParam : [];
-        const { expand: optionExpandParam, ...restOptionParams } = options.params || {};
+        const {
+            expand: optionExpandParam,
+            created: optionCreatedParam,
+            arrival_date: optionArrivalDateParam,
+            ...restOptionParams
+        } = options.params || {};
         const optionExpand = Array.isArray(optionExpandParam) ? optionExpandParam : [];
+        const optionCreated = optionCreatedParam && typeof optionCreatedParam === 'object'
+            ? optionCreatedParam
+            : undefined;
+        const optionArrivalDate = optionArrivalDateParam && typeof optionArrivalDateParam === 'object'
+            ? optionArrivalDateParam
+            : undefined;
         const expand = Array.from(new Set([...baseExpand, ...optionExpand]));
 
         const params = {
@@ -89,11 +100,11 @@ function createListFetcher({ listFn, baseParams }) {
             expand,
             created: createdField === 'arrival_date'
                 ? undefined
-                : { gte: sinceEpoch }
+                : { gte: sinceEpoch, ...(optionCreated || {}) }
         };
 
         if (createdField === 'arrival_date') {
-            params.arrival_date = { gte: sinceEpoch };
+            params.arrival_date = { gte: sinceEpoch, ...(optionArrivalDate || {}) };
         }
 
         return fetchAll(listFn, params, logger);
