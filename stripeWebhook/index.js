@@ -15,6 +15,70 @@ const WebhookEventStore = require('../services/webhookEventStore');
 const SyncLedger = require('../services/syncLedger');
 const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
 
+const defaultStripeFactory = (key, options) => new Stripe(key, options);
+
+let stripeFactory = defaultStripeFactory;
+let createStorageClients = createPersistentStorageClients;
+let idempotencyService;
+let metricsService;
+let webhookEventStore;
+let syncLedger;
+
+const initializeDefaultServices = () => {
+    const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+    const {
+        idempotencyStore,
+        webhookEventStore: webhookEventStoreClient,
+        syncLedgerStore
+    } = createStorageClients(storageNamespace);
+
+    idempotencyService = new IdempotencyService({ storageClient: idempotencyStore });
+    metricsService = new MetricsService();
+    webhookEventStore = new WebhookEventStore({ storageClient: webhookEventStoreClient });
+    syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
+};
+
+initializeDefaultServices();
+
+const setDependencies = ({
+    stripeFactory: stripeFactoryOverride,
+    createPersistentStorageClients: storageFactoryOverride,
+    idempotencyService: idempotencyServiceOverride,
+    metricsService: metricsServiceOverride,
+    webhookEventStore: webhookEventStoreOverride,
+    syncLedger: syncLedgerOverride
+} = {}) => {
+    if (typeof stripeFactoryOverride === 'function') {
+        stripeFactory = stripeFactoryOverride;
+    }
+
+    if (typeof storageFactoryOverride === 'function') {
+        createStorageClients = storageFactoryOverride;
+    }
+
+    if (idempotencyServiceOverride) {
+        idempotencyService = idempotencyServiceOverride;
+    }
+
+    if (metricsServiceOverride) {
+        metricsService = metricsServiceOverride;
+    }
+
+    if (webhookEventStoreOverride) {
+        webhookEventStore = webhookEventStoreOverride;
+    }
+
+    if (syncLedgerOverride) {
+        syncLedger = syncLedgerOverride;
+    }
+};
+
+const resetDependencies = () => {
+    stripeFactory = defaultStripeFactory;
+    createStorageClients = createPersistentStorageClients;
+    initializeDefaultServices();
+};
+
 const createContextLogger = (context) => {
     const baseLog = (...args) => context.log(...args);
 
@@ -37,19 +101,6 @@ const createContextLogger = (context) => {
         error: resolveMethod('error')
     };
 };
-
-// Global service instances
-const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
-const {
-    idempotencyStore,
-    webhookEventStore: webhookEventStoreClient,
-    syncLedgerStore
-} = createPersistentStorageClients(storageNamespace);
-
-const idempotencyService = new IdempotencyService({ storageClient: idempotencyStore });
-const metricsService = new MetricsService();
-const webhookEventStore = new WebhookEventStore({ storageClient: webhookEventStoreClient });
-const syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
 
 /**
  * Redact sensitive information from headers
@@ -121,11 +172,11 @@ function logWebhookRequest(context, req, event) {
 
 // Initialize Stripe
 const initializeStripe = (isLiveMode) => {
-    const stripeKey = isLiveMode 
-        ? process.env.STRIPE_LIVE_SECRET_KEY 
+    const stripeKey = isLiveMode
+        ? process.env.STRIPE_LIVE_SECRET_KEY
         : process.env.STRIPE_TEST_SECRET_KEY;
-    
-    return new Stripe(stripeKey);
+
+    return stripeFactory(stripeKey);
 };
 
 // Get CRM configuration from environment variables
@@ -179,7 +230,7 @@ const verifyWebhookSignature = (payload, signature, endpointSecret) => {
     }
 
     try {
-        const stripe = new Stripe(process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_LIVE_SECRET_KEY);
+        const stripe = stripeFactory(process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_LIVE_SECRET_KEY);
         stripe.webhooks.constructEvent(payload, signature, endpointSecret);
         return true;
     } catch (error) {
@@ -1322,4 +1373,9 @@ module.exports = async function (context, req) {
             })
         };
     }
+};
+
+module.exports.__internals = {
+    setDependencies,
+    resetDependencies
 };

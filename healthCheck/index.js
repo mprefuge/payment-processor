@@ -5,6 +5,25 @@ const AccountingProviderFactory = require('../services/accounting/accountingProv
 const CrmFactory = require('../services/crm/crmFactory');
 const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
 
+const defaultDependencies = {
+    stripeFactory: (secretKey, options) => new Stripe(secretKey, options),
+    sendGridClientFactory: () => new SendGridClient(),
+    accountingSyncConfigFactory: () => new AccountingSyncConfig(),
+    accountingProviderFactory: AccountingProviderFactory,
+    crmFactory: CrmFactory,
+    persistentStorageFactory: createPersistentStorageClients
+};
+
+let dependencies = { ...defaultDependencies };
+
+const setDependencies = (overrides = {}) => {
+    dependencies = { ...dependencies, ...overrides };
+};
+
+const resetDependencies = () => {
+    dependencies = { ...defaultDependencies };
+};
+
 const STRIPE_HEALTH_TIMEOUT_MS = parseInt(process.env.STRIPE_HEALTH_TIMEOUT_MS || '8000', 10);
 
 const createConnectionStatus = ({
@@ -30,7 +49,7 @@ const checkStripeConnection = async (mode, secretKey) => {
     }
 
     try {
-        const stripe = new Stripe(secretKey, { timeout: STRIPE_HEALTH_TIMEOUT_MS });
+        const stripe = dependencies.stripeFactory(secretKey, { timeout: STRIPE_HEALTH_TIMEOUT_MS });
         await stripe.accounts.retrieve();
 
         return createConnectionStatus({
@@ -65,7 +84,7 @@ const checkSendGridConnection = async () => {
         });
     }
 
-    const client = new SendGridClient();
+    const client = dependencies.sendGridClientFactory();
     client.setApiKey(apiKey);
 
     try {
@@ -147,7 +166,7 @@ const checkCrmConnection = async () => {
         });
     }
 
-    const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+        const validation = dependencies.crmFactory.validateConfig(crmConfig.provider, crmConfig.config);
     if (!validation.isValid) {
         return createConnectionStatus({
             name: `crm_${crmConfig.provider}`,
@@ -159,7 +178,7 @@ const checkCrmConnection = async () => {
     }
 
     try {
-        const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+        const crmService = dependencies.crmFactory.createCrmService(crmConfig.provider, crmConfig.config);
         if (typeof crmService.connect === 'function') {
             await crmService.connect();
         }
@@ -184,7 +203,7 @@ const checkCrmConnection = async () => {
 };
 
 const checkAccountingConnection = async () => {
-    const config = new AccountingSyncConfig();
+    const config = dependencies.accountingSyncConfigFactory();
 
     if (!config.isEnabled()) {
         return createConnectionStatus({
@@ -212,7 +231,7 @@ const checkAccountingConnection = async () => {
 
     try {
         const providerConfig = config.getProviderConfig();
-        const provider = AccountingProviderFactory.createProvider(providerName, providerConfig);
+        const provider = dependencies.accountingProviderFactory.createProvider(providerName, providerConfig);
 
         if (typeof provider.healthCheck === 'function') {
             const health = await provider.healthCheck();
@@ -249,7 +268,7 @@ const checkPersistentStorageConnection = async () => {
     const namespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
 
     try {
-        const { syncLedgerStore } = createPersistentStorageClients(namespace);
+        const { syncLedgerStore } = dependencies.persistentStorageFactory(namespace);
         const probeKey = '__healthcheck__';
         const probeValue = { timestamp: new Date().toISOString() };
 
@@ -308,4 +327,9 @@ module.exports = async function healthCheck(context, req) {
             connections
         }
     };
+};
+
+module.exports.__internals = {
+    setDependencies,
+    resetDependencies
 };

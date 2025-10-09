@@ -1,10 +1,37 @@
 const SyncLedger = require('../services/syncLedger');
 const { createPersistentStorageClients } = require('../services/storage/persistentStoreFactory');
 
-// Global service instances
-const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
-const { syncLedgerStore } = createPersistentStorageClients(storageNamespace);
-const syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
+let storageClientFactory = createPersistentStorageClients;
+let syncLedger;
+
+const initializeSyncLedger = () => {
+    const storageNamespace = process.env.PERSISTENT_STORAGE_NAMESPACE || 'default';
+    const { syncLedgerStore } = storageClientFactory(storageNamespace);
+    syncLedger = new SyncLedger({ storageClient: syncLedgerStore });
+};
+
+initializeSyncLedger();
+
+const setDependencies = ({
+    createPersistentStorageClients: storageFactoryOverride,
+    syncLedger: syncLedgerOverride
+} = {}) => {
+    if (typeof storageFactoryOverride === 'function') {
+        storageClientFactory = storageFactoryOverride;
+        if (!syncLedgerOverride) {
+            initializeSyncLedger();
+        }
+    }
+
+    if (syncLedgerOverride) {
+        syncLedger = syncLedgerOverride;
+    }
+};
+
+const resetDependencies = () => {
+    storageClientFactory = createPersistentStorageClients;
+    initializeSyncLedger();
+};
 
 /**
  * Payout Sync Status Checker
@@ -82,4 +109,9 @@ module.exports = async function (context, req) {
             }
         };
     }
+};
+
+module.exports.__internals = {
+    setDependencies,
+    resetDependencies
 };
