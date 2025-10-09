@@ -19,7 +19,8 @@
     "@sendgrid/mail": "^8.1.0",
     "jsforce": "^3.10.7",
     "node-quickbooks": "^2.0.46",
-    "stripe": "^14.7.0"
+    "stripe": "^14.7.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
