@@ -187,4 +187,57 @@ describe('healthCheck', () => {
         expect(environmentComponent).toBeDefined();
         expect(environmentComponent.status).toBe('unhealthy');
     });
+
+    it('redacts secret values from responses and logs', async () => {
+        process.env.STRIPE_TEST_SECRET_KEY = 'sk_test_secret_value';
+        process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live_secret_value';
+        process.env.SENDGRID_API_KEY = 'SG.secret_value';
+        delete process.env.CRM_PROVIDER;
+        delete process.env.ACCOUNTING_SYNC_ENABLED;
+
+        const stripeFactory = vi.fn(secretKey => ({
+            payouts: {
+                list: vi.fn().mockRejectedValue(new Error(`Invalid API Key provided: ${secretKey}`))
+            }
+        }));
+
+        const sendGridRequest = vi.fn().mockRejectedValue(new Error(`invalid key ${process.env.SENDGRID_API_KEY}`));
+
+        internals.setDependencies({
+            stripeFactory,
+            sendGridClientFactory: () => ({
+                setApiKey: vi.fn(),
+                request: sendGridRequest
+            }),
+            accountingSyncConfigFactory: () => ({
+                isEnabled: () => false
+            }),
+            persistentStorageFactory: () => ({
+                syncLedgerStore: {
+                    set: vi.fn().mockResolvedValue(undefined),
+                    delete: vi.fn().mockResolvedValue(undefined)
+                }
+            })
+        });
+
+        const { context, logs } = createContext();
+
+        await handler(context, {});
+
+        const serializedBody = JSON.stringify(context.res.body);
+        expect(serializedBody).not.toContain('sk_test_secret_value');
+        expect(serializedBody).not.toContain('sk_live_secret_value');
+        expect(serializedBody).not.toContain('SG.secret_value');
+        expect(serializedBody).toContain('***REDACTED***');
+
+        const serializedLogs = logs.map(args => JSON.stringify(args)).join(' ');
+        expect(serializedLogs).not.toContain('sk_test_secret_value');
+        expect(serializedLogs).not.toContain('sk_live_secret_value');
+        expect(serializedLogs).not.toContain('SG.secret_value');
+        expect(serializedLogs).toContain('***REDACTED***');
+
+        expect(stripeFactory).toHaveBeenCalledWith('sk_test_secret_value', expect.any(Object));
+        expect(stripeFactory).toHaveBeenCalledWith('sk_live_secret_value', expect.any(Object));
+        expect(sendGridRequest).toHaveBeenCalled();
+    });
 });

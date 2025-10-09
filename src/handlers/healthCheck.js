@@ -1,9 +1,12 @@
+require('../preflight');
+
 const Stripe = require('stripe');
 const { Client: SendGridClient } = require('@sendgrid/client');
 const AccountingSyncConfig = require('../services/payoutRecon/accountingSyncConfig');
 const AccountingProviderFactory = require('../services/qbo/accountingProviderFactory');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const { createPersistentStorageClients } = require('../services/idempotency/storage/persistentStoreFactory');
+const { initializeSecretRedactor, redactSecrets } = require('../lib/secretRedactor');
 
 const defaultDependencies = {
     stripeFactory: (secretKey, options) => new Stripe(secretKey, options),
@@ -432,6 +435,8 @@ module.exports = async function healthCheck(context, req) {
     const now = new Date();
     context.log('Health check requested');
 
+    initializeSecretRedactor();
+
     const connectionChecks = [
         checkStripeConnection('test', process.env.STRIPE_TEST_SECRET_KEY),
         checkStripeConnection('live', process.env.STRIPE_LIVE_SECRET_KEY),
@@ -446,27 +451,34 @@ module.exports = async function healthCheck(context, req) {
     const degraded = connections.some(connection => connection.healthy === false);
     const overallStatus = degraded ? 'degraded' : 'ok';
 
-    context.log('Health check connection statuses', connections);
-
     const components = connections.map(connection => ({
         component: connection.name,
         status: connection.status,
         healthy: connection.healthy
     }));
 
+    const responseBody = {
+        status: overallStatus,
+        timestamp: now.toISOString(),
+        uptime: process.uptime(),
+        version: process.env.APP_VERSION || null,
+        connections,
+        components
+    };
+
+    const sanitizedBody = redactSecrets(responseBody);
+    const safeConnections = Array.isArray(sanitizedBody?.connections)
+        ? sanitizedBody.connections
+        : redactSecrets(connections);
+
+    context.log('Health check connection statuses', safeConnections);
+
     context.res = {
         status: 200,
         headers: {
             'Content-Type': 'application/json'
         },
-        body: {
-            status: overallStatus,
-            timestamp: now.toISOString(),
-            uptime: process.uptime(),
-            version: process.env.APP_VERSION || null,
-            connections,
-            components
-        }
+        body: sanitizedBody
     };
 };
 

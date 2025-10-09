@@ -1,5 +1,6 @@
 import type { FunctionHandler } from '@azure/functions';
 
+import './preflight';
 import './config/env';
 
 const healthCheck: FunctionHandler = require('./handlers/healthCheck');
