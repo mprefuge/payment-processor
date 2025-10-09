@@ -9,7 +9,8 @@ export type TransactionExternalIdField =
   | 'stripe_refund_id__c'
   | 'stripe_dispute_id__c'
   | 'stripe_balance_transaction_id__c'
-  | 'stripe_checkout_session_id__c';
+  | 'stripe_checkout_session_id__c'
+  | 'stripe_charge_id__c';
 
 export interface QuickBooksDocumentReference {
   type: string;
@@ -27,6 +28,10 @@ export interface SalesforceSvc {
   ) => Promise<UpsertResult>;
   linkPayoutOnTransactions: (payoutId: string, btIds: string[]) => Promise<UpsertResult[]>;
   markPostedToQbo: (salesforceId: string, doc: QuickBooksDocumentReference) => Promise<void>;
+  findTransactionIdByExternalId: (
+    key: TransactionExternalIdField,
+    value: string,
+  ) => Promise<string | null>;
 }
 
 type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -154,10 +159,32 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     }
   };
 
+  const findTransactionIdByExternalId = async (
+    key: TransactionExternalIdField,
+    value: string,
+  ): Promise<string | null> => {
+    const normalizedKey = ensureNonEmpty(key, 'External ID field');
+    const normalizedValue = ensureNonEmpty(value, 'External ID value');
+
+    const records = (await (connection as any)
+      .sobject(TRANSACTION_OBJECT)
+      .find({ [normalizedKey]: normalizedValue }, ['Id'])
+      .limit(1)
+      .execute()) as Array<{ Id?: string }>;
+
+    if (!records || records.length === 0) {
+      return null;
+    }
+
+    const [{ Id }] = records;
+    return typeof Id === 'string' && Id.trim().length > 0 ? Id : null;
+  };
+
   return {
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
     markPostedToQbo,
+    findTransactionIdByExternalId,
   };
 };
 

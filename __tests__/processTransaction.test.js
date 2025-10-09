@@ -110,7 +110,7 @@ describe('processTransaction', () => {
             upsertTransactionsRecord: upsertMock
         };
 
-        const CrmFactory = require('../src/services/salesforce/crmFactory');
+        const CrmFactory = require('../dist/services/salesforce/crmFactory');
         vi.spyOn(CrmFactory, 'validateConfig').mockReturnValue({ isValid: true });
         vi.spyOn(CrmFactory, 'createCrmService').mockReturnValue(crmServiceMock);
 

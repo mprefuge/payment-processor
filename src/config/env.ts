@@ -27,6 +27,8 @@ export interface EnvConfig {
       operatingBank: string;
       revenue: string;
       fees: string;
+      refunds: string;
+      disputeLosses: string;
     };
   };
   accounting: {
@@ -180,6 +182,16 @@ function loadEnv(): EnvConfig {
           fallbackNames: ['ACCOUNTING_STRIPE_FEE_ACCOUNT'],
           defaultValue: 'Stripe Fees',
         }) ?? 'Stripe Fees',
+      refunds:
+        resolveEnv('QBO_ACCOUNT_REFUNDS', {
+          fallbackNames: ['ACCOUNTING_REFUNDS_ACCOUNT'],
+          defaultValue: 'Refunds',
+        }) ?? 'Refunds',
+      disputeLosses:
+        resolveEnv('QBO_ACCOUNT_DISPUTES', {
+          fallbackNames: ['ACCOUNTING_DISPUTE_LOSS_ACCOUNT'],
+          defaultValue: 'Dispute Losses',
+        }) ?? 'Dispute Losses',
     },
   };
 
@@ -194,6 +206,8 @@ function loadEnv(): EnvConfig {
       operatingBank: z.string().min(1),
       revenue: z.string().min(1),
       fees: z.string().min(1),
+      refunds: z.string().min(1),
+      disputeLosses: z.string().min(1),
     }),
   });
 

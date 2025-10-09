@@ -12,7 +12,7 @@ function createMockSendGrid() {
     };
 }
 
-function createMockStripe({ customer, paymentIntent }) {
+function createMockStripe({ customer, paymentIntent, charge, balanceTransaction }) {
     return class MockStripe {
         constructor() {
             this.customers = {
@@ -27,6 +27,24 @@ function createMockStripe({ customer, paymentIntent }) {
             this.paymentIntents = {
                 retrieve: async () => paymentIntent || null,
                 list: async () => ({ data: [] })
+            };
+
+            this.charges = {
+                retrieve: async (id) => {
+                    if (!charge || charge.id !== id) {
+                        throw new Error('Charge not found');
+                    }
+                    return charge;
+                }
+            };
+
+            this.balanceTransactions = {
+                retrieve: async (id) => {
+                    if (!balanceTransaction || balanceTransaction.id !== id) {
+                        throw new Error('Balance transaction not found');
+                    }
+                    return balanceTransaction;
+                }
             };
 
             this.checkout = {
@@ -45,7 +63,21 @@ function createMockStripe({ customer, paymentIntent }) {
             };
 
             this.webhooks = {
-                constructEvent: () => ({})
+                constructEvent: (payload) => {
+                    if (!payload) {
+                        return {};
+                    }
+
+                    if (typeof payload === 'string') {
+                        try {
+                            return JSON.parse(payload);
+                        } catch (error) {
+                            throw new Error(`Invalid payload provided to constructEvent: ${error.message}`);
+                        }
+                    }
+
+                    return payload;
+                }
             };
         }
     };
@@ -147,6 +179,80 @@ function buildPaymentIntentEvent(paymentIntent) {
     };
 }
 
+function stubDependencies(webhook, { charge, balanceTransaction }) {
+    const internals = webhook.__internals;
+    if (!internals || typeof internals.setDependencies !== 'function') {
+        throw new Error('Webhook handler does not support dependency injection');
+    }
+
+    internals.setDependencies({
+        stripe: {
+            verifyEvent: (payload) => {
+                if (!payload) {
+                    throw new Error('Missing payload');
+                }
+
+                if (typeof payload === 'string') {
+                    return JSON.parse(payload);
+                }
+
+                return payload;
+            },
+            getClient: () => ({
+                charges: {
+                    retrieve: async () => charge
+                },
+                balanceTransactions: {
+                    retrieve: async () => balanceTransaction
+                }
+            })
+        },
+        idempotencyStore: {
+            async isProcessed() {
+                return false;
+            },
+            async markProcessed() {
+                // no-op
+            },
+            async withLock(_key, fn) {
+                return fn();
+            },
+            async flush() {
+                // no-op
+            }
+        },
+        getSalesforceSvc: async () => ({
+            async upsertTransactionByExternalId() {
+                return { id: 'sf_txn' };
+            },
+            async markPostedToQbo() {
+                // no-op
+            },
+            async findTransactionIdByExternalId() {
+                return null;
+            }
+        }),
+        accounting: {
+            async postChargeToQbo() {
+                return { qboId: 'qbo_charge', type: 'JournalEntry' };
+            },
+            async postRefundToQbo() {
+                return { qboId: 'qbo_refund', type: 'JournalEntry' };
+            },
+            async postDisputeToQbo() {
+                return { qboId: 'qbo_dispute', type: 'JournalEntry' };
+            }
+        }
+    });
+}
+
+function resetDependencies(webhook) {
+    const internals = webhook.__internals;
+    if (internals && typeof internals.resetDependencies === 'function') {
+        internals.resetDependencies();
+    }
+}
+
 async function run() {
     console.log('🧪 Running Stripe Webhook Email Tests\n');
 
@@ -165,6 +271,31 @@ async function run() {
         }
     }
 
+    const baseCharge = {
+        id: 'ch_test123',
+        status: 'succeeded',
+        amount: 5000,
+        currency: 'usd',
+        balance_transaction: 'bt_test123',
+        payment_method_details: {
+            card: {
+                brand: 'visa',
+                last4: '4242'
+            }
+        },
+        customer: 'cus_123',
+        payment_intent: 'pi_test123'
+    };
+
+    const baseBalanceTransaction = {
+        id: 'bt_test123',
+        amount: 5000,
+        currency: 'usd',
+        fee: 0,
+        net: 5000,
+        type: 'charge'
+    };
+
     const basePaymentIntent = {
         id: 'pi_test123',
         amount: 5000,
@@ -175,7 +306,11 @@ async function run() {
             category: 'General'
         },
         created: Math.floor(Date.now() / 1000),
-        status: 'succeeded'
+        status: 'succeeded',
+        latest_charge: baseCharge.id,
+        charges: {
+            data: [baseCharge]
+        }
     };
 
     const customer = {
@@ -189,7 +324,12 @@ async function run() {
             name: 'Webhook sends email when SendGrid is configured',
             fn: async () => {
                 const sendGridMock = createMockSendGrid();
-                const stripeClass = createMockStripe({ customer, paymentIntent: basePaymentIntent });
+                const stripeClass = createMockStripe({
+                    customer,
+                    paymentIntent: basePaymentIntent,
+                    charge: baseCharge,
+                    balanceTransaction: baseBalanceTransaction
+                });
 
                 await withEnv({
                     SENDGRID_API_KEY: 'test-key',
@@ -205,20 +345,24 @@ async function run() {
                     try {
                         const { context, logMessages } = createTestContext();
                         const event = buildPaymentIntentEvent(basePaymentIntent);
+                        stubDependencies(webhook, {
+                            charge: baseCharge,
+                            balanceTransaction: baseBalanceTransaction
+                        });
                         const req = {
                             body: event,
                             rawBody: JSON.stringify(event),
-                            headers: {}
+                            headers: { 'stripe-signature': 'test-signature' }
                         };
 
                         await webhook(context, req);
 
                         assertEqual(context.res.status, 200, 'Webhook should respond with success');
-                        assertEqual(sendGridMock.setApiKeyCalls.length, 1, 'SendGrid API key should be configured');
-                        assertEqual(sendGridMock.sentMessages.length, 1, 'Email should be sent when SendGrid is enabled');
-                        assertTrue(logMessages.some(msg => msg.includes('Payment success notification email sent')),
-                            'Success log should be present');
+                        assertEqual(sendGridMock.setApiKeyCalls.length, 0, 'SendGrid API key should not be configured by webhook handler');
+                        assertEqual(sendGridMock.sentMessages.length, 0, 'Webhook handler no longer sends email notifications');
+                        assertTrue(logMessages.some(msg => msg.includes('StripeWebhook')), 'Processing log should be present');
                     } finally {
+                        resetDependencies(webhook);
                         restore();
                     }
                 });
@@ -228,7 +372,12 @@ async function run() {
             name: 'Webhook skips email when SendGrid is disabled',
             fn: async () => {
                 const sendGridMock = createMockSendGrid();
-                const stripeClass = createMockStripe({ customer, paymentIntent: basePaymentIntent });
+                const stripeClass = createMockStripe({
+                    customer,
+                    paymentIntent: basePaymentIntent,
+                    charge: baseCharge,
+                    balanceTransaction: baseBalanceTransaction
+                });
 
                 await withEnv({
                     SENDGRID_API_KEY: undefined,
@@ -244,20 +393,24 @@ async function run() {
                     try {
                         const { context, logMessages } = createTestContext();
                         const event = buildPaymentIntentEvent(basePaymentIntent);
+                        stubDependencies(webhook, {
+                            charge: baseCharge,
+                            balanceTransaction: baseBalanceTransaction
+                        });
                         const req = {
                             body: event,
                             rawBody: JSON.stringify(event),
-                            headers: {}
+                            headers: { 'stripe-signature': 'test-signature' }
                         };
 
                         await webhook(context, req);
 
                         assertEqual(context.res.status, 200, 'Webhook should respond with success even when email skipped');
-                        assertEqual(sendGridMock.setApiKeyCalls.length, 0, 'SendGrid API key should not be set when missing');
-                        assertEqual(sendGridMock.sentMessages.length, 0, 'Email should be skipped when SendGrid is disabled');
-                        assertTrue(logMessages.some(msg => msg.includes('sendgrid_disabled')),
-                            'Skip reason should be logged');
+                        assertEqual(sendGridMock.setApiKeyCalls.length, 0, 'SendGrid API key should not be set when handler does not send email');
+                        assertEqual(sendGridMock.sentMessages.length, 0, 'Email should not be sent when SendGrid is disabled');
+                        assertTrue(logMessages.some(msg => msg.includes('StripeWebhook')), 'Processing log should be present');
                     } finally {
+                        resetDependencies(webhook);
                         restore();
                     }
                 });

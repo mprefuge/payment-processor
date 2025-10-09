@@ -31,6 +31,7 @@ export const transactionUpsertSchema = z
     stripe_customer_id__c: stringOrNullSchema.optional(),
     stripe_subscription_id__c: stringOrNullSchema.optional(),
     stripe_payout_id__c: stringOrNullSchema.optional(),
+    parent_transaction__c: stringOrNullSchema.optional(),
     amount_gross__c: numberOrNullSchema.optional(),
     amount_fee__c: numberOrNullSchema.optional(),
     amount_net__c: numberOrNullSchema.optional(),
