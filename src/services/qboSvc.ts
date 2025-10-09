@@ -132,7 +132,7 @@ export interface PostChargeToQboInput {
 
 export interface PostChargeToQboResult {
   qboId: string;
-  type: Extract<QuickBooksDocType, 'sales-receipt' | 'journal-entry'>;
+  type: Extract<QuickBooksDocType, 'sales-receipt' | 'journal-entry' | 'bank-deposit'>;
 }
 
 export interface PostRefundToQboInput {
@@ -543,6 +543,37 @@ export const postRefundToQbo = async ({
   return { qboId: result.id, type: 'journal-entry' };
 };
 
+interface PostPayoutToQboInput {
+  amount: number;
+  memo?: string;
+  date: Date;
+  options?: PostOptions;
+}
+
+export const postPayoutToQbo = async ({
+  amount,
+  memo,
+  date,
+  options,
+}: PostPayoutToQboInput): Promise<PostChargeToQboResult> => {
+  const payoutAmount = ensurePositiveAmount(amount, 'Payout amount');
+
+  if (payoutAmount === 0) {
+    throw new Error('Payout amount must be greater than zero.');
+  }
+
+  const docNumber = buildDocNumber('PO', date, payoutAmount);
+  const deposit = buildBankDeposit({
+    docNumber,
+    amountCents: payoutAmount,
+    memo: memo?.trim() || undefined,
+    date,
+  });
+
+  const result = await postBankDeposit(deposit, options);
+  return { qboId: result.id, type: 'bank-deposit' };
+};
+
 export const postDisputeToQbo = async ({
   lossAmount,
   feeAmount,
@@ -620,4 +651,5 @@ export default {
   postChargeToQbo,
   postRefundToQbo,
   postDisputeToQbo,
+  postPayoutToQbo,
 };
