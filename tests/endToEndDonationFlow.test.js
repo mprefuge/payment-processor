@@ -77,6 +77,166 @@ const createContext = (name) => ({
 
 const sanitizeStripeObject = (value) => JSON.parse(JSON.stringify(value));
 
+const getStripeId = (value) => {
+    if (!value) {
+        return null;
+    }
+
+    if (typeof value === 'string') {
+        return value;
+    }
+
+    if (typeof value === 'object' && typeof value.id === 'string') {
+        return value.id;
+    }
+
+    return null;
+};
+
+const normalizeCustomerDetails = (customer = {}) => {
+    const firstName = customer.firstname || customer.firstName || '';
+    const lastName = customer.lastname || customer.lastName || '';
+    const name = [firstName, lastName].filter(Boolean).join(' ').trim() || null;
+
+    const addressSource = typeof customer.address === 'object' && customer.address
+        ? customer.address
+        : null;
+
+    const normalizedAddress = {
+        line1: addressSource?.line1 || (typeof customer.address === 'string' ? customer.address : null) || null,
+        line2: addressSource?.line2 || null,
+        city: addressSource?.city || customer.city || null,
+        state: addressSource?.state || customer.state || null,
+        postal_code: addressSource?.postal_code || customer.postalCode || customer.zipcode || null,
+        country: addressSource?.country || 'US'
+    };
+
+    return {
+        email: customer.email || null,
+        name,
+        phone: customer.phone || null,
+        address: normalizedAddress,
+        tax_exempt: 'none',
+        tax_ids: []
+    };
+};
+
+const createCheckoutSessionCompletedObject = ({ session, customer, customerDetails, paymentIntentId }) => {
+    const resolvedCustomerDetails = customerDetails || normalizeCustomerDetails(customer);
+    const customerId = getStripeId(session.customer) || (customer && customer.id ? customer.id : null);
+
+    return {
+        id: session.id,
+        object: 'checkout.session',
+        mode: session.mode || 'payment',
+        status: 'complete',
+        payment_status: 'paid',
+        amount_total: session.amount_total ?? session.amount_subtotal ?? null,
+        amount_subtotal: session.amount_subtotal ?? session.amount_total ?? null,
+        currency: session.currency || 'usd',
+        livemode: false,
+        customer: customerId,
+        customer_details: resolvedCustomerDetails,
+        payment_intent: paymentIntentId,
+        payment_method_types: Array.isArray(session.payment_method_types) && session.payment_method_types.length > 0
+            ? session.payment_method_types
+            : ['card'],
+        metadata: session.metadata || {},
+        created: session.created || Math.floor(Date.now() / 1000),
+        expires_at: session.expires_at || null,
+        locale: session.locale || null,
+        total_details: session.total_details || {
+            amount_discount: 0,
+            amount_shipping: 0,
+            amount_tax: 0
+        }
+    };
+};
+
+const createPaymentIntentSucceededObject = ({ paymentIntent, charge, balanceTransactionId, customerDetails }) => {
+    const customerId = getStripeId(paymentIntent.customer) || getStripeId(charge.customer) || null;
+    const paymentMethodId = getStripeId(paymentIntent.payment_method) || charge.payment_method || null;
+
+    const normalizedCharge = {
+        id: charge.id,
+        object: 'charge',
+        amount: charge.amount ?? paymentIntent.amount ?? null,
+        amount_captured: charge.amount_captured ?? charge.amount ?? null,
+        amount_refunded: charge.amount_refunded ?? 0,
+        balance_transaction: balanceTransactionId,
+        billing_details: charge.billing_details || customerDetails,
+        currency: charge.currency || paymentIntent.currency || 'usd',
+        customer: customerId,
+        description: charge.description || null,
+        invoice: charge.invoice || null,
+        livemode: false,
+        metadata: charge.metadata || {},
+        paid: charge.paid ?? true,
+        payment_intent: paymentIntent.id,
+        payment_method: charge.payment_method || paymentMethodId,
+        payment_method_details: charge.payment_method_details || {
+            type: 'card',
+            card: {
+                brand: 'visa',
+                last4: '4242'
+            }
+        },
+        receipt_email: charge.receipt_email || customerDetails?.email || null,
+        receipt_url: charge.receipt_url || null,
+        refunded: charge.refunded || false,
+        status: charge.status || 'succeeded',
+        created: charge.created || paymentIntent.created || Math.floor(Date.now() / 1000)
+    };
+
+    return {
+        id: paymentIntent.id,
+        object: 'payment_intent',
+        amount: paymentIntent.amount ?? normalizedCharge.amount ?? null,
+        amount_capturable: 0,
+        amount_details: paymentIntent.amount_details || { tip: {} },
+        amount_received: paymentIntent.amount_received ?? paymentIntent.amount ?? null,
+        application: paymentIntent.application || null,
+        application_fee_amount: paymentIntent.application_fee_amount || null,
+        automatic_payment_methods: paymentIntent.automatic_payment_methods || null,
+        canceled_at: null,
+        cancellation_reason: null,
+        capture_method: paymentIntent.capture_method || 'automatic',
+        client_secret: paymentIntent.client_secret || null,
+        confirmation_method: paymentIntent.confirmation_method || 'automatic',
+        created: paymentIntent.created || Math.floor(Date.now() / 1000),
+        currency: paymentIntent.currency || normalizedCharge.currency || 'usd',
+        customer: customerId,
+        description: paymentIntent.description || null,
+        invoice: paymentIntent.invoice || null,
+        last_payment_error: null,
+        latest_charge: normalizedCharge.id,
+        livemode: false,
+        metadata: paymentIntent.metadata || {},
+        next_action: null,
+        payment_method: paymentMethodId,
+        payment_method_types: Array.isArray(paymentIntent.payment_method_types) && paymentIntent.payment_method_types.length > 0
+            ? paymentIntent.payment_method_types
+            : ['card'],
+        processing: null,
+        receipt_email: paymentIntent.receipt_email || normalizedCharge.receipt_email || null,
+        review: null,
+        setup_future_usage: paymentIntent.setup_future_usage || null,
+        shipping: paymentIntent.shipping || null,
+        statement_descriptor: paymentIntent.statement_descriptor || null,
+        statement_descriptor_suffix: paymentIntent.statement_descriptor_suffix || null,
+        status: 'succeeded',
+        transfer_data: paymentIntent.transfer_data || null,
+        transfer_group: paymentIntent.transfer_group || null,
+        charges: {
+            object: 'list',
+            data: [normalizedCharge],
+            has_more: false,
+            total_count: 1,
+            url: `/v1/charges?payment_intent=${paymentIntent.id}`
+        }
+    };
+};
+
 const createStripeEventPayload = (type, object, uniqueSuffix) => ({
     id: `evt_${type.replace(/\./g, '_')}_${uniqueSuffix}`,
     object: 'event',
@@ -278,10 +438,35 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             );
         };
 
-        await sendWebhookEvent('checkout.session.completed', checkoutSession);
+        const sanitizedSession = sanitizeStripeObject(checkoutSession);
+        const sanitizedPaymentIntent = sanitizeStripeObject(paymentIntent);
+        const sanitizedCharge = sanitizeStripeObject(charge);
+
+        const balanceTransactionId = getStripeId(sanitizedCharge.balance_transaction);
+        assert(balanceTransactionId, 'Charge does not reference a balance transaction id.');
+
+        const customerDetailsForEvents = (sanitizedSession.customer_details && typeof sanitizedSession.customer_details === 'object')
+            ? sanitizedSession.customer_details
+            : normalizeCustomerDetails(donationPayload.customer);
+
+        const checkoutSessionEventObject = createCheckoutSessionCompletedObject({
+            session: sanitizedSession,
+            customer: donationPayload.customer,
+            customerDetails: customerDetailsForEvents,
+            paymentIntentId: sanitizedPaymentIntent.id
+        });
+
+        const paymentIntentEventObject = createPaymentIntentSucceededObject({
+            paymentIntent: sanitizedPaymentIntent,
+            charge: { ...sanitizedCharge, balance_transaction: balanceTransactionId },
+            balanceTransactionId,
+            customerDetails: customerDetailsForEvents
+        });
+
+        await sendWebhookEvent('checkout.session.completed', checkoutSessionEventObject);
         console.log(`✅ Processed checkout.session.completed for ${sessionId}`);
 
-        await sendWebhookEvent('payment_intent.succeeded', paymentIntent);
+        await sendWebhookEvent('payment_intent.succeeded', paymentIntentEventObject);
         console.log(`✅ Processed payment_intent.succeeded for ${paymentIntent.id}`);
 
         const salesforceConnection = new jsforce.Connection({ loginUrl: salesforceLoginUrl });
