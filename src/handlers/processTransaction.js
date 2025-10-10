@@ -496,6 +496,33 @@ const syncContactToCrm = async (context, customerData) => {
 };
 
 // Create pending transaction in CRM after checkout session is created
+const normalizeStripeEntityId = (value) => {
+    if (!value) {
+        return null;
+    }
+
+    if (typeof value === 'string') {
+        return value;
+    }
+
+    if (typeof value === 'object' && value !== null && 'id' in value) {
+        const idValue = value.id;
+        if (typeof idValue === 'string') {
+            return idValue;
+        }
+    }
+
+    return null;
+};
+
+const convertCentsToDollars = (amountInCents) => {
+    if (typeof amountInCents !== 'number' || Number.isNaN(amountInCents)) {
+        return null;
+    }
+
+    return amountInCents / 100;
+};
+
 const createPendingTransaction = async (context, session, contactId, transactionData) => {
     try {
         if (!contactId) {
@@ -520,35 +547,69 @@ const createPendingTransaction = async (context, session, contactId, transaction
         // Create CRM service
         const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
 
-        // Load matching configuration for transaction naming
-        const matchingConfig = loadConfig();
+        if (typeof crmService.upsertTransactionsRecord !== 'function') {
+            context.log('CRM service does not support transaction upsert - skipping pending transaction creation');
+            return null;
+        }
 
-        // Prepare transaction data
+        const matchingConfig = loadConfig();
         const category = session.metadata?.category || transactionData.category || 'General';
         const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
-        const transactionName = generateTransactionName(normalizedCategory, matchingConfig, {
-            amount: `$${(transactionData.amount / 100).toFixed(2)}`,
+
+        const transactionRecord = {
+            stripe_checkout_session_id__c: session.id,
+            transaction_type__c: 'charge',
+            status__c: 'pending',
+            contact__c: contactId,
+            frequency__c: transactionData.frequency || 'onetime',
+            payment_method__c: 'Pending'
+        };
+
+        const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
+        if (paymentIntentId) {
+            transactionRecord.stripe_payment_intent_id__c = paymentIntentId;
+        }
+
+        const customerId = normalizeStripeEntityId(session.customer);
+        if (customerId) {
+            transactionRecord.stripe_customer_id__c = customerId;
+        }
+
+        const amount = convertCentsToDollars(transactionData.amount);
+        if (amount !== null) {
+            transactionRecord.amount_gross__c = amount;
+        }
+
+        const currency = session.currency ? session.currency.toUpperCase() : 'USD';
+        if (currency) {
+            transactionRecord.currency_iso_code__c = currency;
+        }
+
+        if (transactionData.attribution) {
+            transactionRecord.attribution__c = transactionData.attribution;
+        }
+
+        const name = generateTransactionName(normalizedCategory, matchingConfig, {
+            amount: amount !== null ? `$${amount.toFixed(2)}` : undefined,
             date: new Date().toLocaleDateString(),
             id: session.id
         });
 
-        const txnData = {
-            amount: transactionData.amount,
-            currency: 'usd',
-            paymentMethod: 'Pending',
-            transactionId: null, // Will be set when payment_intent.succeeded fires
+        if (name) {
+            transactionRecord.Name = name;
+        }
+
+        const upsertResult = await crmService.upsertTransactionsRecord(
+            transactionRecord,
+            'stripe_checkout_session_id__c'
+        );
+
+        context.log('Upserted pending transaction in CRM with contact association', {
             sessionId: session.id,
-            status: 'Pending',
-            description: transactionName,
-            frequency: transactionData.frequency || 'onetime',
-            category: normalizedCategory,
-            name: transactionName
-        };
+            contactId
+        });
 
-        const transaction = await crmService.createTransaction(contactId, txnData);
-        context.log(`Created pending transaction: ${transaction.Id || 'N/A'} with name: ${transactionName}`);
-
-        return transaction;
+        return upsertResult;
     } catch (error) {
         // Log error but don't fail the checkout process
         context.log(`Error creating pending transaction: ${error.message}`);
@@ -881,14 +942,19 @@ module.exports = async function (context, req) {
         // This happens after checkout session creation to not block the payment flow
         const contact = await syncContactToCrm(context, customerDetails);
 
+        let pendingTransactionUpserted = false;
+
         if (contact?.Id) {
-            await createPendingTransaction(context, session, contact.Id, requestData);
+            const pendingResult = await createPendingTransaction(context, session, contact.Id, requestData);
+            pendingTransactionUpserted = Boolean(pendingResult);
         } else {
             context.log('No CRM contact available - skipping pending transaction creation');
         }
 
-        // Upsert pending transaction in CRM as a fallback
-        await upsertSalesforceTransaction(context, session, requestData);
+        // Upsert pending transaction in CRM as a fallback when contact sync fails
+        if (!pendingTransactionUpserted) {
+            await upsertSalesforceTransaction(context, session, requestData);
+        }
 
         // Return success response with checkout URL
         context.res = {

@@ -98,7 +98,7 @@ describe('processTransaction', () => {
         process.env.SALESFORCE_PASSWORD = 'password123';
 
         const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
-        const createTransactionMock = vi.fn().mockResolvedValue({ Id: 'a1TTEST' });
+        const createTransactionMock = vi.fn();
         const crmServiceMock = {
             searchContact: vi.fn().mockResolvedValue([]),
             createContact: vi.fn().mockResolvedValue({
@@ -135,24 +135,21 @@ describe('processTransaction', () => {
 
         await handler(context, req);
 
-        expect(createTransactionMock).toHaveBeenCalledWith(
-            '003TEST',
-            expect.objectContaining({
-                amount: 7500,
-                currency: 'usd',
-                paymentMethod: 'Pending',
-                sessionId: 'cs_test',
-                status: 'Pending'
-            })
-        );
+        expect(createTransactionMock).not.toHaveBeenCalled();
 
+        expect(upsertMock).toHaveBeenCalledTimes(1);
         expect(upsertMock).toHaveBeenCalledWith(
-            {
+            expect.objectContaining({
                 stripe_checkout_session_id__c: 'cs_test',
                 transaction_type__c: 'charge',
                 status__c: 'pending',
+                contact__c: '003TEST',
+                frequency__c: 'month',
+                payment_method__c: 'Pending',
+                amount_gross__c: 75,
+                currency_iso_code__c: 'USD',
                 attribution__c: 'referral-program'
-            },
+            }),
             'stripe_checkout_session_id__c'
         );
     });
@@ -210,6 +207,7 @@ describe('processTransaction', () => {
         await handler(context, req);
 
         expect(createTransactionMock).not.toHaveBeenCalled();
+        expect(upsertMock).toHaveBeenCalledTimes(1);
         expect(upsertMock).toHaveBeenCalledWith(
             {
                 stripe_checkout_session_id__c: 'cs_test',
