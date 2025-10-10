@@ -103,6 +103,13 @@ transaction. This adds an extra API call and will fail if the account name is
 ambiguous or missing, so providing the ID up front is still strongly
 recommended.
 
+### Salesforce field mapping
+
+Stripe webhook processing populates a custom `Transaction__c` record in Salesforce. The integration expects the Salesforce API
+names listed in [`docs/salesforce-transaction-fields.md`](docs/salesforce-transaction-fields.md) to exist (mark
+`Stripe_Payment_Intent_Id__c` and `Stripe_Balance_Transaction_Id__c` as external IDs). Review the table to confirm each field is
+created so Stripe amounts, identifiers, and QuickBooks sync state flow through correctly.
+
 ## Endpoint reference
 
 All endpoints are prefixed with `/api` when running locally with the Functions host.
