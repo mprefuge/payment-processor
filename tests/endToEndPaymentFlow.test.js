@@ -17,11 +17,17 @@ const assert = require('assert');
 const { randomUUID } = require('crypto');
 const Stripe = require('stripe');
 const jsforce = require('jsforce');
-const QuickBooks = require('node-quickbooks');
-
 const processTransaction = require('../dist/handlers/processTransaction');
 const stripeWebhookModule = require('../dist/handlers/stripeWebhook');
 const stripeWebhook = stripeWebhookModule && stripeWebhookModule.default ? stripeWebhookModule.default : stripeWebhookModule;
+
+const qboSvcModule = require('../dist/services/qboSvc');
+const qboSvc = qboSvcModule && qboSvcModule.default ? qboSvcModule.default : qboSvcModule;
+
+const runQuickBooksQuery =
+    (qboSvcModule && typeof qboSvcModule.query === 'function' && qboSvcModule.query.bind(qboSvcModule)) ||
+    (qboSvc && typeof qboSvc.query === 'function' && qboSvc.query.bind(qboSvc)) ||
+    null;
 
 const STRIPE_API_VERSION = '2023-10-16';
 const STRIPE_EVENT_TIMEOUT_MS = 120_000;
@@ -297,27 +303,18 @@ async function verifySalesforce(donor, paymentIntentId, chargeId, balanceTransac
     });
 }
 
-function createQuickBooksClient() {
-    const clientId = requireEnvVar('QBO_CLIENT_ID');
-    const clientSecret = requireEnvVar('QBO_CLIENT_SECRET');
-    const accessToken = requireEnvVar('QBO_ACCESS_TOKEN');
-    const refreshToken = requireEnvVar('QBO_REFRESH_TOKEN');
-    const realmId = requireEnvVar('QBO_REALM_ID');
-    const env = (process.env.QBO_ENV || 'sandbox').toLowerCase();
-    const useSandbox = env !== 'production';
+function getQuickBooksQuery() {
+    requireEnvVar('QBO_CLIENT_ID');
+    requireEnvVar('QBO_CLIENT_SECRET');
+    requireEnvVar('QBO_ACCESS_TOKEN');
+    requireEnvVar('QBO_REFRESH_TOKEN');
+    requireEnvVar('QBO_REALM_ID');
 
-    return new QuickBooks(
-        clientId,
-        clientSecret,
-        accessToken,
-        false,
-        realmId,
-        useSandbox,
-        true,
-        null,
-        '2.0',
-        refreshToken
-    );
+    if (!runQuickBooksQuery) {
+        throw new Error('QuickBooks query helper is unavailable. Ensure qboSvc exports a query function.');
+    }
+
+    return runQuickBooksQuery;
 }
 
 function buildDocNumber(prefix, date, amountCents) {
@@ -330,30 +327,34 @@ function buildDocNumber(prefix, date, amountCents) {
     return `${safePrefix}-${suffix}`.slice(0, 21);
 }
 
-async function queryQuickBooks(qbo, entity, docNumber) {
-    const query = `select Id, DocNumber, TxnDate, PrivateNote from ${entity} where DocNumber = '${docNumber}'`;
-    return new Promise((resolve, reject) => {
-        qbo.query(query, (error, result) => {
-            if (error) {
-                reject(error);
-                return;
-            }
+async function queryQuickBooks(entity, docNumber) {
+    const queryFn = getQuickBooksQuery();
+    const escapedDocNumber = docNumber.replace(/'/g, "''");
+    const query = `select Id, DocNumber, TxnDate, PrivateNote from ${entity} where DocNumber = '${escapedDocNumber}'`;
+    const result = await queryFn(query);
 
-            const response = result && result.QueryResponse ? result.QueryResponse : null;
-            const records = response && (response[entity] || response[`${entity}s`]);
-            if (Array.isArray(records) && records.length > 0) {
-                resolve(records[0]);
-                return;
-            }
+    const response = result && typeof result === 'object' ? result.QueryResponse : null;
+    if (!response || typeof response !== 'object') {
+        return null;
+    }
 
-            resolve(null);
-        });
-    });
+    const singular = response[entity];
+    const plural = response[`${entity}s`];
+    const records = Array.isArray(singular)
+        ? singular
+        : singular
+        ? [singular]
+        : Array.isArray(plural)
+        ? plural
+        : plural
+        ? [plural]
+        : [];
+
+    return records.length > 0 ? records[0] : null;
 }
 
 async function verifyQuickBooksPosting(chargeId, balanceTransaction, postingStrategy) {
     console.log('🔎 Verifying QuickBooks posting');
-    const qbo = createQuickBooksClient();
     const postingDateSeconds = balanceTransaction.available_on || balanceTransaction.created;
     const postingDate = postingDateSeconds ? postingDateSeconds * 1000 : Date.now();
 
@@ -369,12 +370,12 @@ async function verifyQuickBooksPosting(chargeId, balanceTransaction, postingStra
 
         if (postingStrategy === 'sales-receipt') {
             const salesReceiptDoc = buildDocNumber('CHG', postingDate, grossCents);
-            const salesReceipt = await queryQuickBooks(qbo, 'SalesReceipt', salesReceiptDoc);
+            const salesReceipt = await queryQuickBooks('SalesReceipt', salesReceiptDoc);
             if (salesReceipt) {
                 console.log('✅ QuickBooks sales receipt located', { docNumber: salesReceiptDoc });
                 if (feeCents > 0) {
                     const feeDoc = buildDocNumber('FEE', postingDate, feeCents);
-                    const feeJournal = await queryQuickBooks(qbo, 'JournalEntry', feeDoc);
+                    const feeJournal = await queryQuickBooks('JournalEntry', feeDoc);
                     if (!feeJournal) {
                         console.log('⌛ Waiting for QuickBooks fee journal entry', { docNumber: feeDoc });
                         await delay(QUICKBOOKS_POLL_INTERVAL_MS);
@@ -386,7 +387,7 @@ async function verifyQuickBooksPosting(chargeId, balanceTransaction, postingStra
             }
         } else {
             const journalDoc = buildDocNumber('CHGJE', postingDate, grossCents + feeCents);
-            const journalEntry = await queryQuickBooks(qbo, 'JournalEntry', journalDoc);
+            const journalEntry = await queryQuickBooks('JournalEntry', journalDoc);
             if (journalEntry) {
                 console.log('✅ QuickBooks journal entry located', { docNumber: journalDoc });
                 return;

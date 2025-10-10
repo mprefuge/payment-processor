@@ -1046,6 +1046,32 @@ export const postDisputeToQbo = async ({
   return { qboId: result.id, type: 'journal-entry' };
 };
 
+export const query = async <T = unknown>(query: string, options?: PostOptions): Promise<T> => {
+  const trimmedQuery = query?.trim();
+  if (!trimmedQuery) {
+    throw new Error('QuickBooks query must be a non-empty string.');
+  }
+
+  const url = buildQboQueryUrl(trimmedQuery);
+  const context = createRequestContext(options);
+  const response = await context.request(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `QuickBooks query failed (status ${response.status}): ${errorText ?? response.statusText}`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  return data as T;
+};
+
 export default {
   buildSalesReceipt,
   buildFeesJE,
@@ -1058,4 +1084,5 @@ export default {
   postRefundToQbo,
   postDisputeToQbo,
   postPayoutToQbo,
+  query,
 };
