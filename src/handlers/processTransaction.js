@@ -498,6 +498,11 @@ const syncContactToCrm = async (context, customerData) => {
 // Create pending transaction in CRM after checkout session is created
 const createPendingTransaction = async (context, session, contactId, transactionData) => {
     try {
+        if (!contactId) {
+            context.log('No contact ID provided - skipping pending transaction creation');
+            return null;
+        }
+
         const crmConfig = getCrmConfig();
 
         if (!crmConfig) {
@@ -874,9 +879,15 @@ module.exports = async function (context, req) {
 
         // Sync contact to CRM (Salesforce) if configured
         // This happens after checkout session creation to not block the payment flow
-        await syncContactToCrm(context, customerDetails);
+        const contact = await syncContactToCrm(context, customerDetails);
 
-        // Upsert pending transaction in CRM
+        if (contact?.Id) {
+            await createPendingTransaction(context, session, contact.Id, requestData);
+        } else {
+            context.log('No CRM contact available - skipping pending transaction creation');
+        }
+
+        // Upsert pending transaction in CRM as a fallback
         await upsertSalesforceTransaction(context, session, requestData);
 
         // Return success response with checkout URL
