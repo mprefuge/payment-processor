@@ -370,8 +370,23 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
         const sessionId = processResponse.id;
         console.log(`✅ Created Stripe checkout session ${sessionId}`);
 
-        const sessionAfterCreation = await stripe.checkout.sessions.retrieve(sessionId);
-        const paymentIntentIdFromSession = sessionAfterCreation.payment_intent;
+        const sessionAfterCreation = await waitFor(
+            async () => {
+                const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent'] });
+                const paymentIntentId = getStripeId(session.payment_intent);
+                if (paymentIntentId) {
+                    return session;
+                }
+                return null;
+            },
+            {
+                attempts: 10,
+                delay: 2000,
+                timeoutMessage: `Timed out waiting for checkout session ${sessionId} to expose a payment intent.`
+            }
+        );
+
+        const paymentIntentIdFromSession = getStripeId(sessionAfterCreation.payment_intent);
         assert(paymentIntentIdFromSession, 'Checkout session did not include a payment intent id.');
 
         await stripe.paymentIntents.confirm(paymentIntentIdFromSession, {
