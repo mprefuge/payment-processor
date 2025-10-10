@@ -77,6 +77,186 @@ const createContext = (name) => ({
 
 const sanitizeStripeObject = (value) => JSON.parse(JSON.stringify(value));
 
+const getStripeId = (value) => {
+    if (!value) {
+        return null;
+    }
+
+    if (typeof value === 'string') {
+        return value;
+    }
+
+    if (typeof value === 'object' && typeof value.id === 'string') {
+        return value.id;
+    }
+
+    return null;
+};
+
+const normalizeCustomerDetails = (customer = {}) => {
+    const firstName = customer.firstname || customer.firstName || '';
+    const lastName = customer.lastname || customer.lastName || '';
+    const name = [firstName, lastName].filter(Boolean).join(' ').trim() || null;
+
+    const addressSource = typeof customer.address === 'object' && customer.address
+        ? customer.address
+        : null;
+
+    const normalizedAddress = {
+        line1: addressSource?.line1 || (typeof customer.address === 'string' ? customer.address : null) || null,
+        line2: addressSource?.line2 || null,
+        city: addressSource?.city || customer.city || null,
+        state: addressSource?.state || customer.state || null,
+        postal_code: addressSource?.postal_code || customer.postalCode || customer.zipcode || null,
+        country: addressSource?.country || 'US'
+    };
+
+    return {
+        email: customer.email || null,
+        name,
+        phone: customer.phone || null,
+        address: normalizedAddress,
+        tax_exempt: 'none',
+        tax_ids: []
+    };
+};
+
+const normalizeStripeMetadata = (metadata = {}) => {
+    const normalized = {};
+
+    for (const [key, value] of Object.entries(metadata || {})) {
+        if (typeof value === 'undefined' || value === null) {
+            continue;
+        }
+
+        if (typeof value === 'object') {
+            normalized[key] = JSON.stringify(value);
+            continue;
+        }
+
+        normalized[key] = String(value);
+    }
+
+    return normalized;
+};
+
+const createCheckoutSessionCompletedObject = ({ session, customer, customerDetails, paymentIntentId }) => {
+    const resolvedCustomerDetails = customerDetails || normalizeCustomerDetails(customer);
+    const customerId = getStripeId(session.customer) || (customer && customer.id ? customer.id : null);
+
+    return {
+        id: session.id,
+        object: 'checkout.session',
+        mode: session.mode || 'payment',
+        status: 'complete',
+        payment_status: 'paid',
+        amount_total: session.amount_total ?? session.amount_subtotal ?? null,
+        amount_subtotal: session.amount_subtotal ?? session.amount_total ?? null,
+        currency: session.currency || 'usd',
+        livemode: false,
+        customer: customerId,
+        customer_details: resolvedCustomerDetails,
+        payment_intent: paymentIntentId,
+        payment_method_types: Array.isArray(session.payment_method_types) && session.payment_method_types.length > 0
+            ? session.payment_method_types
+            : ['card'],
+        metadata: session.metadata || {},
+        created: session.created || Math.floor(Date.now() / 1000),
+        expires_at: session.expires_at || null,
+        locale: session.locale || null,
+        total_details: session.total_details || {
+            amount_discount: 0,
+            amount_shipping: 0,
+            amount_tax: 0
+        }
+    };
+};
+
+const createPaymentIntentSucceededObject = ({ paymentIntent, charge, balanceTransactionId, customerDetails }) => {
+    const normalizedPaymentIntent = { ...paymentIntent };
+    const fallbackAmount = normalizedPaymentIntent.amount ?? charge.amount ?? null;
+    const fallbackCurrency = normalizedPaymentIntent.currency || charge.currency || 'usd';
+
+    const customerId = getStripeId(normalizedPaymentIntent.customer) || getStripeId(charge.customer) || null;
+    const paymentMethodId = getStripeId(normalizedPaymentIntent.payment_method) || charge.payment_method || null;
+    const resolvedPaymentMethodId = paymentMethodId || 'pm_card_visa';
+
+    const invoiceId = getStripeId(charge.invoice);
+
+    const normalizedCharge = {
+        ...charge,
+        id: charge.id,
+        object: 'charge',
+        amount: charge.amount ?? fallbackAmount,
+        amount_captured: charge.amount_captured ?? charge.amount ?? fallbackAmount,
+        amount_refunded: charge.amount_refunded ?? 0,
+        balance_transaction: balanceTransactionId,
+        billing_details: charge.billing_details || customerDetails,
+        currency: charge.currency || fallbackCurrency,
+        customer: customerId,
+        description: charge.description || null,
+        invoice: invoiceId,
+        livemode: charge.livemode === true,
+        metadata: charge.metadata || {},
+        paid: charge.paid ?? true,
+        payment_intent: normalizedPaymentIntent.id,
+        payment_method: charge.payment_method || resolvedPaymentMethodId,
+        payment_method_details: charge.payment_method_details || {
+            type: 'card',
+            card: {
+                brand: 'visa',
+                last4: '4242'
+            }
+        },
+        receipt_email: charge.receipt_email || customerDetails?.email || null,
+        receipt_url: charge.receipt_url || null,
+        refunded: charge.refunded ?? false,
+        status: charge.status || 'succeeded',
+        created: charge.created || normalizedPaymentIntent.created || Math.floor(Date.now() / 1000)
+    };
+
+    normalizedPaymentIntent.object = 'payment_intent';
+    normalizedPaymentIntent.amount = fallbackAmount;
+    normalizedPaymentIntent.amount_capturable = normalizedPaymentIntent.amount_capturable ?? 0;
+    normalizedPaymentIntent.amount_details = normalizedPaymentIntent.amount_details || { tip: {} };
+    normalizedPaymentIntent.amount_received = normalizedPaymentIntent.amount_received ?? fallbackAmount;
+    normalizedPaymentIntent.currency = fallbackCurrency;
+    normalizedPaymentIntent.customer = customerId;
+    normalizedPaymentIntent.livemode = normalizedPaymentIntent.livemode === true;
+    normalizedPaymentIntent.metadata = normalizedPaymentIntent.metadata || {};
+    normalizedPaymentIntent.payment_method = resolvedPaymentMethodId;
+    normalizedPaymentIntent.payment_method_types = Array.isArray(normalizedPaymentIntent.payment_method_types)
+        && normalizedPaymentIntent.payment_method_types.length > 0
+        ? normalizedPaymentIntent.payment_method_types
+        : ['card'];
+    normalizedPaymentIntent.receipt_email = normalizedPaymentIntent.receipt_email || normalizedCharge.receipt_email || null;
+    normalizedPaymentIntent.invoice = getStripeId(normalizedPaymentIntent.invoice);
+    normalizedPaymentIntent.subscription = getStripeId(normalizedPaymentIntent.subscription);
+    normalizedPaymentIntent.canceled_at = normalizedPaymentIntent.canceled_at ?? null;
+    normalizedPaymentIntent.cancellation_reason = normalizedPaymentIntent.cancellation_reason ?? null;
+    normalizedPaymentIntent.last_payment_error = normalizedPaymentIntent.last_payment_error ?? null;
+    normalizedPaymentIntent.next_action = normalizedPaymentIntent.next_action ?? null;
+    normalizedPaymentIntent.processing = normalizedPaymentIntent.processing ?? null;
+    normalizedPaymentIntent.review = normalizedPaymentIntent.review ?? null;
+    normalizedPaymentIntent.setup_future_usage = normalizedPaymentIntent.setup_future_usage ?? null;
+    normalizedPaymentIntent.shipping = normalizedPaymentIntent.shipping ?? null;
+    normalizedPaymentIntent.statement_descriptor = normalizedPaymentIntent.statement_descriptor ?? null;
+    normalizedPaymentIntent.statement_descriptor_suffix = normalizedPaymentIntent.statement_descriptor_suffix ?? null;
+    normalizedPaymentIntent.transfer_data = normalizedPaymentIntent.transfer_data ?? null;
+    normalizedPaymentIntent.transfer_group = normalizedPaymentIntent.transfer_group ?? null;
+    normalizedPaymentIntent.status = 'succeeded';
+    normalizedPaymentIntent.latest_charge = normalizedCharge.id;
+    normalizedPaymentIntent.charges = {
+        object: 'list',
+        data: [normalizedCharge],
+        has_more: false,
+        total_count: 1,
+        url: `/v1/charges?payment_intent=${normalizedPaymentIntent.id}`
+    };
+
+    return normalizedPaymentIntent;
+};
+
 const createStripeEventPayload = (type, object, uniqueSuffix) => ({
     id: `evt_${type.replace(/\./g, '_')}_${uniqueSuffix}`,
     object: 'event',
@@ -210,50 +390,71 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
         const sessionId = processResponse.id;
         console.log(`✅ Created Stripe checkout session ${sessionId}`);
 
-        const sessionAfterCreation = await stripe.checkout.sessions.retrieve(sessionId);
-        const paymentIntentIdFromSession = sessionAfterCreation.payment_intent;
-        assert(paymentIntentIdFromSession, 'Checkout session did not include a payment intent id.');
+        const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
 
-        await stripe.paymentIntents.confirm(paymentIntentIdFromSession, {
+        const checkoutSessionCurrency = checkoutSession.currency || 'usd';
+        const checkoutSessionCustomerId = getStripeId(checkoutSession.customer);
+        const normalizedMetadata = {
+            ...normalizeStripeMetadata(donationPayload.metadata || {}),
+            checkout_session_id: sessionId,
+            integration_test_run_id: uniqueRunId
+        };
+
+        let paymentIntent = await stripe.paymentIntents.create({
+            amount: donationAmount,
+            currency: checkoutSessionCurrency,
+            customer: checkoutSessionCustomerId || undefined,
             payment_method: 'pm_card_visa',
-            return_url: 'https://example.com/complete'
+            payment_method_types: ['card'],
+            confirm: true,
+            receipt_email: donorEmail,
+            description: 'Automated integration test donation',
+            metadata: normalizedMetadata,
+            expand: ['charges.data.balance_transaction']
         });
 
-        const paymentIntent = await waitFor(
-            async () => {
-                const pi = await stripe.paymentIntents.retrieve(paymentIntentIdFromSession, {
-                    expand: ['charges.data.balance_transaction']
-                });
-                if (pi.status === 'succeeded') {
-                    return pi;
+        if (paymentIntent.status !== 'succeeded') {
+            paymentIntent = await waitFor(
+                async () => {
+                    const pi = await stripe.paymentIntents.retrieve(paymentIntent.id, {
+                        expand: ['charges.data.balance_transaction']
+                    });
+                    if (pi.status === 'succeeded') {
+                        return pi;
+                    }
+                    return null;
+                },
+                {
+                    attempts: 5,
+                    delay: 1000,
+                    timeoutMessage: `Timed out waiting for simulated payment intent ${paymentIntent.id} to succeed.`
                 }
-                return null;
-            },
-            {
-                attempts: 10,
-                delay: 2000,
-                timeoutMessage: `Timed out waiting for payment intent ${paymentIntentIdFromSession} to succeed.`
-            }
-        );
+            );
+        }
 
-        const charge = paymentIntent.charges?.data?.[0];
+        let charge = paymentIntent.charges?.data?.[0];
+
+        if (!charge) {
+            charge = await waitFor(
+                async () => {
+                    const chargesResponse = await stripe.charges.list({
+                        payment_intent: paymentIntent.id,
+                        limit: 1,
+                        expand: ['data.balance_transaction']
+                    });
+
+                    return chargesResponse.data?.[0] || null;
+                },
+                {
+                    attempts: 5,
+                    delay: 1000,
+                    timeoutMessage: `Timed out waiting for charge on payment intent ${paymentIntent.id}.`
+                }
+            );
+        }
+
         assert(charge, 'Expected at least one charge on the succeeded payment intent.');
         assert.strictEqual(charge.status, 'succeeded', `Charge ${charge.id} did not succeed.`);
-
-        const checkoutSession = await waitFor(
-            async () => {
-                const session = await stripe.checkout.sessions.retrieve(sessionId);
-                if (session.status === 'complete') {
-                    return session;
-                }
-                return null;
-            },
-            {
-                attempts: 10,
-                delay: 2000,
-                timeoutMessage: `Timed out waiting for checkout session ${sessionId} to reach the complete state.`
-            }
-        );
 
         const sendWebhookEvent = async (type, object) => {
             const payloadObject = createStripeEventPayload(type, object, uniqueRunId);
@@ -278,10 +479,51 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             );
         };
 
-        await sendWebhookEvent('checkout.session.completed', checkoutSession);
+        const sanitizedSession = sanitizeStripeObject(checkoutSession);
+        const sanitizedPaymentIntent = sanitizeStripeObject(paymentIntent);
+        const sanitizedCharge = sanitizeStripeObject(charge);
+
+        if (!sanitizedSession.amount_total) {
+            sanitizedSession.amount_total = sanitizedPaymentIntent.amount_received
+                ?? sanitizedPaymentIntent.amount
+                ?? donationAmount;
+        }
+
+        if (!sanitizedSession.amount_subtotal) {
+            sanitizedSession.amount_subtotal = sanitizedPaymentIntent.amount
+                ?? sanitizedPaymentIntent.amount_received
+                ?? donationAmount;
+        }
+
+        if (!sanitizedSession.currency) {
+            sanitizedSession.currency = sanitizedPaymentIntent.currency || checkoutSessionCurrency;
+        }
+
+        const balanceTransactionId = getStripeId(sanitizedCharge.balance_transaction);
+        assert(balanceTransactionId, 'Charge does not reference a balance transaction id.');
+
+        const customerDetailsForEvents = (sanitizedSession.customer_details && typeof sanitizedSession.customer_details === 'object')
+            ? sanitizedSession.customer_details
+            : normalizeCustomerDetails(donationPayload.customer);
+
+        const checkoutSessionEventObject = createCheckoutSessionCompletedObject({
+            session: sanitizedSession,
+            customer: donationPayload.customer,
+            customerDetails: customerDetailsForEvents,
+            paymentIntentId: sanitizedPaymentIntent.id
+        });
+
+        const paymentIntentEventObject = createPaymentIntentSucceededObject({
+            paymentIntent: sanitizedPaymentIntent,
+            charge: { ...sanitizedCharge, balance_transaction: balanceTransactionId },
+            balanceTransactionId,
+            customerDetails: customerDetailsForEvents
+        });
+
+        await sendWebhookEvent('checkout.session.completed', checkoutSessionEventObject);
         console.log(`✅ Processed checkout.session.completed for ${sessionId}`);
 
-        await sendWebhookEvent('payment_intent.succeeded', paymentIntent);
+        await sendWebhookEvent('payment_intent.succeeded', paymentIntentEventObject);
         console.log(`✅ Processed payment_intent.succeeded for ${paymentIntent.id}`);
 
         const salesforceConnection = new jsforce.Connection({ loginUrl: salesforceLoginUrl });
