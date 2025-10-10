@@ -19,6 +19,17 @@ interface QuickBooksReference {
   name?: string;
 }
 
+type AccountRefLookupMetadata = {
+  original: string;
+  lookupName: string;
+};
+
+const ACCOUNT_LOOKUP_METADATA: unique symbol = Symbol('QuickBooksAccountLookup');
+
+type AccountRefWithMetadata = QuickBooksReference & {
+  [ACCOUNT_LOOKUP_METADATA]?: AccountRefLookupMetadata;
+};
+
 interface QuickBooksSalesItemLineDetail {
   ItemRef: QuickBooksReference;
   ItemAccountRef?: QuickBooksReference;
@@ -174,7 +185,7 @@ const normalizeDate = (value: string | Date): string => {
 const parseDelimitedAccount = (
   raw: string,
   delimiter: string,
-): QuickBooksReference | null => {
+): AccountRefWithMetadata | null => {
   const index = raw.indexOf(delimiter);
   if (index === -1) {
     return null;
@@ -188,16 +199,18 @@ const parseDelimitedAccount = (
     );
   }
 
-  return {
+  const reference: AccountRefWithMetadata = {
     value: right,
     name: left || undefined,
   };
+
+  return reference;
 };
 
 const ensureAccountRefValue = (
-  ref: QuickBooksReference,
+  ref: AccountRefWithMetadata,
   original: string,
-): QuickBooksReference => {
+): AccountRefWithMetadata => {
   const value = ref.value.trim();
   if (!value) {
     throw new Error(
@@ -208,7 +221,7 @@ const ensureAccountRefValue = (
   return { ...ref, value };
 };
 
-const createAccountRef = (input: string): QuickBooksReference => {
+const createAccountRef = (input: string): AccountRefWithMetadata => {
   const trimmed = input.trim();
   if (!trimmed) {
     throw new Error('QuickBooks account name must be provided.');
@@ -228,7 +241,8 @@ const createAccountRef = (input: string): QuickBooksReference => {
         throw new Error('QuickBooks account reference JSON must include a value.');
       }
 
-      return { value, name };
+      const reference: AccountRefWithMetadata = { value, name };
+      return reference;
     } catch (error) {
       throw new Error(
         error instanceof Error
@@ -246,14 +260,17 @@ const createAccountRef = (input: string): QuickBooksReference => {
     }
   }
 
-  if (!/\s/.test(trimmed)) {
+  const isNumericId = /^\d+$/.test(trimmed);
+  if (isNumericId) {
     return ensureAccountRefValue({ value: trimmed }, input);
   }
 
-  throw new Error(
-    'QuickBooks account configuration must include an ID. ' +
-      'Provide an "Account Name|Account ID" pair or a JSON string with a "value" field.',
-  );
+  const reference = ensureAccountRefValue({ value: trimmed, name: trimmed }, input);
+  reference[ACCOUNT_LOOKUP_METADATA] = {
+    original: input,
+    lookupName: trimmed,
+  };
+  return reference;
 };
 
 const buildDocNumber = (prefix: string, date: string | Date, amountCents: number): string => {
@@ -264,6 +281,7 @@ const buildDocNumber = (prefix: string, date: string | Date, amountCents: number
   const safePrefix = prefix.slice(0, maxPrefixLength);
   return `${safePrefix}-${suffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
 };
+
 
 export const buildSalesReceipt = ({
   docNumber,
@@ -447,6 +465,200 @@ const buildQboUrl = (entity: string): string => {
   return `${base}/${encodeURIComponent(realmId)}/${entity}`;
 };
 
+const accountLookupCache = new Map<string, string>();
+
+const escapeQueryValue = (value: string): string => {
+  return value.replace(/'/g, "''");
+};
+
+const buildQboQueryUrl = (query: string): string => {
+  const base = QBO_BASE_URL[env.quickBooks.environment];
+  const realmId = getRealmId();
+  const encodedQuery = encodeURIComponent(query);
+  return `${base}/${encodeURIComponent(realmId)}/query?query=${encodedQuery}`;
+};
+
+const getLookupName = (ref: AccountRefWithMetadata): string | undefined => {
+  const metadata = ref[ACCOUNT_LOOKUP_METADATA];
+  if (metadata?.lookupName) {
+    return metadata.lookupName;
+  }
+  if (ref.name) {
+    return ref.name;
+  }
+  const value = ref.value.trim();
+  if (value.length > 0) {
+    return value;
+  }
+  return undefined;
+};
+
+const isLookupRequired = (ref: AccountRefWithMetadata): boolean => {
+  return Boolean(ref[ACCOUNT_LOOKUP_METADATA]);
+};
+
+const resolveAccountId = async (
+  name: string,
+  fetcher: Fetcher,
+  accessToken: string,
+): Promise<string> => {
+  const cacheKey = `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:${name.toLowerCase()}`;
+  const cached = accountLookupCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const query = `select Id, Name from Account where Name = '${escapeQueryValue(name)}'`;
+  const url = buildQboQueryUrl(query);
+  const response = await fetcher(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to resolve QuickBooks account "${name}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const queryResponse = (data as Record<string, unknown>).QueryResponse;
+  const accounts =
+    queryResponse && typeof queryResponse === 'object'
+      ? (queryResponse as Record<string, unknown>).Account
+      : undefined;
+  const accountList = Array.isArray(accounts)
+    ? accounts
+    : accounts
+    ? [accounts]
+    : [];
+
+  const match = accountList.find((account) => {
+    if (!account || typeof account !== 'object') {
+      return false;
+    }
+    const accountName = (account as Record<string, unknown>).Name;
+    if (typeof accountName !== 'string') {
+      return false;
+    }
+    return accountName.trim().toLowerCase() === name.trim().toLowerCase();
+  }) ?? accountList[0];
+
+  if (!match || typeof match !== 'object') {
+    throw new Error(
+      `QuickBooks account "${name}" could not be found. ` +
+        'Provide the account ID in configuration or ensure the account exists in QuickBooks.',
+    );
+  }
+
+  const idValue = (match as Record<string, unknown>).Id;
+  if (typeof idValue !== 'string' && typeof idValue !== 'number') {
+    throw new Error(
+      `QuickBooks account "${name}" does not provide a usable ID. ` +
+        'Update the configuration to include the account ID.',
+    );
+  }
+
+  const id = typeof idValue === 'number' ? idValue.toString() : idValue.trim();
+  if (!id) {
+    throw new Error(
+      `QuickBooks account "${name}" returned an empty ID. Update the configuration to include the account ID.`,
+    );
+  }
+
+  accountLookupCache.set(cacheKey, id);
+  return id;
+};
+
+const collectAccountReferences = (
+  entity: QuickBooksDocType,
+  payload: QuickBooksSalesReceipt | QuickBooksJournalEntry | QuickBooksBankDeposit,
+): AccountRefWithMetadata[] => {
+  const references: AccountRefWithMetadata[] = [];
+
+  const addRef = (ref: QuickBooksReference | undefined) => {
+    if (ref) {
+      references.push(ref as AccountRefWithMetadata);
+    }
+  };
+
+  if (entity === 'sales-receipt') {
+    const receipt = payload as QuickBooksSalesReceipt;
+    addRef(receipt.DepositToAccountRef);
+    for (const line of receipt.Line) {
+      if (line.DetailType === 'SalesItemLineDetail') {
+        addRef(line.SalesItemLineDetail.ItemRef);
+        addRef(line.SalesItemLineDetail.ItemAccountRef);
+        addRef(line.SalesItemLineDetail.TaxCodeRef);
+      }
+    }
+  } else if (entity === 'journal-entry') {
+    const journal = payload as QuickBooksJournalEntry;
+    for (const line of journal.Line) {
+      if (line.DetailType === 'JournalEntryLineDetail') {
+        addRef(line.JournalEntryLineDetail.AccountRef);
+      }
+    }
+  } else {
+    const deposit = payload as QuickBooksBankDeposit;
+    addRef(deposit.DepositToAccountRef);
+    for (const line of deposit.Line) {
+      if (line.DetailType === 'DepositLineDetail') {
+        addRef(line.DepositLineDetail.AccountRef);
+      }
+    }
+  }
+
+  return references;
+};
+
+const resolveAccountReferences = async (
+  entity: QuickBooksDocType,
+  payload: QuickBooksSalesReceipt | QuickBooksJournalEntry | QuickBooksBankDeposit,
+  fetcher: Fetcher,
+  accessToken: string,
+): Promise<void> => {
+  const references = collectAccountReferences(entity, payload);
+  const lookups = new Map<string, AccountRefWithMetadata[]>();
+
+  for (const ref of references) {
+    if (!isLookupRequired(ref)) {
+      continue;
+    }
+
+    const lookupName = getLookupName(ref);
+    if (!lookupName) {
+      throw new Error(
+        'QuickBooks account configuration must include an ID. ' +
+          'Provide an "Account Name|Account ID" pair or a JSON string with a "value" field.',
+      );
+    }
+
+    const normalizedName = lookupName.trim();
+    if (!lookups.has(normalizedName)) {
+      lookups.set(normalizedName, []);
+    }
+    lookups.get(normalizedName)?.push(ref);
+  }
+
+  for (const [name, refs] of lookups.entries()) {
+    const id = await resolveAccountId(name, fetcher, accessToken);
+    for (const ref of refs) {
+      ref.value = id;
+      if (!ref.name) {
+        ref.name = name;
+      }
+      delete ref[ACCOUNT_LOOKUP_METADATA];
+    }
+  }
+};
+
 const postToQbo = async <T extends QuickBooksDocType>(
   entity: T,
   payload: T extends 'sales-receipt'
@@ -465,6 +677,8 @@ const postToQbo = async <T extends QuickBooksDocType>(
   );
   const fetcher = getFetcher(options);
   const accessToken = getAccessToken(options);
+
+  await resolveAccountReferences(entity, payload, fetcher, accessToken);
 
   const response = await fetcher(url, {
     method: 'POST',

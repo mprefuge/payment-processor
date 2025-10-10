@@ -94,11 +94,14 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
 
-When specifying account mappings you must provide the QuickBooks account ID.
+When specifying account mappings you should provide the QuickBooks account ID.
 You can either supply the raw ID (for example, `123`) or a `Name|ID` pair such
 as `Stripe Clearing|123`. JSON strings of the form `{"value":"123","name":"Stripe
-Clearing"}` are also accepted. Supplying only an account name without an ID will
-throw a configuration error before any QuickBooks API calls are attempted.
+Clearing"}` are also accepted. If only a name is supplied the service will
+attempt to resolve the ID by querying QuickBooks before submitting the
+transaction. This adds an extra API call and will fail if the account name is
+ambiguous or missing, so providing the ID up front is still strongly
+recommended.
 
 ## Endpoint reference
 

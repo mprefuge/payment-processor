@@ -36,6 +36,14 @@ const resetAccounts = () => {
   Object.assign(baseEnv.quickBooks.accounts, defaultAccounts);
 };
 
+type MockResponse = {
+  ok?: boolean;
+  status?: number;
+  statusText?: string;
+  json?: () => Promise<unknown>;
+  text?: () => Promise<string>;
+};
+
 const createFetchMock = (...payloads: unknown[]) => {
   const requests: RequestRecord[] = [];
   const fetcher = vi.fn(async (url: string, init?: any) => {
@@ -44,6 +52,27 @@ const createFetchMock = (...payloads: unknown[]) => {
       throw new Error('No mock response available for fetch call.');
     }
     requests.push({ url, init });
+    if (payload && typeof payload === 'object' && 'ok' in (payload as MockResponse)) {
+      const response = payload as MockResponse;
+      return {
+        ok: response.ok ?? true,
+        status: response.status ?? (response.ok === false ? 400 : 200),
+        statusText: response.statusText ?? 'OK',
+        async json() {
+          if (response.json) {
+            return response.json();
+          }
+          throw new Error('JSON parsing not implemented for this mock response.');
+        },
+        async text() {
+          if (response.text) {
+            return response.text();
+          }
+          return '';
+        },
+      } as any;
+    }
+
     return {
       ok: true,
       status: 200,
@@ -178,8 +207,49 @@ describe('postChargeToQbo', () => {
     ]);
   });
 
-  it('throws a helpful error when an account configuration omits an ID', async () => {
+  it('looks up account IDs when configuration only provides a name', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Account: [{ Id: '999', Name: 'Stripe Clearing' }],
+        },
+      },
+      { SalesReceipt: { Id: 'sr-2' } },
+      { JournalEntry: { Id: 'fee-je-2' } },
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 325,
+      memo: 'Lookup memo',
+      date: new Date('2024-05-01'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(requests[0].url).toContain('/query?query=');
+    expect(requests[0].init?.method).toBe('GET');
+
+    const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
+      value: '999',
+      name: 'Stripe Clearing',
+    });
+
+    const journalBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
+    const clearingLine = journalBody.Line.find(
+      (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing',
+    );
+    expect(clearingLine?.JournalEntryLineDetail.AccountRef.value).toBe('999');
+  });
+
+  it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    const { fetcher } = createFetchMock({ QueryResponse: { Account: [] } });
     const { postChargeToQbo } = await importQboSvc();
 
     await expect(
@@ -188,9 +258,9 @@ describe('postChargeToQbo', () => {
         fee: 0,
         memo: 'Missing ID',
         date: new Date('2024-04-01'),
-        options: { fetcher: vi.fn(), accessToken: 'token' },
+        options: { fetcher, accessToken: 'token' },
       }),
-    ).rejects.toThrow(/account configuration must include an ID/i);
+    ).rejects.toThrow(/could not be found/i);
   });
 });
 
