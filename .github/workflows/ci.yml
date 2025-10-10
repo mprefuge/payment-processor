@@ -27,5 +27,6 @@ jobs:
       - name: Run tests
         env:
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          AZURE_TABLES_CONNECTION_STRING: ${{ secrets.AZURE_TABLES_CONNECTION_STRING }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
         run: npm test
