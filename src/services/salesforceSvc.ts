@@ -12,22 +12,57 @@ export type TransactionExternalIdField =
   | 'stripe_checkout_session_id__c'
   | 'stripe_charge_id__c';
 
+const TRANSACTION_EXTERNAL_ID_FIELDS: readonly TransactionExternalIdField[] = [
+  'stripe_payment_intent_id__c',
+  'stripe_refund_id__c',
+  'stripe_dispute_id__c',
+  'stripe_balance_transaction_id__c',
+  'stripe_checkout_session_id__c',
+  'stripe_charge_id__c',
+];
+
+const capitalize = (value: string): string =>
+  value.length === 0 ? value : value[0].toUpperCase() + value.slice(1).toLowerCase();
+
+const uppercaseIdSuffix = (value: string): string =>
+  value.replace(/Id(__[a-z0-9]+)?$/i, (_, suffix = '') => `ID${suffix}`);
+
+const buildExternalIdAliases = (field: TransactionExternalIdField): readonly string[] => {
+  const suffixMatch = field.match(/(__[a-z0-9]+)$/i);
+  const suffix = suffixMatch ? suffixMatch[0] : '';
+  const withoutSuffix = suffix ? field.slice(0, -suffix.length) : field;
+  const rawSegments = withoutSuffix.split('_').filter(Boolean);
+
+  if (rawSegments.length === 0) {
+    return [field];
+  }
+
+  const segments = rawSegments.map((segment) => segment.toLowerCase());
+  const pascalSegments = segments.map(capitalize);
+
+  const underscorePascal = `${pascalSegments.join('_')}${suffix}`;
+  const pascal = `${pascalSegments.join('')}${suffix}`;
+  const camel = `${segments[0]}${pascalSegments.slice(1).join('')}${suffix}`;
+
+  const candidates = new Set<string>([field, underscorePascal, pascal, camel]);
+
+  for (const candidate of Array.from(candidates)) {
+    candidates.add(uppercaseIdSuffix(candidate));
+  }
+
+  return Array.from(candidates);
+};
+
 const TRANSACTION_EXTERNAL_ID_FIELD_ALIASES: Record<
   TransactionExternalIdField,
   readonly string[]
-> = {
-  stripe_payment_intent_id__c: [
-    'stripe_payment_intent_id__c',
-    'Stripe_Payment_Intent_ID__c',
-    'Stripe_Payment_Intent_Id__c',
-    'StripePaymentIntentId__c',
-  ],
-  stripe_refund_id__c: ['stripe_refund_id__c'],
-  stripe_dispute_id__c: ['stripe_dispute_id__c'],
-  stripe_balance_transaction_id__c: ['stripe_balance_transaction_id__c'],
-  stripe_checkout_session_id__c: ['stripe_checkout_session_id__c'],
-  stripe_charge_id__c: ['stripe_charge_id__c'],
-};
+> = TRANSACTION_EXTERNAL_ID_FIELDS.reduce(
+  (aliases, field) => ({
+    ...aliases,
+    [field]: buildExternalIdAliases(field),
+  }),
+  {} as Record<TransactionExternalIdField, readonly string[]>,
+);
 
 export interface QuickBooksDocumentReference {
   type: string;
