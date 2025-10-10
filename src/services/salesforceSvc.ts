@@ -46,6 +46,25 @@ const buildExternalIdAliases = (field: TransactionExternalIdField): readonly str
 
   const candidates = new Set<string>([field, underscorePascal, pascal, camel]);
 
+  if (segments[segments.length - 1] === 'id') {
+    const withoutIdSegments = segments.slice(0, -1);
+    if (withoutIdSegments.length > 0) {
+      const withoutIdPascalSegments = withoutIdSegments.map(capitalize);
+      const underscorePascalWithoutId = `${withoutIdPascalSegments.join('_')}${suffix}`;
+      const pascalWithoutId = `${withoutIdPascalSegments.join('')}${suffix}`;
+      const camelWithoutId = `${withoutIdSegments[0]}${withoutIdPascalSegments
+        .slice(1)
+        .join('')}${suffix}`;
+
+      const snakeWithoutId = `${withoutIdSegments.join('_')}${suffix}`;
+
+      candidates.add(underscorePascalWithoutId);
+      candidates.add(pascalWithoutId);
+      candidates.add(camelWithoutId);
+      candidates.add(snakeWithoutId);
+    }
+  }
+
   for (const candidate of Array.from(candidates)) {
     candidates.add(uppercaseIdSuffix(candidate));
   }
