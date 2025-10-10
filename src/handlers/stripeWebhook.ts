@@ -362,7 +362,7 @@ const handleCheckoutSessionCompleted = async (
     stripe_subscription_id__c: normalizeStripeId(session.subscription),
     amount_gross__c: centsToMajorUnits(session.amount_total ?? null),
     amount_net__c: centsToMajorUnits(session.amount_subtotal ?? null),
-    currency_iso_code: session.currency
+    currency_iso_code__c: session.currency
       ? session.currency.toUpperCase()
       : null,
     received_at__c: timestampToIsoString(session.created ?? null),
@@ -505,7 +505,7 @@ const handleChargeRefunded = async (
     amount_gross__c: centsToPositiveMajorUnits(refund.amount ?? null),
     amount_fee__c: centsToPositiveMajorUnits(balanceTransaction?.fee ?? null),
     amount_net__c: centsToMajorUnits(balanceTransaction?.net ?? null),
-    currency_iso_code: charge.currency
+    currency_iso_code__c: charge.currency
       ? charge.currency.toUpperCase()
       : null,
     received_at__c: timestampToIsoString(refund.created ?? charge.created ?? null),
@@ -639,7 +639,7 @@ const handleDisputeClosed = async (
       lossAmountCents + feeAmountCents > 0
         ? centsToMajorUnits(-(lossAmountCents + feeAmountCents))
         : null,
-    currency_iso_code: dispute.currency
+    currency_iso_code__c: dispute.currency
       ? dispute.currency.toUpperCase()
       : charge?.currency?.toUpperCase() ?? null,
     received_at__c: timestampToIsoString(dispute.created ?? null),
