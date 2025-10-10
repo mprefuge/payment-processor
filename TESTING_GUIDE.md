@@ -11,6 +11,43 @@ Before testing, verify:
 - [ ] Azure Function deployed and running
 - [ ] All environment variables set correctly
 
+## Automated End-to-End Donation Flow Test
+
+The repository now includes a fully automated test that mimics the live donation lifecycle from checkout session creation through webhook settlement. The test exercises the Azure Function handlers, the Salesforce CRM integration, and the QuickBooks posting logic with in-memory stubs so that no external systems are required.
+
+### Environment parity requirements
+
+To mirror the production configuration, ensure the following dependencies are available before running the test:
+
+- **Node.js 20.x** (matching the runtime declared in `package.json`).
+- **Azure Functions Core Tools v4** (optional, required only when running the local Functions host).
+- All project dependencies installed with `npm install`.
+- Environment variables that are required in production must be present, even though the test substitutes external services:
+  - `STRIPE_SECRET`, `STRIPE_TEST_SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+  - `ACCOUNTING_SYNC_ENABLED=true`
+  - `QBO_REALM_ID`, `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `QBO_REFRESH_TOKEN`
+  - `CRM_PROVIDER=salesforce`, `SALESFORCE_USERNAME`, `SALESFORCE_PASSWORD`, and optional `SALESFORCE_SECURITY_TOKEN`
+  - Any URLs referenced by the checkout flow (`SUCCESS_URL`, `CANCEL_URL`) if you need to override defaults
+
+Sample non-secret placeholder values are baked into the test so you can run it locally without exposing production credentials, but setting your own values ensures parity with CI/CD pipelines.
+
+### Running the end-to-end suite
+
+```bash
+npm install
+npm run build
+node tests/endToEndDonationFlow.test.js
+```
+
+The command above compiles the TypeScript sources, loads the `processTransaction` and `stripeWebhook` handlers from the production build, and asserts that:
+
+- A Stripe checkout session is created with the expected metadata.
+- Salesforce contact and pending transaction records are created.
+- Webhook events (`checkout.session.completed` and `payment_intent.succeeded`) update the transaction status to `paid` and trigger accounting sync.
+- QuickBooks posting metadata is persisted back to Salesforce and idempotency is respected.
+
+To run the full regression suite (including the end-to-end scenario) use `npm test`, which executes every script in the `tests/` directory against the compiled `dist/` output.
+
 ## Quick Test: Trigger Test Webhook
 
 ### Using Stripe CLI (Recommended)
