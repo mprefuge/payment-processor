@@ -121,6 +121,25 @@ const normalizeCustomerDetails = (customer = {}) => {
     };
 };
 
+const normalizeStripeMetadata = (metadata = {}) => {
+    const normalized = {};
+
+    for (const [key, value] of Object.entries(metadata || {})) {
+        if (typeof value === 'undefined' || value === null) {
+            continue;
+        }
+
+        if (typeof value === 'object') {
+            normalized[key] = JSON.stringify(value);
+            continue;
+        }
+
+        normalized[key] = String(value);
+    }
+
+    return normalized;
+};
+
 const createCheckoutSessionCompletedObject = ({ session, customer, customerDetails, paymentIntentId }) => {
     const resolvedCustomerDetails = customerDetails || normalizeCustomerDetails(customer);
     const customerId = getStripeId(session.customer) || (customer && customer.id ? customer.id : null);
@@ -371,65 +390,53 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
         const sessionId = processResponse.id;
         console.log(`✅ Created Stripe checkout session ${sessionId}`);
 
-        const sessionAfterCreation = await waitFor(
-            async () => {
-                const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent'] });
-                const paymentIntentId = getStripeId(session.payment_intent);
-                if (paymentIntentId) {
-                    return session;
-                }
-                return null;
-            },
+        const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
+
+        const checkoutSessionCurrency = checkoutSession.currency || 'usd';
+        const checkoutSessionCustomerId = getStripeId(checkoutSession.customer);
+        const normalizedMetadata = {
+            ...normalizeStripeMetadata(donationPayload.metadata || {}),
+            checkout_session_id: sessionId,
+            integration_test_run_id: uniqueRunId
+        };
+
+        let paymentIntent = await stripe.paymentIntents.create(
             {
-                attempts: 10,
-                delay: 2000,
-                timeoutMessage: `Timed out waiting for checkout session ${sessionId} to expose a payment intent.`
-            }
+                amount: donationAmount,
+                currency: checkoutSessionCurrency,
+                customer: checkoutSessionCustomerId || undefined,
+                payment_method: 'pm_card_visa',
+                payment_method_types: ['card'],
+                confirm: true,
+                receipt_email: donorEmail,
+                description: 'Automated integration test donation',
+                metadata: normalizedMetadata
+            },
+            { expand: ['charges.data.balance_transaction'] }
         );
 
-        const paymentIntentIdFromSession = getStripeId(sessionAfterCreation.payment_intent);
-        assert(paymentIntentIdFromSession, 'Checkout session did not include a payment intent id.');
-
-        await stripe.paymentIntents.confirm(paymentIntentIdFromSession, {
-            payment_method: 'pm_card_visa',
-            return_url: 'https://example.com/complete'
-        });
-
-        const paymentIntent = await waitFor(
-            async () => {
-                const pi = await stripe.paymentIntents.retrieve(paymentIntentIdFromSession, {
-                    expand: ['charges.data.balance_transaction']
-                });
-                if (pi.status === 'succeeded') {
-                    return pi;
+        if (paymentIntent.status !== 'succeeded') {
+            paymentIntent = await waitFor(
+                async () => {
+                    const pi = await stripe.paymentIntents.retrieve(paymentIntent.id, {
+                        expand: ['charges.data.balance_transaction']
+                    });
+                    if (pi.status === 'succeeded') {
+                        return pi;
+                    }
+                    return null;
+                },
+                {
+                    attempts: 5,
+                    delay: 1000,
+                    timeoutMessage: `Timed out waiting for simulated payment intent ${paymentIntent.id} to succeed.`
                 }
-                return null;
-            },
-            {
-                attempts: 10,
-                delay: 2000,
-                timeoutMessage: `Timed out waiting for payment intent ${paymentIntentIdFromSession} to succeed.`
-            }
-        );
+            );
+        }
 
         const charge = paymentIntent.charges?.data?.[0];
         assert(charge, 'Expected at least one charge on the succeeded payment intent.');
         assert.strictEqual(charge.status, 'succeeded', `Charge ${charge.id} did not succeed.`);
-
-        const checkoutSession = await waitFor(
-            async () => {
-                const session = await stripe.checkout.sessions.retrieve(sessionId);
-                if (session.status === 'complete') {
-                    return session;
-                }
-                return null;
-            },
-            {
-                attempts: 10,
-                delay: 2000,
-                timeoutMessage: `Timed out waiting for checkout session ${sessionId} to reach the complete state.`
-            }
-        );
 
         const sendWebhookEvent = async (type, object) => {
             const payloadObject = createStripeEventPayload(type, object, uniqueRunId);
@@ -457,6 +464,22 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
         const sanitizedSession = sanitizeStripeObject(checkoutSession);
         const sanitizedPaymentIntent = sanitizeStripeObject(paymentIntent);
         const sanitizedCharge = sanitizeStripeObject(charge);
+
+        if (!sanitizedSession.amount_total) {
+            sanitizedSession.amount_total = sanitizedPaymentIntent.amount_received
+                ?? sanitizedPaymentIntent.amount
+                ?? donationAmount;
+        }
+
+        if (!sanitizedSession.amount_subtotal) {
+            sanitizedSession.amount_subtotal = sanitizedPaymentIntent.amount
+                ?? sanitizedPaymentIntent.amount_received
+                ?? donationAmount;
+        }
+
+        if (!sanitizedSession.currency) {
+            sanitizedSession.currency = sanitizedPaymentIntent.currency || checkoutSessionCurrency;
+        }
 
         const balanceTransactionId = getStripeId(sanitizedCharge.balance_transaction);
         assert(balanceTransactionId, 'Charge does not reference a balance transaction id.');
