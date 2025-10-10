@@ -1,549 +1,360 @@
 const assert = require('assert');
+const { randomUUID } = require('crypto');
+const Stripe = require('stripe');
+const jsforce = require('jsforce');
 
-process.env.STRIPE_SECRET = process.env.STRIPE_SECRET || 'sk_test_stub_secret';
-process.env.STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || 'whsec_stub_secret';
-process.env.STRIPE_TEST_SECRET_KEY = process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_SECRET;
-process.env.STRIPE_LIVE_SECRET_KEY = process.env.STRIPE_LIVE_SECRET_KEY || process.env.STRIPE_SECRET;
-process.env.ACCOUNTING_POSTING_STRATEGY = process.env.ACCOUNTING_POSTING_STRATEGY || 'je-transfer';
-process.env.ACCOUNTING_SYNC_ENABLED = process.env.ACCOUNTING_SYNC_ENABLED || 'true';
-process.env.QBO_REALM_ID = process.env.QBO_REALM_ID || '1234567890';
-process.env.QBO_CLIENT_ID = process.env.QBO_CLIENT_ID || 'client-id';
-process.env.QBO_CLIENT_SECRET = process.env.QBO_CLIENT_SECRET || 'client-secret';
-process.env.QBO_REFRESH_TOKEN = process.env.QBO_REFRESH_TOKEN || 'refresh-token';
-process.env.CRM_PROVIDER = 'salesforce';
-process.env.SALESFORCE_USERNAME = process.env.SALESFORCE_USERNAME || 'integration@example.com';
-process.env.SALESFORCE_PASSWORD = process.env.SALESFORCE_PASSWORD || 'Password!1';
-process.env.SALESFORCE_SECURITY_TOKEN = process.env.SALESFORCE_SECURITY_TOKEN || 'token';
-process.env.SALESFORCE_LOGIN_URL = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
-process.env.SF_AUTH_MODE = process.env.SF_AUTH_MODE || 'disabled';
-process.env.DISABLE_AZURE_TABLES = '1';
+const REQUIRED_ENV_SETS = {
+    STRIPE_TEST_SECRET_KEY: ['STRIPE_TEST_SECRET_KEY'],
+    STRIPE_WEBHOOK_SECRET: ['STRIPE_WEBHOOK_SECRET'],
+    SALESFORCE_USERNAME: ['SALESFORCE_USERNAME'],
+    SALESFORCE_PASSWORD: ['SALESFORCE_PASSWORD'],
+    SALESFORCE_SECURITY_TOKEN: ['SALESFORCE_SECURITY_TOKEN'],
+    QBO_ACCESS_TOKEN: ['QBO_ACCESS_TOKEN'],
+    QBO_REALM_ID: ['QBO_REALM_ID']
+};
 
-class InMemorySalesforceService {
-    constructor() {
-        this.contactSequence = 0;
-        this.transactionSequence = 0;
-        this.contacts = [];
-        this.transactionsById = new Map();
-        this.upsertLog = [];
-        this.createdTransactions = [];
-        this.markPostedLog = [];
-    }
+const DEFAULT_STRIPE_API_VERSION = '2023-10-16';
+const QUICKBOOKS_ENTITY_PATH = {
+    'journal-entry': 'journalentry',
+    'sales-receipt': 'salesreceipt',
+    'bank-deposit': 'deposit'
+};
 
-    _storeTransaction(record) {
-        if (!record.Id) {
-            this.transactionSequence += 1;
-            record.Id = `a00${this.transactionSequence.toString().padStart(6, '0')}`;
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const waitFor = async (fn, { attempts = 10, delay = 1000, timeoutMessage }) => {
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+            const result = await fn();
+            if (result) {
+                return result;
+            }
+        } catch (error) {
+            lastError = error;
         }
-
-        this.transactionsById.set(record.Id, record);
-        return record;
+        await sleep(delay);
     }
 
-    _findTransactionByExternalId(field, value) {
-        for (const record of this.transactionsById.values()) {
-            if (record[field] === value) {
-                return record;
+    if (lastError) {
+        throw lastError;
+    }
+
+    throw new Error(timeoutMessage || 'Timed out waiting for condition to be met');
+};
+
+const getEnvValue = (names, description) => {
+    for (const name of names) {
+        const value = process.env[name];
+        if (value && value.trim().length > 0) {
+            return value.trim();
+        }
+    }
+    throw new Error(`Missing required environment variable for ${description}: ${names.join(' or ')}`);
+};
+
+const getSalesforceField = (record, fieldNames) => {
+    const entries = Object.entries(record || {});
+    for (const target of fieldNames) {
+        const normalized = target.toLowerCase();
+        for (const [key, value] of entries) {
+            if (key.toLowerCase() === normalized) {
+                return value;
             }
         }
-        return null;
+    }
+    return undefined;
+};
+
+const createContext = (name) => ({
+    invocationId: randomUUID(),
+    bindingData: { livemode: false },
+    log: (...args) => {
+        const timestamp = new Date().toISOString();
+        console.log(`[${timestamp}] [${name}]`, ...args);
+    }
+});
+
+const sanitizeStripeObject = (value) => JSON.parse(JSON.stringify(value));
+
+const createStripeEventPayload = (type, object, uniqueSuffix) => ({
+    id: `evt_${type.replace(/\./g, '_')}_${uniqueSuffix}`,
+    object: 'event',
+    api_version: DEFAULT_STRIPE_API_VERSION,
+    created: Math.floor(Date.now() / 1000),
+    data: { object: sanitizeStripeObject(object) },
+    livemode: false,
+    pending_webhooks: 1,
+    request: { id: null, idempotency_key: null },
+    type
+});
+
+const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken }) => {
+    const entityPath = QUICKBOOKS_ENTITY_PATH[docType];
+    if (!entityPath) {
+        throw new Error(`Unsupported QuickBooks document type: ${docType}`);
     }
 
-    async searchContact(criteria) {
-        return this.contacts.filter(contact => {
-            if (criteria.email && contact.Email.toLowerCase() === criteria.email.toLowerCase()) {
-                return true;
-            }
-            if (criteria.phone && contact.Phone === criteria.phone) {
-                return true;
-            }
-            if (
-                criteria.firstName &&
-                criteria.lastName &&
-                contact.FirstName.toLowerCase() === criteria.firstName.toLowerCase() &&
-                contact.LastName.toLowerCase() === criteria.lastName.toLowerCase()
-            ) {
-                return true;
-            }
-            return false;
-        });
+    const realmId = envConfig.quickBooks.realmId;
+    if (!realmId) {
+        throw new Error('QuickBooks realm ID is not configured.');
     }
 
-    async createContact(data) {
-        this.contactSequence += 1;
-        const contact = {
-            Id: `003${this.contactSequence.toString().padStart(6, '0')}`,
-            FirstName: data.firstName,
-            LastName: data.lastName,
-            Email: data.email,
-            Phone: data.phone || null
-        };
-        this.contacts.push(contact);
-        return contact;
-    }
+    const baseUrl = envConfig.quickBooks.environment === 'production'
+        ? 'https://quickbooks.api.intuit.com/v3/company'
+        : 'https://sandbox-quickbooks.api.intuit.com/v3/company';
 
-    async updateContact(contactId, updates) {
-        const contact = this.contacts.find(record => record.Id === contactId);
-        if (!contact) {
-            throw new Error(`Contact not found: ${contactId}`);
+    const url = `${baseUrl}/${encodeURIComponent(realmId)}/${entityPath}/${encodeURIComponent(docId)}?minorversion=73`;
+
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`
         }
-        Object.assign(contact, updates);
-        return contact;
-    }
-
-    async createTask() {
-        return { Id: `00T${Date.now()}` };
-    }
-
-    async createTransaction(contactId, data) {
-        const transaction = {
-            Id: null,
-            Contact__c: contactId,
-            Status__c: data.status,
-            Amount__c: data.amount / 100,
-            Category__c: data.category,
-            Frequency__c: data.frequency,
-            Payment_Method__c: data.paymentMethod,
-            Transaction_ID__c: data.transactionId,
-            Session_ID__c: data.sessionId,
-            Name: data.name || data.description
-        };
-        this.createdTransactions.push(transaction);
-        return this._storeTransaction(transaction);
-    }
-
-    async upsertTransactionsRecord(data, externalIdField) {
-        const keyValue = data[externalIdField];
-        if (!keyValue) {
-            throw new Error(`Missing ${externalIdField} on transaction upsert`);
-        }
-        let record = this._findTransactionByExternalId(externalIdField, keyValue);
-        if (!record) {
-            record = this._storeTransaction({ [externalIdField]: keyValue });
-        }
-        Object.assign(record, data);
-        this._storeTransaction(record);
-        this.upsertLog.push({ key: externalIdField, data: { ...data } });
-        return { id: record.Id, success: true };
-    }
-
-    async updateTransaction(transactionId, updates) {
-        const record = this.transactionsById.get(transactionId);
-        if (!record) {
-            throw new Error(`Transaction not found: ${transactionId}`);
-        }
-        Object.assign(record, updates);
-        this._storeTransaction(record);
-        return record;
-    }
-
-    async findTransactionBySessionId(sessionId) {
-        for (const record of this.transactionsById.values()) {
-            if (record.Session_ID__c === sessionId || record.stripe_checkout_session_id__c === sessionId) {
-                return record;
-            }
-        }
-        return null;
-    }
-
-    async createPayout(data) {
-        return { Id: `a0X${Date.now()}`, ...data };
-    }
-
-    async upsertTransactionByExternalId(data, externalIdField) {
-        return this.upsertTransactionsRecord(data, externalIdField);
-    }
-
-    async linkPayoutOnTransactions() {
-        return [];
-    }
-
-    async markPostedToQbo(salesforceId, reference) {
-        this.markPostedLog.push({ salesforceId, reference });
-        const record = this.transactionsById.get(salesforceId);
-        if (record) {
-            record.posted_to_qbo__c = true;
-            record.qbo_doc_type__c = reference.type;
-            record.qbo_doc_id__c = reference.id;
-        }
-    }
-
-    async findTransactionIdByExternalId(externalIdField, value) {
-        const record = this._findTransactionByExternalId(externalIdField, value);
-        return record ? record.Id : null;
-    }
-}
-
-class StripeStub {
-    constructor() {
-        this.customerSequence = 0;
-        this.sessionSequence = 0;
-        this.customersById = new Map();
-        this.sessions = [];
-        this.balanceTransactionStore = new Map();
-        this.searchQueries = [];
-    }
-
-    setBalanceTransaction(record) {
-        this.balanceTransactionStore.set(record.id, record);
-    }
-
-    get lastCustomerId() {
-        if (this.customerSequence === 0) {
-            return null;
-        }
-        return `cus_test_${this.customerSequence.toString().padStart(6, '0')}`;
-    }
-
-    customers = {
-        search: async ({ query }) => {
-            this.searchQueries.push(query);
-            const emailMatch = /email:'([^']+)'/i.exec(query);
-            const nameMatch = /name:'([^']+)'/i.exec(query);
-            const email = emailMatch ? emailMatch[1] : null;
-            const name = nameMatch ? nameMatch[1] : null;
-            const matches = [];
-            for (const record of this.customersById.values()) {
-                const emailMatches = !email || record.email.toLowerCase() === email.toLowerCase();
-                const nameMatches = !name || record.name.toLowerCase() === name.toLowerCase();
-                if (emailMatches && nameMatches) {
-                    matches.push(record);
-                }
-            }
-            return { data: matches };
-        },
-        create: async data => {
-            this.customerSequence += 1;
-            const id = `cus_test_${this.customerSequence.toString().padStart(6, '0')}`;
-            const record = {
-                id,
-                email: data.email,
-                name: data.name,
-                phone: data.phone || null,
-                address: data.address || null
-            };
-            this.customersById.set(id, record);
-            return record;
-        },
-        update: async (id, updates) => {
-            const record = this.customersById.get(id);
-            if (!record) {
-                throw new Error(`Customer not found: ${id}`);
-            }
-            Object.assign(record, updates);
-            return record;
-        }
-    };
-
-    checkout = {
-        sessions: {
-            create: async params => {
-                this.sessionSequence += 1;
-                const id = `cs_test_${this.sessionSequence.toString().padStart(6, '0')}`;
-                const session = {
-                    id,
-                    url: `https://checkout.example.com/sessions/${id}`,
-                    ...params
-                };
-                this.sessions.push(session);
-                return session;
-            }
-        }
-    };
-
-    balanceTransactions = {
-        retrieve: async id => {
-            if (!this.balanceTransactionStore.has(id)) {
-                throw new Error(`Balance transaction not found: ${id}`);
-            }
-            return this.balanceTransactionStore.get(id);
-        }
-    };
-
-    charges = {
-        retrieve: async () => {
-            throw new Error('charges.retrieve should not be called in this test');
-        }
-    };
-}
-
-function createIdempotencyStore() {
-    const processed = new Set();
-    const locks = new Set();
-    return {
-        processedKeys: processed,
-        async isProcessed(key) {
-            return processed.has(key);
-        },
-        async markProcessed(key) {
-            processed.add(key);
-        },
-        async withLock(key, fn) {
-            if (locks.has(key)) {
-                throw new Error(`Lock already held for ${key}`);
-            }
-            locks.add(key);
-            try {
-                return await fn();
-            } finally {
-                locks.delete(key);
-            }
-        },
-        async flush() {}
-    };
-}
-
-function createHttpContext(overrides = {}) {
-    const logs = [];
-    return {
-        invocationId: `test-${Date.now()}`,
-        bindingData: {},
-        log: (...args) => logs.push(args),
-        logs,
-        ...overrides
-    };
-}
-
-async function runEndToEndTest() {
-    console.log('\n🧪 Running End-to-End Donation Flow Test');
-
-    const crmService = new InMemorySalesforceService();
-    const stripeStub = new StripeStub();
-    const idempotencyStore = createIdempotencyStore();
-    const accounting = {
-        postedCharges: [],
-        async postChargeToQbo(payload) {
-            this.postedCharges.push(payload);
-            return { qboId: `je-${this.postedCharges.length}`, type: 'JournalEntry' };
-        },
-        async postRefundToQbo() {
-            throw new Error('postRefundToQbo should not be called in this scenario');
-        },
-        async postDisputeToQbo() {
-            throw new Error('postDisputeToQbo should not be called in this scenario');
-        }
-    };
-
-    const crmFactoryPath = require.resolve('../dist/services/salesforce/crmFactory');
-    const originalCrmFactory = require(crmFactoryPath);
-    require.cache[crmFactoryPath] = {
-        exports: {
-            createCrmService: () => crmService,
-            validateConfig: () => ({ isValid: true }),
-            getSupportedProviders: () => ['salesforce']
-        }
-    };
-
-    const processTransactionPath = require.resolve('../processTransaction');
-    delete require.cache[processTransactionPath];
-    const processTransactionHandlerPath = require.resolve('../dist/handlers/processTransaction');
-    delete require.cache[processTransactionHandlerPath];
-    const processTransaction = require('../processTransaction');
-
-    const stripeWebhookPath = require.resolve('../stripeWebhook');
-    delete require.cache[stripeWebhookPath];
-    const stripeWebhookHandlerPath = require.resolve('../dist/handlers/stripeWebhook');
-    delete require.cache[stripeWebhookHandlerPath];
-    const stripeWebhook = require('../stripeWebhook');
-
-    const {
-        setStripeClientFactory,
-        resetStripeClientFactory
-    } = processTransaction.__internals;
-    setStripeClientFactory(() => stripeStub);
-
-    const webhookInternals = stripeWebhook.__internals;
-    const eventQueue = [];
-    webhookInternals.setDependencies({
-        stripe: {
-            verifyEvent: () => {
-                if (eventQueue.length === 0) {
-                    throw new Error('No queued Stripe event for verification');
-                }
-                return eventQueue.shift();
-            },
-            getClient: () => stripeStub
-        },
-        idempotencyStore,
-        getSalesforceSvc: async () => crmService,
-        accounting
     });
 
+    if (response.status === 404) {
+        return null;
+    }
+
+    if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`QuickBooks API returned ${response.status} for ${docType} ${docId}: ${body}`);
+    }
+
+    return response.json();
+};
+
+(async () => {
     try {
-        const requestBody = {
-            amount: 5000,
+        console.log('🧪 Starting live-parity end-to-end donation flow test');
+
+        for (const [description, names] of Object.entries(REQUIRED_ENV_SETS)) {
+            getEnvValue(names, description);
+        }
+
+        const stripeSecret = getEnvValue(['STRIPE_TEST_SECRET_KEY'], 'Stripe test secret key');
+        const webhookSecret = getEnvValue(['STRIPE_WEBHOOK_SECRET'], 'Stripe webhook signing secret');
+        const salesforceUsername = getEnvValue(['SALESFORCE_USERNAME'], 'Salesforce username');
+        const salesforcePassword = getEnvValue(['SALESFORCE_PASSWORD'], 'Salesforce password');
+        const salesforceSecurityToken = getEnvValue(['SALESFORCE_SECURITY_TOKEN'], 'Salesforce security token');
+        const salesforceLoginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
+        const quickBooksAccessToken = getEnvValue(['QBO_ACCESS_TOKEN'], 'QuickBooks access token');
+
+        process.env.STRIPE_SECRET = process.env.STRIPE_SECRET || stripeSecret;
+        process.env.CRM_PROVIDER = process.env.CRM_PROVIDER || 'salesforce';
+        process.env.STRIPE_MODE = process.env.STRIPE_MODE || 'test';
+        process.env.DISABLE_AZURE_TABLES = '1';
+        process.env.ACCOUNTING_SYNC_ENABLED = process.env.ACCOUNTING_SYNC_ENABLED || 'true';
+        process.env.ACCOUNTING_POSTING_STRATEGY = process.env.ACCOUNTING_POSTING_STRATEGY || 'je-transfer';
+
+        const processTransaction = require('../dist/handlers/processTransaction');
+        const stripeWebhook = require('../dist/handlers/stripeWebhook');
+        const { createSalesforceSvc } = require('../dist/services/salesforceSvc');
+
+        let envConfigModule;
+        try {
+            envConfigModule = require('../dist/config/env');
+        } catch (error) {
+            throw new Error('Failed to load compiled env configuration. Run "npm run build" before executing the tests.');
+        }
+
+        const envConfig = envConfigModule?.default || envConfigModule?.env || envConfigModule;
+        if (!envConfig || !envConfig.quickBooks) {
+            throw new Error('Unable to resolve QuickBooks configuration from dist/config/env.');
+        }
+
+        if (typeof stripeWebhook.__internals?.resetDependencies === 'function') {
+            stripeWebhook.__internals.resetDependencies();
+        }
+
+        const stripe = new Stripe(stripeSecret, { apiVersion: DEFAULT_STRIPE_API_VERSION });
+        const uniqueRunId = randomUUID();
+        const donationAmount = 2500; // $25.00
+        const donorEmail = `donor+${uniqueRunId}@example.com`;
+        const donationPayload = {
+            amount: donationAmount,
             frequency: 'onetime',
             customer: {
-                email: 'ada@example.com',
-                firstName: 'Ada',
-                lastName: 'Lovelace',
+                email: donorEmail,
+                firstname: 'Integration',
+                lastname: 'Test',
                 phone: '+15551234567',
                 address: {
-                    line1: '123 Analytical Engine Way',
-                    city: 'London',
-                    state: 'LDN',
-                    postal_code: 'N1 9GU',
-                    country: 'GB'
+                    line1: '1 Test Way',
+                    city: 'Testville',
+                    state: 'CA',
+                    postal_code: '94016',
+                    country: 'US'
                 }
             },
             metadata: {
-                campaign: 'Annual Fund',
-                attribution: 'Community Event'
+                attribution: 'Automated integration test',
+                run_id: uniqueRunId
             }
         };
 
-        const processContext = createHttpContext();
-        await processTransaction(processContext, { body: requestBody });
-        assert.strictEqual(processContext.res.status, 200, `Unexpected status: ${processContext.res.status}`);
+        const processContext = createContext('processTransaction');
+        await processTransaction(processContext, { body: donationPayload });
 
-        const processResponse = JSON.parse(processContext.res.body);
-        assert.ok(processResponse.id, 'Checkout session id missing');
-        assert.ok(processResponse.url, 'Checkout session url missing');
+        assert(processContext.res, 'processTransaction handler did not set an HTTP response.');
+        assert.strictEqual(processContext.res.status, 200, `Unexpected status from processTransaction: ${processContext.res.status}`);
 
-        assert.strictEqual(crmService.contacts.length, 1, 'Expected one contact to be created');
-        assert.strictEqual(crmService.createdTransactions.length, 1, 'Expected one pending transaction');
-        const pendingTransaction = crmService.createdTransactions[0];
-        assert.strictEqual(pendingTransaction.Status__c, 'Pending', 'Pending transaction should have Pending status');
-        assert.strictEqual(
-            pendingTransaction.Session_ID__c,
-            processResponse.id,
-            'Pending transaction should store the checkout session id'
-        );
+        const processResponse = typeof processContext.res.body === 'string'
+            ? JSON.parse(processContext.res.body)
+            : processContext.res.body;
 
-        const balanceTransactionId = 'txn_bt_e2e_001';
-        stripeStub.setBalanceTransaction({
-            id: balanceTransactionId,
-            amount: 5000,
-            fee: 175,
-            net: 4825,
-            currency: 'usd',
-            type: 'charge',
-            available_on: 1_700_000_000
+        assert(processResponse?.id, 'processTransaction response missing checkout session id.');
+
+        const sessionId = processResponse.id;
+        console.log(`✅ Created Stripe checkout session ${sessionId}`);
+
+        const sessionAfterCreation = await stripe.checkout.sessions.retrieve(sessionId);
+        const paymentIntentIdFromSession = sessionAfterCreation.payment_intent;
+        assert(paymentIntentIdFromSession, 'Checkout session did not include a payment intent id.');
+
+        await stripe.paymentIntents.confirm(paymentIntentIdFromSession, {
+            payment_method: 'pm_card_visa',
+            return_url: 'https://example.com/complete'
         });
 
-        const paymentIntentId = 'pi_test_e2e_001';
-        const chargeId = 'ch_test_e2e_001';
-
-        const checkoutEvent = {
-            id: 'evt_checkout_e2e',
-            type: 'checkout.session.completed',
-            livemode: false,
-            data: {
-                object: {
-                    id: processResponse.id,
-                    payment_intent: paymentIntentId,
-                    customer: stripeStub.lastCustomerId,
-                    amount_total: 5000,
-                    amount_subtotal: 5000,
-                    currency: 'usd',
-                    metadata: requestBody.metadata,
-                    created: 1_700_000_000
+        const paymentIntent = await waitFor(
+            async () => {
+                const pi = await stripe.paymentIntents.retrieve(paymentIntentIdFromSession, {
+                    expand: ['charges.data.balance_transaction']
+                });
+                if (pi.status === 'succeeded') {
+                    return pi;
                 }
+                return null;
+            },
+            {
+                attempts: 10,
+                delay: 2000,
+                timeoutMessage: `Timed out waiting for payment intent ${paymentIntentIdFromSession} to succeed.`
             }
-        };
+        );
 
-        eventQueue.push(checkoutEvent);
-        const checkoutContext = createHttpContext();
-        await stripeWebhook(checkoutContext, {
-            headers: { 'stripe-signature': 'stub-signature' },
-            rawBody: JSON.stringify(checkoutEvent)
-        });
-        assert.strictEqual(checkoutContext.res.status, 200, 'Checkout event should succeed');
+        const charge = paymentIntent.charges?.data?.[0];
+        assert(charge, 'Expected at least one charge on the succeeded payment intent.');
+        assert.strictEqual(charge.status, 'succeeded', `Charge ${charge.id} did not succeed.`);
 
-        const checkoutUpserts = crmService.upsertLog.filter(entry => entry.key === 'stripe_checkout_session_id__c');
-        assert.ok(checkoutUpserts.length > 0, 'Checkout session should be upserted into CRM');
-        const checkoutUpsert = checkoutUpserts[checkoutUpserts.length - 1];
-        assert.strictEqual(checkoutUpsert.data.status__c, 'processing', 'Checkout upsert should mark status as processing');
-
-        const paymentIntentEvent = {
-            id: 'evt_payment_intent_e2e',
-            type: 'payment_intent.succeeded',
-            livemode: false,
-            data: {
-                object: {
-                    id: paymentIntentId,
-                    status: 'succeeded',
-                    currency: 'usd',
-                    created: 1_700_000_100,
-                    metadata: {
-                        stripe_checkout_session_id__c: processResponse.id,
-                        frequency__c: 'onetime'
-                    },
-                    charges: {
-                        data: [
-                            {
-                                id: chargeId,
-                                status: 'succeeded',
-                                amount: 5000,
-                                currency: 'usd',
-                                balance_transaction: balanceTransactionId,
-                                metadata: {
-                                    stripe_checkout_session_id__c: processResponse.id
-                                },
-                                payment_method_details: {
-                                    type: 'card',
-                                    card: {
-                                        brand: 'visa',
-                                        last4: '4242'
-                                    }
-                                },
-                                created: 1_700_000_100
-                            }
-                        ]
-                    }
+        const checkoutSession = await waitFor(
+            async () => {
+                const session = await stripe.checkout.sessions.retrieve(sessionId);
+                if (session.status === 'complete') {
+                    return session;
                 }
+                return null;
+            },
+            {
+                attempts: 10,
+                delay: 2000,
+                timeoutMessage: `Timed out waiting for checkout session ${sessionId} to reach the complete state.`
             }
+        );
+
+        const sendWebhookEvent = async (type, object) => {
+            const payloadObject = createStripeEventPayload(type, object, uniqueRunId);
+            const payload = JSON.stringify(payloadObject);
+            const signature = Stripe.webhooks.generateTestHeaderString({
+                payload,
+                secret: webhookSecret
+            });
+
+            const webhookContext = createContext('stripeWebhook');
+            const request = {
+                headers: { 'stripe-signature': signature },
+                rawBody: payload
+            };
+
+            await stripeWebhook(webhookContext, request);
+            assert(webhookContext.res, `Webhook handler did not respond for ${type}.`);
+            assert.strictEqual(
+                webhookContext.res.status,
+                200,
+                `Webhook handler returned ${webhookContext.res.status} for ${type}: ${webhookContext.res.body}`
+            );
         };
 
-        eventQueue.push(paymentIntentEvent);
-        const paymentIntentContext = createHttpContext();
-        await stripeWebhook(paymentIntentContext, {
-            headers: { 'stripe-signature': 'stub-signature' },
-            rawBody: JSON.stringify(paymentIntentEvent)
-        });
-        assert.strictEqual(paymentIntentContext.res.status, 200, 'Payment intent event should succeed');
+        await sendWebhookEvent('checkout.session.completed', checkoutSession);
+        console.log(`✅ Processed checkout.session.completed for ${sessionId}`);
 
-        const paymentUpsert = crmService.upsertLog.find(entry => entry.key === 'stripe_payment_intent_id__c');
-        assert.ok(paymentUpsert, 'Payment intent upsert should occur');
-        assert.strictEqual(paymentUpsert.data.status__c, 'paid', 'Payment intent should mark transaction as paid');
-        assert.strictEqual(paymentUpsert.data.amount_gross__c, 50, 'Gross amount should be converted to dollars');
-        assert.strictEqual(paymentUpsert.data.amount_fee__c, 1.75, 'Fee amount should be converted to dollars');
-        assert.strictEqual(paymentUpsert.data.amount_net__c, 48.25, 'Net amount should be converted to dollars');
+        await sendWebhookEvent('payment_intent.succeeded', paymentIntent);
+        console.log(`✅ Processed payment_intent.succeeded for ${paymentIntent.id}`);
 
-        assert.strictEqual(accounting.postedCharges.length, 1, 'Accounting sync should post one charge');
-        const postedCharge = accounting.postedCharges[0];
-        assert.strictEqual(postedCharge.gross, 5000, 'Gross cents should be passed to accounting');
-        assert.strictEqual(postedCharge.fee, 175, 'Fee cents should be passed to accounting');
+        const salesforceConnection = new jsforce.Connection({ loginUrl: salesforceLoginUrl });
+        await salesforceConnection.login(salesforceUsername, `${salesforcePassword}${salesforceSecurityToken}`);
+        const salesforceSvc = createSalesforceSvc({ connection: salesforceConnection });
 
-        assert.strictEqual(crmService.markPostedLog.length, 1, 'CRM should be marked as posted to QBO');
-        const marked = crmService.markPostedLog[0];
-        assert.strictEqual(marked.reference.type, 'JournalEntry');
-        assert.ok(marked.reference.id, 'QBO document id should be recorded');
-
-        assert.ok(
-            idempotencyStore.processedKeys.has('evt_evt_checkout_e2e'),
-            'Checkout event should be tracked for idempotency'
-        );
-        assert.ok(
-            idempotencyStore.processedKeys.has('evt_evt_payment_intent_e2e'),
-            'Payment intent event should be tracked for idempotency'
+        const { id: salesforceTransactionId, record: salesforceRecord } = await waitFor(
+            async () => {
+                const recordId = await salesforceSvc.findTransactionIdByExternalId('stripe_payment_intent_id__c', paymentIntent.id);
+                if (!recordId) {
+                    return null;
+                }
+                const record = await salesforceConnection.sobject('Transaction__c').retrieve(recordId);
+                if (!record) {
+                    return null;
+                }
+                return { id: recordId, record };
+            },
+            {
+                attempts: 10,
+                delay: 3000,
+                timeoutMessage: `Salesforce transaction for payment intent ${paymentIntent.id} was not found.`
+            }
         );
 
-        console.log('✅ End-to-End Donation Flow validated successfully');
+        console.log(`✅ Located Salesforce transaction ${salesforceTransactionId}`);
+
+        const statusValue = getSalesforceField(salesforceRecord, ['Status__c', 'status__c']);
+        assert(statusValue, 'Salesforce transaction status field is missing.');
+        assert.strictEqual(String(statusValue).toLowerCase(), 'paid', `Expected Salesforce status to be "paid" but got "${statusValue}".`);
+
+        const storedPaymentIntentId = getSalesforceField(
+            salesforceRecord,
+            ['Stripe_Payment_Intent_ID__c', 'stripe_payment_intent_id__c']
+        );
+        assert.strictEqual(storedPaymentIntentId, paymentIntent.id, 'Salesforce record does not reference the correct payment intent.');
+
+        const postedToQbo = getSalesforceField(salesforceRecord, ['Posted_to_QBO__c', 'posted_to_qbo__c']);
+        assert(postedToQbo === true || postedToQbo === 'true', 'Salesforce record is not flagged as posted to QuickBooks.');
+
+        const qboDocId = getSalesforceField(salesforceRecord, ['QBO_Doc_ID__c', 'qbo_doc_id__c']);
+        const qboDocType = getSalesforceField(salesforceRecord, ['QBO_Doc_Type__c', 'qbo_doc_type__c']);
+        assert(qboDocId, 'Salesforce record missing QuickBooks document ID.');
+        assert(qboDocType, 'Salesforce record missing QuickBooks document type.');
+
+        const qboDocument = await waitFor(
+            async () => {
+                return fetchQuickBooksDocument({
+                    docType: String(qboDocType).toLowerCase(),
+                    docId: qboDocId,
+                    envConfig,
+                    accessToken: quickBooksAccessToken
+                });
+            },
+            {
+                attempts: 6,
+                delay: 5000,
+                timeoutMessage: `QuickBooks document ${qboDocType} ${qboDocId} was not found.`
+            }
+        );
+
+        assert(qboDocument, 'QuickBooks document lookup returned no data.');
+        console.log(`✅ Verified QuickBooks document ${qboDocType} ${qboDocId}`);
+
+        if (typeof stripeWebhook.__internals?.resetDependencies === 'function') {
+            stripeWebhook.__internals.resetDependencies();
+        }
+
+        console.log('🎉 End-to-end donation flow completed successfully with live integrations.');
+        process.exit(0);
     } catch (error) {
-        console.error('❌ End-to-End Donation Flow failed');
+        console.error('❌ End-to-end donation flow test failed:');
         console.error(error);
-        process.exitCode = 1;
-    } finally {
-        setStripeClientFactory(() => new StripeStub());
-        resetStripeClientFactory();
-        stripeWebhook.__internals.resetDependencies();
-        delete require.cache[crmFactoryPath];
-        require.cache[crmFactoryPath] = { exports: originalCrmFactory };
+        process.exit(1);
     }
-}
-
-runEndToEndTest().catch(error => {
-    console.error('❌ Unexpected error in End-to-End Donation Flow test');
-    console.error(error);
-    process.exit(1);
-});
+})();
