@@ -400,20 +400,18 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             integration_test_run_id: uniqueRunId
         };
 
-        let paymentIntent = await stripe.paymentIntents.create(
-            {
-                amount: donationAmount,
-                currency: checkoutSessionCurrency,
-                customer: checkoutSessionCustomerId || undefined,
-                payment_method: 'pm_card_visa',
-                payment_method_types: ['card'],
-                confirm: true,
-                receipt_email: donorEmail,
-                description: 'Automated integration test donation',
-                metadata: normalizedMetadata
-            },
-            { expand: ['charges.data.balance_transaction'] }
-        );
+        let paymentIntent = await stripe.paymentIntents.create({
+            amount: donationAmount,
+            currency: checkoutSessionCurrency,
+            customer: checkoutSessionCustomerId || undefined,
+            payment_method: 'pm_card_visa',
+            payment_method_types: ['card'],
+            confirm: true,
+            receipt_email: donorEmail,
+            description: 'Automated integration test donation',
+            metadata: normalizedMetadata,
+            expand: ['charges.data.balance_transaction']
+        });
 
         if (paymentIntent.status !== 'succeeded') {
             paymentIntent = await waitFor(
