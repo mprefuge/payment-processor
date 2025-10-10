@@ -363,7 +363,7 @@ class SalesforceCrmService extends BaseCrmService {
         }
 
         try {
-            const result = await this.conn.sobject('Transactions__c').upsert(transactionData, externalIdField);
+            const result = await this.conn.sobject('Transaction__c').upsert(transactionData, externalIdField);
 
             if (Array.isArray(result)) {
                 const [firstResult] = result;
