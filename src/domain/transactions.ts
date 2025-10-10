@@ -35,7 +35,7 @@ export const transactionUpsertSchema = z
     amount_gross__c: numberOrNullSchema.optional(),
     amount_fee__c: numberOrNullSchema.optional(),
     amount_net__c: numberOrNullSchema.optional(),
-    currency_iso_code: stringOrNullSchema.optional(),
+    currency_iso_code__c: stringOrNullSchema.optional(),
     contact__c: stringOrNullSchema.optional(),
     account__c: stringOrNullSchema.optional(),
     campaign__c: stringOrNullSchema.optional(),
@@ -544,9 +544,9 @@ export const mapStripeToTransaction = (
     amount_net__c:
       centsToMajorUnits(balanceTransaction?.net) ??
       parseMetadataNumber(combinedMetadata, 'amount_net__c', 'amount_net'),
-    currency_iso_code:
+    currency_iso_code__c:
       deriveCurrency(paymentIntent, charge, balanceTransaction) ||
-      parseMetadataString(combinedMetadata, 'currency_iso_code', 'currency'),
+      parseMetadataString(combinedMetadata, 'currency_iso_code__c', 'currency'),
     contact__c: parseMetadataString(combinedMetadata, 'contact__c', 'contact'),
     account__c: parseMetadataString(combinedMetadata, 'account__c', 'account'),
     campaign__c: parseMetadataString(combinedMetadata, 'campaign__c', 'campaign'),
