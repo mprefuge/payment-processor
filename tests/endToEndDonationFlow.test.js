@@ -483,6 +483,11 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
         const sanitizedPaymentIntent = sanitizeStripeObject(paymentIntent);
         const sanitizedCharge = sanitizeStripeObject(charge);
 
+        sanitizedSession.status = 'complete';
+        sanitizedSession.payment_status = 'paid';
+        sanitizedSession.mode = sanitizedSession.mode || 'payment';
+        sanitizedSession.payment_intent = sanitizedSession.payment_intent || sanitizedPaymentIntent.id;
+
         if (!sanitizedSession.amount_total) {
             sanitizedSession.amount_total = sanitizedPaymentIntent.amount_received
                 ?? sanitizedPaymentIntent.amount
@@ -499,12 +504,24 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             sanitizedSession.currency = sanitizedPaymentIntent.currency || checkoutSessionCurrency;
         }
 
+        sanitizedSession.customer = sanitizedSession.customer || checkoutSessionCustomerId;
+
         const balanceTransactionId = getStripeId(sanitizedCharge.balance_transaction);
         assert(balanceTransactionId, 'Charge does not reference a balance transaction id.');
 
         const customerDetailsForEvents = (sanitizedSession.customer_details && typeof sanitizedSession.customer_details === 'object')
             ? sanitizedSession.customer_details
             : normalizeCustomerDetails(donationPayload.customer);
+
+        sanitizedSession.customer_details = customerDetailsForEvents;
+
+        if (!sanitizedSession.total_details) {
+            sanitizedSession.total_details = {
+                amount_discount: 0,
+                amount_shipping: 0,
+                amount_tax: 0
+            };
+        }
 
         const checkoutSessionEventObject = createCheckoutSessionCompletedObject({
             session: sanitizedSession,
