@@ -125,6 +125,7 @@ const createExternalIdFieldResolver = (connection: Connection) => {
   type DescribeResult = { fields?: Array<{ name?: string | null }> };
 
   let describePromise: Promise<DescribeResult> | null = null;
+  let fieldMapPromise: Promise<Map<string, string>> | null = null;
 
   const loadDescribe = async (): Promise<DescribeResult> => {
     if (!describePromise) {
@@ -145,50 +146,88 @@ const createExternalIdFieldResolver = (connection: Connection) => {
 
   const canonicalize = (value: string): string => normalizeFieldName(value);
 
+  const loadFieldMap = async (): Promise<Map<string, string>> => {
+    if (!fieldMapPromise) {
+      fieldMapPromise = loadDescribe().then((describeResult) => {
+        const map = new Map<string, string>();
+        for (const field of describeResult.fields ?? []) {
+          const name = typeof field?.name === 'string' ? field.name : null;
+          if (!name) {
+            continue;
+          }
+          const canonicalName = canonicalize(name);
+          if (!map.has(canonicalName)) {
+            map.set(canonicalName, name);
+          }
+        }
+        return map;
+      });
+    }
+    return fieldMapPromise;
+  };
+
   const resolveCandidates = async (
     key: TransactionExternalIdField,
   ): Promise<readonly string[]> => {
     const defaults = getExternalIdFieldCandidates(key);
 
     try {
-      const describeResult = await loadDescribe();
-      const availableFields = new Map<string, string>();
-
-      for (const field of describeResult.fields ?? []) {
-        const name = typeof field?.name === 'string' ? field.name : null;
-        if (!name) {
-          continue;
-        }
-
-        const canonicalName = canonicalize(name);
-        if (!availableFields.has(canonicalName)) {
-          availableFields.set(canonicalName, name);
-        }
-      }
-
+      const availableFields = await loadFieldMap();
       const resolved: string[] = [];
+
+      const pushCandidate = (name: string): void => {
+        if (!resolved.some((existing) => existing === name)) {
+          resolved.push(name);
+        }
+      };
 
       for (const candidate of defaults) {
         const canonicalCandidate = canonicalize(candidate);
-        const resolvedName = availableFields.get(canonicalCandidate) ?? candidate;
-        resolved.push(resolvedName);
+        const resolvedName = availableFields.get(canonicalCandidate);
+        if (resolvedName) {
+          pushCandidate(resolvedName);
+        }
+        pushCandidate(candidate);
       }
 
       const canonicalKey = canonicalize(key);
-      if (!resolved.some((name) => canonicalize(name) === canonicalKey)) {
-        const actual = availableFields.get(canonicalKey);
-        if (actual) {
-          resolved.push(actual);
-        }
+      const actual = availableFields.get(canonicalKey);
+      if (actual) {
+        pushCandidate(actual);
       }
 
-      return Array.from(new Set(resolved));
+      return resolved.length > 0 ? resolved : defaults;
     } catch (error) {
       return defaults;
     }
   };
 
-  return { resolveCandidates };
+  const resolveFieldName = async (
+    field: TransactionExternalIdField,
+  ): Promise<string> => {
+    try {
+      const availableFields = await loadFieldMap();
+      const canonicalField = canonicalize(field);
+      const directMatch = availableFields.get(canonicalField);
+      if (directMatch) {
+        return directMatch;
+      }
+
+      const defaults = getExternalIdFieldCandidates(field);
+      for (const candidate of defaults) {
+        const actual = availableFields.get(canonicalize(candidate));
+        if (actual) {
+          return actual;
+        }
+      }
+
+      return defaults[0] ?? field;
+    } catch (error) {
+      return field;
+    }
+  };
+
+  return { resolveCandidates, resolveFieldName };
 };
 
 const isMissingColumnError = (message: string, fieldName: string): boolean => {
@@ -248,6 +287,37 @@ const ensureNonEmpty = (value: string, fieldName: string): string => {
 export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): SalesforceSvc => {
   const externalIdFieldResolver = createExternalIdFieldResolver(connection);
 
+  const remapExternalIdFields = async (
+    input: TransactionRecordInput,
+  ): Promise<TransactionRecordInput> => {
+    const entries = await Promise.all(
+      Object.entries(input).map(async ([field, value]) => {
+        if (typeof field !== 'string') {
+          return [field, value] as const;
+        }
+
+        const matchedKey = TRANSACTION_EXTERNAL_ID_FIELDS.find(
+          (candidate) => normalizeFieldName(candidate) === normalizeFieldName(field),
+        );
+
+        if (!matchedKey) {
+          return [field, value] as const;
+        }
+
+        const resolvedField = await externalIdFieldResolver.resolveFieldName(matchedKey);
+        return [resolvedField, value] as const;
+      }),
+    );
+
+    const record: TransactionRecordInput = {};
+
+    for (const [field, value] of entries) {
+      (record as Record<string, unknown>)[field] = value as unknown;
+    }
+
+    return record;
+  };
+
   const upsertTransactionByExternalId = async (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
@@ -271,7 +341,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
           delete (recordInput as Record<string, unknown>)[key];
         }
 
-        const records = [sanitizeTransactionRecord(recordInput)];
+        const remappedRecord = await remapExternalIdFields(recordInput);
+        const records = [sanitizeTransactionRecord(remappedRecord)];
         const [result] = toArray(
           await connection.upsert(TRANSACTION_OBJECT, records, fieldName, {
             allOrNone: true,
@@ -312,14 +383,21 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     if (normalizedIds.length === 0) {
       return [];
     }
-    const records = normalizedIds.map((balanceTransactionId) =>
-      sanitizeTransactionRecord({
-        stripe_balance_transaction_id__c: balanceTransactionId,
-        stripe_payout_id__c: normalizedPayoutId,
+    const records = await Promise.all(
+      normalizedIds.map(async (balanceTransactionId) => {
+        const recordInput = await remapExternalIdFields({
+          stripe_balance_transaction_id__c: balanceTransactionId,
+          stripe_payout_id__c: normalizedPayoutId,
+        });
+        return sanitizeTransactionRecord(recordInput);
       }),
     );
+    const upsertField = await externalIdFieldResolver.resolveFieldName(
+      'stripe_balance_transaction_id__c',
+    );
+
     const results = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, records, 'stripe_balance_transaction_id__c', {
+      await connection.upsert(TRANSACTION_OBJECT, records, upsertField, {
         allOrNone: true,
       }),
     );
