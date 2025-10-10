@@ -432,7 +432,27 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             );
         }
 
-        const charge = paymentIntent.charges?.data?.[0];
+        let charge = paymentIntent.charges?.data?.[0];
+
+        if (!charge) {
+            charge = await waitFor(
+                async () => {
+                    const chargesResponse = await stripe.charges.list({
+                        payment_intent: paymentIntent.id,
+                        limit: 1,
+                        expand: ['data.balance_transaction']
+                    });
+
+                    return chargesResponse.data?.[0] || null;
+                },
+                {
+                    attempts: 5,
+                    delay: 1000,
+                    timeoutMessage: `Timed out waiting for charge on payment intent ${paymentIntent.id}.`
+                }
+            );
+        }
+
         assert(charge, 'Expected at least one charge on the succeeded payment intent.');
         assert.strictEqual(charge.status, 'succeeded', `Charge ${charge.id} did not succeed.`);
 
