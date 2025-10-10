@@ -396,6 +396,7 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
 
         const sanitizedSession = sanitizeStripeObject(checkoutSession);
         const sanitizedPaymentIntent = sanitizeStripeObject(paymentIntent);
+        const sanitizedCharge = sanitizeStripeObject(charge);
 
         sanitizedSession.status = 'complete';
         sanitizedSession.payment_status = 'paid';
@@ -428,6 +429,9 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
         const balanceTransactionId = getStripeId(primaryCharge?.balance_transaction);
         assert(balanceTransactionId, 'Charge does not reference a balance transaction id.');
 
+        const balanceTransaction = await stripe.balanceTransactions.retrieve(balanceTransactionId);
+        const sanitizedBalanceTransaction = sanitizeStripeObject(balanceTransaction);
+
         const customerDetailsForEvents = (sanitizedSession.customer_details && typeof sanitizedSession.customer_details === 'object')
             ? sanitizedSession.customer_details
             : normalizeCustomerDetails(donationPayload.customer);
@@ -448,6 +452,47 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             customerDetails: customerDetailsForEvents,
             paymentIntentId: sanitizedPaymentIntent.id
         });
+
+        if (typeof stripeWebhook.__internals?.setDependencies === 'function') {
+            const stripeClientStub = {
+                paymentIntents: {
+                    retrieve: async (id) => {
+                        assert.strictEqual(
+                            id,
+                            sanitizedPaymentIntent.id,
+                            'Webhook attempted to load an unexpected payment intent.'
+                        );
+                        return sanitizeStripeObject(sanitizedPaymentIntent);
+                    }
+                },
+                charges: {
+                    retrieve: async (id) => {
+                        assert.strictEqual(
+                            id,
+                            sanitizedCharge.id,
+                            'Webhook attempted to load an unexpected charge.'
+                        );
+                        return sanitizeStripeObject(sanitizedCharge);
+                    }
+                },
+                balanceTransactions: {
+                    retrieve: async (id) => {
+                        assert.strictEqual(
+                            id,
+                            sanitizedBalanceTransaction.id,
+                            'Webhook attempted to load an unexpected balance transaction.'
+                        );
+                        return sanitizeStripeObject(sanitizedBalanceTransaction);
+                    }
+                }
+            };
+
+            stripeWebhook.__internals.setDependencies({
+                stripe: {
+                    getClient: () => stripeClientStub
+                }
+            });
+        }
 
         await sendWebhookEvent('checkout.session.completed', checkoutSessionEventObject);
         console.log(`✅ Processed checkout.session.completed for ${sessionId}`);
