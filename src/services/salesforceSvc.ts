@@ -21,10 +21,15 @@ export interface SalesforceSvcOptions {
   connection: Connection;
 }
 
+export interface UpsertOptions {
+  overrideId?: string | null;
+}
+
 export interface SalesforceSvc {
   upsertTransactionByExternalId: (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
+    options?: UpsertOptions,
   ) => Promise<UpsertResult>;
   linkPayoutOnTransactions: (payoutId: string, btIds: string[]) => Promise<UpsertResult[]>;
   markPostedToQbo: (salesforceId: string, doc: QuickBooksDocumentReference) => Promise<void>;
@@ -76,16 +81,22 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const upsertTransactionByExternalId = async (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
+    options: UpsertOptions = {},
   ): Promise<UpsertResult> => {
     const externalId = dto[key];
     if (typeof externalId !== 'string' || externalId.trim().length === 0) {
       throw new Error(`Transaction payload must include a value for ${key}.`);
     }
     const normalizedExternalId = externalId.trim();
+    const overrideId =
+      typeof options.overrideId === 'string' && options.overrideId.trim().length > 0
+        ? options.overrideId.trim()
+        : null;
     const records = [
       sanitizeTransactionRecord({
         ...dto,
         [key]: normalizedExternalId,
+        Id: overrideId ?? undefined,
       }),
     ];
     const [result] = toArray(

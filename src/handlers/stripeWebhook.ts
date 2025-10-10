@@ -345,6 +345,31 @@ const resolveBalanceTransaction = async (
   return null;
 };
 
+const findCheckoutSessionForPaymentIntent = async (
+  stripe: Stripe,
+  paymentIntentId: string | null | undefined,
+): Promise<Stripe.Checkout.Session | null> => {
+  if (!paymentIntentId || typeof paymentIntentId !== 'string') {
+    return null;
+  }
+
+  const trimmed = paymentIntentId.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const sessions = await stripe.checkout.sessions.list({
+    payment_intent: trimmed,
+    limit: 1,
+  });
+
+  if (!sessions || !Array.isArray(sessions.data) || sessions.data.length === 0) {
+    return null;
+  }
+
+  return sessions.data[0] ?? null;
+};
+
 const handleCheckoutSessionCompleted = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -415,11 +440,47 @@ const handlePaymentIntentSucceeded = async (
     paymentIntent,
   );
 
+  let checkoutSession: Stripe.Checkout.Session | null = null;
+  try {
+    checkoutSession = await findCheckoutSessionForPaymentIntent(stripe, paymentIntent.id);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Unknown error retrieving checkout session';
+    context.log('[StripeWebhook] Failed to load checkout session for payment intent', {
+      paymentIntentId: paymentIntent.id,
+      error: message,
+    });
+  }
+
   const transaction = mapStripeToTransaction({
     paymentIntent,
     charge: charge ?? undefined,
     balanceTransaction: balanceTransaction ?? undefined,
   });
+
+  let overrideId: string | null = null;
+
+  if (checkoutSession) {
+    if (!transaction.stripe_checkout_session_id__c) {
+      transaction.stripe_checkout_session_id__c = checkoutSession.id;
+    }
+
+    try {
+      overrideId = await salesforce.findTransactionIdByExternalId(
+        'stripe_checkout_session_id__c',
+        checkoutSession.id,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error locating transaction by checkout session ID';
+      context.log('[StripeWebhook] Failed to locate transaction by checkout session ID', {
+        sessionId: checkoutSession.id,
+        error: message,
+      });
+    }
+  }
 
   context.log('[StripeWebhook] Upserting transaction for payment intent', {
     paymentIntentId: paymentIntent.id,
@@ -428,6 +489,7 @@ const handlePaymentIntentSucceeded = async (
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
     'stripe_payment_intent_id__c',
+    overrideId ? { overrideId } : undefined,
   );
 
   if (!env.accounting.syncEnabled || !balanceTransaction) {
