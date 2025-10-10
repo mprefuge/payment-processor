@@ -2,7 +2,6 @@ const assert = require('assert');
 const { randomUUID } = require('crypto');
 const Stripe = require('stripe');
 const jsforce = require('jsforce');
-const nock = require('nock');
 
 const REQUIRED_ENV_SETS = {
     STRIPE_TEST_SECRET_KEY: ['STRIPE_TEST_SECRET_KEY'],
@@ -171,91 +170,6 @@ const createCheckoutSessionCompletedObject = ({ session, customer, customerDetai
             amount_tax: 0
         }
     };
-};
-
-const createPaymentIntentSucceededObject = ({ paymentIntent, charge, balanceTransactionId, customerDetails }) => {
-    const normalizedPaymentIntent = { ...paymentIntent };
-    const fallbackAmount = normalizedPaymentIntent.amount ?? charge.amount ?? null;
-    const fallbackCurrency = normalizedPaymentIntent.currency || charge.currency || 'usd';
-
-    const customerId = getStripeId(normalizedPaymentIntent.customer) || getStripeId(charge.customer) || null;
-    const paymentMethodId = getStripeId(normalizedPaymentIntent.payment_method) || charge.payment_method || null;
-    const resolvedPaymentMethodId = paymentMethodId || 'pm_card_visa';
-
-    const invoiceId = getStripeId(charge.invoice);
-
-    const normalizedCharge = {
-        ...charge,
-        id: charge.id,
-        object: 'charge',
-        amount: charge.amount ?? fallbackAmount,
-        amount_captured: charge.amount_captured ?? charge.amount ?? fallbackAmount,
-        amount_refunded: charge.amount_refunded ?? 0,
-        balance_transaction: balanceTransactionId,
-        billing_details: charge.billing_details || customerDetails,
-        currency: charge.currency || fallbackCurrency,
-        customer: customerId,
-        description: charge.description || null,
-        invoice: invoiceId,
-        livemode: charge.livemode === true,
-        metadata: charge.metadata || {},
-        paid: charge.paid ?? true,
-        payment_intent: normalizedPaymentIntent.id,
-        payment_method: charge.payment_method || resolvedPaymentMethodId,
-        payment_method_details: charge.payment_method_details || {
-            type: 'card',
-            card: {
-                brand: 'visa',
-                last4: '4242'
-            }
-        },
-        receipt_email: charge.receipt_email || customerDetails?.email || null,
-        receipt_url: charge.receipt_url || null,
-        refunded: charge.refunded ?? false,
-        status: charge.status || 'succeeded',
-        created: charge.created || normalizedPaymentIntent.created || Math.floor(Date.now() / 1000)
-    };
-
-    normalizedPaymentIntent.object = 'payment_intent';
-    normalizedPaymentIntent.amount = fallbackAmount;
-    normalizedPaymentIntent.amount_capturable = normalizedPaymentIntent.amount_capturable ?? 0;
-    normalizedPaymentIntent.amount_details = normalizedPaymentIntent.amount_details || { tip: {} };
-    normalizedPaymentIntent.amount_received = normalizedPaymentIntent.amount_received ?? fallbackAmount;
-    normalizedPaymentIntent.currency = fallbackCurrency;
-    normalizedPaymentIntent.customer = customerId;
-    normalizedPaymentIntent.livemode = normalizedPaymentIntent.livemode === true;
-    normalizedPaymentIntent.metadata = normalizedPaymentIntent.metadata || {};
-    normalizedPaymentIntent.payment_method = resolvedPaymentMethodId;
-    normalizedPaymentIntent.payment_method_types = Array.isArray(normalizedPaymentIntent.payment_method_types)
-        && normalizedPaymentIntent.payment_method_types.length > 0
-        ? normalizedPaymentIntent.payment_method_types
-        : ['card'];
-    normalizedPaymentIntent.receipt_email = normalizedPaymentIntent.receipt_email || normalizedCharge.receipt_email || null;
-    normalizedPaymentIntent.invoice = getStripeId(normalizedPaymentIntent.invoice);
-    normalizedPaymentIntent.subscription = getStripeId(normalizedPaymentIntent.subscription);
-    normalizedPaymentIntent.canceled_at = normalizedPaymentIntent.canceled_at ?? null;
-    normalizedPaymentIntent.cancellation_reason = normalizedPaymentIntent.cancellation_reason ?? null;
-    normalizedPaymentIntent.last_payment_error = normalizedPaymentIntent.last_payment_error ?? null;
-    normalizedPaymentIntent.next_action = normalizedPaymentIntent.next_action ?? null;
-    normalizedPaymentIntent.processing = normalizedPaymentIntent.processing ?? null;
-    normalizedPaymentIntent.review = normalizedPaymentIntent.review ?? null;
-    normalizedPaymentIntent.setup_future_usage = normalizedPaymentIntent.setup_future_usage ?? null;
-    normalizedPaymentIntent.shipping = normalizedPaymentIntent.shipping ?? null;
-    normalizedPaymentIntent.statement_descriptor = normalizedPaymentIntent.statement_descriptor ?? null;
-    normalizedPaymentIntent.statement_descriptor_suffix = normalizedPaymentIntent.statement_descriptor_suffix ?? null;
-    normalizedPaymentIntent.transfer_data = normalizedPaymentIntent.transfer_data ?? null;
-    normalizedPaymentIntent.transfer_group = normalizedPaymentIntent.transfer_group ?? null;
-    normalizedPaymentIntent.status = 'succeeded';
-    normalizedPaymentIntent.latest_charge = normalizedCharge.id;
-    normalizedPaymentIntent.charges = {
-        object: 'list',
-        data: [normalizedCharge],
-        has_more: false,
-        total_count: 1,
-        url: `/v1/charges?payment_intent=${normalizedPaymentIntent.id}`
-    };
-
-    return normalizedPaymentIntent;
 };
 
 const createStripeEventPayload = (type, object, uniqueSuffix) => ({
@@ -482,7 +396,6 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
 
         const sanitizedSession = sanitizeStripeObject(checkoutSession);
         const sanitizedPaymentIntent = sanitizeStripeObject(paymentIntent);
-        const sanitizedCharge = sanitizeStripeObject(charge);
 
         sanitizedSession.status = 'complete';
         sanitizedSession.payment_status = 'paid';
@@ -507,7 +420,12 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
 
         sanitizedSession.customer = sanitizedSession.customer || checkoutSessionCustomerId;
 
-        const balanceTransactionId = getStripeId(sanitizedCharge.balance_transaction);
+        const primaryCharge = (sanitizedPaymentIntent.charges && sanitizedPaymentIntent.charges.data
+            && sanitizedPaymentIntent.charges.data.length > 0)
+            ? sanitizedPaymentIntent.charges.data[0]
+            : charge;
+
+        const balanceTransactionId = getStripeId(primaryCharge?.balance_transaction);
         assert(balanceTransactionId, 'Charge does not reference a balance transaction id.');
 
         const customerDetailsForEvents = (sanitizedSession.customer_details && typeof sanitizedSession.customer_details === 'object')
@@ -524,11 +442,6 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             };
         }
 
-        nock('https://api.stripe.com')
-            .persist()
-            .get(new RegExp(`/v1/checkout/sessions/${sessionId}(?:\\?.*)?$`))
-            .reply(200, sanitizedSession, { 'Content-Type': 'application/json' });
-
         const checkoutSessionEventObject = createCheckoutSessionCompletedObject({
             session: sanitizedSession,
             customer: donationPayload.customer,
@@ -536,18 +449,8 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
             paymentIntentId: sanitizedPaymentIntent.id
         });
 
-        const paymentIntentEventObject = createPaymentIntentSucceededObject({
-            paymentIntent: sanitizedPaymentIntent,
-            charge: { ...sanitizedCharge, balance_transaction: balanceTransactionId },
-            balanceTransactionId,
-            customerDetails: customerDetailsForEvents
-        });
-
         await sendWebhookEvent('checkout.session.completed', checkoutSessionEventObject);
         console.log(`✅ Processed checkout.session.completed for ${sessionId}`);
-
-        await sendWebhookEvent('payment_intent.succeeded', paymentIntentEventObject);
-        console.log(`✅ Processed payment_intent.succeeded for ${paymentIntent.id}`);
 
         const salesforceConnection = new jsforce.Connection({ loginUrl: salesforceLoginUrl });
         await salesforceConnection.login(salesforceUsername, `${salesforcePassword}${salesforceSecurityToken}`);

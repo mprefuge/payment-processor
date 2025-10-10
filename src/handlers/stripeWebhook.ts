@@ -345,76 +345,14 @@ const resolveBalanceTransaction = async (
   return null;
 };
 
-const handleCheckoutSessionCompleted = async (
+const upsertChargeAndSyncAccounting = async (
   context: HttpContext,
-  event: Stripe.Event,
-  deps: Dependencies,
-): Promise<void> => {
-  const session = event.data.object as Stripe.Checkout.Session;
-  const salesforce = await deps.getSalesforceSvc();
-
-  const transaction: TransactionUpsertDTO = {
-    transaction_type__c: 'charge',
-    status__c: 'processing',
-    stripe_checkout_session_id__c: session.id,
-    stripe_payment_intent_id__c: normalizeStripeId(session.payment_intent),
-    stripe_customer_id__c: normalizeStripeId(session.customer),
-    stripe_subscription_id__c: normalizeStripeId(session.subscription),
-    amount_gross__c: centsToMajorUnits(session.amount_total ?? null),
-    amount_net__c: centsToMajorUnits(session.amount_subtotal ?? null),
-    currency_iso_code: session.currency
-      ? session.currency.toUpperCase()
-      : null,
-    received_at__c: timestampToIsoString(session.created ?? null),
-  };
-
-  context.log('[StripeWebhook] Upserting pending transaction for checkout session', {
-    sessionId: session.id,
-  });
-
-  await salesforce.upsertTransactionByExternalId(
-    transaction,
-    'stripe_checkout_session_id__c',
-  );
-};
-
-const markPosted = async (
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  balanceTransaction: Stripe.BalanceTransaction | null,
   salesforce: SalesforceSvc,
-  upsertResult: unknown,
-  doc: PostChargeToQboResult,
-): Promise<void> => {
-  const id =
-    upsertResult &&
-    typeof upsertResult === 'object' &&
-    'id' in upsertResult
-      ? (upsertResult as { id?: string }).id
-      : undefined;
-
-  if (typeof id === 'string' && id.trim().length > 0) {
-    const reference: QuickBooksDocumentReference = {
-      id: doc.qboId,
-      type: doc.type,
-    };
-    await salesforce.markPostedToQbo(id, reference);
-  }
-};
-
-const handlePaymentIntentSucceeded = async (
-  context: HttpContext,
-  event: Stripe.Event,
   deps: Dependencies,
 ): Promise<void> => {
-  const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  const stripe = deps.stripe.getClient(Boolean(event.livemode));
-  const salesforce = await deps.getSalesforceSvc();
-
-  const charge = await resolveCharge(stripe, paymentIntent);
-  const balanceTransaction = await resolveBalanceTransaction(
-    stripe,
-    charge,
-    paymentIntent,
-  );
-
   const transaction = mapStripeToTransaction({
     paymentIntent,
     charge: charge ?? undefined,
@@ -454,6 +392,139 @@ const handlePaymentIntentSucceeded = async (
       await markPosted(salesforce, upsertResult, posting);
     },
   );
+};
+
+const PAYMENT_INTENT_PROCESSED_PREFIX = 'pi_';
+
+const processSuccessfulPaymentIntent = async (
+  context: HttpContext,
+  paymentIntent: Stripe.PaymentIntent,
+  deps: Dependencies,
+  options: { livemode: boolean },
+): Promise<void> => {
+  const paymentIntentId = paymentIntent.id;
+  if (!paymentIntentId) {
+    context.log('[StripeWebhook] Payment intent missing id, skipping');
+    return;
+  }
+
+  const idempotencyKey = `${PAYMENT_INTENT_PROCESSED_PREFIX}${paymentIntentId}`;
+
+  await deps.idempotencyStore.withLock(idempotencyKey, async () => {
+    const alreadyProcessed = await deps.idempotencyStore.isProcessed(
+      idempotencyKey,
+    );
+    if (alreadyProcessed) {
+      context.log('[StripeWebhook] Payment intent already processed, skipping', {
+        paymentIntentId,
+      });
+      return;
+    }
+
+    const stripe = deps.stripe.getClient(options.livemode);
+    const salesforce = await deps.getSalesforceSvc();
+
+    const charge = await resolveCharge(stripe, paymentIntent);
+    const balanceTransaction = await resolveBalanceTransaction(
+      stripe,
+      charge,
+      paymentIntent,
+    );
+
+    await upsertChargeAndSyncAccounting(
+      context,
+      paymentIntent,
+      charge,
+      balanceTransaction,
+      salesforce,
+      deps,
+    );
+
+    await deps.idempotencyStore.markProcessed(idempotencyKey);
+  });
+};
+
+const handleCheckoutSessionCompleted = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: Dependencies,
+): Promise<void> => {
+  const session = event.data.object as Stripe.Checkout.Session;
+  const salesforce = await deps.getSalesforceSvc();
+
+  const transaction: TransactionUpsertDTO = {
+    transaction_type__c: 'charge',
+    status__c: 'processing',
+    stripe_checkout_session_id__c: session.id,
+    stripe_payment_intent_id__c: normalizeStripeId(session.payment_intent),
+    stripe_customer_id__c: normalizeStripeId(session.customer),
+    stripe_subscription_id__c: normalizeStripeId(session.subscription),
+    amount_gross__c: centsToMajorUnits(session.amount_total ?? null),
+    amount_net__c: centsToMajorUnits(session.amount_subtotal ?? null),
+    currency_iso_code: session.currency
+      ? session.currency.toUpperCase()
+      : null,
+    received_at__c: timestampToIsoString(session.created ?? null),
+  };
+
+  context.log('[StripeWebhook] Upserting pending transaction for checkout session', {
+    sessionId: session.id,
+  });
+
+  await salesforce.upsertTransactionByExternalId(
+    transaction,
+    'stripe_checkout_session_id__c',
+  );
+
+  const isPaidSession =
+    session.payment_status === 'paid' || session.status === 'complete';
+  const paymentIntentId = normalizeStripeId(session.payment_intent);
+  if (!isPaidSession || !paymentIntentId) {
+    return;
+  }
+
+  const stripe = deps.stripe.getClient(Boolean(event.livemode));
+
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+    expand: ['charges.data.balance_transaction'],
+  });
+
+  await processSuccessfulPaymentIntent(context, paymentIntent, deps, {
+    livemode: Boolean(event.livemode),
+  });
+};
+
+const markPosted = async (
+  salesforce: SalesforceSvc,
+  upsertResult: unknown,
+  doc: PostChargeToQboResult,
+): Promise<void> => {
+  const id =
+    upsertResult &&
+    typeof upsertResult === 'object' &&
+    'id' in upsertResult
+      ? (upsertResult as { id?: string }).id
+      : undefined;
+
+  if (typeof id === 'string' && id.trim().length > 0) {
+    const reference: QuickBooksDocumentReference = {
+      id: doc.qboId,
+      type: doc.type,
+    };
+    await salesforce.markPostedToQbo(id, reference);
+  }
+};
+
+const handlePaymentIntentSucceeded = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: Dependencies,
+): Promise<void> => {
+  const paymentIntent = event.data.object as Stripe.PaymentIntent;
+
+  await processSuccessfulPaymentIntent(context, paymentIntent, deps, {
+    livemode: Boolean(event.livemode),
+  });
 };
 
 const getLatestRefund = (charge: Stripe.Charge): Stripe.Refund | null => {
