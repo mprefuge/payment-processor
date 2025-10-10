@@ -1,604 +1,168 @@
-# Payment Processing Azure Function
+# Payment Processor Azure Functions
 
-This Azure Function app processes payments through Stripe, handling customer management, payment processing, email notifications, and accounting sync.
+This repository hosts a collection of Azure Functions that orchestrate Stripe billing, payout reconciliation, and downstream integrations with Salesforce and QuickBooks.
 
-## Features
+## Quick start
 
-- Stripe payment processing (one-time and recurring payments)
-- Customer management (search/create)
-- Email notifications via SendGrid
-- Support for both test and live modes
-- **Stripe webhook handling for payment confirmations**
-- **Webhook-only payout sync to accounting systems (QuickBooks Online, extensible to Xero, Sage)**
-- **Manual true-up endpoint for backfilling and reconciliation with automatic pagination and rate limiting**
-- **Automatic CRM payout tracking (Salesforce, extensible to other CRMs)**
-- **Salesforce contact sync on checkout session creation**
-- **Enhanced CRM integration with robust customer-contact association**
-- **Intelligent contact matching with normalization and fuzzy logic**
-- **Configurable scoring thresholds for auto-association vs manual review**
-- **Comprehensive review workflow for uncertain matches**
-- **Improved transaction naming: "Transaction - {Category}" format**
-- **Idempotency checking to prevent duplicate processing**
-- **Metrics and observability for matching performance**
+1. **Select Node.js 20** (recommended via `nvm`):
+   ```bash
+   nvm use
+   ```
+2. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+3. **Configure local settings**:
+   ```bash
+   cp local.settings.json.template local.settings.json
+   # edit the copy with your secrets
+   ```
+4. **Run the Functions host**:
+   ```bash
+   npm run dev
+   ```
 
-## Prerequisites
+> ℹ️ Every function except the anonymous health probe requires a function key. When the host starts locally, Azure Functions Core Tools prints the master and function keys. Append `?code=<FUNCTION_KEY>` to the request URL or send it in an `x-functions-key` header when calling secured endpoints.
 
-- Azure subscription
-- Azure Functions Core Tools
-- Node.js 18+
-- Stripe account (test and live keys)
-- SendGrid account for email notifications
-- **Salesforce account (for CRM integration)**
+## Available npm scripts
 
-## Local Development Setup
+| Script | Description |
+| ------ | ----------- |
+| `npm run dev` | Starts the Azure Functions host (alias of `npm start`). |
+| `npm run build` | Compiles the TypeScript sources. |
+| `npm run lint` | Runs a type-check only build (`tsc --noEmit`). |
+| `npm run format` | Formats the repository with Prettier. |
+| `npm test` | Builds and executes the integration test suite. |
+| `npm run ci` | Runs linting followed by the full test suite (used by CI). |
+| `npm run test:unit` | Executes the Vitest-powered unit tests. |
+| `npm run test:watch` | Runs Vitest in watch mode. |
 
-### 1. Install Dependencies
+## Environment variables
 
+Copy the template in `local.settings.json.template` and populate the following keys.
+
+### Core runtime
+
+| Key | Purpose |
+| --- | ------- |
+| `AzureWebJobsStorage` | Storage connection used by the local emulator or Azure Functions runtime. |
+| `FUNCTIONS_WORKER_RUNTIME` | Language worker selection (should remain `node`). |
+| `APPINSIGHTS_INSTRUMENTATIONKEY` | (Optional) Application Insights instrumentation key for telemetry. |
+
+### Stripe + webhook processing
+
+| Key | Purpose |
+| --- | ------- |
+| `STRIPE_SECRET` | Default Stripe secret key used when no mode-specific key is supplied. |
+| `STRIPE_TEST_SECRET_KEY` | Stripe secret for test-mode operations. |
+| `STRIPE_LIVE_SECRET_KEY` | Stripe secret for live-mode operations. |
+| `STRIPE_WEBHOOK_SECRET_TEST` | Signing secret for test-mode webhooks. |
+| `STRIPE_WEBHOOK_SECRET_LIVE` | Signing secret for live-mode webhooks. |
+| `STRIPE_WEBHOOK_SECRET` | Legacy webhook secret support. |
+| `STRIPE_TRUE_UP_TOKEN` | Bearer token required by the manual true-up endpoint. |
+| `STRIPE_TRUE_UP_MODE` | Set to `live` to force true-up processing against live mode. |
+
+### Notification + CRM
+
+| Key | Purpose |
+| --- | ------- |
+| `SENDGRID_API_KEY` | SendGrid API key for transactional email notifications. |
+| `NOTIFICATION_EMAIL_FROM` | Verified From address for SendGrid. |
+| `NOTIFICATION_EMAIL_TEST` | Recipient for test-mode notifications. |
+| `NOTIFICATION_EMAIL_LIVE` | Recipient for live-mode notifications. |
+| `DEBUG_EMAIL` | Optional debug email override. |
+| `NOTIFICATION_POLICY` | Controls notification cadence (`ALL`, `FIRST`, `NONE`, etc.). |
+| `STRIPE_MODE` | Default Stripe mode override (`test` or `live`). |
+| `CRM_PROVIDER` | CRM provider identifier (e.g., `salesforce`). |
+| `SALESFORCE_USERNAME`, `SALESFORCE_PASSWORD`, `SALESFORCE_SECURITY_TOKEN`, `SALESFORCE_LOGIN_URL` | Salesforce connection credentials. |
+| `SF_AUTH_MODE`, `SF_CLIENT_ID`, `SF_JWT_PRIVATE_KEY` | Optional Salesforce JWT/OAuth configuration. |
+
+### QuickBooks Online + accounting sync
+
+| Key | Purpose |
+| --- | ------- |
+| `QBO_ENV` | Target QuickBooks environment (`sandbox` or `production`). |
+| `QBO_REALM_ID` | QuickBooks company ID. |
+| `QBO_CLIENT_ID` / `QBO_CLIENT_SECRET` | OAuth client credentials. |
+| `QBO_REFRESH_TOKEN` | OAuth refresh token for server-to-server flows. |
+| `QBO_ACCOUNT_STRIPE_CLEARING` | Name/ID of the Stripe clearing account. |
+| `QBO_ACCOUNT_OPERATING_BANK` | Name/ID of the operating bank account. |
+| `QBO_ACCOUNT_REVENUE` | Revenue account mapping. |
+| `QBO_ACCOUNT_FEES` | Stripe fee account mapping. |
+| `QBO_ACCOUNT_REFUNDS` | Refund liability account mapping. |
+| `QBO_ACCOUNT_DISPUTES` | Dispute loss account mapping. |
+| `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
+| `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
+
+## Endpoint reference
+
+All endpoints are prefixed with `/api` when running locally with the Functions host.
+
+### Health check — `GET /api/health`
+A public probe for monitoring.
 ```bash
-npm install
+curl http://localhost:7071/api/health
 ```
 
-### 2. Configure Environment Variables
-
-Copy the `local.settings.json.template` to `local.settings.json` and fill in your values:
-
-```json
-{
-  "IsEncrypted": false,
-  "Values": {
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "node",
-    "STRIPE_TEST_SECRET_KEY": "sk_test_YOUR_TEST_KEY_HERE",
-    "STRIPE_LIVE_SECRET_KEY": "sk_live_YOUR_LIVE_KEY_HERE",
-    "SENDGRID_API_KEY": "YOUR_SENDGRID_API_KEY_HERE",
-    "NOTIFICATION_EMAIL_TEST": "test@example.com",
-    "NOTIFICATION_EMAIL_LIVE": "live@example.com",
-    "SUCCESS_URL": "https://example.com/thankyou"
-  }
-}
-```
-
-### 3. Start Local Development
-
+### Create transaction — `POST /api/transaction`
+Creates a payment intent, sends notifications, and syncs metadata.
 ```bash
-npm start
-```
-
-The function will be available at `http://localhost:7071/api/transaction`
-
-### 4. Run Tests
-
-```bash
-npm test
-```
-
-This will run the integration tests to verify the payment processing flow.
-
-## Azure Deployment
-
-### Automatic Deployment via GitHub Actions
-
-This repository is configured for automatic deployment to Azure Functions via GitHub Actions. Push to the `main` branch to trigger deployment.
-
-### Manual Deployment
-
-```bash
-func azure functionapp publish payment-processing-function
-```
-
-## Configuration
-
-### Required Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `STRIPE_TEST_SECRET_KEY` | Stripe test secret key | `sk_test_...` |
-| `STRIPE_LIVE_SECRET_KEY` | Stripe live secret key | `sk_live_...` |
-| `STRIPE_WEBHOOK_SECRET_TEST` | Stripe webhook endpoint secret (test) | `whsec_...` |
-| `STRIPE_WEBHOOK_SECRET_LIVE` | Stripe webhook endpoint secret (live) | `whsec_...` |
-| `SENDGRID_API_KEY` | SendGrid API key for emails | `SG.xxx` |
-| `NOTIFICATION_EMAIL_FROM` | From address for outgoing emails (must be verified in SendGrid) | `noreply@example.com` |
-| `NOTIFICATION_EMAIL_TEST` | Email for test notifications | `test@example.com` |
-| `NOTIFICATION_EMAIL_LIVE` | Email for live notifications | `live@example.com` |
-| `SUCCESS_URL` | Redirect URL after successful payment | `https://example.com/thankyou` |
-| `CANCEL_URL` | Redirect URL after canceled payment | `https://example.com/donate` |
-
-### Optional Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `DEBUG_EMAIL` | Email address for debug notifications (leave empty to disable) | `debug@example.com` |
-| `NOTIFICATION_POLICY` | Controls when payment success notifications are sent. Options: `ALL` (all payments), `FIRST` (first payment per customer only), `NONE` (no notifications), `ABOVE #` (only if payment exceeds amount, e.g., `ABOVE 100`), `MINIMUM #` (only if payment meets or exceeds amount, e.g., `MINIMUM 50`) | `ALL` |
-| `STRIPE_MODE` | Stripe operating mode; set to `live` to use live credentials. Defaults to test mode when omitted. | `live` |
-
-### CRM Integration Variables (Optional)
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `CRM_PROVIDER` | CRM provider to use | `salesforce` |
-| `SALESFORCE_USERNAME` | Salesforce username | `user@example.com` |
-| `SALESFORCE_PASSWORD` | Salesforce password | `your-password` |
-| `SALESFORCE_SECURITY_TOKEN` | Salesforce security token | `abc123` |
-| `SALESFORCE_LOGIN_URL` | Salesforce login URL | `https://login.salesforce.com` |
-
-### Contact Matching Configuration (Optional)
-
-The system includes advanced customer-contact association with configurable matching logic:
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `CONTACT_MATCH_THRESHOLD_HIGH` | High confidence threshold (auto-associate) | `0.90` | `0.95` |
-| `CONTACT_MATCH_THRESHOLD_LOW` | Low confidence threshold (below = no match) | `0.60` | `0.50` |
-| `CONTACT_MATCH_WEIGHT_EMAIL_EXACT` | Scoring weight for exact email match | `0.7` | `0.8` |
-| `CONTACT_MATCH_WEIGHT_PHONE_EXACT` | Scoring weight for exact phone match | `0.6` | `0.7` |
-| `CONTACT_MATCH_WEIGHT_NAME_EXACT` | Scoring weight for exact name match | `0.5` | `0.4` |
-| `CONTACT_MATCH_WEIGHT_NAME_FUZZY` | Maximum weight for fuzzy name match | `0.35` | `0.3` |
-| `CONTACT_MATCH_WEIGHT_ZIP_EXACT` | Scoring weight for ZIP code match | `0.2` | `0.15` |
-| `CONTACT_MATCH_EMAIL_STRIP_PLUS_TAGS` | Remove +tags from emails (user+tag@domain.com) | `true` | `false` |
-| `CONTACT_MATCH_DEFAULT_COUNTRY_CODE` | Default country for phone normalization | `US` | `CA` |
-| `CONTACT_MATCH_NAME_FUZZY_THRESHOLD` | Minimum similarity for fuzzy name matching | `0.8` | `0.75` |
-| `TRANSACTION_DEFAULT_CATEGORY` | Fallback category when no category is provided | `Uncategorized` | `General` |
-| `TRANSACTION_NAME_TEMPLATE` | Template for transaction display names | `Transaction - {category}` | `Donation - {category}` |
-| `CONTACT_MATCH_REVIEW_ENABLED` | Enable review task creation for uncertain matches | `true` | `false` |
-| `REVIEW_DEEP_LINK_BASE_URL` | Base URL for deep links in review tasks | `https://example.com/admin` | Your admin URL |
-
-### Stripe → QuickBooks Online configuration
-
-The Stripe clearing sync relies on the following accounting environment variables:
-
-| Variable | Purpose |
-|----------|---------|
-| `ACCT_REVENUE_ID` | Income account credited for successful charges |
-| `ACCT_STRIPE_FEES_ID` | Expense account debited for Stripe fees and dispute fees |
-| `ACCT_REFUNDS_CONTRA_REV_ID` | Contra-revenue account debited for refunds and disputes |
-| `ACCT_STRIPE_CLEARING_ID` | Bank-type clearing account that accumulates Stripe balance activity |
-| `ACCT_OPERATING_BANK_ID` | Destination bank account for Stripe payouts |
-| `VENDOR_STRIPE_ID` | Optional QuickBooks Vendor ID for Stripe (auto-created when omitted) |
-| `COMPANY_HOME_CURRENCY` | Home currency used for FX conversions |
-| `STRIPE_QBO_STATE_PATH` | Optional path for the durable idempotency store (defaults to `.data/stripe-qbo-state.json`) |
-
-The new module under `services/accounting/stripe-qbo` exposes composable functions that follow the Single Responsibility Principle:
-
-```javascript
-const stripe = require('stripe')(process.env.STRIPE_TEST_SECRET_KEY);
-const quickBooksProvider = /* existing QBO provider instance */;
-const {
-    fetchStripeChargesSince,
-    resolveQboCustomer,
-    ensureStripeVendor,
-    buildChargeJE,
-    postJEIfNew,
-    postTransferIfNew,
-    ProcessedStripeStore
-} = require('./services/accounting/stripe-qbo');
-
-async function syncSince(isoDate) {
-    const store = new ProcessedStripeStore();
-    const vendor = await ensureStripeVendor(quickBooksProvider);
-    const charges = await fetchStripeChargesSince(stripe, isoDate);
-
-    for (const charge of charges) {
-        const customer = await resolveQboCustomer(charge, quickBooksProvider);
-        const { journalEntry, attachments } = buildChargeJE(charge, {
-            revenueId: process.env.ACCT_REVENUE_ID,
-            stripeFeesId: process.env.ACCT_STRIPE_FEES_ID,
-            refundsContraId: process.env.ACCT_REFUNDS_CONTRA_REV_ID,
-            stripeClearingId: process.env.ACCT_STRIPE_CLEARING_ID
-        }, vendor, customer, { companyHomeCurrency: process.env.COMPANY_HOME_CURRENCY });
-
-        await postJEIfNew(journalEntry, quickBooksProvider, {
-            store,
-            stripeId: charge.id,
-            attachments
-        });
+curl -X POST "http://localhost:7071/api/transaction?code=<FUNCTION_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 5000,
+    "frequency": "month",
+    "customer": {
+      "email": "donor@example.com",
+      "firstName": "Ada",
+      "lastName": "Lovelace"
+    },
+    "metadata": {
+      "campaign": "spring-drive"
     }
-}
+  }'
 ```
+Required fields mirror the validation schema in `processTransaction` (`amount`, `frequency`, and customer contact details).
 
-For payouts, use `postTransferIfNew(payout, quickBooksProvider, { accounts, store })` after confirming the clearing account balances with `reconcilePayout(payout, mappedTransactions)`. The `ProcessedStripeStore` persists processed Stripe IDs to disk, ensuring webhook replays and manual backfills stay idempotent across process restarts.
-
-Run `node tests/stripeQboSync.test.js` to exercise the charge, refund, dispute, fee, payout, attachment, and idempotency scenarios that underpin the clearing workflow.
-
-## API Usage
-
-### Payment Processing Endpoint
-
-```
-POST /api/transaction
-```
-
-### Request Body
-
-```json
-{
-  "transactionType": "Donation",
-  "email": "customer@example.com",
-  "firstname": "John",
-  "lastname": "Doe",
-  "phone": "+1234567890",
-  "amount": 2500,
-  "frequency": "onetime",
-  "category": "General",
-  "coverFee": false,
-  "address": {
-    "line1": "123 Main St",
-    "city": "New York",
-    "state": "NY",
-    "postal_code": "10001",
-    "country": "US"
-  }
-}
-```
-
-**Request Parameters:**
-
-- `transactionType` (optional): Type of transaction (e.g., "Donation", "Payment", "Fee", etc.). Defaults to "Payment".
-- `email` (required): Customer email address
-- `firstname` (required): Customer first name
-- `lastname` (required): Customer last name
-- `phone` (optional): Customer phone number
-- `amount` (required): Amount in cents (e.g., 2500 = $25.00)
-- `frequency` (required): Payment frequency - "onetime", "week", "biweek", "month", or "year"
-- `category` (optional): Transaction category. Defaults to "General".
-- `coverFee` (optional): Whether customer covers processing fees
-- `address` (optional): Customer address object
-
-> **Note:** The function always determines whether to use live or test Stripe keys from server-side configuration. Client payloads cannot switch modes.
-
-### Response
-
-```json
-{
-  "id": "cs_test_checkout_session_id"
-}
-```
-
-### Stripe Webhook Endpoint
-
-```
-POST /api/stripe/webhook
-```
-
-This endpoint receives payment confirmations from Stripe and automatically:
-- Sends notification email to configured recipient (based on `NOTIFICATION_POLICY`)
-- Searches for existing contacts in the configured CRM
-- Creates new contacts if none exist
-- Creates completed tasks for transaction tracking
-- Records transaction details in the CRM
-
-**Notification Policy:**
-
-The `NOTIFICATION_POLICY` environment variable controls when email notifications are sent for successful payments:
-
-- `ALL` (default) - Send notifications for all successful payments
-- `FIRST` - Send notification only for the first successful payment per customer
-- `NONE` - Do not send any payment notifications
-- `ABOVE #` - Send notifications only when payment amount exceeds the specified dollar amount (e.g., `ABOVE 100` sends notifications for payments over $100)
-- `MINIMUM #` - Send notifications only when payment amount meets or exceeds the specified dollar amount (e.g., `MINIMUM 50` sends notifications for payments of $50 or more)
-
-Examples:
-- Set to `FIRST` to only be notified about new customers making their first payment
-- Set to `ABOVE 500` to only be notified about large payments over $500
-- Set to `MINIMUM 25` to filter out small transactions under $25
-- Set to `NONE` to disable all payment notifications
-
-**Supported Webhook Events:**
-- `payment_intent.succeeded`
-- `checkout.session.completed`
-- `invoice.payment_succeeded` (for recurring payments)
-
-**Webhook Configuration in Stripe:**
-1. Go to your Stripe dashboard → Webhooks
-2. Add endpoint: `https://your-function-app.azurewebsites.net/api/stripe/webhook`
-3. Select the events listed above
-4. Copy the webhook signing secret to your environment variables
-
-## Accounting Integration
-
-The payment processor includes automated **Stripe Payout Sync to Accounting** with support for QuickBooks Online (extensible to Xero, Sage, and others).
-
-> **⚠️ IMPORTANT: Webhook-Only Processing**
-> 
-> Payout sync is **fully automated via Stripe webhooks**. Manual payout sync has been removed for reliability and consistency. All payouts are processed automatically when Stripe sends the `payout.paid` event.
-
-### Features
-
-- **Webhook-only processing**: Fully automated via Stripe `payout.paid` events - no manual sync needed
-- **Provider-agnostic design**: Abstract interface for multiple accounting systems
-- **Comprehensive reconciliation**: Validates that gross - refunds - fees - disputes = net
-- **Idempotent processing**: Prevents duplicate postings with event and payout deduplication
-- **Multi-account support**: Handle multiple Stripe accounts and Connect platforms
-- **Configurable posting**: Journal Entry + Transfer (default) or Bank Deposit
-- **Drift detection**: Detects when mapping changes affect existing payouts
-- **Complete audit trail**: Sync ledger links payouts to accounting documents
-- **CRM integration**: Automatically creates payout records in your CRM (Salesforce, etc.)
-
-### Quick Start
-
-1. **Enable accounting sync**:
-   ```bash
-   ACCOUNTING_SYNC_ENABLED=true
-   ACCOUNTING_PROVIDER=quickbooks
-   ```
-
-2. **Configure QuickBooks**:
-   ```bash
-   QBO_COMPANY_ID=your_company_id
-   QBO_ENVIRONMENT=sandbox  # or production
-   QBO_ACCESS_TOKEN=your_access_token
-   QBO_REFRESH_TOKEN=your_refresh_token
-   ```
-
-### Manual True-Up Endpoint
-
-While payout sync is automated via webhooks, you may need to manually backfill or reconcile data in certain scenarios:
-
-```
-POST /api/sync/stripe/true-up
-```
-
-**Use cases:**
-- Initial data migration
-- Recovering from webhook failures
-- Periodic reconciliation
-- Backfilling historical data
-
-**Example request:**
-```json
-{
-  "since": "2024-01-01T00:00:00Z",
-  "resources": ["payouts"],
-  "dryRun": false
-}
-```
-
-**Features:**
-- ✅ Automatic pagination for large datasets
-- ✅ Rate limiting with exponential backoff
-- ✅ Idempotent (skips already synced payouts)
-- ✅ Dry run mode for preview
-- ✅ Multi-account support
-
-See [STRIPE_TRUE_UP.md](./STRIPE_TRUE_UP.md) for complete documentation.
-
-3. **Set account mappings**:
-   ```bash
-   ACCOUNTING_STRIPE_CLEARING_ACCOUNT=Stripe Clearing
-   ACCOUNTING_REVENUE_ACCOUNT=Revenue
-   ACCOUNTING_REFUNDS_ACCOUNT=Refunds
-   ACCOUNTING_STRIPE_FEE_ACCOUNT=Stripe Fees
-   ```
-
-   > ℹ️ The operating bank account name is now pulled directly from Stripe based on the payout destination, so no environment
-   > variable is required.
-
-4. **Configure Stripe webhook** to send `payout.*` events to `/api/stripe/webhook`
-
-5. **Test your setup** - See [TESTING_GUIDE.md](./TESTING_GUIDE.md) for quick test scenarios
-
-### Detailed Setup Guides
-
-- **[QuickBooks Online Setup](./QUICKBOOKS_SETUP.md)** - Complete guide for QBO integration including OAuth setup, API reference, and troubleshooting
-- **[General Accounting Setup](./PAYOUT_SYNC_SETUP.md)** - Architecture, configuration, and advanced options
-
-### API Endpoints
-
-**Check payout sync status**:
-```
-GET /api/sync/stripe/payouts/{payoutId}?account=acct_xxx
-```
-
-> **Note:** Manual payout sync (POST) has been removed. The system is **webhook-only** for reliability and automation. To process a payout, ensure it's marked as paid in Stripe and the webhook is configured correctly.
-
-### Documentation
-
-**Getting Started:**
-- [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) - **Start here!** Complete setup guide with:
-  - Step-by-step configuration
-  - CRM integration (Salesforce example)
-  - Test case scenarios and walkthroughs
-  - Troubleshooting guide
-  - Monitoring recommendations
-
-**Testing:**
-- [TESTING_GUIDE.md](./TESTING_GUIDE.md) - Quick test scenarios to validate your setup
-
-**Technical Details:**
-- [PAYOUT_SYNC_SETUP.md](./PAYOUT_SYNC_SETUP.md) - Detailed architecture and technical documentation
-- [SALESFORCE_PAYOUT_SETUP.md](./SALESFORCE_PAYOUT_SETUP.md) - Salesforce object creation guide
-
-## CRM Integration
-
-### Contact Synchronization
-
-The system integrates with Salesforce CRM at two key points in the payment flow:
-
-**1. Checkout Session Creation (`/api/transaction`)**
-- When a checkout session is created, the system immediately syncs contact information to Salesforce
-- **If contact exists**: Updates address information with the latest data
-- **If contact doesn't exist**: Creates a new contact with all provided information
-- **Error handling**: CRM sync errors are logged but don't prevent checkout from completing
-- This ensures contact data is available in Salesforce even if the payment isn't completed
-
-**2. Payment Confirmation (`/api/stripe/webhook`)**
-- When a payment is confirmed via Stripe webhook, the system performs advanced contact matching
-- Associates the transaction with the correct contact in Salesforce
-- Creates transaction records and tasks for transaction tracking
-
-### Payout Synchronization to CRM
-
-In addition to syncing payouts to accounting systems, the payment processor can also **create payout records in your CRM** for comprehensive financial tracking and reporting.
-
-**Features:**
-- **Automatic payout tracking**: When a `payout.paid` webhook is received, a payout record is created in the CRM
-- **Comprehensive information**: Includes payout amount, dates, status, transaction counts, and accounting document IDs
-- **Optional and graceful**: CRM payout storage is optional; errors won't prevent accounting sync
-- **Linked data**: Payout records include references to accounting system document IDs (journal entries, transfers, deposits)
-- **Webhook-only**: Fully automated - no manual sync needed
-
-**How it works:**
-1. Stripe sends a `payout.paid` webhook event
-2. System processes payout to accounting system (QuickBooks, Xero, etc.)
-3. If CRM provider is configured (`CRM_PROVIDER=salesforce`), system creates a payout record in CRM
-4. Payout record includes summary data: charge count/amount, refund count/amount, fees, disputes
-5. Links to accounting documents are stored for easy reconciliation
-
-**Required Salesforce Setup:**
-
-Create a custom `Payout__c` object in Salesforce with the following fields:
-
-```sql
--- Standard fields
-Name (Text) -- Auto-generated: "Payout - YYYY-MM-DD"
-
--- Stripe payout identifiers
-Payout_ID__c (Text, Unique, External ID) -- Stripe payout ID (e.g., po_xxx)
-Stripe_Account_ID__c (Text) -- Stripe account ID or 'default'
-
--- Amount and currency
-Amount__c (Currency) -- Payout net amount in dollars
-Currency__c (Text, 3) -- ISO currency code (USD, EUR, etc.)
-
--- Dates and status
-Arrival_Date__c (Date) -- When funds arrived in bank account
-Created_Date__c (DateTime) -- When payout was created in Stripe
-Status__c (Picklist: Paid, Pending, Failed, Canceled)
-
--- Description
-Description__c (Long Text Area) -- Description of the payout
-
--- Transaction summary fields
-Charge_Count__c (Number) -- Number of charges in payout
-Charge_Amount__c (Currency) -- Gross charge amount
-Refund_Count__c (Number) -- Number of refunds in payout
-Refund_Amount__c (Currency) -- Total refund amount
-Fee_Amount__c (Currency) -- Total Stripe fees
-Dispute_Count__c (Number) -- Number of disputes in payout
-Dispute_Amount__c (Currency) -- Total dispute amount
-
--- Accounting integration references
-Accounting_Journal_Entry_ID__c (Text) -- Journal entry ID in accounting system
-Accounting_Transfer_ID__c (Text) -- Transfer transaction ID in accounting system
-Accounting_Deposit_ID__c (Text) -- Deposit transaction ID in accounting system
-
--- Metadata
-Metadata__c (Long Text Area) -- JSON metadata from Stripe payout
-```
-
-**Configuration:**
-
-Simply ensure your CRM provider is configured (same configuration used for transaction sync):
-
+### Stripe webhook — `POST /api/stripe/webhook`
+Processes incoming Stripe events for payments, refunds, disputes, and payouts.
 ```bash
-CRM_PROVIDER=salesforce
-SALESFORCE_USERNAME=your_username@example.com
-SALESFORCE_PASSWORD=your_password
-SALESFORCE_SECURITY_TOKEN=your_security_token
-SALESFORCE_LOGIN_URL=https://login.salesforce.com
+curl -X POST "http://localhost:7071/api/stripe/webhook?code=<FUNCTION_KEY>" \
+  -H "Content-Type: application/json" \
+  -H "Stripe-Signature: t=1700000000,v1=<SIGNATURE>" \
+  -d '{
+    "type": "payment_intent.succeeded",
+    "data": {
+      "object": {
+        "id": "pi_test",
+        "amount_received": 5000,
+        "currency": "usd"
+      }
+    }
+  }'
 ```
+Use the real Stripe signature header when testing against Stripe CLI or the live webhook endpoint.
 
-No additional configuration needed - payout storage is automatically enabled when CRM is configured.
-
-**Behavior:**
-- Payout records are created automatically when `payout.paid` webhook is received
-- If the `Payout__c` object exists, records will be created with all summary data
-- If the object doesn't exist, the system logs a message and continues (graceful degradation)
-- Payout CRM storage errors don't prevent accounting sync from completing
-- Each payout is created once with full summary and accounting references
-
-**Benefits:**
-- **Unified reporting**: View transaction and payout data together in your CRM
-- **Reconciliation**: Easy lookup of accounting documents from CRM payout records
-- **Business intelligence**: Build CRM reports and dashboards on payout trends
-- **Audit trail**: Complete history of payouts with links to source systems
-
-**Complete Setup Guide:**
-
-For detailed setup instructions, test scenarios, and troubleshooting, see:
-- [WEBHOOK_PAYOUT_SETUP.md](./WEBHOOK_PAYOUT_SETUP.md) - Complete webhook-only setup guide with test scenarios
-- [SALESFORCE_PAYOUT_SETUP.md](./SALESFORCE_PAYOUT_SETUP.md) - Step-by-step Salesforce object creation
-
-### Enhanced Customer-Contact Association
-
-The system includes a sophisticated contact matching engine that:
-
-**🧠 Intelligent Matching:**
-- **Normalization**: Cleans email (removes +tags), normalizes phone numbers to E.164 format, standardizes name casing
-- **Fuzzy Matching**: Uses Jaro-Winkler algorithm for name similarity detection
-- **Multi-signal Scoring**: Considers email, phone, name, ZIP code, and prior transaction history
-- **Configurable Thresholds**: Customizable confidence levels for auto-association vs manual review
-
-**⚖️ Decision Engine:**
-- **High Confidence (≥0.90)**: Automatically associates transaction with contact
-- **Medium Confidence (0.60-0.89)**: Creates review task for manual verification
-- **Low Confidence (<0.60)**: Creates review task with "no viable candidates" context
-
-**📋 Review Workflow:**
-- **Comprehensive Context**: Review tasks include full transaction details, normalized data, candidate analysis, and scoring breakdown
-- **Deep Links**: Direct links to transaction records and candidate contacts
-- **Audit Trail**: Complete decision history for compliance and debugging
-
-**🏷️ Transaction Naming:**
-- **Improved Format**: "Transaction - {Category}" instead of internal IDs
-- **Controlled Vocabulary**: Configurable list of allowed categories with fallback to "Uncategorized"
-- **Template System**: Customizable naming templates with variable substitution
-
-**🔒 Reliability & Performance:**
-- **Idempotency**: Prevents duplicate processing of the same transaction
-- **Metrics & Observability**: Tracks auto-link vs review rates, processing times, and error rates
-- **PII Protection**: Automatic redaction of sensitive data in logs
-- **Error Handling**: Graceful degradation without disrupting payment processing
-
-### Salesforce Setup
-
-1. **Create a Connected App** (optional, for OAuth):
-   - Go to Setup → Apps → App Manager → New Connected App
-   - Enable OAuth Settings
-   - Note: This implementation uses username/password authentication
-
-2. **Required Salesforce Objects**:
-   - **Contact**: Standard object (used for customer management)
-   - **Task**: Standard object (used for transaction tracking)
-   - **Transaction__c**: Custom object (optional, falls back to Opportunity)
-
-3. **Custom Transaction Object** (optional):
-   ```sql
-   -- Create custom object Transaction__c with these fields:
-   Name (Text) -- Standard Name field for transaction display name
-   Contact__c (Lookup to Contact)
-   Amount__c (Currency)
-   Currency__c (Text)
-   Payment_Method__c (Text)
-   Transaction_ID__c (Text)
-   Status__c (Picklist: Completed, Failed, Pending)
-   Description__c (Long Text Area)
-   Frequency__c (Text)
-   Category__c (Text)
-   Transaction_Date__c (DateTime)
-   ```
-
-4. **Security Token**:
-   - Go to Personal Settings → Reset My Security Token
-   - Use the token sent to your email in the `SALESFORCE_SECURITY_TOKEN` variable
-
-### Adding Other CRM Providers
-
-The architecture is designed to be extensible. To add a new CRM provider:
-
-1. Create a new service class extending `BaseCrmService`
-2. Implement the required methods: `searchContact`, `createContact`, `createTask`, `createTransaction`
-3. Add the provider to the `CrmFactory` class
-4. Update configuration validation
-
-Example structure:
-```javascript
-const NewCrmService = require('./newCrm');
-
-// In crmFactory.js
-case 'newcrm':
-    return new NewCrmService(config);
+### Payout sync trigger — `GET /api/sync/stripe/payouts/{payoutId?}`
+Fetches recent payouts (optionally a specific payout) and posts them into accounting/CRM systems.
+```bash
+curl "http://localhost:7071/api/sync/stripe/payouts?code=<FUNCTION_KEY>&lookbackDays=9"
 ```
+Provide a specific payout by appending the ID to the path, e.g. `/sync/stripe/payouts/po_123`.
 
-## License
+### Manual Stripe true-up — `POST /api/sync/stripe/true-up`
+Replays Stripe activity across a time window. Requires the bearer token configured in `STRIPE_TRUE_UP_TOKEN` and accepts ISO-8601 timestamps in the `from` (required) and `to` (optional) query parameters.
+```bash
+curl -X POST "http://localhost:7071/api/sync/stripe/true-up?code=<FUNCTION_KEY>&from=2024-01-01T00:00:00Z&to=2024-01-31T23:59:59Z&type=payments&dryRun=true" \
+  -H "Authorization: Bearer ${STRIPE_TRUE_UP_TOKEN}"
+```
+Set `type` to `payments`, `refunds`, or `payouts`, and toggle `dryRun=true` to simulate without posting.
 
-MIT License
+## Posting strategies
+
+Accounting posting behavior is controlled by the `ACCOUNTING_POSTING_STRATEGY` environment variable. The code validates two strategies:
+
+- `je-transfer` *(default)* — generates a journal-entry plus transfer workflow for payouts.
+- `sales-receipt` — records revenue using sales receipts instead of journal entries.
+
+Switch strategies by updating the variable in `local.settings.json` or your deployment environment and restarting the Functions host.

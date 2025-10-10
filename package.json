@@ -4,9 +4,14 @@
   "description": "Azure Function for payment processing with Stripe integration",
   "main": "dist/index.js",
   "scripts": {
+    "dev": "npm run start",
     "build": "tsc",
     "start": "func start",
     "test": "npm run build && node tests/integration.test.js && node tests/transactionCreationFlow.test.js && node tests/failedCanceledTransactions.test.js && node tests/payoutSync.test.js && node tests/payoutCrmIntegration.test.js && node tests/payoutSyncFix.test.js && node tests/manualPayoutSync.test.js && node tests/payoutDateRangeFix.test.js && node tests/connectedAccountPayoutFix.test.js && node tests/payoutArrivalDateFix.test.js && node tests/payoutSyncLogicCorrection.test.js && node tests/payoutAdvanceExclusion.test.js && node tests/productionScenarioSimulation.test.js && node tests/manualPayoutDateWindow.test.js && node tests/persistentStorage.test.js && node tests/quickbooksProvider.test.js && node tests/journalEntryCreation.test.js && node tests/amountConversion.test.js && node tests/stripeQboSync.test.js && node tests/loggingSecurity.test.js && node tests/stripeSearchSanitization.test.js && node tests/stripeWebhookEmail.test.js && node tests/livemodeConfiguration.test.js && node tests/stripeTrueUp.test.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "npm run typecheck",
+    "format": "prettier --write .",
+    "ci": "npm run lint && npm run test",
     "test:unit": "vitest run",
     "test:watch": "vitest watch"
   },
@@ -28,6 +33,7 @@
     "@types/node": "^20.12.7",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5",
-    "vitest": "^1.6.0"
+    "vitest": "^1.6.0",
+    "prettier": "^3.2.5"
   }
 }
