@@ -27,6 +27,7 @@ The Stripe webhook handler maps Stripe payment intents, charges, and balance tra
 | `designation__c` | `Designation__c` | Custom designation reference from metadata. |
 | `restriction__c` | `Restriction__c` | Custom restriction reference from metadata. |
 | `frequency__c` | `Frequency__c` | Donation frequency (e.g., `onetime`, `month`). |
+| `attribution__c` | `Attribution__c` | Attribution or campaign source string (optional). |
 | `cover_fees__c` | `Cover_Fees__c` | Boolean flag when the donor covers fees. |
 | `cover_fees_amount__c` | `Cover_Fees_Amount__c` | Amount of fees covered by the donor. |
 | `payment_method__c` | `Payment_Method__c` | Stripe payment method type (card, ach, etc.). |

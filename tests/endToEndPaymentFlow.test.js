@@ -276,7 +276,7 @@ async function verifySalesforce(donor, paymentIntentId, chargeId, balanceTransac
         () =>
             connection
                 .sobject('Transaction__c')
-                .findOne({ stripe_payment_intent_id__c: paymentIntentId }, 'Id,Amount_Gross__c,Amount_Net__c,Amount_Fee__c,Stripe_Charge_Id__c,Stripe_Balance_Transaction_Id__c,Posted_to_QBO__c'),
+                .findOne({ Stripe_Payment_Intent_Id__c: paymentIntentId }, 'Id,Amount_Gross__c,Amount_Net__c,Amount_Fee__c,Stripe_Charge_Id__c,Stripe_Balance_Transaction_Id__c,Posted_to_QBO__c'),
         'transaction'
     );
 

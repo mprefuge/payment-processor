@@ -140,17 +140,17 @@ describe('processTransaction', () => {
         expect(upsertMock).toHaveBeenCalledTimes(1);
         expect(upsertMock).toHaveBeenCalledWith(
             expect.objectContaining({
-                stripe_checkout_session_id__c: 'cs_test',
-                transaction_type__c: 'charge',
-                status__c: 'pending',
-                contact__c: '003TEST',
-                frequency__c: 'month',
-                payment_method__c: 'Pending',
-                amount_gross__c: 75,
-                currency_iso_code__c: 'USD',
-                attribution__c: 'referral-program'
+                Stripe_Checkout_Session_Id__c: 'cs_test',
+                Transaction_Type__c: 'charge',
+                Status__c: 'pending',
+                Contact__c: '003TEST',
+                Frequency__c: 'month',
+                Payment_Method__c: 'Pending',
+                Amount_Gross__c: 75,
+                Currency_ISO_Code__c: 'USD',
+                Attribution__c: 'referral-program'
             }),
-            'stripe_checkout_session_id__c'
+            'Stripe_Checkout_Session_Id__c'
         );
     });
 
@@ -210,11 +210,11 @@ describe('processTransaction', () => {
         expect(upsertMock).toHaveBeenCalledTimes(1);
         expect(upsertMock).toHaveBeenCalledWith(
             {
-                stripe_checkout_session_id__c: 'cs_test',
-                transaction_type__c: 'charge',
-                status__c: 'pending'
+                Stripe_Checkout_Session_Id__c: 'cs_test',
+                Transaction_Type__c: 'charge',
+                Status__c: 'pending'
             },
-            'stripe_checkout_session_id__c'
+            'Stripe_Checkout_Session_Id__c'
         );
     });
 });

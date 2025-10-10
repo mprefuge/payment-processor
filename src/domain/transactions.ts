@@ -43,6 +43,7 @@ export const transactionUpsertSchema = z
     designation__c: stringOrNullSchema.optional(),
     restriction__c: stringOrNullSchema.optional(),
     frequency__c: stringOrNullSchema.optional(),
+    attribution__c: stringOrNullSchema.optional(),
     cover_fees__c: booleanOrNullSchema.optional(),
     cover_fees_amount__c: numberOrNullSchema.optional(),
     payment_method__c: stringOrNullSchema.optional(),
@@ -567,6 +568,12 @@ export const mapStripeToTransaction = (
       'restriction',
     ),
     frequency__c: parseMetadataString(combinedMetadata, 'frequency__c', 'Frequency__c', 'frequency'),
+    attribution__c: parseMetadataString(
+      combinedMetadata,
+      'attribution__c',
+      'Attribution__c',
+      'attribution',
+    ),
     cover_fees__c: parseMetadataBoolean(
       combinedMetadata,
       'cover_fees__c',

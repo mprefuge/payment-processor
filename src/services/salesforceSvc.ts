@@ -27,6 +27,7 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   designation__c: 'Designation__c',
   restriction__c: 'Restriction__c',
   frequency__c: 'Frequency__c',
+  attribution__c: 'Attribution__c',
   cover_fees__c: 'Cover_Fees__c',
   cover_fees_amount__c: 'Cover_Fees_Amount__c',
   payment_method__c: 'Payment_Method__c',

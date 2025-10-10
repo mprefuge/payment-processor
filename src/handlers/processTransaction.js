@@ -557,36 +557,36 @@ const createPendingTransaction = async (context, session, contactId, transaction
         const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
 
         const transactionRecord = {
-            stripe_checkout_session_id__c: session.id,
-            transaction_type__c: 'charge',
-            status__c: 'pending',
-            contact__c: contactId,
-            frequency__c: transactionData.frequency || 'onetime',
-            payment_method__c: 'Pending'
+            Stripe_Checkout_Session_Id__c: session.id,
+            Transaction_Type__c: 'charge',
+            Status__c: 'pending',
+            Contact__c: contactId,
+            Frequency__c: transactionData.frequency || 'onetime',
+            Payment_Method__c: 'Pending'
         };
 
         const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
         if (paymentIntentId) {
-            transactionRecord.stripe_payment_intent_id__c = paymentIntentId;
+            transactionRecord.Stripe_Payment_Intent_Id__c = paymentIntentId;
         }
 
         const customerId = normalizeStripeEntityId(session.customer);
         if (customerId) {
-            transactionRecord.stripe_customer_id__c = customerId;
+            transactionRecord.Stripe_Customer_Id__c = customerId;
         }
 
         const amount = convertCentsToDollars(transactionData.amount);
         if (amount !== null) {
-            transactionRecord.amount_gross__c = amount;
+            transactionRecord.Amount_Gross__c = amount;
         }
 
         const currency = session.currency ? session.currency.toUpperCase() : 'USD';
         if (currency) {
-            transactionRecord.currency_iso_code__c = currency;
+            transactionRecord.Currency_ISO_Code__c = currency;
         }
 
         if (transactionData.attribution) {
-            transactionRecord.attribution__c = transactionData.attribution;
+            transactionRecord.Attribution__c = transactionData.attribution;
         }
 
         const name = generateTransactionName(normalizedCategory, matchingConfig, {
@@ -601,7 +601,7 @@ const createPendingTransaction = async (context, session, contactId, transaction
 
         const upsertResult = await crmService.upsertTransactionsRecord(
             transactionRecord,
-            'stripe_checkout_session_id__c'
+            'Stripe_Checkout_Session_Id__c'
         );
 
         context.log('Upserted pending transaction in CRM with contact association', {
@@ -641,16 +641,16 @@ const upsertSalesforceTransaction = async (context, session, requestData) => {
         }
 
         const transactionRecord = {
-            stripe_checkout_session_id__c: session.id,
-            transaction_type__c: 'charge',
-            status__c: 'pending'
+            Stripe_Checkout_Session_Id__c: session.id,
+            Transaction_Type__c: 'charge',
+            Status__c: 'pending'
         };
 
         if (requestData.attribution) {
-            transactionRecord.attribution__c = requestData.attribution;
+            transactionRecord.Attribution__c = requestData.attribution;
         }
 
-        await crmService.upsertTransactionsRecord(transactionRecord, 'stripe_checkout_session_id__c');
+        await crmService.upsertTransactionsRecord(transactionRecord, 'Stripe_Checkout_Session_Id__c');
         context.log('Upserted pending transaction in CRM', { sessionId: session.id });
 
         return transactionRecord;
