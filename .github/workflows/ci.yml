@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [prod]
   pull_request:
 
 jobs:
@@ -25,4 +25,7 @@ jobs:
         run: npm run lint
 
       - name: Run tests
+        env:
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
         run: npm test
