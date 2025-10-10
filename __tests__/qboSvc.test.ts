@@ -36,6 +36,46 @@ const resetAccounts = () => {
   Object.assign(baseEnv.quickBooks.accounts, defaultAccounts);
 };
 
+const resetTokens = () => {
+  baseEnv.quickBooks.refreshToken = 'refresh';
+  delete process.env.QBO_ACCESS_TOKEN;
+  delete process.env.QBO_REFRESH_TOKEN;
+};
+
+const getAuthorizationHeader = (request: RequestRecord): string | undefined => {
+  const headers = request.init?.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (typeof (headers as any).get === 'function') {
+    return (headers as any).get('Authorization') ?? (headers as any).get('authorization') ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      if (key.toLowerCase() === 'authorization') {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
+  if (typeof headers === 'object') {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === 'authorization') {
+        return typeof value === 'string'
+          ? value
+          : Array.isArray(value)
+          ? (value[0] as string | undefined)
+          : undefined;
+      }
+    }
+  }
+
+  return undefined;
+};
+
 type MockResponse = {
   ok?: boolean;
   status?: number;
@@ -92,6 +132,7 @@ afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
   resetAccounts();
+  resetTokens();
 });
 
 describe('postChargeToQbo', () => {
@@ -261,6 +302,99 @@ describe('postChargeToQbo', () => {
         options: { fetcher, accessToken: 'token' },
       }),
     ).rejects.toThrow(/could not be found/i);
+  });
+
+  it('refreshes the QuickBooks access token when an account lookup returns 401', async () => {
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    baseEnv.quickBooks.refreshToken = 'refresh-token';
+    process.env.QBO_ACCESS_TOKEN = 'expired-token';
+    process.env.QBO_REFRESH_TOKEN = 'refresh-token';
+
+    const unauthorizedResponse = {
+      ok: false,
+      status: 401,
+      text: async () => 'token expired',
+    };
+
+    const tokenRefreshResponse = {
+      ok: true,
+      json: async () => ({ access_token: 'new-access-token', refresh_token: 'next-refresh-token' }),
+    };
+
+    const { fetcher, requests } = createFetchMock(
+      unauthorizedResponse,
+      tokenRefreshResponse,
+      {
+        QueryResponse: {
+          Account: [{ Id: '123', Name: 'Stripe Clearing' }],
+        },
+      },
+      { JournalEntry: { Id: 'je-401' } },
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Refresh memo',
+      date: new Date('2024-06-01'),
+      options: { fetcher },
+    });
+
+    expect(result).toEqual({ qboId: 'je-401', type: 'journal-entry' });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(requests[1].url).toBe('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer');
+    expect(requests[1].init?.method).toBe('POST');
+    expect(requests[1].init?.body).toBe('grant_type=refresh_token&refresh_token=refresh-token');
+
+    const refreshAuthHeader = getAuthorizationHeader(requests[1]);
+    expect(refreshAuthHeader).toMatch(/^Basic\s+/);
+
+    const lookupAuthHeader = getAuthorizationHeader(requests[2]);
+    expect(lookupAuthHeader).toBe('Bearer new-access-token');
+    const postAuthHeader = getAuthorizationHeader(requests[3]);
+    expect(postAuthHeader).toBe('Bearer new-access-token');
+
+    expect(process.env.QBO_ACCESS_TOKEN).toBe('new-access-token');
+    expect(process.env.QBO_REFRESH_TOKEN).toBe('next-refresh-token');
+    expect(baseEnv.quickBooks.refreshToken).toBe('next-refresh-token');
+  });
+
+  it('throws a descriptive error when token refresh fails after an unauthorized response', async () => {
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    baseEnv.quickBooks.refreshToken = 'refresh-token';
+    process.env.QBO_ACCESS_TOKEN = 'expired-token';
+    process.env.QBO_REFRESH_TOKEN = 'refresh-token';
+
+    const unauthorizedResponse = {
+      ok: false,
+      status: 401,
+      text: async () => 'token expired',
+    };
+
+    const failedRefreshResponse = {
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      text: async () => 'invalid refresh token',
+    };
+
+    const { fetcher } = createFetchMock(unauthorizedResponse, failedRefreshResponse);
+    const { postChargeToQbo } = await importQboSvc();
+
+    await expect(
+      postChargeToQbo({
+        gross: 10_000,
+        fee: 0,
+        memo: 'Refresh failure',
+        date: new Date('2024-06-02'),
+        options: { fetcher },
+      }),
+    ).rejects.toThrow(
+      /QuickBooks access token refresh failed after unauthorized response: Failed to refresh QuickBooks access token \(status 400\): invalid refresh token/i,
+    );
   });
 });
 

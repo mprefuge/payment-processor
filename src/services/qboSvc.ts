@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+
 import env from '../config/env';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
@@ -467,6 +469,125 @@ const buildQboUrl = (entity: string): string => {
 
 const accountLookupCache = new Map<string, string>();
 
+const QUICKBOOKS_TOKEN_URL =
+  'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+
+interface RefreshTokenResult {
+  accessToken: string;
+  refreshToken?: string;
+}
+
+interface QuickBooksRequestContext {
+  request: (url: string, init?: RequestInit) => Promise<Response>;
+}
+
+const setAuthorizationHeader = (headers: Headers, token: string) => {
+  const existing = headers.get('Authorization') ?? headers.get('authorization');
+  if (!existing || !existing.trim()) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+};
+
+const refreshAccessToken = async (fetcher: Fetcher): Promise<RefreshTokenResult> => {
+  const { clientId, clientSecret, refreshToken } = env.quickBooks;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error(
+      'QuickBooks OAuth client ID, client secret, and refresh token must be configured to refresh the access token.',
+    );
+  }
+
+  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`, 'utf8').toString('base64');
+  const params = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+  });
+
+  const response = await fetcher(QUICKBOOKS_TOKEN_URL, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${basicAuth}`,
+    },
+    body: params.toString(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to refresh QuickBooks access token (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const accessToken =
+    data && typeof data === 'object' && typeof (data as Record<string, unknown>).access_token === 'string'
+      ? ((data as Record<string, unknown>).access_token as string).trim()
+      : '';
+
+  if (!accessToken) {
+    throw new Error('QuickBooks access token refresh response did not include an access_token value.');
+  }
+
+  const newRefreshToken =
+    data && typeof data === 'object' && typeof (data as Record<string, unknown>).refresh_token === 'string'
+      ? ((data as Record<string, unknown>).refresh_token as string).trim()
+      : undefined;
+
+  process.env.QBO_ACCESS_TOKEN = accessToken;
+  if (newRefreshToken) {
+    process.env.QBO_REFRESH_TOKEN = newRefreshToken;
+    env.quickBooks.refreshToken = newRefreshToken;
+  }
+
+  return { accessToken, refreshToken: newRefreshToken };
+};
+
+const createRequestContext = (options?: PostOptions): QuickBooksRequestContext => {
+  const fetcher = getFetcher(options);
+  let accessToken = getAccessToken(options);
+  let refreshAttempted = false;
+
+  const execute = async (url: string, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers ?? {});
+    setAuthorizationHeader(headers, accessToken);
+    const requestInit: RequestInit = { ...init, headers };
+    return fetcher(url, requestInit as any) as Promise<Response>;
+  };
+
+  const request: QuickBooksRequestContext['request'] = async (url, init = {}) => {
+    let response = await execute(url, init);
+
+    if (response.status === 401) {
+      if (refreshAttempted) {
+        return response;
+      }
+
+      refreshAttempted = true;
+
+      try {
+        const refreshed = await refreshAccessToken(fetcher);
+        accessToken = refreshed.accessToken;
+      } catch (error) {
+        throw new Error(
+          `QuickBooks access token refresh failed after unauthorized response: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+
+      response = await execute(url, init);
+    }
+
+    return response;
+  };
+
+  return { request };
+};
+
 const escapeQueryValue = (value: string): string => {
   return value.replace(/'/g, "''");
 };
@@ -499,8 +620,7 @@ const isLookupRequired = (ref: AccountRefWithMetadata): boolean => {
 
 const resolveAccountId = async (
   name: string,
-  fetcher: Fetcher,
-  accessToken: string,
+  context: QuickBooksRequestContext,
 ): Promise<string> => {
   const cacheKey = `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:${name.toLowerCase()}`;
   const cached = accountLookupCache.get(cacheKey);
@@ -510,11 +630,10 @@ const resolveAccountId = async (
 
   const query = `select Id, Name from Account where Name = '${escapeQueryValue(name)}'`;
   const url = buildQboQueryUrl(query);
-  const response = await fetcher(url, {
+  const response = await context.request(url, {
     method: 'GET',
     headers: {
       Accept: 'application/json',
-      Authorization: `Bearer ${accessToken}`,
     },
   });
 
@@ -621,8 +740,7 @@ const collectAccountReferences = (
 const resolveAccountReferences = async (
   entity: QuickBooksDocType,
   payload: QuickBooksSalesReceipt | QuickBooksJournalEntry | QuickBooksBankDeposit,
-  fetcher: Fetcher,
-  accessToken: string,
+  context: QuickBooksRequestContext,
 ): Promise<void> => {
   const references = collectAccountReferences(entity, payload);
   const lookups = new Map<string, AccountRefWithMetadata[]>();
@@ -648,7 +766,7 @@ const resolveAccountReferences = async (
   }
 
   for (const [name, refs] of lookups.entries()) {
-    const id = await resolveAccountId(name, fetcher, accessToken);
+    const id = await resolveAccountId(name, context);
     for (const ref of refs) {
       ref.value = id;
       if (!ref.name) {
@@ -675,17 +793,15 @@ const postToQbo = async <T extends QuickBooksDocType>(
       ? 'journalentry'
       : 'deposit',
   );
-  const fetcher = getFetcher(options);
-  const accessToken = getAccessToken(options);
+  const context = createRequestContext(options);
 
-  await resolveAccountReferences(entity, payload, fetcher, accessToken);
+  await resolveAccountReferences(entity, payload, context);
 
-  const response = await fetcher(url, {
+  const response = await context.request(url, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
     },
     body: JSON.stringify(payload),
   });
