@@ -2,6 +2,15 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 type RequestRecord = { url: string; init: any };
 
+const defaultAccounts = {
+  stripeClearing: 'Stripe Clearing|QBO_ACCOUNT_STRIPE_CLEARING',
+  operatingBank: 'Operating Bank|QBO_ACCOUNT_OPERATING_BANK',
+  revenue: 'Revenue|QBO_ACCOUNT_REVENUE',
+  fees: 'Stripe Fees|QBO_ACCOUNT_FEES',
+  refunds: 'Refunds|QBO_ACCOUNT_REFUNDS',
+  disputeLosses: 'Dispute Losses|QBO_ACCOUNT_DISPUTE_LOSSES',
+};
+
 const baseEnv = {
   quickBooks: {
     environment: 'sandbox',
@@ -9,14 +18,7 @@ const baseEnv = {
     clientId: 'client',
     clientSecret: 'secret',
     refreshToken: 'refresh',
-    accounts: {
-      stripeClearing: 'QBO_ACCOUNT_STRIPE_CLEARING',
-      operatingBank: 'QBO_ACCOUNT_OPERATING_BANK',
-      revenue: 'QBO_ACCOUNT_REVENUE',
-      fees: 'QBO_ACCOUNT_FEES',
-      refunds: 'QBO_ACCOUNT_REFUNDS',
-      disputeLosses: 'QBO_ACCOUNT_DISPUTE_LOSSES',
-    },
+    accounts: { ...defaultAccounts },
   },
   accounting: {
     postingStrategy: 'sales-receipt',
@@ -28,6 +30,10 @@ const importQboSvc = async () => {
   vi.resetModules();
   vi.doMock('../src/config/env', () => ({ env: baseEnv, default: baseEnv }));
   return import('../src/services/qboSvc');
+};
+
+const resetAccounts = () => {
+  Object.assign(baseEnv.quickBooks.accounts, defaultAccounts);
 };
 
 const createFetchMock = (...payloads: unknown[]) => {
@@ -56,6 +62,7 @@ const createFetchMock = (...payloads: unknown[]) => {
 afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
+  resetAccounts();
 });
 
 describe('postChargeToQbo', () => {
@@ -84,7 +91,7 @@ describe('postChargeToQbo', () => {
     const salesReceiptBody = JSON.parse((salesReceiptRequest.init?.body ?? '{}') as string);
     expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
       value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-      name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      name: 'Stripe Clearing',
     });
 
     const feeJournalBody = JSON.parse((feeJournalRequest.init?.body ?? '{}') as string);
@@ -98,7 +105,7 @@ describe('postChargeToQbo', () => {
         type: 'Debit',
         accountRef: {
           value: 'QBO_ACCOUNT_FEES',
-          name: 'QBO_ACCOUNT_FEES',
+          name: 'Stripe Fees',
         },
         amount: 3.25,
       },
@@ -106,7 +113,7 @@ describe('postChargeToQbo', () => {
         type: 'Credit',
         accountRef: {
           value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
         },
         amount: 3.25,
       },
@@ -140,7 +147,7 @@ describe('postChargeToQbo', () => {
         type: 'Debit',
         accountRef: {
           value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
         },
         amount: 120,
       },
@@ -148,7 +155,7 @@ describe('postChargeToQbo', () => {
         type: 'Credit',
         accountRef: {
           value: 'QBO_ACCOUNT_REVENUE',
-          name: 'QBO_ACCOUNT_REVENUE',
+          name: 'Revenue',
         },
         amount: 120,
       },
@@ -156,7 +163,7 @@ describe('postChargeToQbo', () => {
         type: 'Debit',
         accountRef: {
           value: 'QBO_ACCOUNT_FEES',
-          name: 'QBO_ACCOUNT_FEES',
+          name: 'Stripe Fees',
         },
         amount: 4,
       },
@@ -164,11 +171,26 @@ describe('postChargeToQbo', () => {
         type: 'Credit',
         accountRef: {
           value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
         },
         amount: 4,
       },
     ]);
+  });
+
+  it('throws a helpful error when an account configuration omits an ID', async () => {
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    const { postChargeToQbo } = await importQboSvc();
+
+    await expect(
+      postChargeToQbo({
+        gross: 10_000,
+        fee: 0,
+        memo: 'Missing ID',
+        date: new Date('2024-04-01'),
+        options: { fetcher: vi.fn(), accessToken: 'token' },
+      }),
+    ).rejects.toThrow(/account configuration must include an ID/i);
   });
 });
 
@@ -197,7 +219,7 @@ describe('postRefundToQbo', () => {
         type: 'Debit',
         accountRef: {
           value: 'QBO_ACCOUNT_REFUNDS',
-          name: 'QBO_ACCOUNT_REFUNDS',
+          name: 'Refunds',
         },
         amount: 85,
       },
@@ -205,7 +227,7 @@ describe('postRefundToQbo', () => {
         type: 'Credit',
         accountRef: {
           value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
         },
         amount: 85,
       },
@@ -230,7 +252,7 @@ describe('postPayoutToQbo', () => {
     const depositBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
     expect(depositBody.DepositToAccountRef).toMatchObject({
       value: 'QBO_ACCOUNT_OPERATING_BANK',
-      name: 'QBO_ACCOUNT_OPERATING_BANK',
+      name: 'Operating Bank',
     });
     const depositLines = depositBody.Line.map((line: any) => ({
       accountRef: line.DepositLineDetail.AccountRef,
@@ -240,7 +262,7 @@ describe('postPayoutToQbo', () => {
       {
         accountRef: {
           value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
         },
         amount: 150,
       },

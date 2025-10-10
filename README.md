@@ -85,19 +85,20 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `QBO_REALM_ID` | QuickBooks company ID. |
 | `QBO_CLIENT_ID` / `QBO_CLIENT_SECRET` | OAuth client credentials. |
 | `QBO_REFRESH_TOKEN` | OAuth refresh token for server-to-server flows. |
-| `QBO_ACCOUNT_STRIPE_CLEARING` | Name/ID of the Stripe clearing account. |
-| `QBO_ACCOUNT_OPERATING_BANK` | Name/ID of the operating bank account. |
-| `QBO_ACCOUNT_REVENUE` | Revenue account mapping. |
-| `QBO_ACCOUNT_FEES` | Stripe fee account mapping. |
-| `QBO_ACCOUNT_REFUNDS` | Refund liability account mapping. |
-| `QBO_ACCOUNT_DISPUTES` | Dispute loss account mapping. |
+| `QBO_ACCOUNT_STRIPE_CLEARING` | QuickBooks ID (or `Name|ID`) of the Stripe clearing account. |
+| `QBO_ACCOUNT_OPERATING_BANK` | QuickBooks ID (or `Name|ID`) of the operating bank account. |
+| `QBO_ACCOUNT_REVENUE` | QuickBooks ID (or `Name|ID`) for revenue recognition. |
+| `QBO_ACCOUNT_FEES` | QuickBooks ID (or `Name|ID`) for Stripe fee expense. |
+| `QBO_ACCOUNT_REFUNDS` | QuickBooks ID (or `Name|ID`) for refunds liability. |
+| `QBO_ACCOUNT_DISPUTES` | QuickBooks ID (or `Name|ID`) for dispute losses. |
 | `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
 
-When specifying account mappings you may provide either a QuickBooks account ID
-or a `Name|ID` pair (for example, `Stripe Clearing|123`). If only a single value
-is supplied it will be used for both the `value` and `name` fields that are sent
-to QuickBooks.
+When specifying account mappings you must provide the QuickBooks account ID.
+You can either supply the raw ID (for example, `123`) or a `Name|ID` pair such
+as `Stripe Clearing|123`. JSON strings of the form `{"value":"123","name":"Stripe
+Clearing"}` are also accepted. Supplying only an account name without an ID will
+throw a configuration error before any QuickBooks API calls are attempted.
 
 ## Endpoint reference
 

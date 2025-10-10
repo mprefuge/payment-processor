@@ -194,6 +194,20 @@ const parseDelimitedAccount = (
   };
 };
 
+const ensureAccountRefValue = (
+  ref: QuickBooksReference,
+  original: string,
+): QuickBooksReference => {
+  const value = ref.value.trim();
+  if (!value) {
+    throw new Error(
+      `QuickBooks account reference configuration is missing an ID: "${original}".`,
+    );
+  }
+
+  return { ...ref, value };
+};
+
 const createAccountRef = (input: string): QuickBooksReference => {
   const trimmed = input.trim();
   if (!trimmed) {
@@ -228,14 +242,18 @@ const createAccountRef = (input: string): QuickBooksReference => {
   for (const delimiter of delimiters) {
     const parsed = parseDelimitedAccount(trimmed, delimiter);
     if (parsed) {
-      return parsed;
+      return ensureAccountRefValue(parsed, input);
     }
   }
 
-  return {
-    value: trimmed,
-    name: trimmed,
-  };
+  if (!/\s/.test(trimmed)) {
+    return ensureAccountRefValue({ value: trimmed }, input);
+  }
+
+  throw new Error(
+    'QuickBooks account configuration must include an ID. ' +
+      'Provide an "Account Name|Account ID" pair or a JSON string with a "value" field.',
+  );
 };
 
 const buildDocNumber = (prefix: string, date: string | Date, amountCents: number): string => {
