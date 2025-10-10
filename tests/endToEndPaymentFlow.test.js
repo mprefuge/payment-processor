@@ -437,10 +437,29 @@ async function runEndToEndTest() {
     );
     await invokeStripeWebhook(paymentIntentEvent, stripeWebhookSecret);
 
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['charges.data.balance_transaction'] });
-    const charge = paymentIntent.charges && paymentIntent.charges.data && paymentIntent.charges.data[0];
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+        expand: ['charges.data.balance_transaction', 'latest_charge.balance_transaction']
+    });
+
+    const charges = Array.isArray(paymentIntent.charges?.data) ? paymentIntent.charges.data : [];
+    let charge = charges.find(charge => charge.status === 'succeeded') || charges[0];
+
+    if (!charge) {
+        const latestCharge = paymentIntent.latest_charge;
+        if (typeof latestCharge === 'string') {
+            charge = await stripe.charges.retrieve(latestCharge, { expand: ['balance_transaction'] });
+        } else if (latestCharge && typeof latestCharge === 'object') {
+            charge = latestCharge;
+        }
+    }
+
     assert(charge, 'Charge data missing from payment intent');
-    const balanceTransactionId = typeof charge.balance_transaction === 'string' ? charge.balance_transaction : charge.balance_transaction?.id;
+
+    const balanceTransactionRef = charge.balance_transaction;
+    const balanceTransactionId =
+        typeof balanceTransactionRef === 'string'
+            ? balanceTransactionRef
+            : balanceTransactionRef?.id;
     assert(balanceTransactionId, 'Balance transaction id missing from charge');
     const balanceTransaction = await stripe.balanceTransactions.retrieve(balanceTransactionId);
 
