@@ -154,26 +154,34 @@ const createCheckoutSessionCompletedObject = ({ session, customer, customerDetai
 };
 
 const createPaymentIntentSucceededObject = ({ paymentIntent, charge, balanceTransactionId, customerDetails }) => {
-    const customerId = getStripeId(paymentIntent.customer) || getStripeId(charge.customer) || null;
-    const paymentMethodId = getStripeId(paymentIntent.payment_method) || charge.payment_method || null;
+    const normalizedPaymentIntent = { ...paymentIntent };
+    const fallbackAmount = normalizedPaymentIntent.amount ?? charge.amount ?? null;
+    const fallbackCurrency = normalizedPaymentIntent.currency || charge.currency || 'usd';
+
+    const customerId = getStripeId(normalizedPaymentIntent.customer) || getStripeId(charge.customer) || null;
+    const paymentMethodId = getStripeId(normalizedPaymentIntent.payment_method) || charge.payment_method || null;
+    const resolvedPaymentMethodId = paymentMethodId || 'pm_card_visa';
+
+    const invoiceId = getStripeId(charge.invoice);
 
     const normalizedCharge = {
+        ...charge,
         id: charge.id,
         object: 'charge',
-        amount: charge.amount ?? paymentIntent.amount ?? null,
-        amount_captured: charge.amount_captured ?? charge.amount ?? null,
+        amount: charge.amount ?? fallbackAmount,
+        amount_captured: charge.amount_captured ?? charge.amount ?? fallbackAmount,
         amount_refunded: charge.amount_refunded ?? 0,
         balance_transaction: balanceTransactionId,
         billing_details: charge.billing_details || customerDetails,
-        currency: charge.currency || paymentIntent.currency || 'usd',
+        currency: charge.currency || fallbackCurrency,
         customer: customerId,
         description: charge.description || null,
-        invoice: charge.invoice || null,
-        livemode: false,
+        invoice: invoiceId,
+        livemode: charge.livemode === true,
         metadata: charge.metadata || {},
         paid: charge.paid ?? true,
-        payment_intent: paymentIntent.id,
-        payment_method: charge.payment_method || paymentMethodId,
+        payment_intent: normalizedPaymentIntent.id,
+        payment_method: charge.payment_method || resolvedPaymentMethodId,
         payment_method_details: charge.payment_method_details || {
             type: 'card',
             card: {
@@ -183,58 +191,51 @@ const createPaymentIntentSucceededObject = ({ paymentIntent, charge, balanceTran
         },
         receipt_email: charge.receipt_email || customerDetails?.email || null,
         receipt_url: charge.receipt_url || null,
-        refunded: charge.refunded || false,
+        refunded: charge.refunded ?? false,
         status: charge.status || 'succeeded',
-        created: charge.created || paymentIntent.created || Math.floor(Date.now() / 1000)
+        created: charge.created || normalizedPaymentIntent.created || Math.floor(Date.now() / 1000)
     };
 
-    return {
-        id: paymentIntent.id,
-        object: 'payment_intent',
-        amount: paymentIntent.amount ?? normalizedCharge.amount ?? null,
-        amount_capturable: 0,
-        amount_details: paymentIntent.amount_details || { tip: {} },
-        amount_received: paymentIntent.amount_received ?? paymentIntent.amount ?? null,
-        application: paymentIntent.application || null,
-        application_fee_amount: paymentIntent.application_fee_amount || null,
-        automatic_payment_methods: paymentIntent.automatic_payment_methods || null,
-        canceled_at: null,
-        cancellation_reason: null,
-        capture_method: paymentIntent.capture_method || 'automatic',
-        client_secret: paymentIntent.client_secret || null,
-        confirmation_method: paymentIntent.confirmation_method || 'automatic',
-        created: paymentIntent.created || Math.floor(Date.now() / 1000),
-        currency: paymentIntent.currency || normalizedCharge.currency || 'usd',
-        customer: customerId,
-        description: paymentIntent.description || null,
-        invoice: paymentIntent.invoice || null,
-        last_payment_error: null,
-        latest_charge: normalizedCharge.id,
-        livemode: false,
-        metadata: paymentIntent.metadata || {},
-        next_action: null,
-        payment_method: paymentMethodId,
-        payment_method_types: Array.isArray(paymentIntent.payment_method_types) && paymentIntent.payment_method_types.length > 0
-            ? paymentIntent.payment_method_types
-            : ['card'],
-        processing: null,
-        receipt_email: paymentIntent.receipt_email || normalizedCharge.receipt_email || null,
-        review: null,
-        setup_future_usage: paymentIntent.setup_future_usage || null,
-        shipping: paymentIntent.shipping || null,
-        statement_descriptor: paymentIntent.statement_descriptor || null,
-        statement_descriptor_suffix: paymentIntent.statement_descriptor_suffix || null,
-        status: 'succeeded',
-        transfer_data: paymentIntent.transfer_data || null,
-        transfer_group: paymentIntent.transfer_group || null,
-        charges: {
-            object: 'list',
-            data: [normalizedCharge],
-            has_more: false,
-            total_count: 1,
-            url: `/v1/charges?payment_intent=${paymentIntent.id}`
-        }
+    normalizedPaymentIntent.object = 'payment_intent';
+    normalizedPaymentIntent.amount = fallbackAmount;
+    normalizedPaymentIntent.amount_capturable = normalizedPaymentIntent.amount_capturable ?? 0;
+    normalizedPaymentIntent.amount_details = normalizedPaymentIntent.amount_details || { tip: {} };
+    normalizedPaymentIntent.amount_received = normalizedPaymentIntent.amount_received ?? fallbackAmount;
+    normalizedPaymentIntent.currency = fallbackCurrency;
+    normalizedPaymentIntent.customer = customerId;
+    normalizedPaymentIntent.livemode = normalizedPaymentIntent.livemode === true;
+    normalizedPaymentIntent.metadata = normalizedPaymentIntent.metadata || {};
+    normalizedPaymentIntent.payment_method = resolvedPaymentMethodId;
+    normalizedPaymentIntent.payment_method_types = Array.isArray(normalizedPaymentIntent.payment_method_types)
+        && normalizedPaymentIntent.payment_method_types.length > 0
+        ? normalizedPaymentIntent.payment_method_types
+        : ['card'];
+    normalizedPaymentIntent.receipt_email = normalizedPaymentIntent.receipt_email || normalizedCharge.receipt_email || null;
+    normalizedPaymentIntent.invoice = getStripeId(normalizedPaymentIntent.invoice);
+    normalizedPaymentIntent.subscription = getStripeId(normalizedPaymentIntent.subscription);
+    normalizedPaymentIntent.canceled_at = normalizedPaymentIntent.canceled_at ?? null;
+    normalizedPaymentIntent.cancellation_reason = normalizedPaymentIntent.cancellation_reason ?? null;
+    normalizedPaymentIntent.last_payment_error = normalizedPaymentIntent.last_payment_error ?? null;
+    normalizedPaymentIntent.next_action = normalizedPaymentIntent.next_action ?? null;
+    normalizedPaymentIntent.processing = normalizedPaymentIntent.processing ?? null;
+    normalizedPaymentIntent.review = normalizedPaymentIntent.review ?? null;
+    normalizedPaymentIntent.setup_future_usage = normalizedPaymentIntent.setup_future_usage ?? null;
+    normalizedPaymentIntent.shipping = normalizedPaymentIntent.shipping ?? null;
+    normalizedPaymentIntent.statement_descriptor = normalizedPaymentIntent.statement_descriptor ?? null;
+    normalizedPaymentIntent.statement_descriptor_suffix = normalizedPaymentIntent.statement_descriptor_suffix ?? null;
+    normalizedPaymentIntent.transfer_data = normalizedPaymentIntent.transfer_data ?? null;
+    normalizedPaymentIntent.transfer_group = normalizedPaymentIntent.transfer_group ?? null;
+    normalizedPaymentIntent.status = 'succeeded';
+    normalizedPaymentIntent.latest_charge = normalizedCharge.id;
+    normalizedPaymentIntent.charges = {
+        object: 'list',
+        data: [normalizedCharge],
+        has_more: false,
+        total_count: 1,
+        url: `/v1/charges?payment_intent=${normalizedPaymentIntent.id}`
     };
+
+    return normalizedPaymentIntent;
 };
 
 const createStripeEventPayload = (type, object, uniqueSuffix) => ({
