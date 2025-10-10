@@ -13,23 +13,23 @@ Before testing, verify:
 
 ## Automated End-to-End Donation Flow Test
 
-The repository now includes a fully automated test that executes the live donation lifecycle end to end _against the real downstream services_. The script drives the compiled Azure Function handlers, creates a real Stripe Checkout session in **test mode**, confirms the payment, delivers signed webhook payloads, and then asserts that Salesforce and QuickBooks have persisted the resulting records. Because no fakes or stubs are used any more, the test requires working credentials for every integration that runs in production.
+The repository now includes a fully automated test that mimics the live donation lifecycle from checkout session creation through webhook settlement. The test exercises the Azure Function handlers, the Salesforce CRM integration, and the QuickBooks posting logic with in-memory stubs so that no external systems are required.
 
 ### Environment parity requirements
 
 To mirror the production configuration, ensure the following dependencies are available before running the test:
 
 - **Node.js 20.x** (matching the runtime declared in `package.json`).
+- **Azure Functions Core Tools v4** (optional, required only when running the local Functions host).
 - All project dependencies installed with `npm install`.
-- Valid credentials for every upstream system the production app touches:
-  - **Stripe (test mode)**: `STRIPE_TEST_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`. Set `STRIPE_SECRET` to the same value so the compiled config loader passes validation.
-  - **Salesforce (sandbox)**: `CRM_PROVIDER=salesforce`, `SALESFORCE_USERNAME`, `SALESFORCE_PASSWORD`, `SALESFORCE_SECURITY_TOKEN`, and optionally `SALESFORCE_LOGIN_URL` if your sandbox uses a custom domain.
-  - **QuickBooks Online (sandbox or production)**: `QBO_REALM_ID`, `QBO_ACCESS_TOKEN`, `QBO_ENV` (defaults to `sandbox`), plus the chart-of-accounts environment variables (`QBO_ACCOUNT_STRIPE_CLEARING`, `QBO_ACCOUNT_OPERATING_BANK`, `QBO_ACCOUNT_REVENUE`, `QBO_ACCOUNT_FEES`, `QBO_ACCOUNT_REFUNDS`, `QBO_ACCOUNT_DISPUTES`) when they differ from the defaults embedded in `env.ts`.
-  - **Accounting feature flags**: `ACCOUNTING_SYNC_ENABLED=true` and, if you rely on a specific journal posting style, `ACCOUNTING_POSTING_STRATEGY` (defaults to `je-transfer`).
+- Environment variables that are required in production must be present, even though the test substitutes external services:
+  - `STRIPE_SECRET`, `STRIPE_TEST_SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+  - `ACCOUNTING_SYNC_ENABLED=true`
+  - `QBO_REALM_ID`, `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `QBO_REFRESH_TOKEN`
+  - `CRM_PROVIDER=salesforce`, `SALESFORCE_USERNAME`, `SALESFORCE_PASSWORD`, and optional `SALESFORCE_SECURITY_TOKEN`
+  - Any URLs referenced by the checkout flow (`SUCCESS_URL`, `CANCEL_URL`) if you need to override defaults
 
-⚠️ **QuickBooks access tokens expire every 60 minutes.** Before running the test, refresh the token with your Intuit OAuth client credentials and set `QBO_ACCESS_TOKEN` to the freshly-issued bearer token. The script calls the live QuickBooks API and will fail if the token is stale.
-
-⚠️ **Salesforce and QuickBooks records are created for real.** Run the test only against non-production orgs or ensure you have cleanup automation in place.
+Sample non-secret placeholder values are baked into the test so you can run it locally without exposing production credentials, but setting your own values ensures parity with CI/CD pipelines.
 
 ### Running the end-to-end suite
 
@@ -41,10 +41,10 @@ node tests/endToEndDonationFlow.test.js
 
 The command above compiles the TypeScript sources, loads the `processTransaction` and `stripeWebhook` handlers from the production build, and asserts that:
 
-- A Stripe checkout session is created and confirmed against the live Stripe API (test mode) with unique donor metadata.
-- Salesforce receives the contact + transaction records via the actual CRM service and stores the QuickBooks linkage fields after webhook processing.
-- Signed webhook payloads for `checkout.session.completed` and `payment_intent.succeeded` are accepted by the handler, which then posts a document to QuickBooks and marks the Salesforce transaction as `paid` and `posted_to_qbo__c = true`.
-- The QuickBooks Online REST API returns the newly-created document referenced by Salesforce, proving that accounting sync completed successfully.
+- A Stripe checkout session is created with the expected metadata.
+- Salesforce contact and pending transaction records are created.
+- Webhook events (`checkout.session.completed` and `payment_intent.succeeded`) update the transaction status to `paid` and trigger accounting sync.
+- QuickBooks posting metadata is persisted back to Salesforce and idempotency is respected.
 
 To run the full regression suite (including the end-to-end scenario) use `npm test`, which executes every script in the `tests/` directory against the compiled `dist/` output.
 
