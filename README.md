@@ -94,6 +94,11 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
 
+When specifying account mappings you may provide either a QuickBooks account ID
+or a `Name|ID` pair (for example, `Stripe Clearing|123`). If only a single value
+is supplied it will be used for both the `value` and `name` fields that are sent
+to QuickBooks.
+
 ## Endpoint reference
 
 All endpoints are prefixed with `/api` when running locally with the Functions host.

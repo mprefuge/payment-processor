@@ -15,8 +15,8 @@ type Fetcher = (
 ) => ReturnType<typeof fetch>;
 
 interface QuickBooksReference {
-  value?: string;
-  name: string;
+  value: string;
+  name?: string;
 }
 
 interface QuickBooksSalesItemLineDetail {
@@ -171,13 +171,71 @@ const normalizeDate = (value: string | Date): string => {
   return date.toISOString().slice(0, 10);
 };
 
-const createAccountRef = (name: string): QuickBooksReference => {
-  const trimmed = name.trim();
+const parseDelimitedAccount = (
+  raw: string,
+  delimiter: string,
+): QuickBooksReference | null => {
+  const index = raw.indexOf(delimiter);
+  if (index === -1) {
+    return null;
+  }
+
+  const left = raw.slice(0, index).trim();
+  const right = raw.slice(index + delimiter.length).trim();
+  if (!right) {
+    throw new Error(
+      'QuickBooks account reference delimiter provided without an ID value.',
+    );
+  }
+
+  return {
+    value: right,
+    name: left || undefined,
+  };
+};
+
+const createAccountRef = (input: string): QuickBooksReference => {
+  const trimmed = input.trim();
   if (!trimmed) {
     throw new Error('QuickBooks account name must be provided.');
   }
 
-  return { name: trimmed };
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Invalid QuickBooks account reference JSON.');
+      }
+
+      const value = typeof parsed.value === 'string' ? parsed.value.trim() : '';
+      const name = typeof parsed.name === 'string' ? parsed.name.trim() : undefined;
+
+      if (!value) {
+        throw new Error('QuickBooks account reference JSON must include a value.');
+      }
+
+      return { value, name };
+    } catch (error) {
+      throw new Error(
+        error instanceof Error
+          ? `Unable to parse QuickBooks account reference JSON: ${error.message}`
+          : 'Unable to parse QuickBooks account reference JSON.',
+      );
+    }
+  }
+
+  const delimiters = ['::', '|'];
+  for (const delimiter of delimiters) {
+    const parsed = parseDelimitedAccount(trimmed, delimiter);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return {
+    value: trimmed,
+    name: trimmed,
+  };
 };
 
 const buildDocNumber = (prefix: string, date: string | Date, amountCents: number): string => {

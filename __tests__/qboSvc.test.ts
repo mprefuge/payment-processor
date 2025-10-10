@@ -82,17 +82,34 @@ describe('postChargeToQbo', () => {
     expect(feeJournalRequest.url).toContain('journalentry');
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest.init?.body ?? '{}') as string);
-    expect(salesReceiptBody.DepositToAccountRef.name).toBe('QBO_ACCOUNT_STRIPE_CLEARING');
+    expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+    });
 
     const feeJournalBody = JSON.parse((feeJournalRequest.init?.body ?? '{}') as string);
     const feeLines = feeJournalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
-      account: line.JournalEntryLineDetail.AccountRef.name,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(feeLines).toEqual([
-      { type: 'Debit', account: 'QBO_ACCOUNT_FEES', amount: 3.25 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 3.25 },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_FEES',
+          name: 'QBO_ACCOUNT_FEES',
+        },
+        amount: 3.25,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+        },
+        amount: 3.25,
+      },
     ]);
   });
 
@@ -115,14 +132,42 @@ describe('postChargeToQbo', () => {
     const journalBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
     const journalLines = journalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
-      account: line.JournalEntryLineDetail.AccountRef.name,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(journalLines).toEqual([
-      { type: 'Debit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 120 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_REVENUE', amount: 120 },
-      { type: 'Debit', account: 'QBO_ACCOUNT_FEES', amount: 4 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 4 },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+        },
+        amount: 120,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_REVENUE',
+          name: 'QBO_ACCOUNT_REVENUE',
+        },
+        amount: 120,
+      },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_FEES',
+          name: 'QBO_ACCOUNT_FEES',
+        },
+        amount: 4,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+        },
+        amount: 4,
+      },
     ]);
   });
 });
@@ -144,12 +189,26 @@ describe('postRefundToQbo', () => {
     const journalBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
     const journalLines = journalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
-      account: line.JournalEntryLineDetail.AccountRef.name,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(journalLines).toEqual([
-      { type: 'Debit', account: 'QBO_ACCOUNT_REFUNDS', amount: 85 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 85 },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_REFUNDS',
+          name: 'QBO_ACCOUNT_REFUNDS',
+        },
+        amount: 85,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+        },
+        amount: 85,
+      },
     ]);
   });
 });
@@ -169,13 +228,22 @@ describe('postPayoutToQbo', () => {
     expect(result).toEqual({ qboId: 'deposit-1', type: 'bank-deposit' });
 
     const depositBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
-    expect(depositBody.DepositToAccountRef.name).toBe('QBO_ACCOUNT_OPERATING_BANK');
+    expect(depositBody.DepositToAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_OPERATING_BANK',
+      name: 'QBO_ACCOUNT_OPERATING_BANK',
+    });
     const depositLines = depositBody.Line.map((line: any) => ({
-      account: line.DepositLineDetail.AccountRef.name,
+      accountRef: line.DepositLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(depositLines).toEqual([
-      { account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 150 },
+      {
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'QBO_ACCOUNT_STRIPE_CLEARING',
+        },
+        amount: 150,
+      },
     ]);
   });
 });
