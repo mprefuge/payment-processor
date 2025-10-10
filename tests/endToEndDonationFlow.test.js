@@ -2,6 +2,7 @@ const assert = require('assert');
 const { randomUUID } = require('crypto');
 const Stripe = require('stripe');
 const jsforce = require('jsforce');
+const nock = require('nock');
 
 const REQUIRED_ENV_SETS = {
     STRIPE_TEST_SECRET_KEY: ['STRIPE_TEST_SECRET_KEY'],
@@ -522,6 +523,11 @@ const fetchQuickBooksDocument = async ({ docType, docId, envConfig, accessToken 
                 amount_tax: 0
             };
         }
+
+        nock('https://api.stripe.com')
+            .persist()
+            .get(new RegExp(`/v1/checkout/sessions/${sessionId}(?:\\?.*)?$`))
+            .reply(200, sanitizedSession, { 'Content-Type': 'application/json' });
 
         const checkoutSessionEventObject = createCheckoutSessionCompletedObject({
             session: sanitizedSession,
