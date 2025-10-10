@@ -12,6 +12,21 @@ export type TransactionExternalIdField =
   | 'stripe_checkout_session_id__c'
   | 'stripe_charge_id__c';
 
+const TRANSACTION_EXTERNAL_ID_FIELD_ALIASES: Record<
+  TransactionExternalIdField,
+  readonly string[]
+> = {
+  stripe_payment_intent_id__c: [
+    'stripe_payment_intent_id__c',
+    'Stripe_Payment_Intent_ID__c',
+  ],
+  stripe_refund_id__c: ['stripe_refund_id__c'],
+  stripe_dispute_id__c: ['stripe_dispute_id__c'],
+  stripe_balance_transaction_id__c: ['stripe_balance_transaction_id__c'],
+  stripe_checkout_session_id__c: ['stripe_checkout_session_id__c'],
+  stripe_charge_id__c: ['stripe_charge_id__c'],
+};
+
 export interface QuickBooksDocumentReference {
   type: string;
   id: string;
@@ -41,6 +56,38 @@ type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
 type TransactionRecord = Record<string, TransactionFieldValue>;
 
 const TRANSACTION_OBJECT = 'Transaction__c';
+
+const MISSING_COLUMN_PATTERN = /No such column '([^']+)' on sobject of type Transaction__c/i;
+
+const normalizeFieldName = (name: string): string => name.trim().toLowerCase();
+
+const getExternalIdFieldCandidates = (
+  key: TransactionExternalIdField,
+): readonly string[] => TRANSACTION_EXTERNAL_ID_FIELD_ALIASES[key] ?? [key];
+
+const isMissingColumnError = (message: string, fieldName: string): boolean => {
+  const match = MISSING_COLUMN_PATTERN.exec(message);
+  if (!match) {
+    return false;
+  }
+
+  return normalizeFieldName(match[1]) === normalizeFieldName(fieldName);
+};
+
+const toErrorMessage = (error: unknown): string | null => {
+  if (error instanceof Error && typeof error.message === 'string') {
+    return error.message;
+  }
+
+  if (error && typeof error === 'object' && 'message' in error) {
+    const candidate = (error as { message?: unknown }).message;
+    if (typeof candidate === 'string') {
+      return candidate;
+    }
+  }
+
+  return null;
+};
 
 const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {
   const record: TransactionRecord = {};
@@ -82,23 +129,48 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       throw new Error(`Transaction payload must include a value for ${key}.`);
     }
     const normalizedExternalId = externalId.trim();
-    const records = [
-      sanitizeTransactionRecord({
-        ...dto,
-        [key]: normalizedExternalId,
-      }),
-    ];
-    const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, records, key, {
-        allOrNone: true,
-      }),
-    );
-    if (!result.success) {
-      const message =
-        collectErrorMessages([result]) || `Failed to upsert transaction with ${key}=${normalizedExternalId}.`;
-      throw new Error(message);
+    const candidates = getExternalIdFieldCandidates(key);
+
+    let lastError: unknown;
+
+    for (const fieldName of candidates) {
+      try {
+        const recordInput: TransactionRecordInput = {
+          ...dto,
+          [fieldName]: normalizedExternalId,
+        };
+        if (fieldName !== key) {
+          delete (recordInput as Record<string, unknown>)[key];
+        }
+
+        const records = [sanitizeTransactionRecord(recordInput)];
+        const [result] = toArray(
+          await connection.upsert(TRANSACTION_OBJECT, records, fieldName, {
+            allOrNone: true,
+          }),
+        );
+
+        if (!result.success) {
+          const message =
+            collectErrorMessages([result]) ||
+            `Failed to upsert transaction with ${fieldName}=${normalizedExternalId}.`;
+          throw new Error(message);
+        }
+
+        return result;
+      } catch (error) {
+        const message = toErrorMessage(error);
+        if (message && isMissingColumnError(message, fieldName)) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
     }
-    return result;
+
+    throw (lastError instanceof Error
+      ? lastError
+      : new Error(`Failed to upsert transaction with ${key}=${normalizedExternalId}.`));
   };
 
   const linkPayoutOnTransactions = async (
@@ -166,18 +238,35 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const normalizedKey = ensureNonEmpty(key, 'External ID field');
     const normalizedValue = ensureNonEmpty(value, 'External ID value');
 
-    const records = (await (connection as any)
-      .sobject(TRANSACTION_OBJECT)
-      .find({ [normalizedKey]: normalizedValue }, ['Id'])
-      .limit(1)
-      .execute()) as Array<{ Id?: string }>;
+    const candidates = getExternalIdFieldCandidates(normalizedKey as TransactionExternalIdField);
 
-    if (!records || records.length === 0) {
-      return null;
+    for (const fieldName of candidates) {
+      try {
+        const records = (await (connection as any)
+          .sobject(TRANSACTION_OBJECT)
+          .find({ [fieldName]: normalizedValue }, ['Id'])
+          .limit(1)
+          .execute()) as Array<{ Id?: string }>;
+
+        if (!records || records.length === 0) {
+          if (fieldName === candidates[candidates.length - 1]) {
+            return null;
+          }
+          continue;
+        }
+
+        const [{ Id }] = records;
+        return typeof Id === 'string' && Id.trim().length > 0 ? Id : null;
+      } catch (error) {
+        const message = toErrorMessage(error);
+        if (message && isMissingColumnError(message, fieldName)) {
+          continue;
+        }
+        throw error;
+      }
     }
 
-    const [{ Id }] = records;
-    return typeof Id === 'string' && Id.trim().length > 0 ? Id : null;
+    return null;
   };
 
   return {
