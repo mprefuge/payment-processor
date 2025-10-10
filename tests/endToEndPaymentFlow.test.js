@@ -1,463 +1,474 @@
 /**
- * End-to-end donation flow test
+ * End-to-end donation flow test that exercises the live integrations.
  *
- * Simulates the full lifecycle from donation request submission through
- * Stripe checkout, webhook processing, Salesforce transaction upsert, and
- * QuickBooks posting. The test provides deterministic delays with detailed
- * logging so the execution mirrors the pacing of the live environment while
- * remaining hermetic.
+ * This script intentionally uses the real Stripe, Salesforce, and QuickBooks
+ * APIs. It creates an actual checkout session, confirms the payment using the
+ * Stripe test card helpers, routes the resulting webhook payloads through the
+ * production handlers with valid signatures, and then verifies the downstream
+ * state in Salesforce and QuickBooks.
+ *
+ * Because the script touches real services you must run it with production
+ * configuration values (or a fully provisioned test tenant) and valid access
+ * tokens. The script exits with a non-zero status if any expectation is not
+ * met so it can be wired into CI pipelines that have the required secrets.
  */
 
 const assert = require('assert');
-
-// Configure environment variables before requiring compiled handlers.
-process.env.STRIPE_SECRET = process.env.STRIPE_SECRET || 'sk_test_e2e_secret';
-process.env.STRIPE_TEST_SECRET_KEY = process.env.STRIPE_TEST_SECRET_KEY || 'sk_test_e2e_secret';
-process.env.STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || 'whsec_e2e_secret';
-process.env.SUCCESS_URL = 'https://example.org/thank-you';
-process.env.CANCEL_URL = 'https://example.org/donate';
-process.env.CRM_PROVIDER = 'salesforce';
-process.env.SALESFORCE_USERNAME = 'integration.user@example.org';
-process.env.SALESFORCE_PASSWORD = 'SuperSecretPassword!';
-process.env.SALESFORCE_SECURITY_TOKEN = 'xyz123';
-process.env.ACCOUNTING_SYNC_ENABLED = 'true';
-process.env.ACCOUNTING_POSTING_STRATEGY = 'je-transfer';
-process.env.QBO_ENV = 'sandbox';
-process.env.QBO_REALM_ID = '4620816365164378410';
-process.env.QBO_CLIENT_ID = 'client-id-e2e';
-process.env.QBO_CLIENT_SECRET = 'client-secret-e2e';
-process.env.QBO_REFRESH_TOKEN = 'refresh-token-e2e';
-process.env.QBO_ACCOUNT_STRIPE_CLEARING = 'Stripe Clearing';
-process.env.QBO_ACCOUNT_OPERATING_BANK = 'Operating Bank';
-process.env.QBO_ACCOUNT_REVENUE = 'Revenue';
-process.env.QBO_ACCOUNT_FEES = 'Stripe Fees';
-process.env.QBO_ACCOUNT_REFUNDS = 'Refunds';
-process.env.QBO_ACCOUNT_DISPUTES = 'Dispute Losses';
-process.env.AZURE_TABLES_CONNECTION_STRING =
-    process.env.AZURE_TABLES_CONNECTION_STRING || 'UseDevelopmentStorage=true;';
+const { randomUUID } = require('crypto');
+const Stripe = require('stripe');
+const jsforce = require('jsforce');
+const QuickBooks = require('node-quickbooks');
 
 const processTransaction = require('../dist/handlers/processTransaction');
-const stripeWebhook = require('../dist/handlers/stripeWebhook');
-const CrmFactory = require('../dist/services/salesforce/crmFactory');
+const stripeWebhookModule = require('../dist/handlers/stripeWebhook');
+const stripeWebhook = stripeWebhookModule && stripeWebhookModule.default ? stripeWebhookModule.default : stripeWebhookModule;
 
-const { setStripeClientFactory, resetStripeClientFactory } = processTransaction.__internals;
+const STRIPE_API_VERSION = '2023-10-16';
+const STRIPE_EVENT_TIMEOUT_MS = 120_000;
+const STRIPE_EVENT_POLL_INTERVAL_MS = 5_000;
+const SALESFORCE_POLL_TIMEOUT_MS = 120_000;
+const SALESFORCE_POLL_INTERVAL_MS = 5_000;
+const QUICKBOOKS_POLL_TIMEOUT_MS = 120_000;
+const QUICKBOOKS_POLL_INTERVAL_MS = 5_000;
 
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const REQUIRED_ENV_VARS = [
+    'STRIPE_TEST_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'SUCCESS_URL',
+    'CANCEL_URL',
+    'CRM_PROVIDER',
+    'SALESFORCE_USERNAME',
+    'SALESFORCE_PASSWORD',
+    'SALESFORCE_SECURITY_TOKEN',
+    'ACCOUNTING_SYNC_ENABLED',
+    'ACCOUNTING_POSTING_STRATEGY',
+    'QBO_CLIENT_ID',
+    'QBO_CLIENT_SECRET',
+    'QBO_REALM_ID',
+    'QBO_REFRESH_TOKEN',
+    'QBO_ACCESS_TOKEN',
+    'QBO_ENV',
+    'AZURE_TABLES_CONNECTION_STRING'
+];
 
-async function waitWithLogging(label, durationMs, details = {}) {
-    const contextDetails = Object.keys(details).length > 0 ? ` ${JSON.stringify(details)}` : '';
-    console.log(`⏱️  ${label}: waiting ${durationMs}ms${contextDetails}`);
-    await delay(durationMs);
+function requireEnvVar(name) {
+    const value = process.env[name];
+    if (!value || value.trim().length === 0) {
+        throw new Error(`Required environment variable ${name} is not set`);
+    }
+    return value;
 }
 
-class FakeProcessStripeClient {
-    constructor(state) {
-        this.state = state;
-        this.customers = {
-            search: async (params) => {
-                this.state.operations.push({ type: 'customers.search', params });
-                return { data: [] };
-            },
-            create: async (payload) => {
-                const customer = { id: 'cus_e2e_001', ...payload };
-                this.state.operations.push({ type: 'customers.create', payload: customer });
-                this.state.customer = customer;
-                return customer;
-            },
-            update: async (id, payload) => {
-                this.state.operations.push({ type: 'customers.update', id, payload });
-                this.state.customer = { ...this.state.customer, ...payload };
-                return this.state.customer;
-            }
-        };
-
-        this.checkout = {
-            sessions: {
-                create: async (params) => {
-                    const session = {
-                        id: 'cs_test_end_to_end',
-                        url: 'https://stripe.test/checkout/cs_test_end_to_end',
-                        metadata: params.metadata,
-                        amount_total: params.line_items[0].price_data.unit_amount,
-                        amount_subtotal: params.line_items[0].price_data.unit_amount,
-                        currency: params.line_items[0].price_data.currency,
-                        created: 1_710_000_000
-                    };
-                    this.state.operations.push({ type: 'checkout.sessions.create', params, session });
-                    this.state.session = session;
-                    return session;
-                }
-            }
-        };
+function validateEnvironment() {
+    console.log('🔐 Validating required environment variables');
+    const summary = {};
+    for (const name of REQUIRED_ENV_VARS) {
+        const value = requireEnvVar(name);
+        summary[name] = `${value.slice(0, 6)}…`;
     }
+    console.log('✅ Environment validation completed', summary);
 }
 
-class MockCrmService {
-    constructor() {
-        this.contacts = [];
-        this.transactions = [];
-        this.updates = [];
-        this.lookups = [];
-    }
-
-    async searchContact(criteria) {
-        this.lookups.push({ type: 'searchContact', criteria });
-        return this.contacts.filter(contact => contact.Email === criteria.email);
-    }
-
-    async updateContact(id, payload) {
-        this.updates.push({ type: 'updateContact', id, payload });
-        const contact = this.contacts.find(item => item.Id === id);
-        if (!contact) {
-            throw new Error(`Contact ${id} not found`);
-        }
-        Object.assign(contact, payload);
-        return contact;
-    }
-
-    async createContact(payload) {
-        const contact = {
-            Id: `003${this.contacts.length + 1}`,
-            FirstName: payload.firstName || payload.firstname,
-            LastName: payload.lastName || payload.lastname,
-            Email: payload.email,
-            Phone: payload.phone
-        };
-        this.contacts.push(contact);
-        return contact;
-    }
-
-    async createTransaction(contactId, transactionData) {
-        const transaction = {
-            Id: `a00${this.transactions.length + 1}`,
-            Contact__c: contactId,
-            ...transactionData
-        };
-        this.transactions.push(transaction);
-        return transaction;
-    }
-}
-
-class InMemoryIdempotencyStore {
-    constructor() {
-        this.keys = new Set();
-    }
-
-    async isProcessed(key) {
-        return this.keys.has(key);
-    }
-
-    async markProcessed(key) {
-        this.keys.add(key);
-    }
-
-    async withLock(_, fn) {
-        return fn();
-    }
-
-    async flush() {
-        this.keys.clear();
-    }
-}
-
-class MockSalesforceService {
-    constructor() {
-        this.upserts = [];
-        this.markPosted = [];
-    }
-
-    async upsertTransactionByExternalId(dto, key) {
-        this.upserts.push({ dto, key });
-        return { success: true, id: `a0T${this.upserts.length}` };
-    }
-
-    async linkPayoutOnTransactions() {
-        return [];
-    }
-
-    async markPostedToQbo(id, reference) {
-        this.markPosted.push({ id, reference });
-    }
-
-    async findTransactionIdByExternalId() {
-        return null;
-    }
-}
-
-class FakeWebhookStripeClient {
-    constructor(state) {
-        this.state = state;
-        this.balanceTransactions = {
-            retrieve: async (id) => {
-                this.state.webhookOperations.push({ type: 'balanceTransactions.retrieve', id });
-                if (id === 'bt_test_charge_001') {
-                    return {
-                        id,
-                        amount: 5000,
-                        currency: 'usd',
-                        fee: 150,
-                        net: 4850,
-                        type: 'charge',
-                        status: 'available'
-                    };
-                }
-                throw new Error(`Unknown balance transaction: ${id}`);
-            }
-        };
-    }
-
-    get charges() {
-        return {
-            retrieve: async (id) => {
-                this.state.webhookOperations.push({ type: 'charges.retrieve', id });
-                if (id === 'ch_test_charge_001') {
-                    return {
-                        id,
-                        status: 'succeeded',
-                        amount: 5000,
-                        currency: 'usd',
-                        balance_transaction: 'bt_test_charge_001',
-                        payment_method_details: {
-                            type: 'card',
-                            card: { brand: 'visa', last4: '4242' }
-                        },
-                        created: 1_710_000_005
-                    };
-                }
-                throw new Error(`Unknown charge: ${id}`);
-            }
-        };
-    }
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function createFunctionContext(name) {
     return {
-        invocationId: `${name}-${Date.now()}`,
-        bindingData: {},
+        invocationId: `${name}-${randomUUID()}`,
         log: (...args) => console.log(`[${name}]`, ...args)
     };
 }
 
-async function dispatchStripeEvent(handler, event) {
-    const payload = JSON.stringify(event);
-    const context = createFunctionContext('stripeWebhook');
-    const req = {
-        headers: { 'stripe-signature': 'stub-signature' },
-        rawBody: payload,
-        body: event
-    };
-
-    await handler(context, req);
-
-    if (!context.res || context.res.status !== 200) {
-        const status = context.res ? context.res.status : 'unknown';
-        const body = context.res ? context.res.body : '<no body>';
-        throw new Error(`Stripe webhook handler returned status ${status}: ${body}`);
+function extractPaymentIntentId(session) {
+    if (!session) {
+        return null;
     }
 
-    return context;
+    if (typeof session.payment_intent === 'string') {
+        return session.payment_intent;
+    }
+
+    if (session.payment_intent && typeof session.payment_intent === 'object' && session.payment_intent.id) {
+        return session.payment_intent.id;
+    }
+
+    return null;
 }
 
-async function runEndToEndTest() {
-    console.log('🧪 Starting end-to-end donation processing test');
+async function createCheckoutSession(stripe, runId, donationCents, donor) {
+    console.log('🧪 Initiating donation via processTransaction', { runId, donationCents });
 
-    const stripeState = { operations: [], webhookOperations: [] };
-    const mockCrmService = new MockCrmService();
-    const mockSalesforceService = new MockSalesforceService();
-    const qboPosts = [];
-
-    const originalCreateCrmService = CrmFactory.createCrmService;
-
-    setStripeClientFactory(() => new FakeProcessStripeClient(stripeState));
-    CrmFactory.createCrmService = () => mockCrmService;
-
-    try {
-        const context = createFunctionContext('processTransaction');
-        const requestPayload = {
-            amount: 5000,
-            frequency: 'onetime',
-            customer: {
-                email: 'donor@example.org',
-                firstname: 'Grace',
-                lastname: 'Hopper',
-                phone: '+15555550123',
-                address: {
-                    line1: '123 Main Street',
-                    city: 'Boston',
-                    state: 'MA',
-                    postal_code: '02118'
-                }
-            },
-            metadata: {
-                category: 'General Giving',
-                attribution: 'Landing Page'
+    const context = createFunctionContext('processTransaction');
+    const payload = {
+        amount: donationCents,
+        frequency: 'onetime',
+        metadata: {
+            e2e_run_id: runId,
+            source: 'automation'
+        },
+        customer: {
+            email: donor.email,
+            firstname: donor.firstName,
+            lastname: donor.lastName,
+            phone: donor.phone,
+            address: {
+                line1: '123 E2E Street',
+                city: 'Testville',
+                state: 'NY',
+                postal_code: '10001',
+                country: 'US'
             }
-        };
-        const req = { body: requestPayload };
+        }
+    };
 
-        await processTransaction(context, req);
+    const req = { body: payload };
+    await processTransaction(context, req);
 
-        assert(context.res, 'processTransaction did not set a response');
-        assert.strictEqual(context.res.status, 200, 'processTransaction did not return 200');
+    assert(context.res, 'processTransaction did not return a response');
+    assert.strictEqual(context.res.status, 200, `processTransaction returned ${context.res.status}`);
 
-        const responseBody = JSON.parse(context.res.body);
-        assert.strictEqual(responseBody.id, 'cs_test_end_to_end');
-        assert.strictEqual(responseBody.url, 'https://stripe.test/checkout/cs_test_end_to_end');
+    const response = typeof context.res.body === 'string' ? JSON.parse(context.res.body) : context.res.body;
+    assert(response && response.id, 'Checkout session id missing from response');
+    assert(response.url, 'Checkout session url missing from response');
 
-        console.log('✅ Checkout session created', responseBody);
+    console.log('✅ Checkout session created', { sessionId: response.id, url: response.url });
+    return { sessionId: response.id, url: response.url };
+}
 
-        assert.strictEqual(mockCrmService.contacts.length, 1, 'Expected a CRM contact to be created');
-        assert.strictEqual(mockCrmService.transactions.length, 1, 'Expected a pending CRM transaction');
+async function confirmCheckout(stripe, sessionId) {
+    console.log('⏳ Waiting for checkout session completion', { sessionId });
 
-        await waitWithLogging('Simulating Stripe checkout completion delay', 75, {
-            checkoutUrl: responseBody.url,
-            sessionId: responseBody.id
+    const start = Date.now();
+    let attempt = 0;
+    while (Date.now() - start < STRIPE_EVENT_TIMEOUT_MS) {
+        attempt += 1;
+        const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent.charges'] });
+        const paymentIntentId = extractPaymentIntentId(session);
+        const paymentStatus = session.payment_status;
+        const sessionStatus = session.status;
+
+        console.log('🔁 Stripe checkout status', {
+            attempt,
+            sessionStatus,
+            paymentStatus,
+            paymentIntentId
         });
 
-        const webhookDependencies = {
-            stripe: {
-                verifyEvent: (payload) => JSON.parse(payload),
-                getClient: () => new FakeWebhookStripeClient(stripeState)
-            },
-            idempotencyStore: new InMemoryIdempotencyStore(),
-            getSalesforceSvc: async () => mockSalesforceService,
-            accounting: {
-                postChargeToQbo: async (input) => {
-                    qboPosts.push(input);
-                    return {
-                        type: 'JournalEntry',
-                        qboId: 'QB-001',
-                        postedAt: new Date().toISOString()
-                    };
-                },
-                postRefundToQbo: async () => {
-                    throw new Error('Unexpected refund posting in end-to-end test');
-                },
-                postDisputeToQbo: async () => {
-                    throw new Error('Unexpected dispute posting in end-to-end test');
-                }
-            }
-        };
+        if (sessionStatus === 'complete' && paymentStatus === 'paid' && paymentIntentId) {
+            console.log('✅ Checkout session is paid', { sessionId, paymentIntentId });
+            return { session, paymentIntentId };
+        }
 
-        stripeWebhook.__internals.setDependencies(webhookDependencies);
-
-        const checkoutEvent = {
-            id: 'evt_checkout_completed',
-            type: 'checkout.session.completed',
-            created: 1_710_000_010,
-            livemode: false,
-            data: {
-                object: {
-                    id: responseBody.id,
-                    payment_intent: 'pi_test_success',
-                    customer: 'cus_e2e_001',
-                    amount_total: 5000,
-                    amount_subtotal: 5000,
-                    currency: 'usd',
-                    created: 1_710_000_000,
-                    metadata: requestPayload.metadata
-                }
-            }
-        };
-
-        await dispatchStripeEvent(stripeWebhook, checkoutEvent);
-        console.log('✅ checkout.session.completed processed');
-
-        assert.strictEqual(mockSalesforceService.upserts.length, 1, 'Expected pending upsert for checkout session');
-        const [pendingUpsert] = mockSalesforceService.upserts;
-        assert.strictEqual(pendingUpsert.key, 'stripe_checkout_session_id__c');
-        assert.strictEqual(pendingUpsert.dto.stripe_checkout_session_id__c, responseBody.id);
-
-        await waitWithLogging('Waiting for Stripe payment intent to succeed', 100, {
-            paymentIntentId: 'pi_test_success'
-        });
-
-        const paymentIntentEvent = {
-            id: 'evt_payment_intent_succeeded',
-            type: 'payment_intent.succeeded',
-            livemode: false,
-            created: 1_710_000_020,
-            data: {
-                object: {
-                    id: 'pi_test_success',
-                    status: 'succeeded',
-                    currency: 'usd',
-                    amount: 5000,
-                    created: 1_710_000_001,
-                    customer: 'cus_e2e_001',
-                    metadata: requestPayload.metadata,
-                    payment_method_types: ['card'],
-                    payment_method: 'pm_card_visa',
-                    charges: {
-                        data: [
-                            {
-                                id: 'ch_test_charge_001',
-                                status: 'succeeded',
-                                amount: 5000,
-                                currency: 'usd',
-                                balance_transaction: 'bt_test_charge_001',
-                                payment_method_details: {
-                                    type: 'card',
-                                    card: { brand: 'visa', last4: '4242' }
-                                },
-                                created: 1_710_000_005
-                            }
-                        ]
+        if (paymentIntentId) {
+            const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['charges'] });
+            if (paymentIntent.status !== 'succeeded') {
+                console.log('💳 Confirming payment intent with pm_card_visa', { paymentIntentId, status: paymentIntent.status });
+                try {
+                    await stripe.paymentIntents.confirm(paymentIntentId, {
+                        payment_method: 'pm_card_visa',
+                        return_url: 'https://example.org/stripe-complete'
+                    });
+                } catch (error) {
+                    if (error && error.code === 'payment_intent_unexpected_state') {
+                        console.log('⚠️ Payment intent already in terminal state', { paymentIntentId, state: paymentIntent.status });
+                    } else {
+                        throw error;
                     }
                 }
             }
-        };
+        }
 
-        await dispatchStripeEvent(stripeWebhook, paymentIntentEvent);
-        console.log('✅ payment_intent.succeeded processed');
+        await delay(STRIPE_EVENT_POLL_INTERVAL_MS);
+    }
 
-        assert.strictEqual(mockSalesforceService.upserts.length, 2, 'Expected final upsert for payment intent');
-        const finalUpsert = mockSalesforceService.upserts[1];
-        assert.strictEqual(finalUpsert.key, 'stripe_payment_intent_id__c');
-        assert.strictEqual(finalUpsert.dto.stripe_payment_intent_id__c, 'pi_test_success');
-        assert.strictEqual(finalUpsert.dto.stripe_charge_id__c, 'ch_test_charge_001');
-        assert.strictEqual(finalUpsert.dto.stripe_balance_transaction_id__c, 'bt_test_charge_001');
-        assert.strictEqual(finalUpsert.dto.amount_gross__c, 50);
-        assert.strictEqual(finalUpsert.dto.amount_net__c, 48.5);
-        assert.strictEqual(finalUpsert.dto.amount_fee__c, 1.5);
-        assert.strictEqual(finalUpsert.dto.payment_method__c, 'card');
-        assert.strictEqual(finalUpsert.dto.payment_brand__c, 'visa');
-        assert.strictEqual(finalUpsert.dto.payment_last4__c, '4242');
+    throw new Error('Timed out waiting for checkout session to complete');
+}
 
-        await waitWithLogging('Completing QuickBooks posting delay', 50, {
-            qboPostingCount: qboPosts.length
+async function waitForStripeEvent(stripe, type, predicate, startedAt) {
+    console.log('🔍 Waiting for Stripe event', { type });
+    const timeoutAt = Date.now() + STRIPE_EVENT_TIMEOUT_MS;
+
+    while (Date.now() < timeoutAt) {
+        const events = await stripe.events.list({
+            type,
+            limit: 20,
+            created: { gte: startedAt }
         });
 
-        assert.strictEqual(qboPosts.length, 1, 'Expected one QuickBooks posting');
-        const [qboPosting] = qboPosts;
-        assert.strictEqual(qboPosting.gross, 5000);
-        assert.strictEqual(qboPosting.fee, 150);
-        assert.strictEqual(qboPosting.gross - qboPosting.fee, 4850);
-
-        console.log('✅ QuickBooks posting simulated', qboPosting);
-
-        assert.strictEqual(
-            mockSalesforceService.markPosted.length,
-            1,
-            'Expected Salesforce transaction to be marked as posted'
-        );
-        const [markPostedCall] = mockSalesforceService.markPosted;
-        assert.strictEqual(markPostedCall.id, 'a0T2');
-        assert.strictEqual(markPostedCall.reference.type, 'JournalEntry');
-        assert.strictEqual(markPostedCall.reference.id, 'QB-001');
-
-        console.log('🎉 End-to-end donation processing test completed successfully');
-    } finally {
-        CrmFactory.createCrmService = originalCreateCrmService;
-        resetStripeClientFactory();
-        if (stripeWebhook.__internals && typeof stripeWebhook.__internals.resetDependencies === 'function') {
-            stripeWebhook.__internals.resetDependencies();
+        for (const event of events.data) {
+            if (predicate(event)) {
+                console.log('✅ Retrieved Stripe event', { type: event.type, id: event.id });
+                return event;
+            }
         }
+
+        await delay(STRIPE_EVENT_POLL_INTERVAL_MS);
     }
+
+    throw new Error(`Timed out waiting for Stripe event ${type}`);
+}
+
+async function invokeStripeWebhook(event, secret) {
+    const payload = JSON.stringify(event);
+    const signature = Stripe.webhooks.generateTestHeaderString({
+        payload,
+        secret,
+        timestamp: Math.floor(Date.now() / 1000)
+    });
+
+    const context = createFunctionContext('stripeWebhook');
+    const req = {
+        headers: { 'stripe-signature': signature },
+        rawBody: Buffer.from(payload),
+        body: event
+    };
+
+    await stripeWebhook(context, req);
+
+    if (!context.res || context.res.status !== 200) {
+        const body = context.res ? context.res.body : '<no response body>';
+        throw new Error(`Stripe webhook handler returned ${context.res && context.res.status}: ${body}`);
+    }
+
+    console.log('📬 Webhook delivered to handler', { eventId: event.id, eventType: event.type });
+}
+
+async function createSalesforceConnection() {
+    const username = requireEnvVar('SALESFORCE_USERNAME');
+    const password = requireEnvVar('SALESFORCE_PASSWORD');
+    const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
+    const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
+
+    const connection = new jsforce.Connection({ loginUrl });
+    await connection.login(username, `${password}${securityToken}`);
+    return connection;
+}
+
+async function pollSalesforceRecord(fetchFn, label) {
+    const timeoutAt = Date.now() + SALESFORCE_POLL_TIMEOUT_MS;
+    let attempt = 0;
+
+    while (Date.now() < timeoutAt) {
+        attempt += 1;
+        const record = await fetchFn();
+        if (record) {
+            console.log(`✅ Salesforce ${label} located`, { attempt });
+            return record;
+        }
+        console.log(`⌛ Waiting for Salesforce ${label}`, { attempt });
+        await delay(SALESFORCE_POLL_INTERVAL_MS);
+    }
+
+    throw new Error(`Timed out waiting for Salesforce ${label}`);
+}
+
+async function verifySalesforce(donor, paymentIntentId, chargeId, balanceTransactionId, expectedAmounts) {
+    console.log('🔎 Verifying Salesforce data');
+    const connection = await createSalesforceConnection();
+
+    const contact = await pollSalesforceRecord(
+        () => connection.sobject('Contact').findOne({ Email: donor.email }),
+        'contact'
+    );
+
+    const transaction = await pollSalesforceRecord(
+        () =>
+            connection
+                .sobject('Transaction__c')
+                .findOne({ stripe_payment_intent_id__c: paymentIntentId }, 'Id,Amount_Gross__c,Amount_Net__c,Amount_Fee__c,Stripe_Charge_Id__c,Stripe_Balance_Transaction_Id__c,Posted_to_QBO__c'),
+        'transaction'
+    );
+
+    assert.strictEqual(transaction.Stripe_Charge_Id__c, chargeId, 'Salesforce charge id mismatch');
+    assert.strictEqual(
+        transaction.Stripe_Balance_Transaction_Id__c,
+        balanceTransactionId,
+        'Salesforce balance transaction id mismatch'
+    );
+    assert.strictEqual(Number(transaction.Amount_Gross__c), expectedAmounts.gross, 'Salesforce gross amount mismatch');
+    assert.strictEqual(Number(transaction.Amount_Net__c), expectedAmounts.net, 'Salesforce net amount mismatch');
+    assert.strictEqual(Number(transaction.Amount_Fee__c), expectedAmounts.fee, 'Salesforce fee amount mismatch');
+
+    console.log('✅ Salesforce verification complete', {
+        contactId: contact.Id,
+        transactionId: transaction.Id,
+        postedToQbo: transaction.Posted_to_QBO__c
+    });
+}
+
+function createQuickBooksClient() {
+    const clientId = requireEnvVar('QBO_CLIENT_ID');
+    const clientSecret = requireEnvVar('QBO_CLIENT_SECRET');
+    const accessToken = requireEnvVar('QBO_ACCESS_TOKEN');
+    const refreshToken = requireEnvVar('QBO_REFRESH_TOKEN');
+    const realmId = requireEnvVar('QBO_REALM_ID');
+    const env = (process.env.QBO_ENV || 'sandbox').toLowerCase();
+    const useSandbox = env !== 'production';
+
+    return new QuickBooks(
+        clientId,
+        clientSecret,
+        accessToken,
+        false,
+        realmId,
+        useSandbox,
+        true,
+        null,
+        '2.0',
+        refreshToken
+    );
+}
+
+function buildDocNumber(prefix, date, amountCents) {
+    const normalizedDate = new Date(date);
+    const formattedDate = normalizedDate.toISOString().slice(0, 10).replace(/-/g, '');
+    const amountPart = Math.abs(Math.round(amountCents)).toString().slice(-10);
+    const suffix = `${formattedDate}-${amountPart}`;
+    const maxPrefixLength = Math.max(1, 21 - suffix.length - 1);
+    const safePrefix = prefix.slice(0, maxPrefixLength);
+    return `${safePrefix}-${suffix}`.slice(0, 21);
+}
+
+async function queryQuickBooks(qbo, entity, docNumber) {
+    const query = `select Id, DocNumber, TxnDate, PrivateNote from ${entity} where DocNumber = '${docNumber}'`;
+    return new Promise((resolve, reject) => {
+        qbo.query(query, (error, result) => {
+            if (error) {
+                reject(error);
+                return;
+            }
+
+            const response = result && result.QueryResponse ? result.QueryResponse : null;
+            const records = response && (response[entity] || response[`${entity}s`]);
+            if (Array.isArray(records) && records.length > 0) {
+                resolve(records[0]);
+                return;
+            }
+
+            resolve(null);
+        });
+    });
+}
+
+async function verifyQuickBooksPosting(chargeId, balanceTransaction, postingStrategy) {
+    console.log('🔎 Verifying QuickBooks posting');
+    const qbo = createQuickBooksClient();
+    const postingDateSeconds = balanceTransaction.available_on || balanceTransaction.created;
+    const postingDate = postingDateSeconds ? postingDateSeconds * 1000 : Date.now();
+
+    const grossCents = Math.abs(balanceTransaction.amount || 0);
+    const feeCents = Math.abs(balanceTransaction.fee || 0);
+
+    const timeoutAt = Date.now() + QUICKBOOKS_POLL_TIMEOUT_MS;
+    let attempt = 0;
+
+    while (Date.now() < timeoutAt) {
+        attempt += 1;
+        console.log('🔁 Polling QuickBooks for posting', { attempt });
+
+        if (postingStrategy === 'sales-receipt') {
+            const salesReceiptDoc = buildDocNumber('CHG', postingDate, grossCents);
+            const salesReceipt = await queryQuickBooks(qbo, 'SalesReceipt', salesReceiptDoc);
+            if (salesReceipt) {
+                console.log('✅ QuickBooks sales receipt located', { docNumber: salesReceiptDoc });
+                if (feeCents > 0) {
+                    const feeDoc = buildDocNumber('FEE', postingDate, feeCents);
+                    const feeJournal = await queryQuickBooks(qbo, 'JournalEntry', feeDoc);
+                    if (!feeJournal) {
+                        console.log('⌛ Waiting for QuickBooks fee journal entry', { docNumber: feeDoc });
+                        await delay(QUICKBOOKS_POLL_INTERVAL_MS);
+                        continue;
+                    }
+                    console.log('✅ QuickBooks fee journal entry located', { docNumber: feeDoc });
+                }
+                return;
+            }
+        } else {
+            const journalDoc = buildDocNumber('CHGJE', postingDate, grossCents + feeCents);
+            const journalEntry = await queryQuickBooks(qbo, 'JournalEntry', journalDoc);
+            if (journalEntry) {
+                console.log('✅ QuickBooks journal entry located', { docNumber: journalDoc });
+                return;
+            }
+        }
+
+        await delay(QUICKBOOKS_POLL_INTERVAL_MS);
+    }
+
+    throw new Error('Timed out waiting for QuickBooks posting to appear');
+}
+
+async function runEndToEndTest() {
+    validateEnvironment();
+
+    const stripeSecret = requireEnvVar('STRIPE_TEST_SECRET_KEY');
+    const stripeWebhookSecret = requireEnvVar('STRIPE_WEBHOOK_SECRET');
+    const stripe = new Stripe(stripeSecret, { apiVersion: STRIPE_API_VERSION });
+
+    const runId = `e2e-${randomUUID()}`;
+    const donor = {
+        firstName: 'Grace',
+        lastName: 'Hopper',
+        email: `donor+${runId}@example.org`,
+        phone: '+15555550123'
+    };
+    const donationCents = 5_000;
+
+    console.log('🚀 Starting live end-to-end donation test', { runId, donor: donor.email, donationCents });
+
+    const startTime = Math.floor(Date.now() / 1000) - 5;
+    const { sessionId } = await createCheckoutSession(stripe, runId, donationCents, donor);
+    const { paymentIntentId } = await confirmCheckout(stripe, sessionId);
+
+    const checkoutEvent = await waitForStripeEvent(
+        stripe,
+        'checkout.session.completed',
+        event => event.data && event.data.object && event.data.object.id === sessionId,
+        startTime
+    );
+    await invokeStripeWebhook(checkoutEvent, stripeWebhookSecret);
+
+    const paymentIntentEvent = await waitForStripeEvent(
+        stripe,
+        'payment_intent.succeeded',
+        event => event.data && event.data.object && event.data.object.id === paymentIntentId,
+        startTime
+    );
+    await invokeStripeWebhook(paymentIntentEvent, stripeWebhookSecret);
+
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['charges.data.balance_transaction'] });
+    const charge = paymentIntent.charges && paymentIntent.charges.data && paymentIntent.charges.data[0];
+    assert(charge, 'Charge data missing from payment intent');
+    const balanceTransactionId = typeof charge.balance_transaction === 'string' ? charge.balance_transaction : charge.balance_transaction?.id;
+    assert(balanceTransactionId, 'Balance transaction id missing from charge');
+    const balanceTransaction = await stripe.balanceTransactions.retrieve(balanceTransactionId);
+
+    const centsToMajorUnits = value => Number(((value ?? 0) / 100).toFixed(2));
+    const expectedAmounts = {
+        gross: centsToMajorUnits(balanceTransaction.amount ?? donationCents),
+        net: centsToMajorUnits(balanceTransaction.net ?? donationCents),
+        fee: centsToMajorUnits(balanceTransaction.fee ?? 0)
+    };
+
+    await verifySalesforce(donor, paymentIntentId, charge.id, balanceTransactionId, expectedAmounts);
+
+    const postingStrategy = (process.env.ACCOUNTING_POSTING_STRATEGY || 'je-transfer').toLowerCase();
+    if (process.env.ACCOUNTING_SYNC_ENABLED === 'true') {
+        await verifyQuickBooksPosting(charge.id, balanceTransaction, postingStrategy);
+    } else {
+        console.log('ℹ️ Accounting sync disabled; skipping QuickBooks verification');
+    }
+
+    console.log('🎉 End-to-end donation test completed successfully', {
+        paymentIntentId,
+        chargeId: charge.id,
+        balanceTransactionId
+    });
 }
 
 runEndToEndTest().catch(error => {
-    console.error('❌ End-to-end donation processing test failed');
+    console.error('❌ End-to-end donation test failed');
     console.error(error);
     process.exitCode = 1;
 });
