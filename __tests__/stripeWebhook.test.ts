@@ -179,6 +179,18 @@ describe('stripeWebhook', () => {
       charges: {
         retrieve: vi.fn(),
       },
+      checkout: {
+        sessions: {
+          list: vi.fn().mockResolvedValue({
+            data: [
+              {
+                id: 'cs_test',
+                metadata: {},
+              },
+            ],
+          }),
+        },
+      },
     };
 
     const accounting = {
@@ -191,7 +203,9 @@ describe('stripeWebhook', () => {
       upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'sf_1', success: true }),
       linkPayoutOnTransactions: vi.fn(),
       markPostedToQbo: vi.fn().mockResolvedValue(undefined),
-      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      findTransactionIdByExternalId: vi
+        .fn()
+        .mockImplementation(async (field: string) => (field === 'stripe_checkout_session_id__c' ? 'sf_existing' : null)),
     };
 
     const stripe = {
@@ -212,9 +226,17 @@ describe('stripeWebhook', () => {
     await handler(context, req);
 
     expect(store.isProcessed).toHaveBeenCalledWith('evt_evt_test');
+    expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
+      'stripe_checkout_session_id__c',
+      'cs_test',
+    );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
-      expect.objectContaining({ stripe_payment_intent_id__c: 'pi_test' }),
+      expect.objectContaining({
+        stripe_payment_intent_id__c: 'pi_test',
+        stripe_checkout_session_id__c: 'cs_test',
+      }),
       'stripe_payment_intent_id__c',
+      { overrideId: 'sf_existing' },
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalledWith(
       expect.objectContaining({ gross: 1_000, fee: 100 }),

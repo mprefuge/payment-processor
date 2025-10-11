@@ -43,6 +43,7 @@ export const transactionUpsertSchema = z
     designation__c: stringOrNullSchema.optional(),
     restriction__c: stringOrNullSchema.optional(),
     frequency__c: stringOrNullSchema.optional(),
+    attribution__c: stringOrNullSchema.optional(),
     cover_fees__c: booleanOrNullSchema.optional(),
     cover_fees_amount__c: numberOrNullSchema.optional(),
     payment_method__c: stringOrNullSchema.optional(),
@@ -384,6 +385,7 @@ const extractDisputeId = (metadata: Record<string, unknown>): string | null =>
   parseMetadataString(
     metadata,
     'stripe_dispute_id__c',
+    'Stripe_Dispute_Id__c',
     'stripe_dispute_id',
     'dispute_id',
   );
@@ -434,6 +436,7 @@ const extractSubscriptionId = (
   const fromMetadata = parseMetadataString(
     metadata,
     'stripe_subscription_id__c',
+    'Stripe_Subscription_Id__c',
     'stripe_subscription_id',
     'subscription_id',
   );
@@ -517,6 +520,43 @@ export const mapStripeToTransaction = (
     ...toMetadataRecord(charge?.metadata ?? null),
   };
 
+  const contactId = parseMetadataString(
+    combinedMetadata,
+    'contact__c',
+    'Contact__c',
+    'contact',
+  );
+  const accountId = parseMetadataString(
+    combinedMetadata,
+    'account__c',
+    'Account__c',
+    'account',
+  );
+  const campaignId = parseMetadataString(
+    combinedMetadata,
+    'campaign__c',
+    'Campaign__c',
+    'campaign',
+  );
+  const fundId = parseMetadataString(
+    combinedMetadata,
+    'fund__c',
+    'Fund__c',
+    'fund',
+  );
+  const designationId = parseMetadataString(
+    combinedMetadata,
+    'designation__c',
+    'Designation__c',
+    'designation',
+  );
+  const restrictionId = parseMetadataString(
+    combinedMetadata,
+    'restriction__c',
+    'Restriction__c',
+    'restriction',
+  );
+
   const transactionCandidate: TransactionUpsertDTO = {
     transaction_type__c: deriveTransactionType(charge, balanceTransaction),
     status__c: deriveStatus(paymentIntent, charge),
@@ -528,6 +568,7 @@ export const mapStripeToTransaction = (
     stripe_checkout_session_id__c: parseMetadataString(
       combinedMetadata,
       'stripe_checkout_session_id__c',
+      'Stripe_Checkout_Session_Id__c',
       'stripe_checkout_session_id',
       'checkout_session_id',
     ),
@@ -537,39 +578,33 @@ export const mapStripeToTransaction = (
     stripe_payout_id__c: extractPayoutId(balanceTransaction),
     amount_gross__c:
       centsToMajorUnits(balanceTransaction?.amount ?? charge?.amount) ??
-      parseMetadataNumber(combinedMetadata, 'amount_gross__c', 'amount_gross'),
+      parseMetadataNumber(combinedMetadata, 'amount_gross__c', 'Amount_Gross__c', 'amount_gross'),
     amount_fee__c:
       centsToMajorUnits(balanceTransaction?.fee) ??
-      parseMetadataNumber(combinedMetadata, 'amount_fee__c', 'amount_fee'),
+      parseMetadataNumber(combinedMetadata, 'amount_fee__c', 'Amount_Fee__c', 'amount_fee'),
     amount_net__c:
       centsToMajorUnits(balanceTransaction?.net) ??
-      parseMetadataNumber(combinedMetadata, 'amount_net__c', 'amount_net'),
+      parseMetadataNumber(combinedMetadata, 'amount_net__c', 'Amount_Net__c', 'amount_net'),
     currency_iso_code__c:
       deriveCurrency(paymentIntent, charge, balanceTransaction) ||
-      parseMetadataString(combinedMetadata, 'currency_iso_code__c', 'currency'),
-    contact__c: parseMetadataString(combinedMetadata, 'contact__c', 'contact'),
-    account__c: parseMetadataString(combinedMetadata, 'account__c', 'account'),
-    campaign__c: parseMetadataString(combinedMetadata, 'campaign__c', 'campaign'),
-    fund__c: parseMetadataString(combinedMetadata, 'fund__c', 'fund'),
-    designation__c: parseMetadataString(
+      parseMetadataString(combinedMetadata, 'currency_iso_code__c', 'Currency_ISO_Code__c', 'currency'),
+    frequency__c: parseMetadataString(combinedMetadata, 'frequency__c', 'Frequency__c', 'frequency'),
+    attribution__c: parseMetadataString(
       combinedMetadata,
-      'designation__c',
-      'designation',
+      'attribution__c',
+      'Attribution__c',
+      'attribution',
     ),
-    restriction__c: parseMetadataString(
-      combinedMetadata,
-      'restriction__c',
-      'restriction',
-    ),
-    frequency__c: parseMetadataString(combinedMetadata, 'frequency__c', 'frequency'),
     cover_fees__c: parseMetadataBoolean(
       combinedMetadata,
       'cover_fees__c',
+      'Cover_Fees__c',
       'cover_fees',
     ),
     cover_fees_amount__c: parseMetadataNumber(
       combinedMetadata,
       'cover_fees_amount__c',
+      'Cover_Fees_Amount__c',
       'cover_fees_amount',
     ),
     payment_method__c: derivePaymentMethod(paymentIntent, charge),
@@ -579,24 +614,39 @@ export const mapStripeToTransaction = (
     posted_to_qbo__c: parseMetadataBoolean(
       combinedMetadata,
       'posted_to_qbo__c',
+      'Posted_to_QBO__c',
       'posted_to_qbo',
     ),
     qbo_doc_type__c: parseMetadataString(
       combinedMetadata,
       'qbo_doc_type__c',
+      'QBO_Doc_Type__c',
       'qbo_doc_type',
     ),
-    qbo_doc_id__c: parseMetadataString(combinedMetadata, 'qbo_doc_id__c', 'qbo_doc_id'),
+    qbo_doc_id__c: parseMetadataString(
+      combinedMetadata,
+      'qbo_doc_id__c',
+      'QBO_Doc_Id__c',
+      'qbo_doc_id',
+    ),
     qbo_posted_at__c: parseMetadataString(
       combinedMetadata,
       'qbo_posted_at__c',
+      'QBO_Posted_At__c',
       'qbo_posted_at',
     ),
     posting_error__c: parseMetadataString(
       combinedMetadata,
       'posting_error__c',
+      'Posting_Error__c',
       'posting_error',
     ),
+    ...(contactId !== null ? { contact__c: contactId } : {}),
+    ...(accountId !== null ? { account__c: accountId } : {}),
+    ...(campaignId !== null ? { campaign__c: campaignId } : {}),
+    ...(fundId !== null ? { fund__c: fundId } : {}),
+    ...(designationId !== null ? { designation__c: designationId } : {}),
+    ...(restrictionId !== null ? { restriction__c: restrictionId } : {}),
   };
 
   return transactionUpsertSchema.parse(transactionCandidate);

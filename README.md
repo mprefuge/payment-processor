@@ -85,14 +85,30 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `QBO_REALM_ID` | QuickBooks company ID. |
 | `QBO_CLIENT_ID` / `QBO_CLIENT_SECRET` | OAuth client credentials. |
 | `QBO_REFRESH_TOKEN` | OAuth refresh token for server-to-server flows. |
-| `QBO_ACCOUNT_STRIPE_CLEARING` | Name/ID of the Stripe clearing account. |
-| `QBO_ACCOUNT_OPERATING_BANK` | Name/ID of the operating bank account. |
-| `QBO_ACCOUNT_REVENUE` | Revenue account mapping. |
-| `QBO_ACCOUNT_FEES` | Stripe fee account mapping. |
-| `QBO_ACCOUNT_REFUNDS` | Refund liability account mapping. |
-| `QBO_ACCOUNT_DISPUTES` | Dispute loss account mapping. |
+| `QBO_ACCOUNT_STRIPE_CLEARING` | QuickBooks ID (or `Name|ID`) of the Stripe clearing account. |
+| `QBO_ACCOUNT_OPERATING_BANK` | QuickBooks ID (or `Name|ID`) of the operating bank account. |
+| `QBO_ACCOUNT_REVENUE` | QuickBooks ID (or `Name|ID`) for revenue recognition. |
+| `QBO_ACCOUNT_FEES` | QuickBooks ID (or `Name|ID`) for Stripe fee expense. |
+| `QBO_ACCOUNT_REFUNDS` | QuickBooks ID (or `Name|ID`) for refunds liability. |
+| `QBO_ACCOUNT_DISPUTES` | QuickBooks ID (or `Name|ID`) for dispute losses. |
 | `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
+
+When specifying account mappings you should provide the QuickBooks account ID.
+You can either supply the raw ID (for example, `123`) or a `Name|ID` pair such
+as `Stripe Clearing|123`. JSON strings of the form `{"value":"123","name":"Stripe
+Clearing"}` are also accepted. If only a name is supplied the service will
+attempt to resolve the ID by querying QuickBooks before submitting the
+transaction. This adds an extra API call and will fail if the account name is
+ambiguous or missing, so providing the ID up front is still strongly
+recommended.
+
+### Salesforce field mapping
+
+Stripe webhook processing populates a custom `Transaction__c` record in Salesforce. The integration expects the Salesforce API
+names listed in [`docs/salesforce-transaction-fields.md`](docs/salesforce-transaction-fields.md) to exist (mark
+`Stripe_Payment_Intent_Id__c` and `Stripe_Balance_Transaction_Id__c` as external IDs). Review the table to confirm each field is
+created so Stripe amounts, identifiers, and QuickBooks sync state flow through correctly.
 
 ## Endpoint reference
 

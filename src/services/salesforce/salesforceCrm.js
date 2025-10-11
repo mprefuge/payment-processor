@@ -355,7 +355,7 @@ class SalesforceCrmService extends BaseCrmService {
      * @param {string} externalIdField - External ID field for upsert
      * @returns {Promise<Object>} Upsert result
      */
-    async upsertTransactionsRecord(transactionData, externalIdField = 'stripe_checkout_session_id__c') {
+    async upsertTransactionsRecord(transactionData, externalIdField = 'Stripe_Checkout_Session_Id__c') {
         await this.connect();
 
         if (!externalIdField) {

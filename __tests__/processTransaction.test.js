@@ -98,7 +98,7 @@ describe('processTransaction', () => {
         process.env.SALESFORCE_PASSWORD = 'password123';
 
         const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
-        const createTransactionMock = vi.fn().mockResolvedValue({ Id: 'a1TTEST' });
+        const createTransactionMock = vi.fn();
         const crmServiceMock = {
             searchContact: vi.fn().mockResolvedValue([]),
             createContact: vi.fn().mockResolvedValue({
@@ -135,25 +135,22 @@ describe('processTransaction', () => {
 
         await handler(context, req);
 
-        expect(createTransactionMock).toHaveBeenCalledWith(
-            '003TEST',
-            expect.objectContaining({
-                amount: 7500,
-                currency: 'usd',
-                paymentMethod: 'Pending',
-                sessionId: 'cs_test',
-                status: 'Pending'
-            })
-        );
+        expect(createTransactionMock).not.toHaveBeenCalled();
 
+        expect(upsertMock).toHaveBeenCalledTimes(1);
         expect(upsertMock).toHaveBeenCalledWith(
-            {
-                stripe_checkout_session_id__c: 'cs_test',
-                transaction_type__c: 'charge',
-                status__c: 'pending',
-                attribution__c: 'referral-program'
-            },
-            'stripe_checkout_session_id__c'
+            expect.objectContaining({
+                Stripe_Checkout_Session_Id__c: 'cs_test',
+                Transaction_Type__c: 'charge',
+                Status__c: 'pending',
+                Contact__c: '003TEST',
+                Frequency__c: 'month',
+                Payment_Method__c: 'Pending',
+                Amount_Gross__c: 75,
+                Currency_ISO_Code__c: 'USD',
+                Attribution__c: 'referral-program'
+            }),
+            'Stripe_Checkout_Session_Id__c'
         );
     });
 
@@ -210,13 +207,14 @@ describe('processTransaction', () => {
         await handler(context, req);
 
         expect(createTransactionMock).not.toHaveBeenCalled();
+        expect(upsertMock).toHaveBeenCalledTimes(1);
         expect(upsertMock).toHaveBeenCalledWith(
             {
-                stripe_checkout_session_id__c: 'cs_test',
-                transaction_type__c: 'charge',
-                status__c: 'pending'
+                Stripe_Checkout_Session_Id__c: 'cs_test',
+                Transaction_Type__c: 'charge',
+                Status__c: 'pending'
             },
-            'stripe_checkout_session_id__c'
+            'Stripe_Checkout_Session_Id__c'
         );
     });
 });

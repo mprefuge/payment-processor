@@ -2,6 +2,15 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 type RequestRecord = { url: string; init: any };
 
+const defaultAccounts = {
+  stripeClearing: 'Stripe Clearing|QBO_ACCOUNT_STRIPE_CLEARING',
+  operatingBank: 'Operating Bank|QBO_ACCOUNT_OPERATING_BANK',
+  revenue: 'Revenue|QBO_ACCOUNT_REVENUE',
+  fees: 'Stripe Fees|QBO_ACCOUNT_FEES',
+  refunds: 'Refunds|QBO_ACCOUNT_REFUNDS',
+  disputeLosses: 'Dispute Losses|QBO_ACCOUNT_DISPUTE_LOSSES',
+};
+
 const baseEnv = {
   quickBooks: {
     environment: 'sandbox',
@@ -9,14 +18,7 @@ const baseEnv = {
     clientId: 'client',
     clientSecret: 'secret',
     refreshToken: 'refresh',
-    accounts: {
-      stripeClearing: 'QBO_ACCOUNT_STRIPE_CLEARING',
-      operatingBank: 'QBO_ACCOUNT_OPERATING_BANK',
-      revenue: 'QBO_ACCOUNT_REVENUE',
-      fees: 'QBO_ACCOUNT_FEES',
-      refunds: 'QBO_ACCOUNT_REFUNDS',
-      disputeLosses: 'QBO_ACCOUNT_DISPUTE_LOSSES',
-    },
+    accounts: { ...defaultAccounts },
   },
   accounting: {
     postingStrategy: 'sales-receipt',
@@ -30,6 +32,58 @@ const importQboSvc = async () => {
   return import('../src/services/qboSvc');
 };
 
+const resetAccounts = () => {
+  Object.assign(baseEnv.quickBooks.accounts, defaultAccounts);
+};
+
+const resetTokens = () => {
+  baseEnv.quickBooks.refreshToken = 'refresh';
+  delete process.env.QBO_ACCESS_TOKEN;
+  delete process.env.QBO_REFRESH_TOKEN;
+};
+
+const getAuthorizationHeader = (request: RequestRecord): string | undefined => {
+  const headers = request.init?.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (typeof (headers as any).get === 'function') {
+    return (headers as any).get('Authorization') ?? (headers as any).get('authorization') ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      if (key.toLowerCase() === 'authorization') {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
+  if (typeof headers === 'object') {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === 'authorization') {
+        return typeof value === 'string'
+          ? value
+          : Array.isArray(value)
+          ? (value[0] as string | undefined)
+          : undefined;
+      }
+    }
+  }
+
+  return undefined;
+};
+
+type MockResponse = {
+  ok?: boolean;
+  status?: number;
+  statusText?: string;
+  json?: () => Promise<unknown>;
+  text?: () => Promise<string>;
+};
+
 const createFetchMock = (...payloads: unknown[]) => {
   const requests: RequestRecord[] = [];
   const fetcher = vi.fn(async (url: string, init?: any) => {
@@ -38,6 +92,27 @@ const createFetchMock = (...payloads: unknown[]) => {
       throw new Error('No mock response available for fetch call.');
     }
     requests.push({ url, init });
+    if (payload && typeof payload === 'object' && 'ok' in (payload as MockResponse)) {
+      const response = payload as MockResponse;
+      return {
+        ok: response.ok ?? true,
+        status: response.status ?? (response.ok === false ? 400 : 200),
+        statusText: response.statusText ?? 'OK',
+        async json() {
+          if (response.json) {
+            return response.json();
+          }
+          throw new Error('JSON parsing not implemented for this mock response.');
+        },
+        async text() {
+          if (response.text) {
+            return response.text();
+          }
+          return '';
+        },
+      } as any;
+    }
+
     return {
       ok: true,
       status: 200,
@@ -56,6 +131,8 @@ const createFetchMock = (...payloads: unknown[]) => {
 afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
+  resetAccounts();
+  resetTokens();
 });
 
 describe('postChargeToQbo', () => {
@@ -82,17 +159,34 @@ describe('postChargeToQbo', () => {
     expect(feeJournalRequest.url).toContain('journalentry');
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest.init?.body ?? '{}') as string);
-    expect(salesReceiptBody.DepositToAccountRef.name).toBe('QBO_ACCOUNT_STRIPE_CLEARING');
+    expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      name: 'Stripe Clearing',
+    });
 
     const feeJournalBody = JSON.parse((feeJournalRequest.init?.body ?? '{}') as string);
     const feeLines = feeJournalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
-      account: line.JournalEntryLineDetail.AccountRef.name,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(feeLines).toEqual([
-      { type: 'Debit', account: 'QBO_ACCOUNT_FEES', amount: 3.25 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 3.25 },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_FEES',
+          name: 'Stripe Fees',
+        },
+        amount: 3.25,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 3.25,
+      },
     ]);
   });
 
@@ -115,15 +209,192 @@ describe('postChargeToQbo', () => {
     const journalBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
     const journalLines = journalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
-      account: line.JournalEntryLineDetail.AccountRef.name,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(journalLines).toEqual([
-      { type: 'Debit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 120 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_REVENUE', amount: 120 },
-      { type: 'Debit', account: 'QBO_ACCOUNT_FEES', amount: 4 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 4 },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 120,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_REVENUE',
+          name: 'Revenue',
+        },
+        amount: 120,
+      },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_FEES',
+          name: 'Stripe Fees',
+        },
+        amount: 4,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 4,
+      },
     ]);
+  });
+
+  it('looks up account IDs when configuration only provides a name', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Account: [{ Id: '999', Name: 'Stripe Clearing' }],
+        },
+      },
+      { SalesReceipt: { Id: 'sr-2' } },
+      { JournalEntry: { Id: 'fee-je-2' } },
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 325,
+      memo: 'Lookup memo',
+      date: new Date('2024-05-01'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(requests[0].url).toContain('/query?query=');
+    expect(requests[0].init?.method).toBe('GET');
+
+    const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
+      value: '999',
+      name: 'Stripe Clearing',
+    });
+
+    const journalBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
+    const clearingLine = journalBody.Line.find(
+      (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing',
+    );
+    expect(clearingLine?.JournalEntryLineDetail.AccountRef.value).toBe('999');
+  });
+
+  it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    const { fetcher } = createFetchMock({ QueryResponse: { Account: [] } });
+    const { postChargeToQbo } = await importQboSvc();
+
+    await expect(
+      postChargeToQbo({
+        gross: 10_000,
+        fee: 0,
+        memo: 'Missing ID',
+        date: new Date('2024-04-01'),
+        options: { fetcher, accessToken: 'token' },
+      }),
+    ).rejects.toThrow(/could not be found/i);
+  });
+
+  it('refreshes the QuickBooks access token when an account lookup returns 401', async () => {
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    baseEnv.quickBooks.refreshToken = 'refresh-token';
+    process.env.QBO_ACCESS_TOKEN = 'expired-token';
+    process.env.QBO_REFRESH_TOKEN = 'refresh-token';
+
+    const unauthorizedResponse = {
+      ok: false,
+      status: 401,
+      text: async () => 'token expired',
+    };
+
+    const tokenRefreshResponse = {
+      ok: true,
+      json: async () => ({ access_token: 'new-access-token', refresh_token: 'next-refresh-token' }),
+    };
+
+    const { fetcher, requests } = createFetchMock(
+      unauthorizedResponse,
+      tokenRefreshResponse,
+      {
+        QueryResponse: {
+          Account: [{ Id: '123', Name: 'Stripe Clearing' }],
+        },
+      },
+      { JournalEntry: { Id: 'je-401' } },
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Refresh memo',
+      date: new Date('2024-06-01'),
+      options: { fetcher },
+    });
+
+    expect(result).toEqual({ qboId: 'je-401', type: 'journal-entry' });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(requests[1].url).toBe('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer');
+    expect(requests[1].init?.method).toBe('POST');
+    expect(requests[1].init?.body).toBe('grant_type=refresh_token&refresh_token=refresh-token');
+
+    const refreshAuthHeader = getAuthorizationHeader(requests[1]);
+    expect(refreshAuthHeader).toMatch(/^Basic\s+/);
+
+    const lookupAuthHeader = getAuthorizationHeader(requests[2]);
+    expect(lookupAuthHeader).toBe('Bearer new-access-token');
+    const postAuthHeader = getAuthorizationHeader(requests[3]);
+    expect(postAuthHeader).toBe('Bearer new-access-token');
+
+    expect(process.env.QBO_ACCESS_TOKEN).toBe('new-access-token');
+    expect(process.env.QBO_REFRESH_TOKEN).toBe('next-refresh-token');
+    expect(baseEnv.quickBooks.refreshToken).toBe('next-refresh-token');
+  });
+
+  it('throws a descriptive error when token refresh fails after an unauthorized response', async () => {
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
+    baseEnv.quickBooks.refreshToken = 'refresh-token';
+    process.env.QBO_ACCESS_TOKEN = 'expired-token';
+    process.env.QBO_REFRESH_TOKEN = 'refresh-token';
+
+    const unauthorizedResponse = {
+      ok: false,
+      status: 401,
+      text: async () => 'token expired',
+    };
+
+    const failedRefreshResponse = {
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      text: async () => 'invalid refresh token',
+    };
+
+    const { fetcher } = createFetchMock(unauthorizedResponse, failedRefreshResponse);
+    const { postChargeToQbo } = await importQboSvc();
+
+    await expect(
+      postChargeToQbo({
+        gross: 10_000,
+        fee: 0,
+        memo: 'Refresh failure',
+        date: new Date('2024-06-02'),
+        options: { fetcher },
+      }),
+    ).rejects.toThrow(
+      /QuickBooks access token refresh failed after unauthorized response: Failed to refresh QuickBooks access token \(status 400\): invalid refresh token/i,
+    );
   });
 });
 
@@ -144,12 +415,26 @@ describe('postRefundToQbo', () => {
     const journalBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
     const journalLines = journalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
-      account: line.JournalEntryLineDetail.AccountRef.name,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(journalLines).toEqual([
-      { type: 'Debit', account: 'QBO_ACCOUNT_REFUNDS', amount: 85 },
-      { type: 'Credit', account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 85 },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_REFUNDS',
+          name: 'Refunds',
+        },
+        amount: 85,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 85,
+      },
     ]);
   });
 });
@@ -169,13 +454,22 @@ describe('postPayoutToQbo', () => {
     expect(result).toEqual({ qboId: 'deposit-1', type: 'bank-deposit' });
 
     const depositBody = JSON.parse((requests[0].init?.body ?? '{}') as string);
-    expect(depositBody.DepositToAccountRef.name).toBe('QBO_ACCOUNT_OPERATING_BANK');
+    expect(depositBody.DepositToAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_OPERATING_BANK',
+      name: 'Operating Bank',
+    });
     const depositLines = depositBody.Line.map((line: any) => ({
-      account: line.DepositLineDetail.AccountRef.name,
+      accountRef: line.DepositLineDetail.AccountRef,
       amount: line.Amount,
     }));
     expect(depositLines).toEqual([
-      { account: 'QBO_ACCOUNT_STRIPE_CLEARING', amount: 150 },
+      {
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 150,
+      },
     ]);
   });
 });
