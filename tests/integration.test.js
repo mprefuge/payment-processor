@@ -168,19 +168,19 @@ function runIntegrationTests() {
     test('Transaction name generation', () => {
         const config = loadConfig();
         const name = generateTransactionName('General Giving', config);
-        assertEqual(name, 'Transaction - General Giving');
+        assertEqual(name, 'General Giving - Payment');
     });
     
     test('Transaction name generation - General Donation', () => {
         const config = loadConfig();
-        const name = generateTransactionName('General Donation', config);
-        assertEqual(name, 'Transaction - General Donation');
+        const name = generateTransactionName('General Donation', config, { transactionType: 'Giving' });
+        assertEqual(name, 'General Donation - Giving');
     });
     
     test('Transaction name generation - Example Category', () => {
         const config = loadConfig();
-        const name = generateTransactionName('Example Category', config);
-        assertEqual(name, 'Transaction - Example Category');
+        const name = generateTransactionName('Example Category', config, { transactionType: 'Support' });
+        assertEqual(name, 'Example Category - Support');
     });
     
     // Test full integration flow - high confidence match
@@ -297,7 +297,7 @@ function runIntegrationTests() {
         
         const transaction = await mockCrm.createTransaction('0031234567890001', transactionData);
         
-        assertEqual(transaction.Name, 'Transaction - Youth Ministry');
+        assertEqual(transaction.Name, 'Youth Ministry - Payment');
         assertEqual(transaction.Category__c, 'Youth Ministry');
         assertEqual(transaction.Amount__c, 75.00);
     });

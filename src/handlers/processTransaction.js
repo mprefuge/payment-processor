@@ -600,10 +600,14 @@ const createPendingTransaction = async (context, session, contactId, transaction
             transactionRecord.Attribution__c = transactionData.attribution;
         }
 
+        const transactionTypeName =
+            transactionData.transactionType || transactionData.metadata?.transactionType || 'Payment';
+
         const name = generateTransactionName(normalizedCategory, matchingConfig, {
             amount: amount !== null ? `$${amount.toFixed(2)}` : undefined,
             date: new Date().toLocaleDateString(),
-            id: session.id
+            id: session.id,
+            transactionType: transactionTypeName
         });
 
         if (name) {
