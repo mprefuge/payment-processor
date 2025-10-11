@@ -88,7 +88,6 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `QBO_ACCOUNT_STRIPE_CLEARING` | QuickBooks ID (or `Name|ID`) of the Stripe clearing account. |
 | `QBO_ACCOUNT_OPERATING_BANK` | QuickBooks ID (or `Name|ID`) of the operating bank account. |
 | `QBO_ACCOUNT_REVENUE` | QuickBooks ID (or `Name|ID`) for revenue recognition. |
-| `QBO_ITEM_REVENUE` | QuickBooks product/service item ID (or `Name|ID`) used on sales receipts. |
 | `QBO_ACCOUNT_FEES` | QuickBooks ID (or `Name|ID`) for Stripe fee expense. |
 | `QBO_ACCOUNT_REFUNDS` | QuickBooks ID (or `Name|ID`) for refunds liability. |
 | `QBO_ACCOUNT_DISPUTES` | QuickBooks ID (or `Name|ID`) for dispute losses. |
@@ -102,6 +101,12 @@ Clearing"}` are also accepted. If only a name is supplied the service will
 attempt to resolve the ID by querying QuickBooks before submitting the
 transaction. This adds an extra API call and will fail if the name is ambiguous
 or missing, so providing the ID up front is still strongly recommended.
+
+When posting sales receipts the integration derives the QuickBooks
+Product/Service item name from the Stripe Checkout Session's
+`transactionType` metadata. If the named item is missing in QuickBooks, the
+service will automatically create a Service item tied to the configured
+revenue account before posting the receipt.
 
 ### Salesforce field mapping
 

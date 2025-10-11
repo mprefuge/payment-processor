@@ -50,12 +50,13 @@ that mirror those tenants.
 | `QBO_REFRESH_TOKEN` | Refresh token paired with the access token. |
 | `QBO_REALM_ID` | QuickBooks company id. |
 | `QBO_ENV` | `sandbox` or `production`. |
-| `QBO_ITEM_REVENUE` | QuickBooks product/service item ID used for sales receipts. |
 | `AZURE_TABLES_CONNECTION_STRING` | Backing store for webhook idempotency keys. |
 
 > ⚠️ **Important:** The script refuses to run if any of the variables above are
 > missing. Refresh the QuickBooks access token immediately before running the
-> test to avoid 401 responses during verification.
+> test to avoid 401 responses during verification. Ensure the Stripe Checkout
+> Session used during testing supplies a `transactionType` metadata value so the
+> integration can derive (or create) the corresponding QuickBooks item.
 
 ## 3. Install Project Dependencies
 

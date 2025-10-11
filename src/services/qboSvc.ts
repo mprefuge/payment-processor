@@ -1,5 +1,7 @@
 import { Buffer } from 'node:buffer';
 
+import type Stripe from 'stripe';
+
 import env from '../config/env';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
@@ -45,6 +47,21 @@ type ItemRefWithMetadata = QuickBooksReference & {
   [ITEM_LOOKUP_METADATA]?: ItemRefLookupMetadata;
 };
 
+interface QuickBooksEmailAddress {
+  Address: string;
+}
+
+interface QuickBooksPhysicalAddress {
+  Line1?: string;
+  Line2?: string;
+  Line3?: string;
+  Line4?: string;
+  City?: string;
+  CountrySubDivisionCode?: string;
+  PostalCode?: string;
+  Country?: string;
+}
+
 interface QuickBooksSalesItemLineDetail {
   ItemRef: QuickBooksReference;
   ItemAccountRef?: QuickBooksReference;
@@ -63,6 +80,10 @@ export interface QuickBooksSalesReceipt {
   TxnDate: string;
   PrivateNote?: string;
   DepositToAccountRef: QuickBooksReference;
+  CustomerRef?: QuickBooksReference;
+  BillEmail?: QuickBooksEmailAddress;
+  BillAddr?: QuickBooksPhysicalAddress;
+  ShipAddr?: QuickBooksPhysicalAddress;
   Line: QuickBooksSalesReceiptLine[];
 }
 
@@ -121,8 +142,43 @@ interface BuildSalesReceiptInput {
   memo?: string;
   date: string | Date;
   revenueAccountName?: string;
-  revenueItemName?: string;
+  revenueItemName: string;
   depositAccountName?: string;
+  customer?: SalesReceiptCustomerDetails | null;
+}
+
+type StripeCustomerContext = {
+  charge?: Stripe.Charge | null;
+  paymentIntent?: Stripe.PaymentIntent | null;
+  customer?: (Stripe.Customer | Stripe.DeletedCustomer) | null;
+  checkoutSession?: Stripe.Checkout.Session | null;
+};
+
+interface SalesReceiptCustomerDetails {
+  ref: QuickBooksReference;
+  email?: string | null;
+  billingAddress?: QuickBooksPhysicalAddress | null;
+  shippingAddress?: QuickBooksPhysicalAddress | null;
+}
+
+interface EnsureCustomerInput {
+  displayName: string;
+  preferredDisplayName?: string | null;
+  email?: string | null;
+  givenName?: string | null;
+  familyName?: string | null;
+  phone?: string | null;
+  billingAddress?: QuickBooksPhysicalAddress | null;
+  shippingAddress?: QuickBooksPhysicalAddress | null;
+  stripeCustomerId?: string | null;
+  chargeId?: string | null;
+}
+
+interface EnsureCustomerResult {
+  ref: QuickBooksReference;
+  email?: string | null;
+  billingAddress?: QuickBooksPhysicalAddress | null;
+  shippingAddress?: QuickBooksPhysicalAddress | null;
 }
 
 interface BuildFeesJournalEntryInput {
@@ -154,6 +210,7 @@ export interface PostChargeToQboInput {
   fee: number;
   memo?: string;
   date: string | Date;
+  stripe?: StripeCustomerContext;
   options?: PostOptions;
 }
 
@@ -189,6 +246,261 @@ const centsToDollars = (value: number): number => {
   return Math.round(value) / 100;
 };
 
+const toTrimmed = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const normalizeEmail = (value: unknown): string | null => {
+  const trimmed = toTrimmed(value);
+  return trimmed ? trimmed.toLowerCase() : null;
+};
+
+const truncate = (value: string | null | undefined, length: number): string | null => {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.length > length ? trimmed.slice(0, length) : trimmed;
+};
+
+const equalsIgnoreCase = (a: string | null | undefined, b: string | null | undefined): boolean => {
+  const left = a?.trim().toLowerCase();
+  const right = b?.trim().toLowerCase();
+  return Boolean(left && right && left === right);
+};
+
+const mapStripeAddress = (
+  address: Stripe.Address | null | undefined,
+): QuickBooksPhysicalAddress | null => {
+  if (!address) {
+    return null;
+  }
+
+  const extract = (key: keyof Stripe.Address): string | null => {
+    const candidate = (address as Stripe.Address)[key];
+    if (typeof candidate === 'string') {
+      const trimmed = candidate.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    return null;
+  };
+
+  const mapped: QuickBooksPhysicalAddress = {};
+
+  const line1 = extract('line1');
+  const line2 = extract('line2');
+  const city = extract('city');
+  const state = extract('state');
+  const postalCode = extract('postal_code');
+  const country = extract('country');
+
+  if (line1) {
+    mapped.Line1 = truncate(line1, 500) ?? undefined;
+  }
+  if (line2) {
+    mapped.Line2 = truncate(line2, 500) ?? undefined;
+  }
+  if (city) {
+    mapped.City = truncate(city, 255) ?? undefined;
+  }
+  if (state) {
+    mapped.CountrySubDivisionCode = truncate(state, 255) ?? undefined;
+  }
+  if (postalCode) {
+    mapped.PostalCode = truncate(postalCode, 30) ?? undefined;
+  }
+  if (country) {
+    mapped.Country = truncate(country, 255) ?? undefined;
+  }
+
+  return Object.keys(mapped).length > 0 ? mapped : null;
+};
+
+const sanitizeAddress = (
+  address: QuickBooksPhysicalAddress | null | undefined,
+): QuickBooksPhysicalAddress | undefined => {
+  if (!address) {
+    return undefined;
+  }
+
+  const sanitized: QuickBooksPhysicalAddress = {};
+
+  if (address.Line1) {
+    sanitized.Line1 = truncate(address.Line1, 500) ?? undefined;
+  }
+  if (address.Line2) {
+    sanitized.Line2 = truncate(address.Line2, 500) ?? undefined;
+  }
+  if (address.Line3) {
+    sanitized.Line3 = truncate(address.Line3, 500) ?? undefined;
+  }
+  if (address.Line4) {
+    sanitized.Line4 = truncate(address.Line4, 500) ?? undefined;
+  }
+  if (address.City) {
+    sanitized.City = truncate(address.City, 255) ?? undefined;
+  }
+  if (address.CountrySubDivisionCode) {
+    sanitized.CountrySubDivisionCode = truncate(address.CountrySubDivisionCode, 255) ?? undefined;
+  }
+  if (address.PostalCode) {
+    sanitized.PostalCode = truncate(address.PostalCode, 30) ?? undefined;
+  }
+  if (address.Country) {
+    sanitized.Country = truncate(address.Country, 255) ?? undefined;
+  }
+
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+};
+
+const splitName = (
+  name: string | null | undefined,
+): { givenName?: string | null; familyName?: string | null } => {
+  const trimmed = toTrimmed(name);
+  if (!trimmed) {
+    return {};
+  }
+
+  const parts = trimmed.split(/\s+/);
+  if (parts.length === 0) {
+    return {};
+  }
+
+  if (parts.length === 1) {
+    return { givenName: truncate(parts[0], 100) };
+  }
+
+  const givenName = parts.shift() ?? '';
+  const familyName = parts.join(' ');
+
+  return {
+    givenName: truncate(givenName, 100),
+    familyName: truncate(familyName, 100),
+  };
+};
+
+const isDeletedCustomer = (
+  customer: (Stripe.Customer | Stripe.DeletedCustomer) | null | undefined,
+): customer is Stripe.DeletedCustomer => {
+  return Boolean(customer && 'deleted' in customer && customer.deleted);
+};
+
+const deriveSalesReceiptCustomer = (
+  source: StripeCustomerContext,
+): EnsureCustomerInput => {
+  const activeCustomer =
+    source.customer && !isDeletedCustomer(source.customer)
+      ? (source.customer as Stripe.Customer)
+      : null;
+
+  const billingDetails = source.charge?.billing_details ?? null;
+  const chargeShipping = source.charge?.shipping ?? null;
+  const paymentShipping = source.paymentIntent?.shipping ?? null;
+  const checkoutDetails = source.checkoutSession?.customer_details ?? null;
+
+  const stripeCustomerId =
+    toTrimmed(
+      (typeof source.charge?.customer === 'string'
+        ? source.charge.customer
+        : source.charge?.customer && 'id' in source.charge.customer
+        ? (source.charge.customer as { id?: string }).id
+        : undefined) ||
+        (typeof source.paymentIntent?.customer === 'string'
+          ? source.paymentIntent.customer
+          : source.paymentIntent?.customer && 'id' in source.paymentIntent.customer
+          ? (source.paymentIntent.customer as { id?: string }).id
+          : undefined) ||
+        (activeCustomer?.id ?? null) ||
+        (typeof source.checkoutSession?.customer === 'string'
+          ? source.checkoutSession.customer
+          : source.checkoutSession?.customer && 'id' in source.checkoutSession.customer
+          ? (source.checkoutSession.customer as { id?: string }).id
+          : undefined),
+    ) ?? null;
+
+  const preferredName =
+    toTrimmed(activeCustomer?.name) ||
+    toTrimmed(checkoutDetails?.name) ||
+    toTrimmed(paymentShipping?.name) ||
+    toTrimmed(chargeShipping?.name) ||
+    toTrimmed(billingDetails?.name);
+
+  const email =
+    normalizeEmail(billingDetails?.email) ||
+    normalizeEmail(source.paymentIntent?.receipt_email) ||
+    normalizeEmail(checkoutDetails?.email) ||
+    normalizeEmail(activeCustomer?.email) ||
+    normalizeEmail(source.checkoutSession?.customer_email);
+
+  const phone =
+    toTrimmed(billingDetails?.phone) ||
+    toTrimmed(paymentShipping?.phone) ||
+    toTrimmed(chargeShipping?.phone) ||
+    toTrimmed(activeCustomer?.phone) ||
+    toTrimmed(activeCustomer?.shipping?.phone) ||
+    toTrimmed(checkoutDetails?.phone);
+
+  const billingAddress =
+    mapStripeAddress(billingDetails?.address) ||
+    mapStripeAddress(activeCustomer?.address) ||
+    mapStripeAddress(checkoutDetails?.address);
+
+  const shippingAddress =
+    mapStripeAddress(paymentShipping?.address) ||
+    mapStripeAddress(chargeShipping?.address) ||
+    mapStripeAddress(activeCustomer?.shipping?.address) ||
+    mapStripeAddress(checkoutDetails?.address);
+
+  const fallbackName =
+    preferredName ||
+    email ||
+    (stripeCustomerId ? `Stripe Customer ${stripeCustomerId}` : null) ||
+    (source.charge?.id ? `Stripe Charge ${source.charge.id}` : null) ||
+    (source.paymentIntent?.id ? `Stripe Payment ${source.paymentIntent.id}` : null) ||
+    'Stripe Customer';
+
+  const { givenName, familyName } = splitName(preferredName ?? fallbackName);
+
+  return {
+    displayName: truncate(fallbackName, 99) ?? 'Stripe Customer',
+    preferredDisplayName: truncate(preferredName ?? null, 99),
+    email,
+    givenName,
+    familyName,
+    phone,
+    billingAddress,
+    shippingAddress,
+    stripeCustomerId,
+    chargeId: source.charge?.id ?? null,
+  };
+};
+
+const getCheckoutTransactionType = (
+  session: Stripe.Checkout.Session | null | undefined,
+): string | null => {
+  if (!session) {
+    return null;
+  }
+
+  const metadata = session.metadata as Record<string, unknown> | null | undefined;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+
+  const value = metadata.transactionType;
+  return typeof value === 'string' ? toTrimmed(value) : null;
+};
+
 const normalizeDate = (value: string | Date): string => {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -222,6 +534,493 @@ const ensureReferenceValue = <T extends QuickBooksReference>(
   }
 
   return { ...ref, ...normalized } as T;
+};
+
+const queryQuickBooks = async <T = unknown>(
+  query: string,
+  context: QuickBooksRequestContext,
+): Promise<T[]> => {
+  const url = buildQboQueryUrl(query);
+  const response = await context.request(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `QuickBooks query failed (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const queryResponse =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).QueryResponse as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!queryResponse) {
+    return [];
+  }
+
+  const values = Object.values(queryResponse).find((value) =>
+    Array.isArray(value) || (value && typeof value === 'object'),
+  );
+
+  if (!values) {
+    return [];
+  }
+
+  if (Array.isArray(values)) {
+    return values as T[];
+  }
+
+  return [values as T];
+};
+
+const findCustomerByEmail = async (
+  email: string,
+  context: QuickBooksRequestContext,
+) => {
+  const query = `select Id, DisplayName, PrimaryEmailAddr from Customer where PrimaryEmailAddr = '${escapeQueryValue(
+    email,
+  )}'`;
+  const customers = await queryQuickBooks<Record<string, unknown>>(query, context);
+
+  return (
+    customers.find((customer) => {
+      const addr = customer?.PrimaryEmailAddr as { Address?: string } | undefined;
+      const value = addr?.Address;
+      return typeof value === 'string' && value.trim().toLowerCase() === email.toLowerCase();
+    }) ?? null
+  );
+};
+
+const findCustomerByDisplayName = async (
+  displayName: string,
+  context: QuickBooksRequestContext,
+) => {
+  const query = `select Id, DisplayName from Customer where DisplayName = '${escapeQueryValue(displayName)}'`;
+  const customers = await queryQuickBooks<Record<string, unknown>>(query, context);
+
+  return (
+    customers.find((customer) => {
+      const name = customer?.DisplayName;
+      return typeof name === 'string' && name.trim().toLowerCase() === displayName.toLowerCase();
+    }) ?? null
+  );
+};
+
+const fetchQuickBooksCustomer = async (
+  id: string,
+  context: QuickBooksRequestContext,
+): Promise<Record<string, unknown>> => {
+  const trimmedId = id.trim();
+  if (!trimmedId) {
+    throw new Error('QuickBooks customer ID is required to load customer details.');
+  }
+
+  const url = `${buildQboUrl('customer')}/${encodeURIComponent(trimmedId)}`;
+  const response = await context.request(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to load QuickBooks customer "${trimmedId}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const customer =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Customer as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!customer) {
+    throw new Error('QuickBooks customer response did not include a Customer record.');
+  }
+
+  return customer;
+};
+
+const updateQuickBooksCustomer = async (
+  id: string,
+  updates: Record<string, unknown>,
+  context: QuickBooksRequestContext,
+): Promise<Record<string, unknown>> => {
+  const customer = await fetchQuickBooksCustomer(id, context);
+  const syncTokenRaw = customer.SyncToken;
+  const syncToken =
+    typeof syncTokenRaw === 'number'
+      ? syncTokenRaw.toString()
+      : typeof syncTokenRaw === 'string'
+      ? syncTokenRaw.trim()
+      : null;
+
+  if (!syncToken) {
+    throw new Error('QuickBooks customer record did not include a SyncToken.');
+  }
+
+  const payload: Record<string, unknown> = {
+    ...updates,
+    Id: customer.Id,
+    SyncToken: syncToken,
+    sparse: true,
+  };
+
+  const url = `${buildQboUrl('customer')}?operation=update`;
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to update QuickBooks customer "${id}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const updated =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Customer as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!updated) {
+    throw new Error('QuickBooks customer update response did not include a Customer record.');
+  }
+
+  return updated;
+};
+
+const ensureSalesReceiptCustomer = async (
+  input: EnsureCustomerInput,
+  context: QuickBooksRequestContext,
+): Promise<EnsureCustomerResult | null> => {
+  const displayName = truncate(input.displayName, 99) ?? 'Stripe Customer';
+  const email = input.email ? normalizeEmail(input.email) : null;
+  const givenName = truncate(input.givenName ?? null, 100);
+  const familyName = truncate(input.familyName ?? null, 100);
+  const phone = truncate(input.phone ?? null, 30);
+  const billingAddress = sanitizeAddress(input.billingAddress);
+  const shippingAddress = sanitizeAddress(input.shippingAddress);
+  const preferredDisplayName = truncate(input.preferredDisplayName ?? null, 99);
+
+  let existing: Record<string, unknown> | null = null;
+
+  if (email) {
+    try {
+      existing = await findCustomerByEmail(email, context);
+    } catch (error) {
+      throw new Error(
+        `Failed to look up QuickBooks customer by email "${email}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  if (!existing) {
+    try {
+      existing = await findCustomerByDisplayName(displayName, context);
+    } catch (error) {
+      throw new Error(
+        `Failed to look up QuickBooks customer "${displayName}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  if (existing) {
+    const id = existing.Id;
+    if (typeof id === 'string' || typeof id === 'number') {
+      const value = typeof id === 'number' ? id.toString() : id.trim();
+      if (value) {
+        let resolvedDisplayName =
+          typeof existing.DisplayName === 'string'
+            ? existing.DisplayName
+            : displayName;
+
+        if (
+          preferredDisplayName &&
+          !equalsIgnoreCase(resolvedDisplayName, preferredDisplayName)
+        ) {
+          const updatePayload: Record<string, unknown> = {
+            DisplayName: preferredDisplayName,
+          };
+
+          if (givenName) {
+            updatePayload.GivenName = givenName;
+          }
+          if (familyName) {
+            updatePayload.FamilyName = familyName;
+          }
+          if (email) {
+            updatePayload.PrimaryEmailAddr = {
+              Address: email,
+            } satisfies QuickBooksEmailAddress;
+          }
+          if (phone) {
+            updatePayload.PrimaryPhone = { FreeFormNumber: phone };
+          }
+          if (billingAddress) {
+            updatePayload.BillAddr = billingAddress;
+          }
+          if (shippingAddress) {
+            updatePayload.ShipAddr = shippingAddress;
+          }
+
+          try {
+            const updated = await updateQuickBooksCustomer(value, updatePayload, context);
+            const updatedName =
+              typeof updated.DisplayName === 'string'
+                ? updated.DisplayName
+                : preferredDisplayName;
+            if (updatedName) {
+              resolvedDisplayName = updatedName;
+            }
+          } catch (error) {
+            throw new Error(
+              `Failed to update QuickBooks customer "${displayName}" (${value}) with Stripe contact details: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+
+        return {
+          ref: {
+            value,
+            name: resolvedDisplayName,
+          },
+          email,
+          billingAddress,
+          shippingAddress,
+        };
+      }
+    }
+  }
+
+  const payload: Record<string, unknown> = {
+    DisplayName: displayName,
+  };
+
+  if (email) {
+    payload.PrimaryEmailAddr = { Address: email } satisfies QuickBooksEmailAddress;
+  }
+  if (givenName) {
+    payload.GivenName = givenName;
+  }
+  if (familyName) {
+    payload.FamilyName = familyName;
+  }
+  if (phone) {
+    payload.PrimaryPhone = { FreeFormNumber: phone };
+  }
+  if (billingAddress) {
+    payload.BillAddr = billingAddress;
+  }
+  if (shippingAddress) {
+    payload.ShipAddr = shippingAddress;
+  }
+
+  const note = input.stripeCustomerId
+    ? `Stripe Customer ID: ${input.stripeCustomerId}`
+    : input.chargeId
+    ? `Stripe Charge ID: ${input.chargeId}`
+    : null;
+  if (note) {
+    payload.Notes = truncate(note, 500);
+  }
+
+  const url = buildQboUrl('customer');
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+
+    if (
+      response.status === 400 &&
+      errorText &&
+      /Duplicate Name Exists Error/i.test(errorText)
+    ) {
+      const duplicate = await findCustomerByDisplayName(displayName, context);
+      if (duplicate) {
+        const id = duplicate.Id;
+        if (typeof id === 'string' || typeof id === 'number') {
+          const value = typeof id === 'number' ? id.toString() : id.trim();
+          if (value) {
+            return {
+              ref: {
+                value,
+                name:
+                  typeof duplicate.DisplayName === 'string'
+                    ? duplicate.DisplayName
+                    : displayName,
+              },
+              email,
+              billingAddress,
+              shippingAddress,
+            };
+          }
+        }
+      }
+    }
+
+    throw new Error(
+      `Failed to create QuickBooks customer "${displayName}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const customer =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Customer as Record<string, unknown> | undefined)
+      : undefined;
+
+  const idValue = customer?.Id;
+  const resolvedDisplayName =
+    typeof customer?.DisplayName === 'string'
+      ? customer.DisplayName
+      : displayName;
+
+  if (typeof idValue === 'string' && idValue.trim()) {
+    return {
+      ref: { value: idValue.trim(), name: resolvedDisplayName },
+      email,
+      billingAddress,
+      shippingAddress,
+    };
+  }
+
+  if (typeof idValue === 'number' && Number.isFinite(idValue)) {
+    return {
+      ref: { value: idValue.toString(), name: resolvedDisplayName },
+      email,
+      billingAddress,
+      shippingAddress,
+    };
+  }
+
+  throw new Error('QuickBooks customer creation response did not include an identifier.');
+};
+
+const ensureSalesReceiptItem = async (
+  itemName: string,
+  context: QuickBooksRequestContext,
+): Promise<QuickBooksReference> => {
+  const trimmedName = toTrimmed(itemName);
+  if (!trimmedName) {
+    throw new Error('Stripe Checkout Session metadata.transactionType must be provided.');
+  }
+
+  const truncatedName = truncate(trimmedName, 100) ?? trimmedName;
+
+  const existing = await findItemReferenceByName(truncatedName, context);
+  if (existing) {
+    return existing;
+  }
+
+  const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
+  await resolveAccountReferences([revenueAccountRef], context);
+
+  const payload: Record<string, unknown> = {
+    Name: truncatedName,
+    Type: 'Service',
+    IncomeAccountRef: { value: revenueAccountRef.value },
+  };
+
+  const url = buildQboUrl('item');
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const cacheKey = buildItemCacheKey(truncatedName);
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+
+    if (
+      response.status === 400 &&
+      errorText &&
+      /Duplicate Name Exists Error/i.test(errorText)
+    ) {
+      const duplicate = await findItemReferenceByName(truncatedName, context);
+      if (duplicate) {
+        return duplicate;
+      }
+    }
+
+    throw new Error(
+      `Failed to create QuickBooks item "${truncatedName}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const item =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Item as Record<string, unknown> | undefined)
+      : undefined;
+
+  const idValue = item?.Id;
+  const resolvedName =
+    typeof item?.Name === 'string' && item.Name.trim()
+      ? item.Name.trim()
+      : truncatedName;
+
+  if (typeof idValue === 'string' && idValue.trim()) {
+    const id = idValue.trim();
+    itemLookupCache.set(cacheKey, id);
+    return { value: id, name: resolvedName };
+  }
+
+  if (typeof idValue === 'number' && Number.isFinite(idValue)) {
+    const id = idValue.toString();
+    itemLookupCache.set(cacheKey, id);
+    return { value: id, name: resolvedName };
+  }
+
+  const created = await findItemReferenceByName(truncatedName, context);
+  if (created) {
+    return created;
+  }
+
+  throw new Error(
+    `QuickBooks item creation response did not include an identifier for "${truncatedName}".`,
+  );
 };
 
 const parseDelimitedReference = (
@@ -364,8 +1163,9 @@ export const buildSalesReceipt = ({
   memo,
   date,
   revenueAccountName = env.quickBooks.accounts.revenue,
-  revenueItemName = env.quickBooks.items?.revenue,
+  revenueItemName,
   depositAccountName = env.quickBooks.accounts.stripeClearing,
+  customer = null,
 }: BuildSalesReceiptInput): QuickBooksSalesReceipt => {
   const amount = ensurePositiveAmount(amountCents, 'Sales receipt amount');
   if (amount === 0) {
@@ -379,7 +1179,7 @@ export const buildSalesReceipt = ({
     );
   }
 
-  return {
+  const receipt: QuickBooksSalesReceipt = {
     DocNumber: docNumber,
     TxnDate: normalizeDate(date),
     PrivateNote: memo,
@@ -396,6 +1196,30 @@ export const buildSalesReceipt = ({
       },
     ],
   };
+
+  if (customer?.ref?.value) {
+    receipt.CustomerRef = {
+      value: customer.ref.value,
+      name: customer.ref.name,
+    };
+  }
+
+  const customerEmail = normalizeEmail(customer?.email ?? null);
+  if (customerEmail) {
+    receipt.BillEmail = { Address: customerEmail };
+  }
+
+  const billingAddress = sanitizeAddress(customer?.billingAddress);
+  if (billingAddress) {
+    receipt.BillAddr = billingAddress;
+  }
+
+  const shippingAddress = sanitizeAddress(customer?.shippingAddress);
+  if (shippingAddress) {
+    receipt.ShipAddr = shippingAddress;
+  }
+
+  return receipt;
 };
 
 const createJournalEntryLine = (
@@ -893,17 +1717,26 @@ const isItemLookupRequired = (ref: ItemRefWithMetadata): boolean => {
   return Boolean(metadata && metadata.resolved === false);
 };
 
-const resolveItemId = async (
+const buildItemCacheKey = (name: string): string => {
+  return `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:item:${name.trim().toLowerCase()}`;
+};
+
+const findItemReferenceByName = async (
   name: string,
   context: QuickBooksRequestContext,
-): Promise<string> => {
-  const cacheKey = `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:item:${name.toLowerCase()}`;
-  const cached = itemLookupCache.get(cacheKey);
-  if (cached) {
-    return cached;
+): Promise<QuickBooksReference | null> => {
+  const normalizedName = name.trim();
+  if (!normalizedName) {
+    return null;
   }
 
-  const query = `select Id, Name from Item where Name = '${escapeQueryValue(name)}'`;
+  const cacheKey = buildItemCacheKey(normalizedName);
+  const cached = itemLookupCache.get(cacheKey);
+  if (cached) {
+    return { value: cached, name: normalizedName };
+  }
+
+  const query = `select Id, Name from Item where Name = '${escapeQueryValue(normalizedName)}'`;
   const url = buildQboQueryUrl(query);
   const response = await context.request(url, {
     method: 'GET',
@@ -915,7 +1748,7 @@ const resolveItemId = async (
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
     throw new Error(
-      `Failed to resolve QuickBooks item "${name}" (status ${response.status}): ${
+      `Failed to look up QuickBooks item "${normalizedName}" (status ${response.status}): ${
         errorText ?? response.statusText
       }`,
     );
@@ -941,20 +1774,17 @@ const resolveItemId = async (
     if (typeof itemName !== 'string') {
       return false;
     }
-    return itemName.trim().toLowerCase() === name.trim().toLowerCase();
+    return itemName.trim().toLowerCase() === normalizedName.toLowerCase();
   }) ?? itemList[0];
 
   if (!match || typeof match !== 'object') {
-    throw new Error(
-      `QuickBooks item "${name}" could not be found. ` +
-        'Provide the item ID in configuration or ensure the item exists in QuickBooks.',
-    );
+    return null;
   }
 
   const idValue = (match as Record<string, unknown>).Id;
   if (typeof idValue !== 'string' && typeof idValue !== 'number') {
     throw new Error(
-      `QuickBooks item "${name}" does not provide a usable ID. ` +
+      `QuickBooks item "${normalizedName}" does not provide a usable ID. ` +
         'Update the configuration to include the item ID.',
     );
   }
@@ -962,12 +1792,32 @@ const resolveItemId = async (
   const id = typeof idValue === 'number' ? idValue.toString() : idValue.trim();
   if (!id) {
     throw new Error(
-      `QuickBooks item "${name}" returned an empty ID. Update the configuration to include the item ID.`,
+      `QuickBooks item "${normalizedName}" returned an empty ID. Update the configuration to include the item ID.`,
     );
   }
 
+  const resolvedName =
+    typeof (match as Record<string, unknown>).Name === 'string'
+      ? ((match as Record<string, unknown>).Name as string).trim() || normalizedName
+      : normalizedName;
+
   itemLookupCache.set(cacheKey, id);
-  return id;
+  return { value: id, name: resolvedName };
+};
+
+const resolveItemId = async (
+  name: string,
+  context: QuickBooksRequestContext,
+): Promise<string> => {
+  const reference = await findItemReferenceByName(name, context);
+  if (!reference) {
+    throw new Error(
+      `QuickBooks item "${name}" could not be found. ` +
+        'Provide the item ID in configuration or ensure the item exists in QuickBooks.',
+    );
+  }
+
+  return reference.value;
 };
 
 const resolveItemReferences = async (
@@ -1239,6 +2089,7 @@ export const postChargeToQbo = async ({
   fee,
   memo,
   date,
+  stripe,
   options,
 }: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(gross, 'Gross amount');
@@ -1249,11 +2100,58 @@ export const postChargeToQbo = async ({
 
   if (strategy === 'sales-receipt') {
     const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount);
+    const context = createRequestContext(options);
+    let receiptCustomer: SalesReceiptCustomerDetails | null = null;
+
+    try {
+      const derived = deriveSalesReceiptCustomer({ ...(stripe ?? {}) });
+      const ensured = await ensureSalesReceiptCustomer(derived, context);
+      if (ensured) {
+        receiptCustomer = {
+          ref: ensured.ref,
+          email: ensured.email ?? null,
+          billingAddress: ensured.billingAddress ?? null,
+          shippingAddress: ensured.shippingAddress ?? null,
+        };
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to ensure QuickBooks customer for sales receipt: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const transactionTypeName = getCheckoutTransactionType(stripe?.checkoutSession);
+    if (!transactionTypeName) {
+      throw new Error(
+        'Stripe Checkout Session metadata.transactionType is required to determine the QuickBooks item for sales receipts.',
+      );
+    }
+
+    let revenueItemReference: QuickBooksReference;
+    try {
+      revenueItemReference = await ensureSalesReceiptItem(transactionTypeName, context);
+    } catch (error) {
+      throw new Error(
+        `Failed to ensure QuickBooks item "${transactionTypeName}" for sales receipt: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const revenueItemPayload = JSON.stringify({
+      value: revenueItemReference.value,
+      name: revenueItemReference.name ?? transactionTypeName,
+    });
+
     const salesReceipt = buildSalesReceipt({
       docNumber: salesReceiptDocNumber,
       amountCents: grossAmount,
       memo: normalizedMemo,
       date,
+      revenueItemName: revenueItemPayload,
+      customer: receiptCustomer,
     });
 
     const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
