@@ -673,6 +673,15 @@ async function runTests() {
                 currency: 'usd',
                 description: 'Donation A',
                 source: 'ch_123',
+                customer: {
+                    id: 'cus_txn_1',
+                    name: 'Ada Lovelace',
+                    email: 'ada@example.com'
+                },
+                billing_details: {
+                    name: 'Ada Lovelace',
+                    email: 'ada@example.com'
+                },
                 metadata: { donationId: 'don_1' },
                 created: baseTime - 3600,
                 available_on: baseTime,
@@ -749,6 +758,9 @@ async function runTests() {
             'Donation A',
             'Gross: $50.00, Fees: $1.50, Net: $48.50',
             'Transaction: txn_charge_1',
+            'Charge: ch_123',
+            'Customer: Ada Lovelace <ada@example.com>',
+            'Customer ID: cus_txn_1',
             'Amount: $48.50'
         ].join(' | ');
 

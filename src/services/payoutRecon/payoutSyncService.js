@@ -583,16 +583,42 @@ class PayoutSyncService {
                 }
 
                 for (const line of lines) {
+                    const metadata = line.metadata || {};
+                    const entity = line.entity || {};
+
+                    const chargeIdentifier = metadata.chargeId
+                        || metadata.paymentIntentId
+                        || metadata.source
+                        || (typeof line.name === 'string' && line.name.trim().length > 0 ? line.name.trim() : null);
+
+                    const customerName = metadata.customerName
+                        || (typeof entity.name === 'string' ? entity.name : null);
+                    const customerEmail = metadata.customerEmail
+                        || (typeof entity.email === 'string' ? entity.email : null);
+                    const stripeCustomerId = metadata.stripeCustomerId
+                        || (typeof entity.stripeCustomerId === 'string' ? entity.stripeCustomerId : null);
+
+                    let customerSegment = null;
+                    if (customerName && customerEmail) {
+                        customerSegment = `Customer: ${customerName} <${customerEmail}>`;
+                    } else if (customerName) {
+                        customerSegment = `Customer: ${customerName}`;
+                    } else if (customerEmail) {
+                        customerSegment = `Customer email: ${customerEmail}`;
+                    }
+
+                    const customerIdSegment = stripeCustomerId ? `Customer ID: ${stripeCustomerId}` : null;
+
                     const detailSegments = [
-                        line.metadata && line.metadata.balanceTransactionId
-                            ? `Transaction: ${line.metadata.balanceTransactionId}`
+                        metadata.balanceTransactionId
+                            ? `Transaction: ${metadata.balanceTransactionId}`
                             : null,
-                        (!usePerTransactionLines && line.metadata && (line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source))
-                            ? `Source: ${line.metadata.chargeId || line.metadata.paymentIntentId || line.metadata.source}`
-                            : null,
+                        chargeIdentifier ? `Charge: ${chargeIdentifier}` : null,
+                        customerSegment,
+                        customerIdSegment,
                         formatCurrency(line.amount) ? `Amount: ${formatCurrency(line.amount)}` : null,
-                        (!usePerTransactionLines && line.metadata && line.metadata.component)
-                            ? `Component: ${line.metadata.component}`
+                        (!usePerTransactionLines && metadata.component)
+                            ? `Component: ${metadata.component}`
                             : null
                     ];
 
