@@ -88,20 +88,20 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `QBO_ACCOUNT_STRIPE_CLEARING` | QuickBooks ID (or `Name|ID`) of the Stripe clearing account. |
 | `QBO_ACCOUNT_OPERATING_BANK` | QuickBooks ID (or `Name|ID`) of the operating bank account. |
 | `QBO_ACCOUNT_REVENUE` | QuickBooks ID (or `Name|ID`) for revenue recognition. |
+| `QBO_ITEM_REVENUE` | QuickBooks product/service item ID (or `Name|ID`) used on sales receipts. |
 | `QBO_ACCOUNT_FEES` | QuickBooks ID (or `Name|ID`) for Stripe fee expense. |
 | `QBO_ACCOUNT_REFUNDS` | QuickBooks ID (or `Name|ID`) for refunds liability. |
 | `QBO_ACCOUNT_DISPUTES` | QuickBooks ID (or `Name|ID`) for dispute losses. |
 | `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
 
-When specifying account mappings you should provide the QuickBooks account ID.
+When specifying account or item mappings you should provide the QuickBooks ID.
 You can either supply the raw ID (for example, `123`) or a `Name|ID` pair such
 as `Stripe Clearing|123`. JSON strings of the form `{"value":"123","name":"Stripe
 Clearing"}` are also accepted. If only a name is supplied the service will
 attempt to resolve the ID by querying QuickBooks before submitting the
-transaction. This adds an extra API call and will fail if the account name is
-ambiguous or missing, so providing the ID up front is still strongly
-recommended.
+transaction. This adds an extra API call and will fail if the name is ambiguous
+or missing, so providing the ID up front is still strongly recommended.
 
 ### Salesforce field mapping
 
