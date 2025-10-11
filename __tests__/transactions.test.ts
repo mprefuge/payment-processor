@@ -80,4 +80,19 @@ describe('mapStripeToTransaction', () => {
     expect(dto.designation__c).toBe('a15xx000000000AAA');
     expect(dto.restriction__c).toBe('a0Oxx000000000AAA');
   });
+
+  it('derives subscription identifier from the payment intent when provided', () => {
+    const paymentIntent = {
+      ...buildPaymentIntent(),
+      subscription: 'sub_456',
+    };
+
+    const dto = mapStripeToTransaction({
+      paymentIntent: paymentIntent as any,
+      charge: buildCharge() as any,
+      balanceTransaction: buildBalanceTransaction() as any,
+    });
+
+    expect(dto.stripe_subscription_id__c).toBe('sub_456');
+  });
 });

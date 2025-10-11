@@ -444,6 +444,16 @@ const extractSubscriptionId = (
     return fromMetadata;
   }
 
+  const paymentIntentSubscription =
+    paymentIntent && typeof paymentIntent === 'object' && 'subscription' in paymentIntent
+      ? (paymentIntent as Stripe.PaymentIntent & { subscription?: unknown }).subscription ?? null
+      : null;
+
+  const fromPaymentIntent = normalizeStripeId(paymentIntentSubscription);
+  if (fromPaymentIntent) {
+    return fromPaymentIntent;
+  }
+
   const chargeInvoice = charge?.invoice;
   if (chargeInvoice && typeof chargeInvoice === 'object' && 'subscription' in chargeInvoice) {
     const subscription = (chargeInvoice as Stripe.Invoice).subscription;
