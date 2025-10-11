@@ -137,4 +137,31 @@ describe('createSalesforceSvc', () => {
       { allOrNone: true },
     );
   });
+
+  it('leaves existing Salesforce lookups untouched when metadata omits them', async () => {
+    const { upsert, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.contact__c = undefined;
+    dto.account__c = undefined;
+    dto.campaign__c = undefined;
+    dto.fund__c = undefined;
+    dto.designation__c = undefined;
+    dto.restriction__c = undefined;
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    const [, records] = upsert.mock.calls[0];
+    expect(records[0]).not.toHaveProperty('Contact__c');
+    expect(records[0]).not.toHaveProperty('Account__c');
+    expect(records[0]).not.toHaveProperty('Campaign__c');
+    expect(records[0]).not.toHaveProperty('Fund__c');
+    expect(records[0]).not.toHaveProperty('Designation__c');
+    expect(records[0]).not.toHaveProperty('Restriction__c');
+  });
 });

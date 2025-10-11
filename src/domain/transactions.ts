@@ -520,6 +520,43 @@ export const mapStripeToTransaction = (
     ...toMetadataRecord(charge?.metadata ?? null),
   };
 
+  const contactId = parseMetadataString(
+    combinedMetadata,
+    'contact__c',
+    'Contact__c',
+    'contact',
+  );
+  const accountId = parseMetadataString(
+    combinedMetadata,
+    'account__c',
+    'Account__c',
+    'account',
+  );
+  const campaignId = parseMetadataString(
+    combinedMetadata,
+    'campaign__c',
+    'Campaign__c',
+    'campaign',
+  );
+  const fundId = parseMetadataString(
+    combinedMetadata,
+    'fund__c',
+    'Fund__c',
+    'fund',
+  );
+  const designationId = parseMetadataString(
+    combinedMetadata,
+    'designation__c',
+    'Designation__c',
+    'designation',
+  );
+  const restrictionId = parseMetadataString(
+    combinedMetadata,
+    'restriction__c',
+    'Restriction__c',
+    'restriction',
+  );
+
   const transactionCandidate: TransactionUpsertDTO = {
     transaction_type__c: deriveTransactionType(charge, balanceTransaction),
     status__c: deriveStatus(paymentIntent, charge),
@@ -551,22 +588,6 @@ export const mapStripeToTransaction = (
     currency_iso_code__c:
       deriveCurrency(paymentIntent, charge, balanceTransaction) ||
       parseMetadataString(combinedMetadata, 'currency_iso_code__c', 'Currency_ISO_Code__c', 'currency'),
-    contact__c: parseMetadataString(combinedMetadata, 'contact__c', 'Contact__c', 'contact'),
-    account__c: parseMetadataString(combinedMetadata, 'account__c', 'Account__c', 'account'),
-    campaign__c: parseMetadataString(combinedMetadata, 'campaign__c', 'Campaign__c', 'campaign'),
-    fund__c: parseMetadataString(combinedMetadata, 'fund__c', 'Fund__c', 'fund'),
-    designation__c: parseMetadataString(
-      combinedMetadata,
-      'designation__c',
-      'Designation__c',
-      'designation',
-    ),
-    restriction__c: parseMetadataString(
-      combinedMetadata,
-      'restriction__c',
-      'Restriction__c',
-      'restriction',
-    ),
     frequency__c: parseMetadataString(combinedMetadata, 'frequency__c', 'Frequency__c', 'frequency'),
     attribution__c: parseMetadataString(
       combinedMetadata,
@@ -620,6 +641,12 @@ export const mapStripeToTransaction = (
       'Posting_Error__c',
       'posting_error',
     ),
+    ...(contactId !== null ? { contact__c: contactId } : {}),
+    ...(accountId !== null ? { account__c: accountId } : {}),
+    ...(campaignId !== null ? { campaign__c: campaignId } : {}),
+    ...(fundId !== null ? { fund__c: fundId } : {}),
+    ...(designationId !== null ? { designation__c: designationId } : {}),
+    ...(restrictionId !== null ? { restriction__c: restrictionId } : {}),
   };
 
   return transactionUpsertSchema.parse(transactionCandidate);
