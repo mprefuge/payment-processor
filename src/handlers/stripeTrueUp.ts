@@ -307,6 +307,46 @@ const ensureStripeBalanceTransaction = (
   return value;
 };
 
+const extractStripeId = (value: unknown): string | null => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'object' && value !== null && 'id' in (value as Record<string, unknown>)) {
+    const idValue = (value as Record<string, unknown>).id;
+    return typeof idValue === 'string' ? idValue : null;
+  }
+
+  return null;
+};
+
+const resolveCustomerForCharge = async (
+  stripe: Stripe,
+  charge: Stripe.Charge,
+  logger: (...args: unknown[]) => void,
+): Promise<(Stripe.Customer | Stripe.DeletedCustomer) | null> => {
+  const customerId = extractStripeId(charge.customer);
+  if (!customerId) {
+    return null;
+  }
+
+  try {
+    const customer = await stripe.customers.retrieve(customerId);
+    return customer as Stripe.Customer | Stripe.DeletedCustomer;
+  } catch (error) {
+    logger('[StripeTrueUp] Failed to retrieve Stripe customer', {
+      chargeId: charge.id,
+      customerId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
+
 const processPayments = async (
   context: HttpContext,
   stripe: Stripe,
@@ -370,6 +410,12 @@ const processPayments = async (
         );
         summary.salesforceUpdates += 1;
 
+        const stripeCustomer = await resolveCustomerForCharge(
+          stripe,
+          charge as Stripe.Charge,
+          context.log,
+        );
+
         const posting = await dependencies.accounting.postChargeToQbo({
           gross: Math.abs(balanceTransaction.amount ?? 0),
           fee: Math.abs(balanceTransaction.fee ?? 0),
@@ -377,6 +423,11 @@ const processPayments = async (
           date: timestampToDate(
             balanceTransaction.available_on ?? balanceTransaction.created ?? null,
           ),
+          stripe: {
+            charge: charge as Stripe.Charge,
+            paymentIntent: null,
+            customer: stripeCustomer,
+          },
         });
         summary.qboPosts += 1;
 
