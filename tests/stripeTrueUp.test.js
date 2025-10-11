@@ -26,7 +26,11 @@ async function runDryRunTest() {
 
         setDependencies({
             stripe: {
-                getClient: () => ({}),
+                getClient: () => ({
+                    customers: {
+                        retrieve: async () => ({ id: 'cus_test', name: 'Donor Example' }),
+                    },
+                }),
             },
             fetchers: {
                 payments: async () => [

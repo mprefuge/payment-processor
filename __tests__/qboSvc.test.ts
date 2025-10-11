@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import type Stripe from 'stripe';
 
 type RequestRecord = { url: string; init: any };
 
@@ -134,6 +135,45 @@ const createFetchMock = (...payloads: unknown[]) => {
   return { fetcher, requests };
 };
 
+const createStripeCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge => {
+  const base: Partial<Stripe.Charge> = {
+    id: 'ch_test',
+    billing_details: {
+      name: 'Donor Example',
+      email: 'donor@example.com',
+      phone: '555-0100',
+      address: {
+        line1: '123 Donation Ave',
+        line2: 'Suite 100',
+        city: 'Givington',
+        state: 'CA',
+        postal_code: '94105',
+        country: 'US',
+      },
+    },
+    shipping: {
+      name: 'Donor Example',
+      phone: '555-0100',
+      address: {
+        line1: '123 Donation Ave',
+        line2: 'Suite 100',
+        city: 'Givington',
+        state: 'CA',
+        postal_code: '94105',
+        country: 'US',
+      },
+    },
+  };
+
+  return { ...base, ...overrides } as Stripe.Charge;
+};
+
+const buildStripeContext = (chargeOverrides: Partial<Stripe.Charge> = {}) => ({
+  charge: createStripeCharge(chargeOverrides),
+  paymentIntent: null,
+  customer: null,
+});
+
 afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
@@ -145,6 +185,9 @@ describe('postChargeToQbo', () => {
   it('posts sales receipt to clearing account and creates fee journal entry when using sales receipt strategy', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } },
       { SalesReceipt: { Id: 'sr-1' } },
       { JournalEntry: { Id: 'fee-je-1' } },
     );
@@ -155,16 +198,37 @@ describe('postChargeToQbo', () => {
       fee: 325,
       memo: 'Charge memo',
       date: new Date('2024-03-01'),
+      stripe: buildStripeContext(),
       options: { fetcher, accessToken: 'token' },
     });
 
     expect(result).toEqual({ qboId: 'sr-1', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    const [salesReceiptRequest, feeJournalRequest] = requests;
-    expect(salesReceiptRequest.url).toContain('salesreceipt');
-    expect(feeJournalRequest.url).toContain('journalentry');
+    expect(fetcher).toHaveBeenCalledTimes(5);
 
-    const salesReceiptBody = JSON.parse((salesReceiptRequest.init?.body ?? '{}') as string);
+    const [emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
+    expect(emailLookupRequest.url).toContain('/query?query=');
+    expect(nameLookupRequest.url).toContain('/query?query=');
+    expect(customerCreateRequest.url).toContain('/customer');
+    expect(customerCreateRequest.init?.method).toBe('POST');
+
+    const customerBody = JSON.parse((customerCreateRequest.init?.body ?? '{}') as string);
+    expect(customerBody).toMatchObject({
+      DisplayName: 'Donor Example',
+      PrimaryEmailAddr: { Address: 'donor@example.com' },
+      BillAddr: expect.objectContaining({ Line1: '123 Donation Ave', City: 'Givington' }),
+    });
+
+    const salesReceiptRequest = requests.find((request) =>
+      request.url.includes('salesreceipt'),
+    );
+    const feeJournalRequest = requests.find((request) =>
+      request.url.includes('journalentry'),
+    );
+
+    expect(salesReceiptRequest).toBeDefined();
+    expect(feeJournalRequest).toBeDefined();
+
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
       value: 'QBO_ACCOUNT_STRIPE_CLEARING',
       name: 'Stripe Clearing',
@@ -173,8 +237,22 @@ describe('postChargeToQbo', () => {
       value: 'QBO_ITEM_REVENUE',
       name: 'Stripe Sales Item',
     });
+    expect(salesReceiptBody.CustomerRef).toMatchObject({
+      value: 'cust-1',
+      name: 'Donor Example',
+    });
+    expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
+    expect(salesReceiptBody.BillAddr).toMatchObject({
+      Line1: '123 Donation Ave',
+      City: 'Givington',
+      PostalCode: '94105',
+    });
+    expect(salesReceiptBody.ShipAddr).toMatchObject({
+      Line1: '123 Donation Ave',
+      City: 'Givington',
+    });
 
-    const feeJournalBody = JSON.parse((feeJournalRequest.init?.body ?? '{}') as string);
+    const feeJournalBody = JSON.parse((feeJournalRequest?.init?.body ?? '{}') as string);
     const feeLines = feeJournalBody.Line.map((line: any) => ({
       type: line.JournalEntryLineDetail.PostingType,
       accountRef: line.JournalEntryLineDetail.AccountRef,
@@ -219,6 +297,9 @@ describe('postChargeToQbo', () => {
     };
 
     const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-2', DisplayName: 'Donor Example' } },
       {
         ok: false,
         status: 400,
@@ -239,19 +320,25 @@ describe('postChargeToQbo', () => {
       fee: 0,
       memo: 'Charge memo',
       date: new Date('2024-04-01'),
+      stripe: buildStripeContext(),
       options: { fetcher, accessToken: 'token' },
     });
 
     expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(6);
 
-    const [initialPost, itemLookup, retryPost] = requests;
-    expect(initialPost.url).toContain('salesreceipt');
-    expect(itemLookup.url).toContain('/query');
-    expect(retryPost.url).toContain('salesreceipt');
+    const salesReceiptRequests = requests.filter((request) =>
+      request.url.includes('salesreceipt'),
+    );
+    expect(salesReceiptRequests).toHaveLength(2);
+    const [initialPost, retryPost] = salesReceiptRequests;
+    const itemLookup = requests.find(
+      (request) => request.url.includes('/query') && request !== requests[0] && request !== requests[1],
+    );
+    expect(itemLookup?.url).toContain('/query');
 
-    const initialBody = JSON.parse((initialPost.init?.body ?? '{}') as string);
-    const retryBody = JSON.parse((retryPost.init?.body ?? '{}') as string);
+    const initialBody = JSON.parse((initialPost?.init?.body ?? '{}') as string);
+    const retryBody = JSON.parse((retryPost?.init?.body ?? '{}') as string);
 
     expect(initialBody.Line[0].SalesItemLineDetail.ItemRef.value).toBe('STALE_ID');
     expect(retryBody.Line[0].SalesItemLineDetail.ItemRef.value).toBe('QBO_ITEM_REVENUE');
@@ -319,6 +406,9 @@ describe('postChargeToQbo', () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
     const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-3', DisplayName: 'Donor Example' } },
       {
         QueryResponse: {
           Account: [{ Id: '999', Name: 'Stripe Clearing' }],
@@ -334,15 +424,27 @@ describe('postChargeToQbo', () => {
       fee: 325,
       memo: 'Lookup memo',
       date: new Date('2024-05-01'),
+      stripe: buildStripeContext(),
       options: { fetcher, accessToken: 'token' },
     });
 
     expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(3);
-    expect(requests[0].url).toContain('/query?query=');
-    expect(requests[0].init?.method).toBe('GET');
+    expect(fetcher).toHaveBeenCalledTimes(6);
 
-    const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    const accountLookupRequest = requests.find(
+      (request) => request.url.includes('/query?query=') && request !== requests[0] && request !== requests[1],
+    );
+    expect(accountLookupRequest?.url).toContain('/query?query=');
+    expect(accountLookupRequest?.init?.method).toBe('GET');
+
+    const salesReceiptRequest = requests.find((request) =>
+      request.url.includes('salesreceipt'),
+    );
+    const journalRequest = requests.find((request) =>
+      request.url.includes('journalentry'),
+    );
+
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
       value: '999',
       name: 'Stripe Clearing',
@@ -352,7 +454,7 @@ describe('postChargeToQbo', () => {
       name: 'Stripe Sales Item',
     });
 
-    const journalBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
+    const journalBody = JSON.parse((journalRequest?.init?.body ?? '{}') as string);
     const clearingLine = journalBody.Line.find(
       (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing',
     );
@@ -363,6 +465,9 @@ describe('postChargeToQbo', () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     baseEnv.quickBooks.items.revenue = 'Stripe Sales Item';
     const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-4', DisplayName: 'Donor Example' } },
       {
         QueryResponse: {
           Item: [{ Id: '123', Name: 'Stripe Sales Item' }],
@@ -378,15 +483,23 @@ describe('postChargeToQbo', () => {
       fee: 300,
       memo: 'Item lookup memo',
       date: new Date('2024-06-01'),
+      stripe: buildStripeContext(),
       options: { fetcher, accessToken: 'token' },
     });
 
     expect(result).toEqual({ qboId: 'sr-3', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(3);
-    expect(requests[0].url).toContain('/query?query=');
-    expect(requests[0].init?.method).toBe('GET');
+    expect(fetcher).toHaveBeenCalledTimes(6);
 
-    const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    const itemLookupRequest = requests.find(
+      (request) => request.url.includes('/query?query=') && request !== requests[0] && request !== requests[1],
+    );
+    expect(itemLookupRequest?.url).toContain('/query?query=');
+    expect(itemLookupRequest?.init?.method).toBe('GET');
+
+    const salesReceiptRequest = requests.find((request) =>
+      request.url.includes('salesreceipt'),
+    );
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
       value: '123',
       name: 'Stripe Sales Item',
@@ -395,7 +508,12 @@ describe('postChargeToQbo', () => {
 
   it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
-    const { fetcher } = createFetchMock({ QueryResponse: { Account: [] } });
+    const { fetcher } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-err', DisplayName: 'Donor Example' } },
+      { QueryResponse: { Account: [] } },
+    );
     const { postChargeToQbo } = await importQboSvc();
 
     await expect(
@@ -404,6 +522,7 @@ describe('postChargeToQbo', () => {
         fee: 0,
         memo: 'Missing ID',
         date: new Date('2024-04-01'),
+        stripe: buildStripeContext(),
         options: { fetcher, accessToken: 'token' },
       }),
     ).rejects.toThrow(/could not be found/i);

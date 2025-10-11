@@ -179,6 +179,13 @@ describe('stripeWebhook', () => {
       charges: {
         retrieve: vi.fn(),
       },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'cus_123',
+          name: 'Donor Example',
+          email: 'donor@example.com',
+        }),
+      },
       checkout: {
         sessions: {
           list: vi.fn().mockResolvedValue({
@@ -239,7 +246,16 @@ describe('stripeWebhook', () => {
       { overrideId: 'sf_existing' },
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalledWith(
-      expect.objectContaining({ gross: 1_000, fee: 100 }),
+      expect.objectContaining({
+        gross: 1_000,
+        fee: 100,
+        stripe: expect.objectContaining({
+          charge: expect.objectContaining({ id: 'ch_test' }),
+          paymentIntent: expect.objectContaining({ id: 'pi_test' }),
+          customer: expect.objectContaining({ id: 'cus_123' }),
+          checkoutSession: expect.objectContaining({ id: 'cs_test' }),
+        }),
+      }),
     );
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_1', {
       id: '123',

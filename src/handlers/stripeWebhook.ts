@@ -345,6 +345,32 @@ const resolveBalanceTransaction = async (
   return null;
 };
 
+const resolveStripeCustomer = async (
+  stripe: Stripe,
+  charge: Stripe.Charge | null,
+  paymentIntent: Stripe.PaymentIntent | null,
+  logger: (...args: unknown[]) => void,
+): Promise<(Stripe.Customer | Stripe.DeletedCustomer) | null> => {
+  const customerId =
+    normalizeStripeId(charge?.customer) ||
+    normalizeStripeId(paymentIntent?.customer);
+
+  if (!customerId) {
+    return null;
+  }
+
+  try {
+    const customer = await stripe.customers.retrieve(customerId);
+    return customer as Stripe.Customer | Stripe.DeletedCustomer;
+  } catch (error) {
+    logger('[StripeWebhook] Failed to retrieve Stripe customer', {
+      customerId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
+
 const findCheckoutSessionForPaymentIntent = async (
   stripe: Stripe,
   paymentIntentId: string | null | undefined,
@@ -504,6 +530,13 @@ const handlePaymentIntentSucceeded = async (
   await deps.idempotencyStore.withLock(
     `bt_${balanceTransactionId}`,
     async () => {
+      const stripeCustomer = await resolveStripeCustomer(
+        stripe,
+        charge,
+        paymentIntent,
+        context.log,
+      );
+
       const posting = await deps.accounting.postChargeToQbo({
         gross: Math.abs(balanceTransaction.amount ?? 0),
         fee: Math.abs(balanceTransaction.fee ?? 0),
@@ -511,6 +544,12 @@ const handlePaymentIntentSucceeded = async (
         date: timestampToDate(
           balanceTransaction.available_on ?? balanceTransaction.created ?? null,
         ),
+        stripe: {
+          charge: charge ?? undefined,
+          paymentIntent,
+          customer: stripeCustomer,
+          checkoutSession: checkoutSession ?? undefined,
+        },
       });
 
       await markPosted(salesforce, upsertResult, posting);
