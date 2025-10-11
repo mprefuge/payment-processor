@@ -61,6 +61,7 @@ export interface TransactionMetadata {
   amount?: string;
   date?: string;
   id?: string;
+  transactionType?: string;
 }
 
 export function loadConfig(): ContactMatchConfig {
@@ -89,7 +90,7 @@ export function loadConfig(): ContactMatchConfig {
       },
     },
     transaction: {
-      nameTemplate: process.env.TRANSACTION_NAME_TEMPLATE || 'Transaction - {category}',
+      nameTemplate: process.env.TRANSACTION_NAME_TEMPLATE || '{category} - {transactionType}',
       defaultCategory: process.env.TRANSACTION_DEFAULT_CATEGORY || 'Uncategorized',
     },
     review: {
@@ -152,10 +153,16 @@ export function generateTransactionName(
 ): string {
   let name = config.transaction.nameTemplate;
 
-  name = name.replace('{category}', category);
-  name = name.replace('{amount}', metadata.amount || '');
-  name = name.replace('{date}', metadata.date || '');
-  name = name.replace('{id}', metadata.id || '');
+  const transactionType = metadata.transactionType || 'Payment';
+  const amount = metadata.amount || '';
+  const date = metadata.date || '';
+  const id = metadata.id || '';
+
+  name = name.replace(/\{category\}/g, category);
+  name = name.replace(/\{transactionType\}/g, transactionType);
+  name = name.replace(/\{amount\}/g, amount);
+  name = name.replace(/\{date\}/g, date);
+  name = name.replace(/\{id\}/g, id);
 
   return name;
 }

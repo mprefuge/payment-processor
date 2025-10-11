@@ -385,13 +385,14 @@ class SalesforceCrmService extends BaseCrmService {
 
         const {
             amount,
-            currency = 'USD', 
+            currency = 'USD',
             paymentMethod = 'Credit Card',
             transactionId,
             status = 'Completed',
             description,
             frequency,
             category,
+            transactionType,
             name, // New field for proper transaction naming
             sessionId // New field for checkout session ID
         } = transactionData;
@@ -400,7 +401,10 @@ class SalesforceCrmService extends BaseCrmService {
         // If it fails, fall back to creating an Opportunity
         try {
             const transactionRecord = {
-                Name: name || description || `Transaction - ${category || 'Uncategorized'}`, // Add Name field
+                Name:
+                    name ||
+                    description ||
+                    `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`, // Add Name field
                 Contact__c: contactId, // Assuming custom lookup field
                 Amount__c: amount / 100, // Convert cents to dollars
                 Currency__c: currency,
@@ -479,11 +483,12 @@ class SalesforceCrmService extends BaseCrmService {
      */
     async createOpportunityAsTransaction(contactId, transactionData) {
         const { 
-            amount, 
+            amount,
             transactionId,
             description,
             frequency,
             category,
+            transactionType,
             name, // New field for proper transaction naming
             sessionId, // New field for checkout session ID
             status = 'Completed'
@@ -507,7 +512,10 @@ class SalesforceCrmService extends BaseCrmService {
         }
 
         const opportunityRecord = {
-            Name: name || description || `Transaction - ${category || 'Uncategorized'}`, // Use new naming format
+            Name:
+                name ||
+                description ||
+                `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`, // Use new naming format
             ContactId: contactId,
             Amount: amount / 100, // Convert cents to dollars
             StageName: stageName,
