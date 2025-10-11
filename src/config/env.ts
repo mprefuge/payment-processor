@@ -30,6 +30,9 @@ export interface EnvConfig {
       refunds: string;
       disputeLosses: string;
     };
+    items?: {
+      revenue?: string;
+    };
   };
   accounting: {
     postingStrategy: AccountingPostingStrategy;
@@ -193,6 +196,11 @@ function loadEnv(): EnvConfig {
           defaultValue: 'Dispute Losses',
         }) ?? 'Dispute Losses',
     },
+    items: {
+      revenue: resolveEnv('QBO_ITEM_REVENUE', {
+        fallbackNames: ['ACCOUNTING_REVENUE_ITEM'],
+      }),
+    },
   };
 
   const quickBooksSchema = z.object({
@@ -209,6 +217,11 @@ function loadEnv(): EnvConfig {
       refunds: z.string().min(1),
       disputeLosses: z.string().min(1),
     }),
+    items: z
+      .object({
+        revenue: z.string().min(1).optional(),
+      })
+      .optional(),
   });
 
   const quickBooks = quickBooksSchema.parse(quickBooksRaw);
@@ -245,6 +258,13 @@ function loadEnv(): EnvConfig {
     }
   }
 
+  if (postingStrategy.success && postingStrategy.data === 'sales-receipt') {
+    const revenueItem = quickBooks.items?.revenue?.trim();
+    if (!revenueItem) {
+      missing.push('QBO_ITEM_REVENUE');
+    }
+  }
+
   const appInsightsInstrumentationKey = resolveEnv('APPINSIGHTS_INSTRUMENTATIONKEY', {
     fallbackNames: ['APPINSIGHTS_INSTRUMENTATION_KEY'],
   });
@@ -278,6 +298,7 @@ function loadEnv(): EnvConfig {
       clientSecret: quickBooks.clientSecret,
       refreshToken: quickBooks.refreshToken,
       accounts: quickBooks.accounts,
+      items: quickBooks.items,
     },
     accounting: {
       postingStrategy: (postingStrategy.success

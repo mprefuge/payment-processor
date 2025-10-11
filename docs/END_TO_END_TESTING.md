@@ -50,6 +50,7 @@ that mirror those tenants.
 | `QBO_REFRESH_TOKEN` | Refresh token paired with the access token. |
 | `QBO_REALM_ID` | QuickBooks company id. |
 | `QBO_ENV` | `sandbox` or `production`. |
+| `QBO_ITEM_REVENUE` | QuickBooks product/service item ID used for sales receipts. |
 | `AZURE_TABLES_CONNECTION_STRING` | Backing store for webhook idempotency keys. |
 
 > ⚠️ **Important:** The script refuses to run if any of the variables above are

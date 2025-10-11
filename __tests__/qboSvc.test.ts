@@ -11,6 +11,10 @@ const defaultAccounts = {
   disputeLosses: 'Dispute Losses|QBO_ACCOUNT_DISPUTE_LOSSES',
 };
 
+const defaultItems = {
+  revenue: 'Stripe Sales Item|QBO_ITEM_REVENUE',
+};
+
 const baseEnv = {
   quickBooks: {
     environment: 'sandbox',
@@ -19,6 +23,7 @@ const baseEnv = {
     clientSecret: 'secret',
     refreshToken: 'refresh',
     accounts: { ...defaultAccounts },
+    items: { ...defaultItems },
   },
   accounting: {
     postingStrategy: 'sales-receipt',
@@ -34,6 +39,7 @@ const importQboSvc = async () => {
 
 const resetAccounts = () => {
   Object.assign(baseEnv.quickBooks.accounts, defaultAccounts);
+  Object.assign(baseEnv.quickBooks.items, defaultItems);
 };
 
 const resetTokens = () => {
@@ -163,6 +169,10 @@ describe('postChargeToQbo', () => {
       value: 'QBO_ACCOUNT_STRIPE_CLEARING',
       name: 'Stripe Clearing',
     });
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: 'QBO_ITEM_REVENUE',
+      name: 'Stripe Sales Item',
+    });
 
     const feeJournalBody = JSON.parse((feeJournalRequest.init?.body ?? '{}') as string);
     const feeLines = feeJournalBody.Line.map((line: any) => ({
@@ -280,12 +290,50 @@ describe('postChargeToQbo', () => {
       value: '999',
       name: 'Stripe Clearing',
     });
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: 'QBO_ITEM_REVENUE',
+      name: 'Stripe Sales Item',
+    });
 
     const journalBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
     const clearingLine = journalBody.Line.find(
       (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing',
     );
     expect(clearingLine?.JournalEntryLineDetail.AccountRef.value).toBe('999');
+  });
+
+  it('looks up item IDs when configuration only provides a name', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.quickBooks.items.revenue = 'Stripe Sales Item';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Item: [{ Id: '123', Name: 'Stripe Sales Item' }],
+        },
+      },
+      { SalesReceipt: { Id: 'sr-3' } },
+      { JournalEntry: { Id: 'fee-je-3' } },
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 8_000,
+      fee: 300,
+      memo: 'Item lookup memo',
+      date: new Date('2024-06-01'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-3', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(requests[0].url).toContain('/query?query=');
+    expect(requests[0].init?.method).toBe('GET');
+
+    const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: '123',
+      name: 'Stripe Sales Item',
+    });
   });
 
   it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {

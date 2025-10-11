@@ -31,6 +31,7 @@
     "QBO_ACCOUNT_STRIPE_CLEARING": "Stripe Clearing|123",
     "QBO_ACCOUNT_OPERATING_BANK": "Operating Bank|456",
     "QBO_ACCOUNT_REVENUE": "Revenue|789",
+    "QBO_ITEM_REVENUE": "Stripe Sales Item|987",
     "QBO_ACCOUNT_FEES": "Stripe Fees|321",
     "ACCOUNTING_POSTING_STRATEGY": "je-transfer",
     "ACCOUNTING_SYNC_ENABLED": "false",
