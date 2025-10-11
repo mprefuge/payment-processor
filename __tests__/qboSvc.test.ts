@@ -162,6 +162,17 @@ const createStripeCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Char
   return { ...base, ...overrides } as Stripe.Charge;
 };
 
+const createStripeCustomer = (overrides: Partial<Stripe.Customer> = {}): Stripe.Customer => {
+  const base: Partial<Stripe.Customer> = {
+    id: 'cus_test',
+    name: 'Donor Example',
+    email: 'donor@example.com',
+    phone: '555-0100',
+  };
+
+  return { ...base, ...overrides } as Stripe.Customer;
+};
+
 const createCheckoutSession = (
   overrides: Partial<Stripe.Checkout.Session> = {},
 ): Stripe.Checkout.Session => {
@@ -200,10 +211,11 @@ const createCheckoutSession = (
 const buildStripeContext = (
   chargeOverrides: Partial<Stripe.Charge> = {},
   checkoutOverrides: Partial<Stripe.Checkout.Session> = {},
+  customer?: Stripe.Customer | null,
 ) => ({
   charge: createStripeCharge(chargeOverrides),
   paymentIntent: null,
-  customer: null,
+  customer: customer ?? null,
   checkoutSession: createCheckoutSession(checkoutOverrides),
 });
 
@@ -401,6 +413,97 @@ describe('postChargeToQbo', () => {
       name: 'Donor Example',
     });
     expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
+  });
+
+  it('prefers the Stripe customer name over billing details when refreshing QuickBooks customers', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Customer: [
+            {
+              Id: 'cust-2',
+              DisplayName: 'Legacy Name',
+              PrimaryEmailAddr: { Address: 'member@example.com' },
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-2',
+          DisplayName: 'Legacy Name',
+          SyncToken: '3',
+          PrimaryEmailAddr: { Address: 'member@example.com' },
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-2',
+          DisplayName: 'Member Stripe',
+          SyncToken: '4',
+          PrimaryEmailAddr: { Address: 'member@example.com' },
+        },
+      },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { SalesReceipt: { Id: 'sr-4' } },
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const stripeCustomer = createStripeCustomer({
+      id: 'cus_member',
+      name: 'Member Stripe',
+      email: 'member@example.com',
+      phone: '555-4242',
+    });
+
+    const result = await postChargeToQbo({
+      gross: 12_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-07-01'),
+      stripe: buildStripeContext(
+        {
+          billing_details: {
+            name: 'Card Holder Name',
+            email: 'member@example.com',
+            phone: '555-0000',
+            address: {
+              line1: '321 Legacy Ln',
+              city: 'History',
+              state: 'CA',
+              postal_code: '90001',
+              country: 'US',
+            },
+          },
+        },
+        {},
+        stripeCustomer,
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-4', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(5);
+
+    const [, , customerUpdate, , salesReceiptPost] = requests;
+    const updateBody = JSON.parse((customerUpdate.init?.body ?? '{}') as string);
+    expect(updateBody).toMatchObject({
+      DisplayName: 'Member Stripe',
+      PrimaryEmailAddr: { Address: 'member@example.com' },
+      sparse: true,
+    });
+
+    const salesReceiptBody = JSON.parse((salesReceiptPost.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.CustomerRef).toMatchObject({
+      value: 'cust-2',
+      name: 'Member Stripe',
+    });
   });
 
   it('retries sales receipt with looked up item id when QuickBooks rejects provided item reference', async () => {

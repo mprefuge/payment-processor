@@ -542,7 +542,7 @@ const handlePaymentIntentSucceeded = async (
         fee: Math.abs(balanceTransaction.fee ?? 0),
         memo: `Stripe charge ${charge?.id || paymentIntent.id}`,
         date: timestampToDate(
-          balanceTransaction.available_on ?? balanceTransaction.created ?? null,
+          balanceTransaction.created ?? balanceTransaction.available_on ?? null,
         ),
         stripe: {
           charge: charge ?? undefined,
@@ -641,7 +641,7 @@ const handleChargeRefunded = async (
         amount,
         memo: `Stripe refund ${refund.id} (charge ${charge.id})`,
         date: timestampToDate(
-          balanceTransaction.available_on ?? balanceTransaction.created ?? null,
+          balanceTransaction.created ?? balanceTransaction.available_on ?? null,
         ),
       });
 
@@ -776,8 +776,8 @@ const handleDisputeClosed = async (
       feeAmount: feeAmountCents,
       memo: `Stripe dispute ${dispute.id} (charge ${chargeId || '-'})`,
       date: timestampToDate(
-        primaryBalanceTransaction?.available_on ??
-          primaryBalanceTransaction?.created ??
+        primaryBalanceTransaction?.created ??
+          primaryBalanceTransaction?.available_on ??
           dispute.created ??
           null,
       ),

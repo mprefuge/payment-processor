@@ -429,11 +429,11 @@ const deriveSalesReceiptCustomer = (
     ) ?? null;
 
   const preferredName =
-    toTrimmed(billingDetails?.name) ||
+    toTrimmed(activeCustomer?.name) ||
+    toTrimmed(checkoutDetails?.name) ||
     toTrimmed(paymentShipping?.name) ||
     toTrimmed(chargeShipping?.name) ||
-    toTrimmed(activeCustomer?.name) ||
-    toTrimmed(checkoutDetails?.name);
+    toTrimmed(billingDetails?.name);
 
   const email =
     normalizeEmail(billingDetails?.email) ||

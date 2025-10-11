@@ -421,7 +421,9 @@ const processPayments = async (
           fee: Math.abs(balanceTransaction.fee ?? 0),
           memo: `Stripe charge ${charge.id}`,
           date: timestampToDate(
-            balanceTransaction.available_on ?? balanceTransaction.created ?? null,
+            balanceTransaction.created ??
+              balanceTransaction.available_on ??
+              null,
           ),
           stripe: {
             charge: charge as Stripe.Charge,
@@ -539,7 +541,9 @@ const processRefunds = async (
           amount: Math.abs(balanceTransaction.amount ?? 0),
           memo: `Stripe refund ${refund.id}`,
           date: timestampToDate(
-            balanceTransaction.available_on ?? balanceTransaction.created ?? null,
+            balanceTransaction.created ??
+              balanceTransaction.available_on ??
+              null,
           ),
         });
         summary.qboPosts += 1;
@@ -628,7 +632,11 @@ const processPayouts = async (
         const posting = await dependencies.accounting.postPayoutToQbo({
           amount: Math.abs(payout.amount ?? 0),
           memo: `Stripe payout ${payout.id}`,
-          date: timestampToDate(payout.arrival_date ?? payout.created ?? null),
+          date: timestampToDate(
+            payout.created ??
+              payout.arrival_date ??
+              null,
+          ),
         });
         summary.qboPosts += 1;
 

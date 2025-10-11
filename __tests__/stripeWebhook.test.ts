@@ -257,6 +257,11 @@ describe('stripeWebhook', () => {
         }),
       }),
     );
+    const chargePostingArgs = accounting.postChargeToQbo.mock.calls[0]?.[0];
+    expect(chargePostingArgs?.date).toBeInstanceOf(Date);
+    expect(chargePostingArgs?.date?.toISOString()).toBe(
+      new Date(1_700_000_000_000).toISOString(),
+    );
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_1', {
       id: '123',
       type: 'journal-entry',
