@@ -24,6 +24,7 @@ interface QuickBooksReference {
 type AccountRefLookupMetadata = {
   original: string;
   lookupName: string;
+  resolved: boolean;
 };
 
 const ACCOUNT_LOOKUP_METADATA: unique symbol = Symbol('QuickBooksAccountLookup');
@@ -35,6 +36,7 @@ type AccountRefWithMetadata = QuickBooksReference & {
 type ItemRefLookupMetadata = {
   original: string;
   lookupName: string;
+  resolved: boolean;
 };
 
 const ITEM_LOOKUP_METADATA: unique symbol = Symbol('QuickBooksItemLookup');
@@ -226,7 +228,7 @@ const parseDelimitedReference = (
   raw: string,
   delimiter: string,
   type: ReferenceType,
-): QuickBooksReference | null => {
+): { reference: QuickBooksReference; lookupName?: string } | null => {
   const index = raw.indexOf(delimiter);
   if (index === -1) {
     return null;
@@ -245,13 +247,13 @@ const parseDelimitedReference = (
     name: left || undefined,
   };
 
-  return reference;
+  return { reference, lookupName: left || undefined };
 };
 
 const parseReferenceInput = (
   input: string,
   type: ReferenceType,
-): { reference: QuickBooksReference; lookupName?: string } => {
+): { reference: QuickBooksReference; lookupName?: string; hasExplicitId: boolean } => {
   const trimmed = input.trim();
   if (!trimmed) {
     throw new Error(`QuickBooks ${type} reference must be provided.`);
@@ -272,7 +274,7 @@ const parseReferenceInput = (
         input,
         type,
       );
-      return { reference };
+      return { reference, lookupName: name, hasExplicitId: true };
     } catch (error) {
       throw new Error(
         error instanceof Error
@@ -287,7 +289,9 @@ const parseReferenceInput = (
     const parsed = parseDelimitedReference(trimmed, delimiter, type);
     if (parsed) {
       return {
-        reference: ensureReferenceValue(parsed, input, type),
+        reference: ensureReferenceValue(parsed.reference, input, type),
+        lookupName: parsed.lookupName,
+        hasExplicitId: true,
       };
     }
   }
@@ -296,6 +300,7 @@ const parseReferenceInput = (
   if (isNumericId) {
     return {
       reference: ensureReferenceValue({ value: trimmed }, input, type),
+      hasExplicitId: true,
     };
   }
 
@@ -304,17 +309,21 @@ const parseReferenceInput = (
     input,
     type,
   );
-  return { reference, lookupName: trimmed };
+  return { reference, lookupName: trimmed, hasExplicitId: false };
 };
 
 const createAccountRef = (input: string): AccountRefWithMetadata => {
-  const { reference, lookupName } = parseReferenceInput(input, 'account');
+  const { reference, lookupName, hasExplicitId } = parseReferenceInput(
+    input,
+    'account',
+  );
   const accountRef = reference as AccountRefWithMetadata;
 
   if (lookupName) {
     accountRef[ACCOUNT_LOOKUP_METADATA] = {
       original: input,
       lookupName,
+      resolved: hasExplicitId,
     };
   }
 
@@ -322,13 +331,17 @@ const createAccountRef = (input: string): AccountRefWithMetadata => {
 };
 
 const createItemRef = (input: string): ItemRefWithMetadata => {
-  const { reference, lookupName } = parseReferenceInput(input, 'item');
+  const { reference, lookupName, hasExplicitId } = parseReferenceInput(
+    input,
+    'item',
+  );
   const itemRef = reference as ItemRefWithMetadata;
 
   if (lookupName) {
     itemRef[ITEM_LOOKUP_METADATA] = {
       original: input,
       lookupName,
+      resolved: hasExplicitId,
     };
   }
 
@@ -684,7 +697,8 @@ const getLookupName = (ref: AccountRefWithMetadata): string | undefined => {
 };
 
 const isLookupRequired = (ref: AccountRefWithMetadata): boolean => {
-  return Boolean(ref[ACCOUNT_LOOKUP_METADATA]);
+  const metadata = ref[ACCOUNT_LOOKUP_METADATA];
+  return Boolean(metadata && metadata.resolved === false);
 };
 
 const resolveAccountId = async (
@@ -851,7 +865,10 @@ const resolveAccountReferences = async (
       if (!ref.name) {
         ref.name = name;
       }
-      delete ref[ACCOUNT_LOOKUP_METADATA];
+      const metadata = ref[ACCOUNT_LOOKUP_METADATA];
+      if (metadata) {
+        metadata.resolved = true;
+      }
     }
   }
 };
@@ -872,7 +889,8 @@ const getItemLookupName = (ref: ItemRefWithMetadata): string | undefined => {
 };
 
 const isItemLookupRequired = (ref: ItemRefWithMetadata): boolean => {
-  return Boolean(ref[ITEM_LOOKUP_METADATA]);
+  const metadata = ref[ITEM_LOOKUP_METADATA];
+  return Boolean(metadata && metadata.resolved === false);
 };
 
 const resolveItemId = async (
@@ -985,9 +1003,107 @@ const resolveItemReferences = async (
       if (!ref.name) {
         ref.name = name;
       }
-      delete ref[ITEM_LOOKUP_METADATA];
+      const metadata = ref[ITEM_LOOKUP_METADATA];
+      if (metadata) {
+        metadata.resolved = true;
+      }
     }
   }
+};
+
+type InvalidReferenceTargets = {
+  accounts: boolean;
+  items: boolean;
+};
+
+const parseInvalidReferenceTargets = (
+  errorText: string,
+): InvalidReferenceTargets | null => {
+  const lowerText = errorText.toLowerCase();
+  if (!lowerText.includes('invalid reference')) {
+    return null;
+  }
+
+  let accounts = lowerText.includes('accountref');
+  let items = lowerText.includes('itemref');
+
+  try {
+    const parsed = JSON.parse(errorText);
+    const fault = parsed && typeof parsed === 'object' ? (parsed as any).Fault : undefined;
+    const rawErrors =
+      fault && typeof fault === 'object'
+        ? ((fault as any).Error as unknown)
+        : undefined;
+    const errors = Array.isArray(rawErrors)
+      ? rawErrors
+      : rawErrors
+      ? [rawErrors]
+      : [];
+
+    for (const entry of errors) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+
+      const { Detail, element, Message } = entry as Record<string, unknown>;
+      const fields = [Detail, element, Message];
+
+      for (const field of fields) {
+        if (typeof field !== 'string') {
+          continue;
+        }
+        const lowerField = field.toLowerCase();
+        if (lowerField.includes('accountref')) {
+          accounts = true;
+        }
+        if (lowerField.includes('itemref')) {
+          items = true;
+        }
+      }
+    }
+  } catch (error) {
+    // Ignore JSON parsing issues and rely on the raw text checks above.
+  }
+
+  if (!accounts && !items) {
+    return null;
+  }
+
+  return { accounts, items };
+};
+
+const markAccountReferencesForRetry = (
+  references: AccountRefWithMetadata[],
+): boolean => {
+  let marked = false;
+  for (const ref of references) {
+    const metadata = ref[ACCOUNT_LOOKUP_METADATA];
+    if (!metadata || !metadata.lookupName) {
+      continue;
+    }
+    if (metadata.resolved === false) {
+      continue;
+    }
+    metadata.resolved = false;
+    marked = true;
+  }
+  return marked;
+};
+
+const markItemReferencesForRetry = (references: ItemRefWithMetadata[]): boolean => {
+  let marked = false;
+  for (const ref of references) {
+    const metadata = ref[ITEM_LOOKUP_METADATA];
+    if (!metadata || !metadata.lookupName) {
+      continue;
+    }
+    if (metadata.resolved === false) {
+      continue;
+    }
+    metadata.resolved = false;
+    marked = true;
+  }
+  return marked;
 };
 
 const postToQbo = async <T extends QuickBooksDocType>(
@@ -1012,7 +1128,7 @@ const postToQbo = async <T extends QuickBooksDocType>(
   await resolveAccountReferences(references.accounts, context);
   await resolveItemReferences(references.items, context);
 
-  const response = await context.request(url, {
+  const buildRequestInit = (): RequestInit => ({
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -1021,13 +1137,48 @@ const postToQbo = async <T extends QuickBooksDocType>(
     body: JSON.stringify(payload),
   });
 
+  const executePost = () => context.request(url, buildRequestInit());
+
+  let response = await executePost();
+
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
-    throw new Error(
-      `Failed to post ${entity} to QuickBooks (status ${response.status}): ${
-        errorText ?? response.statusText
-      }`,
-    );
+    const retryTargets = errorText ? parseInvalidReferenceTargets(errorText) : null;
+
+    const accountsMarked = retryTargets?.accounts
+      ? markAccountReferencesForRetry(references.accounts)
+      : false;
+    const itemsMarked = retryTargets?.items
+      ? markItemReferencesForRetry(references.items)
+      : false;
+
+    const shouldRetry = accountsMarked || itemsMarked;
+
+    if (shouldRetry) {
+      if (accountsMarked) {
+        await resolveAccountReferences(references.accounts, context);
+      }
+      if (itemsMarked) {
+        await resolveItemReferences(references.items, context);
+      }
+
+      response = await executePost();
+
+      if (!response.ok) {
+        const retryErrorText = await response.text().catch(() => errorText);
+        throw new Error(
+          `Failed to post ${entity} to QuickBooks (status ${response.status}): ${
+            retryErrorText ?? response.statusText
+          }`,
+        );
+      }
+    } else {
+      throw new Error(
+        `Failed to post ${entity} to QuickBooks (status ${response.status}): ${
+          errorText ?? response.statusText
+        }`,
+      );
+    }
   }
 
   const data = (await response.json().catch(() => undefined)) ?? {};

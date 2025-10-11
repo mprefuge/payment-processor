@@ -200,6 +200,63 @@ describe('postChargeToQbo', () => {
     ]);
   });
 
+  it('retries sales receipt with looked up item id when QuickBooks rejects provided item reference', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.quickBooks.items.revenue = 'Stripe Sales Item|STALE_ID';
+
+    const invalidReferenceResponse = {
+      Fault: {
+        Error: [
+          {
+            Message: 'Invalid Reference Id',
+            Detail: 'Invalid Reference Id : Line.SalesItemLineDetail.ItemRef',
+            code: '2500',
+            element: 'Line.SalesItemLineDetail.ItemRef',
+          },
+        ],
+        type: 'ValidationFault',
+      },
+    };
+
+    const { fetcher, requests } = createFetchMock(
+      {
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify(invalidReferenceResponse),
+      },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { SalesReceipt: { Id: 'sr-2' } },
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-04-01'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+
+    const [initialPost, itemLookup, retryPost] = requests;
+    expect(initialPost.url).toContain('salesreceipt');
+    expect(itemLookup.url).toContain('/query');
+    expect(retryPost.url).toContain('salesreceipt');
+
+    const initialBody = JSON.parse((initialPost.init?.body ?? '{}') as string);
+    const retryBody = JSON.parse((retryPost.init?.body ?? '{}') as string);
+
+    expect(initialBody.Line[0].SalesItemLineDetail.ItemRef.value).toBe('STALE_ID');
+    expect(retryBody.Line[0].SalesItemLineDetail.ItemRef.value).toBe('QBO_ITEM_REVENUE');
+  });
+
   it('posts a single four-line journal entry when using journal entry transfer strategy', async () => {
     baseEnv.accounting.postingStrategy = 'je-transfer';
     const { fetcher, requests } = createFetchMock({ JournalEntry: { Id: 'je-1' } });
