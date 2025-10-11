@@ -31,7 +31,7 @@ jobs:
       - name: Type check
         run: npm run lint
 
-      - name: Run tests
+      - name: Run platform health check
         env:
           ACCOUNTING_POSTING_STRATEGY: ${{ secrets.ACCOUNTING_POSTING_STRATEGY }}
           ACCOUNTING_SYNC_ENABLED: ${{ secrets.ACCOUNTING_SYNC_ENABLED }}
@@ -49,10 +49,11 @@ jobs:
           SALESFORCE_USERNAME: ${{ secrets.SALESFORCE_USERNAME }}
           SALESFORCE_CONTACT_LEAD_SOURCE: ${{ secrets.SALESFORCE_CONTACT_LEAD_SOURCE }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          STRIPE_LIVE_SECRET_KEY: ${{ secrets.STRIPE_LIVE_SECRET_KEY }}
           STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
           SUCCESS_URL: ${{ secrets.SUCCESS_URL }}
-        run: npm test
+        run: npm run health-check
 
       - name: Run end-to-end tests
         if: ${{ vars.RUN_E2E_TESTS == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run-e2e-tests == 'true') }}

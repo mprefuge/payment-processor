@@ -8,7 +8,11 @@ records exist in Salesforce and QuickBooks.
 
 Because the flow uses production-grade services you must run it from a machine
 that has access to the same credentials that power the live environment (or a
-full set of sandbox equivalents).
+full set of sandbox equivalents). When the CI toggle for the end-to-end suite
+is disabled the pipeline instead executes `npm run health-check`, which builds
+the project and invokes the health-check Azure Function handler to confirm that
+the backing services are reachable without creating records in Salesforce or
+QuickBooks.
 
 ## 1. Prerequisite Tooling
 
