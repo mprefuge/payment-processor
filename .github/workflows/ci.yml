@@ -4,6 +4,13 @@ on:
   push:
     branches: [prod]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run-e2e-tests:
+        description: Run the live end-to-end payment flow test
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-and-test:
@@ -46,3 +53,27 @@ jobs:
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
           SUCCESS_URL: ${{ secrets.SUCCESS_URL }}
         run: npm test
+
+      - name: Run end-to-end tests
+        if: ${{ vars.RUN_E2E_TESTS == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run-e2e-tests == 'true') }}
+        env:
+          ACCOUNTING_POSTING_STRATEGY: ${{ secrets.ACCOUNTING_POSTING_STRATEGY }}
+          ACCOUNTING_SYNC_ENABLED: ${{ secrets.ACCOUNTING_SYNC_ENABLED }}
+          AZURE_TABLES_CONNECTION_STRING: ${{ secrets.AZURE_TABLES_CONNECTION_STRING }}
+          CANCEL_URL: ${{ secrets.CANCEL_URL }}
+          CRM_PROVIDER: ${{ secrets.CRM_PROVIDER }}
+          QBO_ACCESS_TOKEN: ${{ secrets.QBO_ACCESS_TOKEN }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          SALESFORCE_PASSWORD: ${{ secrets.SALESFORCE_PASSWORD }}
+          SALESFORCE_SECURITY_TOKEN: ${{ secrets.SALESFORCE_SECURITY_TOKEN }}
+          SALESFORCE_USERNAME: ${{ secrets.SALESFORCE_USERNAME }}
+          SALESFORCE_CONTACT_LEAD_SOURCE: ${{ secrets.SALESFORCE_CONTACT_LEAD_SOURCE }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          SUCCESS_URL: ${{ secrets.SUCCESS_URL }}
+        run: npm run test:e2e

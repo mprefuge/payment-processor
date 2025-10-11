@@ -70,8 +70,13 @@ step must succeed before running the test.
 ## 5. Execute the End-to-End Flow
 
 ```bash
-node tests/endToEndPaymentFlow.test.js
+npm run test:e2e
 ```
+
+The script above compiles the TypeScript sources and then executes
+`tests/endToEndPaymentFlow.test.js`. You can still invoke the Node.js file
+directly if you need custom flags, but the npm script keeps local execution
+consistent with the CI pipeline toggle.
 
 During execution the script:
 
