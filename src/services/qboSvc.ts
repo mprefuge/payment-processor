@@ -163,6 +163,7 @@ interface SalesReceiptCustomerDetails {
 
 interface EnsureCustomerInput {
   displayName: string;
+  preferredDisplayName?: string | null;
   email?: string | null;
   givenName?: string | null;
   familyName?: string | null;
@@ -270,6 +271,12 @@ const truncate = (value: string | null | undefined, length: number): string | nu
   }
 
   return trimmed.length > length ? trimmed.slice(0, length) : trimmed;
+};
+
+const equalsIgnoreCase = (a: string | null | undefined, b: string | null | undefined): boolean => {
+  const left = a?.trim().toLowerCase();
+  const right = b?.trim().toLowerCase();
+  return Boolean(left && right && left === right);
 };
 
 const mapStripeAddress = (
@@ -466,6 +473,7 @@ const deriveSalesReceiptCustomer = (
 
   return {
     displayName: truncate(fallbackName, 99) ?? 'Stripe Customer',
+    preferredDisplayName: truncate(preferredName ?? null, 99),
     email,
     givenName,
     familyName,
@@ -607,6 +615,100 @@ const findCustomerByDisplayName = async (
   );
 };
 
+const fetchQuickBooksCustomer = async (
+  id: string,
+  context: QuickBooksRequestContext,
+): Promise<Record<string, unknown>> => {
+  const trimmedId = id.trim();
+  if (!trimmedId) {
+    throw new Error('QuickBooks customer ID is required to load customer details.');
+  }
+
+  const url = `${buildQboUrl('customer')}/${encodeURIComponent(trimmedId)}`;
+  const response = await context.request(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to load QuickBooks customer "${trimmedId}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const customer =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Customer as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!customer) {
+    throw new Error('QuickBooks customer response did not include a Customer record.');
+  }
+
+  return customer;
+};
+
+const updateQuickBooksCustomer = async (
+  id: string,
+  updates: Record<string, unknown>,
+  context: QuickBooksRequestContext,
+): Promise<Record<string, unknown>> => {
+  const customer = await fetchQuickBooksCustomer(id, context);
+  const syncTokenRaw = customer.SyncToken;
+  const syncToken =
+    typeof syncTokenRaw === 'number'
+      ? syncTokenRaw.toString()
+      : typeof syncTokenRaw === 'string'
+      ? syncTokenRaw.trim()
+      : null;
+
+  if (!syncToken) {
+    throw new Error('QuickBooks customer record did not include a SyncToken.');
+  }
+
+  const payload: Record<string, unknown> = {
+    ...updates,
+    Id: customer.Id,
+    SyncToken: syncToken,
+    sparse: true,
+  };
+
+  const url = `${buildQboUrl('customer')}?operation=update`;
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to update QuickBooks customer "${id}" (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const updated =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Customer as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!updated) {
+    throw new Error('QuickBooks customer update response did not include a Customer record.');
+  }
+
+  return updated;
+};
+
 const ensureSalesReceiptCustomer = async (
   input: EnsureCustomerInput,
   context: QuickBooksRequestContext,
@@ -618,6 +720,7 @@ const ensureSalesReceiptCustomer = async (
   const phone = truncate(input.phone ?? null, 30);
   const billingAddress = sanitizeAddress(input.billingAddress);
   const shippingAddress = sanitizeAddress(input.shippingAddress);
+  const preferredDisplayName = truncate(input.preferredDisplayName ?? null, 99);
 
   let existing: Record<string, unknown> | null = null;
 
@@ -650,13 +753,62 @@ const ensureSalesReceiptCustomer = async (
     if (typeof id === 'string' || typeof id === 'number') {
       const value = typeof id === 'number' ? id.toString() : id.trim();
       if (value) {
+        let resolvedDisplayName =
+          typeof existing.DisplayName === 'string'
+            ? existing.DisplayName
+            : displayName;
+
+        if (
+          preferredDisplayName &&
+          !equalsIgnoreCase(resolvedDisplayName, preferredDisplayName)
+        ) {
+          const updatePayload: Record<string, unknown> = {
+            DisplayName: preferredDisplayName,
+          };
+
+          if (givenName) {
+            updatePayload.GivenName = givenName;
+          }
+          if (familyName) {
+            updatePayload.FamilyName = familyName;
+          }
+          if (email) {
+            updatePayload.PrimaryEmailAddr = {
+              Address: email,
+            } satisfies QuickBooksEmailAddress;
+          }
+          if (phone) {
+            updatePayload.PrimaryPhone = { FreeFormNumber: phone };
+          }
+          if (billingAddress) {
+            updatePayload.BillAddr = billingAddress;
+          }
+          if (shippingAddress) {
+            updatePayload.ShipAddr = shippingAddress;
+          }
+
+          try {
+            const updated = await updateQuickBooksCustomer(value, updatePayload, context);
+            const updatedName =
+              typeof updated.DisplayName === 'string'
+                ? updated.DisplayName
+                : preferredDisplayName;
+            if (updatedName) {
+              resolvedDisplayName = updatedName;
+            }
+          } catch (error) {
+            throw new Error(
+              `Failed to update QuickBooks customer "${displayName}" (${value}) with Stripe contact details: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+
         return {
           ref: {
             value,
-            name:
-              typeof existing.DisplayName === 'string'
-                ? existing.DisplayName
-                : displayName,
+            name: resolvedDisplayName,
           },
           email,
           billingAddress,

@@ -325,6 +325,84 @@ describe('postChargeToQbo', () => {
     ]);
   });
 
+  it('updates an existing QuickBooks customer with Stripe-provided details before posting the sales receipt', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Customer: [
+            {
+              Id: 'cust-1',
+              DisplayName: 'test',
+              PrimaryEmailAddr: { Address: 'donor@example.com' },
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-1',
+          DisplayName: 'test',
+          SyncToken: '0',
+          PrimaryEmailAddr: { Address: 'donor@example.com' },
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-1',
+          DisplayName: 'Donor Example',
+          SyncToken: '1',
+          PrimaryEmailAddr: { Address: 'donor@example.com' },
+        },
+      },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { SalesReceipt: { Id: 'sr-3' } },
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-06-01'),
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-3', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(5);
+
+    const [emailLookup, customerGet, customerUpdate, itemLookup, salesReceiptPost] = requests;
+
+    expect(emailLookup.url).toContain('/query?query=');
+    expect(customerGet.url).toContain('/customer/');
+    expect(customerGet.init?.method ?? 'GET').toBe('GET');
+
+    expect(customerUpdate.url).toContain('/customer?operation=update');
+    expect(customerUpdate.init?.method).toBe('POST');
+    const updateBody = JSON.parse((customerUpdate.init?.body ?? '{}') as string);
+    expect(updateBody).toMatchObject({
+      DisplayName: 'Donor Example',
+      PrimaryEmailAddr: { Address: 'donor@example.com' },
+      sparse: true,
+    });
+
+    expect(itemLookup.url).toContain('/query?query=');
+    expect(itemLookup.init?.method ?? 'GET').toBe('GET');
+
+    const salesReceiptBody = JSON.parse((salesReceiptPost.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.CustomerRef).toMatchObject({
+      value: 'cust-1',
+      name: 'Donor Example',
+    });
+    expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
+  });
+
   it('retries sales receipt with looked up item id when QuickBooks rejects provided item reference', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const invalidReferenceResponse = {
