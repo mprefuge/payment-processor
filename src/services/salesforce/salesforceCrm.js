@@ -2,6 +2,8 @@ const { logger } = require('../../lib/logger');
 const jsforce = require('jsforce');
 const BaseCrmService = require('./baseCrm');
 
+const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
+
 /**
  * Salesforce CRM service implementation
  * Handles contact management, task creation, and transaction recording in Salesforce
@@ -119,7 +121,19 @@ class SalesforceCrmService extends BaseCrmService {
 
         const { email, firstName, lastName, phone, address } = contactData;
 
-        const contactRecord = {
+        const configuredLeadSource =
+            typeof this.config?.contactLeadSource === 'string'
+                ? this.config.contactLeadSource.trim()
+                : undefined;
+
+        const leadSource =
+            configuredLeadSource === undefined
+                ? DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE
+                : configuredLeadSource.length > 0
+                    ? configuredLeadSource
+                    : null;
+
+        const buildContactRecord = (includeLeadSource = true) => ({
             FirstName: firstName,
             LastName: lastName,
             Email: email,
@@ -129,22 +143,94 @@ class SalesforceCrmService extends BaseCrmService {
             MailingState: address?.state || null,
             MailingPostalCode: address?.postalCode || address?.postal_code || null, // Handle both normalized and original field names
             MailingCountry: address?.country || 'US',
-            LeadSource: 'Online Transaction'
+            ...(includeLeadSource && leadSource ? { LeadSource: leadSource } : {})
+        });
+
+        const hasRestrictedPicklistError = errors =>
+            Array.isArray(errors) &&
+            errors.some(err => err && err.errorCode === 'INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST');
+
+        const isRestrictedPicklistError = error => {
+            if (!error) {
+                return false;
+            }
+
+            if (error.restrictedPicklist) {
+                return true;
+            }
+
+            if (hasRestrictedPicklistError(error.originalErrors)) {
+                return true;
+            }
+
+            if (hasRestrictedPicklistError(error.errors)) {
+                return true;
+            }
+
+            if (hasRestrictedPicklistError(error?.body?.errors)) {
+                return true;
+            }
+
+            if (error.errorCode === 'INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST') {
+                return true;
+            }
+
+            return typeof error.message === 'string' &&
+                error.message.includes('INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST');
         };
 
-        try {
-            const result = await this.conn.sobject('Contact').create(contactRecord);
-            
-            if (result.success) {
+        const attemptContactCreation = async (includeLeadSource = true) => {
+            const contactRecord = buildContactRecord(includeLeadSource);
+
+            try {
+                const result = await this.conn.sobject('Contact').create(contactRecord);
+
+                if (!result.success) {
+                    const errors = Array.isArray(result.errors) ? result.errors : [];
+
+                    if (includeLeadSource && leadSource && hasRestrictedPicklistError(errors)) {
+                        const restrictedError = new Error('LeadSource value is not allowed for this Salesforce org');
+                        restrictedError.restrictedPicklist = true;
+                        restrictedError.originalErrors = errors;
+                        throw restrictedError;
+                    }
+
+                    throw new Error(`Contact creation failed: ${JSON.stringify(result.errors)}`);
+                }
+
                 logger.info(`Created new Salesforce contact with ID: ${result.id}`);
-                
+
                 // Fetch the created contact to return complete data
                 const createdContact = await this.conn.sobject('Contact').retrieve(result.id);
                 return createdContact;
-            } else {
-                throw new Error(`Contact creation failed: ${JSON.stringify(result.errors)}`);
+            } catch (error) {
+                if (includeLeadSource && leadSource && !error.restrictedPicklist && isRestrictedPicklistError(error)) {
+                    error.restrictedPicklist = true;
+                }
+
+                throw error;
             }
+        };
+
+        try {
+            const includeLeadSource = Boolean(leadSource);
+            const contact = await attemptContactCreation(includeLeadSource);
+            return contact;
         } catch (error) {
+            if (leadSource && error?.restrictedPicklist) {
+                logger.warn('Salesforce contact lead source rejected, retrying without LeadSource', {
+                    leadSource,
+                    error: error.originalErrors || error.message
+                });
+
+                try {
+                    return await attemptContactCreation(false);
+                } catch (retryError) {
+                    logger.error('Error creating Salesforce contact without LeadSource:', retryError);
+                    throw new Error(`Salesforce contact creation failed: ${retryError.message}`);
+                }
+            }
+
             logger.error('Error creating Salesforce contact:', error);
             throw new Error(`Salesforce contact creation failed: ${error.message}`);
         }

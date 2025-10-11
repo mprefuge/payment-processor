@@ -339,27 +339,38 @@ const initializeServices = (isLiveMode) => {
     return { stripe };
 };
 
+const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
+
 // Get CRM configuration from environment variables
 const getCrmConfig = () => {
     const provider = process.env.CRM_PROVIDER;
-    
+
     if (!provider) {
         logger.info('No CRM provider configured, skipping CRM integration');
         return null;
     }
 
     switch (provider.toLowerCase()) {
-        case 'salesforce':
+        case 'salesforce': {
+            const contactLeadSource = Object.prototype.hasOwnProperty.call(
+                process.env,
+                'SALESFORCE_CONTACT_LEAD_SOURCE'
+            )
+                ? process.env.SALESFORCE_CONTACT_LEAD_SOURCE
+                : DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE;
+
             return {
                 provider: 'salesforce',
                 config: {
                     username: process.env.SALESFORCE_USERNAME,
                     password: process.env.SALESFORCE_PASSWORD,
                     securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
-                    loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com'
+                    loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com',
+                    contactLeadSource
                 }
             };
-        
+        }
+
         default:
             logger.error(`Unsupported CRM provider: ${provider}`);
             return null;
