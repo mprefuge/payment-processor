@@ -34,6 +34,8 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   payment_brand__c: 'Payment_Brand__c',
   payment_last4__c: 'Payment_Last4__c',
   received_at__c: 'Received_At__c',
+  next_retry_at__c: 'Next_Retry_At__c',
+  dunning_required__c: 'Dunning_Required__c',
   posted_to_qbo__c: 'Posted_to_QBO__c',
   qbo_doc_type__c: 'QBO_Doc_Type__c',
   qbo_doc_id__c: 'QBO_Doc_Id__c',

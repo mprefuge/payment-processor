@@ -15,7 +15,13 @@
     "format": "prettier --write .",
     "ci": "npm run lint && npm run test",
     "test:unit": "vitest run",
-    "test:watch": "vitest watch"
+    "test:watch": "vitest watch",
+    "stripe:pi:success": "stripe trigger payment_intent.succeeded",
+    "stripe:inv:paid": "stripe trigger invoice.paid",
+    "stripe:inv:failed": "stripe trigger invoice.payment_failed",
+    "stripe:refund:created": "stripe trigger refund.created",
+    "stripe:payout:paid": "stripe trigger payout.paid",
+    "stripe:payout:recon": "stripe trigger payout.reconciliation_completed"
   },
   "engines": {
     "node": ">=20.0.0 <21"

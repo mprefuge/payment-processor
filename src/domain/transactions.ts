@@ -50,6 +50,8 @@ export const transactionUpsertSchema = z
     payment_brand__c: stringOrNullSchema.optional(),
     payment_last4__c: stringOrNullSchema.optional(),
     received_at__c: stringOrNullSchema.optional(),
+    next_retry_at__c: stringOrNullSchema.optional(),
+    dunning_required__c: booleanOrNullSchema.optional(),
     posted_to_qbo__c: booleanOrNullSchema.optional(),
     qbo_doc_type__c: stringOrNullSchema.optional(),
     qbo_doc_id__c: stringOrNullSchema.optional(),
