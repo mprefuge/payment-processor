@@ -108,7 +108,7 @@ export const stripeChargeFragmentSchema = z
     currency: z.string().optional(),
     balance_transaction: z
       .union([z.string(), z.object({ id: z.string() }).passthrough()])
-      .optional(),
+      .nullish(),
     metadata: metadataSchema.optional(),
     payment_method_details: z
       .object({
