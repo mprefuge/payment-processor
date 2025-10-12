@@ -48,7 +48,8 @@ export type TransactionExternalIdField =
   | 'stripe_dispute_id__c'
   | 'stripe_balance_transaction_id__c'
   | 'stripe_checkout_session_id__c'
-  | 'stripe_charge_id__c';
+  | 'stripe_charge_id__c'
+  | 'stripe_subscription_id__c';
 
 export interface QuickBooksDocumentReference {
   type: string;
