@@ -71,6 +71,10 @@ const TRIGGERS = [
         amount: 2_000,
         currency: 'usd',
         payment_method: 'pm_card_visa',
+        automatic_payment_methods: {
+          enabled: true,
+          allow_redirects: 'never',
+        },
         confirm: true,
       });
 
