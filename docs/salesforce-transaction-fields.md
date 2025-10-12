@@ -20,6 +20,7 @@ The Stripe webhook handler maps Stripe payment intents, charges, and balance tra
 | `amount_fee__c` | `Amount_Fee__c` | Total Stripe fees in major units. |
 | `amount_net__c` | `Amount_Net__c` | Net amount in major units. |
 | `currency_iso_code__c` | `Currency_ISO_Code__c` | ISO currency code, uppercase. |
+| `memo__c` | `Memo__c` | Free-form notes or audit information about the transaction. |
 | `contact__c` | `Contact__c` | Salesforce contact lookup (optional). |
 | `account__c` | `Account__c` | Salesforce account lookup (optional). |
 | `campaign__c` | `Campaign__c` | Salesforce campaign lookup (optional). |

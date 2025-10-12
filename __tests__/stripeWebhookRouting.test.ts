@@ -4,7 +4,10 @@ import type Stripe from 'stripe';
 import {
   handleInvoicePaid,
   handleInvoicePaidNoPI,
+  handleInvoicePaymentActionRequired,
+  handleInvoicePaymentFailed,
 } from '../src/stripe/handlers/invoicePaid';
+import { handlePaymentIntentActionRequired } from '../src/stripe/handlers/paymentIntents';
 import * as paymentIntentHandlers from '../src/stripe/handlers/paymentIntents';
 import type { HttpContext, StripeWebhookDependencies } from '../src/stripe/types';
 
@@ -102,7 +105,7 @@ describe('invoice handlers', () => {
     expect(spy.mock.calls[0][1]).toBe(paymentIntent);
   });
 
-  it('handles invoice.paid without payment intent by updating Salesforce directly', async () => {
+  it('handles zero-dollar invoice.paid without payment intent by updating Salesforce with memo', async () => {
     const context = createContext();
     const upsert = vi.fn().mockResolvedValue({});
     const deps = createDeps({
@@ -119,8 +122,8 @@ describe('invoice handlers', () => {
       id: 'in_456',
       customer: 'cus_456',
       subscription: 'sub_123',
-      amount_paid: 2000,
-      total: 2000,
+      amount_paid: 0,
+      total: 0,
       currency: 'usd',
     } as unknown as Stripe.Invoice;
 
@@ -131,7 +134,206 @@ describe('invoice handlers', () => {
     } as Stripe.Event, deps);
 
     expect(upsert).toHaveBeenCalledTimes(1);
+    const payload = upsert.mock.calls[0][0];
+    expect(payload.status__c).toBe('paid');
+    expect(payload.memo__c).toContain('amount_paid=0');
+    expect(payload.memo__c).toContain(`Invoice ${invoice.id}`);
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('records paid_out_of_band invoices without payment intent', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+    const deps = createDeps({
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    const invoice = {
+      id: 'in_789',
+      customer: 'cus_789',
+      subscription: 'sub_789',
+      amount_paid: 1500,
+      total: 1500,
+      currency: 'usd',
+      paid_out_of_band: true,
+      collection_method: 'send_invoice',
+    } as unknown as Stripe.Invoice;
+
+    await handleInvoicePaidNoPI(context, invoice, {
+      type: 'invoice.paid',
+      data: { object: invoice },
+      livemode: false,
+    } as Stripe.Event, deps);
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const payload = upsert.mock.calls[0][0];
+    expect(payload.memo__c).toContain('paid_out_of_band=true');
+    expect(payload.memo__c).toContain('collection_method=send_invoice');
+  });
+
+  it('updates Salesforce and logs error metadata for invoice payment failures', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+
+    const nextAttempt = Math.floor(Date.now() / 1000) + 3600;
+    const paymentIntent = {
+      id: 'pi_fail',
+      amount: 5000,
+      currency: 'usd',
+      customer: 'cus_fail',
+      last_payment_error: {
+        code: 'card_declined',
+        decline_code: 'insufficient_funds',
+        message: 'Card was declined',
+        type: 'card_error',
+      },
+    } as unknown as Stripe.PaymentIntent;
+
+    const retrieve = vi.fn().mockResolvedValue(paymentIntent);
+    const deps = createDeps({
+      stripeClient: {
+        paymentIntents: { retrieve },
+      } as unknown as Stripe,
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    const invoice = {
+      id: 'in_fail',
+      payment_intent: 'pi_fail',
+      next_payment_attempt: nextAttempt,
+    } as unknown as Stripe.Invoice;
+
+    await handleInvoicePaymentFailed(
+      context,
+      {
+        type: 'invoice.payment_failed',
+        data: { object: invoice },
+        livemode: false,
+      } as Stripe.Event,
+      deps,
+    );
+
+    expect(retrieve).toHaveBeenCalledWith('pi_fail');
+
+    const salesforce = await deps.getSalesforceSvc();
+    const payload = (salesforce.upsertTransactionByExternalId as any).mock
+      .calls[0][0];
+
+    expect(payload.status__c).toBe('failed');
+    expect(payload.next_retry_at__c).toBe(new Date(nextAttempt * 1000).toISOString());
+    expect(context.log).toHaveBeenCalledWith(
+      '[StripeWebhook] Updating payment intent status',
+      expect.objectContaining({
+        lastError: expect.objectContaining({
+          code: 'card_declined',
+          decline_code: 'insufficient_funds',
+        }),
+      }),
+    );
+  });
+
+  it('derives next retry from payment intent action required metadata when invoices lack a retry time', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+
+    const retryTimestamp = Math.floor(Date.now() / 1000) + 7200;
+    const paymentIntent = {
+      id: 'pi_pending',
+      amount: 2500,
+      currency: 'usd',
+      customer: 'cus_pending',
+      next_action: {
+        type: 'card_await_notification',
+        card_await_notification: {
+          charge_attempt_at: retryTimestamp,
+          customer_approval_required: true,
+        },
+      },
+    } as unknown as Stripe.PaymentIntent;
+
+    const retrieve = vi.fn().mockResolvedValue(paymentIntent);
+    const deps = createDeps({
+      stripeClient: {
+        paymentIntents: { retrieve },
+      } as unknown as Stripe,
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    const invoice = {
+      id: 'in_pending',
+      payment_intent: 'pi_pending',
+      subscription: 'sub_pending',
+    } as unknown as Stripe.Invoice;
+
+    await handleInvoicePaymentActionRequired(
+      context,
+      {
+        type: 'invoice.payment_action_required',
+        data: { object: invoice },
+        livemode: false,
+      } as Stripe.Event,
+      deps,
+    );
+
+    const salesforce = await deps.getSalesforceSvc();
+    const payload = (salesforce.upsertTransactionByExternalId as any).mock
+      .calls[0][0];
+
+    expect(payload.status__c).toBe('pending');
+    expect(payload.next_retry_at__c).toBe(new Date(retryTimestamp * 1000).toISOString());
+  });
+});
+
+describe('payment intent action required handler', () => {
+  it('updates Salesforce with next retry derived from payment intent event payload', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+
+    const retryTimestamp = Math.floor(Date.now() / 1000) + 5400;
+    const paymentIntent = {
+      id: 'pi_event',
+      amount: 3300,
+      currency: 'usd',
+      customer: 'cus_event',
+      next_action: {
+        type: 'card_await_notification',
+        card_await_notification: {
+          charge_attempt_at: retryTimestamp,
+          customer_approval_required: true,
+        },
+      },
+    } as unknown as Stripe.PaymentIntent;
+
+    const deps = createDeps({
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    await handlePaymentIntentActionRequired(
+      context,
+      {
+        type: 'payment_intent.payment_action_required',
+        data: { object: paymentIntent },
+        livemode: false,
+      } as Stripe.Event,
+      deps,
+    );
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_payment_intent_id__c: 'pi_event',
+        next_retry_at__c: new Date(retryTimestamp * 1000).toISOString(),
+        status__c: 'pending',
+      }),
+      'stripe_payment_intent_id__c',
+    );
   });
 });
 

@@ -20,6 +20,7 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   amount_fee__c: 'Amount_Fee__c',
   amount_net__c: 'Amount_Net__c',
   currency_iso_code__c: 'Currency_ISO_Code__c',
+  memo__c: 'Memo__c',
   contact__c: 'Contact__c',
   account__c: 'Account__c',
   campaign__c: 'Campaign__c',

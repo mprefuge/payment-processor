@@ -26,6 +26,60 @@ import {
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
 
+const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
+  if (input === null || input === undefined) {
+    return;
+  }
+
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    const normalized = input >= 1_000_000_000_000 ? input / 1000 : input;
+    if (normalized >= 1_000_000_000) {
+      accumulator.push(normalized);
+    }
+    return;
+  }
+
+  if (Array.isArray(input)) {
+    for (const value of input) {
+      collectUnixTimestamps(value, accumulator);
+    }
+    return;
+  }
+
+  if (typeof input === 'object') {
+    for (const value of Object.values(input as Record<string, unknown>)) {
+      collectUnixTimestamps(value, accumulator);
+    }
+  }
+};
+
+const toDateFromUnixSeconds = (value: number | null | undefined): Date | null => {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return null;
+  }
+
+  const normalized = value >= 1_000_000_000_000 ? value / 1000 : value;
+  if (!Number.isFinite(normalized) || normalized < 0) {
+    return null;
+  }
+
+  return new Date(normalized * 1000);
+};
+
+export const deriveNextRetryFromPaymentIntent = (
+  paymentIntent: Stripe.PaymentIntent,
+): Date | null => {
+  const timestamps: number[] = [];
+  collectUnixTimestamps(paymentIntent.next_action, timestamps);
+
+  if (timestamps.length === 0) {
+    return null;
+  }
+
+  const earliest = Math.min(...timestamps);
+  return toDateFromUnixSeconds(earliest);
+};
+
 interface ProcessPaymentIntentOptions {
   context: HttpContext;
   paymentIntent: Stripe.PaymentIntent;
@@ -246,11 +300,24 @@ export const updatePaymentIntentStatus = async (
   const salesforce = await deps.getSalesforceSvc();
   const payload = buildFailureTransaction(paymentIntent, status, options);
 
+  const nextRetryIso = options?.nextRetry
+    ? options.nextRetry.toISOString()
+    : null;
+  const lastError = paymentIntent.last_payment_error
+    ? {
+        code: paymentIntent.last_payment_error.code ?? null,
+        decline_code: paymentIntent.last_payment_error.decline_code ?? null,
+        message: paymentIntent.last_payment_error.message ?? null,
+        type: paymentIntent.last_payment_error.type ?? null,
+      }
+    : null;
+
   context.log('[StripeWebhook] Updating payment intent status', {
     paymentIntentId: paymentIntent.id,
     status,
-    nextRetry: options?.nextRetry?.toISOString() ?? null,
+    nextRetry: nextRetryIso,
     dunningRequired: options?.dunningRequired ?? null,
+    lastError,
   });
 
   await salesforce.upsertTransactionByExternalId(
@@ -303,9 +370,21 @@ export const handlePaymentIntentFailed = async (
   deps: StripeWebhookDependencies,
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, {
-    dunningRequired: true,
-  });
+  const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
+  await updatePaymentIntentStatus(
+    context,
+    paymentIntent,
+    'failed',
+    deps,
+    nextRetry
+      ? {
+          nextRetry,
+          dunningRequired: true,
+        }
+      : {
+          dunningRequired: true,
+        },
+  );
 };
 
 export const handlePaymentIntentCanceled = async (
@@ -325,9 +404,19 @@ export const handlePaymentIntentActionRequired = async (
   deps: StripeWebhookDependencies,
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  const nextRetry = paymentIntent.next_action?.type === 'confirm' ? new Date() : null;
-  await updatePaymentIntentStatus(context, paymentIntent, 'pending', deps, {
-    nextRetry,
-    dunningRequired: true,
-  });
+  const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
+  await updatePaymentIntentStatus(
+    context,
+    paymentIntent,
+    'pending',
+    deps,
+    nextRetry
+      ? {
+          nextRetry,
+          dunningRequired: true,
+        }
+      : {
+          dunningRequired: true,
+        },
+  );
 };

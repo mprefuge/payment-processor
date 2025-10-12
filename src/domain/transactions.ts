@@ -36,6 +36,7 @@ export const transactionUpsertSchema = z
     amount_fee__c: numberOrNullSchema.optional(),
     amount_net__c: numberOrNullSchema.optional(),
     currency_iso_code__c: stringOrNullSchema.optional(),
+    memo__c: stringOrNullSchema.optional(),
     contact__c: stringOrNullSchema.optional(),
     account__c: stringOrNullSchema.optional(),
     campaign__c: stringOrNullSchema.optional(),

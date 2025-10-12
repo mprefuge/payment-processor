@@ -9,6 +9,7 @@ import {
 import { ensureStripeClient } from './common';
 import type { HttpContext, StripeWebhookDependencies } from '../types';
 import {
+  deriveNextRetryFromPaymentIntent,
   handlePaymentIntentActionRequired,
   handleSuccessfulPaymentIntent,
   updatePaymentIntentStatus,
@@ -77,10 +78,19 @@ export const handleInvoicePaidNoPI = async (
   }
 
   const transaction = buildInvoiceTransaction(invoice);
+  const amountPaid = centsToPositiveMajorUnits(invoice.amount_paid ?? null) ?? 0;
+  const memo =
+    `Invoice ${invoice.id} marked paid without payment intent; ` +
+    `collection_method=${invoice.collection_method ?? 'unknown'}; ` +
+    `paid_out_of_band=${invoice.paid_out_of_band === true}; ` +
+    `amount_paid=${amountPaid}`;
+
+  transaction.memo__c = memo;
 
   context.log('[StripeWebhook] Updating subscription transaction from invoice', {
     invoiceId: invoice.id,
     subscriptionId,
+    memo,
   });
 
   await salesforce.upsertTransactionByExternalId(
@@ -143,16 +153,23 @@ export const handleInvoicePaymentFailed = async (
     return;
   }
 
-  const nextRetry =
+  const invoiceNextRetry =
     typeof invoice.next_payment_attempt === 'number' &&
     Number.isFinite(invoice.next_payment_attempt)
       ? new Date(invoice.next_payment_attempt * 1000)
       : null;
+  const paymentIntentNextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
+  const nextRetry = invoiceNextRetry ?? paymentIntentNextRetry ?? null;
 
-  await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, {
+  const options: { nextRetry?: Date; dunningRequired: boolean } = {
     dunningRequired: true,
-    nextRetry,
-  });
+  };
+
+  if (nextRetry) {
+    options.nextRetry = nextRetry;
+  }
+
+  await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, options);
 };
 
 export const handleInvoicePaymentActionRequired = async (
@@ -182,14 +199,21 @@ export const handleInvoicePaymentActionRequired = async (
     return;
   }
 
-  const nextRetry =
+  const invoiceNextRetry =
     typeof invoice.next_payment_attempt === 'number' &&
     Number.isFinite(invoice.next_payment_attempt)
       ? new Date(invoice.next_payment_attempt * 1000)
       : null;
+  const paymentIntentNextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
+  const nextRetry = invoiceNextRetry ?? paymentIntentNextRetry ?? null;
 
-  await updatePaymentIntentStatus(context, paymentIntent, 'pending', deps, {
+  const options: { nextRetry?: Date; dunningRequired: boolean } = {
     dunningRequired: true,
-    nextRetry,
-  });
+  };
+
+  if (nextRetry) {
+    options.nextRetry = nextRetry;
+  }
+
+  await updatePaymentIntentStatus(context, paymentIntent, 'pending', deps, options);
 };
