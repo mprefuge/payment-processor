@@ -484,6 +484,33 @@ const handlePaymentIntentSucceeded = async (
     balanceTransaction: balanceTransaction ?? undefined,
   });
 
+  const invoiceId =
+    normalizeStripeId(paymentIntent.invoice) || normalizeStripeId(charge?.invoice);
+
+  let subscriptionId =
+    transaction.stripe_subscription_id__c || normalizeStripeId(checkoutSession?.subscription);
+
+  if (!subscriptionId && invoiceId) {
+    try {
+      const invoice = await stripe.invoices.retrieve(invoiceId);
+      subscriptionId = normalizeStripeId(invoice?.subscription);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error retrieving invoice for payment intent';
+      context.log('[StripeWebhook] Failed to retrieve invoice for payment intent', {
+        paymentIntentId: paymentIntent.id,
+        invoiceId,
+        error: message,
+      });
+    }
+  }
+
+  if (subscriptionId && !transaction.stripe_subscription_id__c) {
+    transaction.stripe_subscription_id__c = subscriptionId;
+  }
+
   let overrideId: string | null = null;
 
   if (checkoutSession) {
@@ -503,6 +530,24 @@ const handlePaymentIntentSucceeded = async (
           : 'Unknown error locating transaction by checkout session ID';
       context.log('[StripeWebhook] Failed to locate transaction by checkout session ID', {
         sessionId: checkoutSession.id,
+        error: message,
+      });
+    }
+  }
+
+  if (!overrideId && subscriptionId) {
+    try {
+      overrideId = await salesforce.findTransactionIdByExternalId(
+        'stripe_subscription_id__c',
+        subscriptionId,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error locating transaction by subscription ID';
+      context.log('[StripeWebhook] Failed to locate transaction by subscription ID', {
+        subscriptionId,
         error: message,
       });
     }

@@ -198,6 +198,9 @@ describe('stripeWebhook', () => {
           }),
         },
       },
+      invoices: {
+        retrieve: vi.fn(),
+      },
     };
 
     const accounting = {
@@ -269,5 +272,89 @@ describe('stripeWebhook', () => {
     expect(store.markProcessed).toHaveBeenCalledWith('evt_evt_test');
     expect(context.res.status).toBe(200);
     expect(JSON.parse(context.res.body)).toMatchObject({ received: true, eventType: 'payment_intent.succeeded' });
+  });
+
+  it('locates pending subscription transactions by subscription id when available', async () => {
+    const store = mockIdempotencyStore();
+    const stripeEvent = createStripeEvent();
+    (stripeEvent.data.object as any).invoice = 'in_test';
+    ((stripeEvent.data.object as any).charges.data[0] as any).invoice = 'in_test';
+
+    const stripeClient = {
+      balanceTransactions: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'bt_123',
+          amount: 1_000,
+          fee: 100,
+          net: 900,
+          currency: 'usd',
+          created: 1_700_000_000,
+          available_on: 1_700_000_100,
+          type: 'charge',
+        }),
+      },
+      charges: {
+        retrieve: vi.fn(),
+      },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({ id: 'cus_123' }),
+      },
+      checkout: {
+        sessions: {
+          list: vi.fn().mockResolvedValue({ data: [] }),
+        },
+      },
+      invoices: {
+        retrieve: vi.fn().mockResolvedValue({ id: 'in_test', subscription: 'sub_123' }),
+      },
+    };
+
+    const accounting = {
+      postChargeToQbo: vi.fn().mockResolvedValue({ qboId: '123', type: 'journal-entry' }),
+      postRefundToQbo: vi.fn(),
+      postDisputeToQbo: vi.fn(),
+    };
+
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'sf_1', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn().mockResolvedValue(undefined),
+      findTransactionIdByExternalId: vi
+        .fn()
+        .mockImplementation(async (field: string) =>
+          field === 'stripe_subscription_id__c' ? 'sf_subscription' : null,
+        ),
+    };
+
+    const stripe = {
+      verifyEvent: vi.fn(() => stripeEvent),
+      getClient: vi.fn(() => stripeClient),
+    };
+
+    internals?.setDependencies({
+      stripe,
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce,
+      accounting,
+    });
+
+    const { context } = createContext();
+    const req = baseRequest();
+
+    await handler(context, req);
+
+    expect(stripeClient.invoices.retrieve).toHaveBeenCalledWith('in_test');
+    expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
+      'stripe_subscription_id__c',
+      'sub_123',
+    );
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_payment_intent_id__c: 'pi_test',
+        stripe_subscription_id__c: 'sub_123',
+      }),
+      'stripe_payment_intent_id__c',
+      { overrideId: 'sf_subscription' },
+    );
   });
 });
