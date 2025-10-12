@@ -61,11 +61,65 @@ export interface RefundReceiptAccountingAdapter {
   }) => Promise<void>;
 }
 
+export type PayoutDepositLineType = 'charge' | 'fee' | 'refund' | 'adjustment';
+
+export interface PayoutDepositLineReference {
+  balanceTransactionId: string;
+  amountCents: number;
+  sourceId?: string | null;
+  chargeId?: string | null;
+  paymentIntentId?: string | null;
+  refundId?: string | null;
+  type?: string | null;
+}
+
+export interface PayoutDepositLineInput {
+  type: PayoutDepositLineType;
+  currency: string;
+  amountCents: number;
+  description: string;
+  memo?: string | null;
+  references: PayoutDepositLineReference[];
+}
+
+export interface PayoutDepositSummary {
+  payoutAmountCents: number;
+  calculatedAmountCents: number;
+  differenceCents: number;
+}
+
+export interface UpsertPayoutDepositInput {
+  stripeEventId: string;
+  payout: Stripe.Payout;
+  depositExternalRef: string;
+  docNumber: string;
+  memo: string;
+  txnDate: Date;
+  currency: string | null;
+  totalAmountCents: number;
+  lines: PayoutDepositLineInput[];
+  balanceTransactions: Stripe.BalanceTransaction[];
+  summary: PayoutDepositSummary;
+}
+
+export interface PayoutAccountingAdapter {
+  upsertDeposit: (
+    input: UpsertPayoutDepositInput,
+  ) => Promise<StripeQuickBooksDocument | null | void>;
+  markDepositForReview?: (input: {
+    payout: Stripe.Payout;
+    stripeEventId: string;
+    depositExternalRef: string;
+    reason?: string | null;
+  }) => Promise<void>;
+}
+
 export interface AccountingServices {
   postChargeToQbo: typeof postChargeToQbo;
   postRefundToQbo: typeof postRefundToQbo;
   postDisputeToQbo: typeof postDisputeToQbo;
   refundReceipts?: RefundReceiptAccountingAdapter;
+  payouts?: PayoutAccountingAdapter;
 }
 
 export interface StripeWebhookDependencies {
