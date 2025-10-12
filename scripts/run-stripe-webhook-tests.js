@@ -63,7 +63,23 @@ const TRIGGERS = [
   { command: 'payment_intent.succeeded', eventType: 'payment_intent.succeeded' },
   { command: 'invoice.paid', eventType: 'invoice.paid' },
   { command: 'invoice.payment_failed', eventType: 'invoice.payment_failed' },
-  { command: 'refund.created', eventType: 'refund.created' },
+  {
+    command: 'refund.created',
+    eventType: 'refund.created',
+    execute: async () => {
+      const pi = await stripe.paymentIntents.create({
+        amount: 2_000,
+        currency: 'usd',
+        payment_method: 'pm_card_visa',
+        confirm: true,
+      });
+
+      await stripe.refunds.create({
+        payment_intent: pi.id,
+        amount: 1_000,
+      });
+    },
+  },
   { command: 'payout.paid', eventType: 'payout.paid' },
   { command: 'payout.reconciliation_completed', eventType: 'payout.reconciliation_completed' },
 ];
@@ -288,7 +304,11 @@ const main = async () => {
     for (const trigger of TRIGGERS) {
       console.log(`\n▶️  Triggering ${trigger.command}`);
       const startTime = Math.floor(Date.now() / 1000);
-      await runStripeTrigger(trigger.command);
+      if (typeof trigger.execute === 'function') {
+        await trigger.execute();
+      } else {
+        await runStripeTrigger(trigger.command);
+      }
       const eventId = await waitForStripeEvent(trigger.eventType, startTime);
       console.log(`ℹ️  Stripe generated event ${eventId} (${trigger.eventType})`);
       const event = await stripe.events.retrieve(eventId);
