@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 
+import env from '../../config/env';
 import type {
   HttpContext,
   RefundReceiptAccountingAdapter,
@@ -438,7 +439,20 @@ const buildRefundTransaction = (
     paymentIntent?.currency ||
     null;
 
-  const amountCents = Math.abs(refund.amount ?? 0);
+  const grossCents =
+    typeof balanceTransaction?.amount === 'number'
+      ? balanceTransaction.amount
+      : refund.amount !== undefined && refund.amount !== null
+      ? -Math.abs(refund.amount)
+      : null;
+  const feeCents =
+    typeof balanceTransaction?.fee === 'number' ? balanceTransaction.fee : null;
+  const netCents =
+    typeof balanceTransaction?.net === 'number'
+      ? balanceTransaction.net
+      : grossCents !== null
+      ? grossCents - (feeCents ?? 0)
+      : null;
 
   return {
     transaction_type__c: 'refund',
@@ -453,9 +467,9 @@ const buildRefundTransaction = (
     stripe_customer_id__c:
       normalizeStripeId(charge?.customer) ||
       normalizeStripeId(paymentIntent?.customer),
-    amount_gross__c: centsToPositiveMajorUnits(amountCents),
-    amount_fee__c: centsToPositiveMajorUnits(balanceTransaction?.fee ?? null),
-    amount_net__c: centsToMajorUnits(balanceTransaction?.net ?? null),
+    amount_gross__c: centsToMajorUnits(grossCents),
+    amount_fee__c: centsToMajorUnits(feeCents),
+    amount_net__c: centsToMajorUnits(netCents),
     currency_iso_code__c: currency ? currency.toUpperCase() : null,
     received_at__c: timestampToIsoString(refund.created ?? null),
     parent_transaction__c: parentId,
@@ -548,6 +562,10 @@ const processRefund = async (
         reason: normalizeMetadataValue(refund.metadata ?? null, 'failure_reason'),
       });
     }
+    return;
+  }
+
+  if (!env.accounting.syncEnabled) {
     return;
   }
 

@@ -8,13 +8,20 @@ import {
 } from '../services/idempotencyStore';
 import { createSalesforceSvc, type SalesforceSvc } from '../services/salesforceSvc';
 import type { UpsertResult } from 'jsforce/lib/types';
-import { postChargeToQbo, postRefundToQbo, postDisputeToQbo } from '../services/qboSvc';
+import {
+  postChargeToQbo,
+  postRefundToQbo,
+  postDisputeToQbo,
+  postPayoutToQbo,
+} from '../services/qboSvc';
 import type { TransactionUpsertDTO } from '../domain/transactions';
 import {
   type DependencyOverrides,
   type HttpContext,
   type StripeWebhookDependencies,
   type StripeWebhookRequest,
+  type RefundReceiptAccountingAdapter,
+  type PayoutAccountingAdapter,
 } from '../stripe/types';
 import {
   handlePaymentIntentActionRequired,
@@ -138,6 +145,46 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   };
 };
 
+const sumRefundLineAmounts = (lines: { amountCents: number }[]): number =>
+  lines.reduce((total, line) => total + Math.max(0, Math.trunc(line.amountCents || 0)), 0);
+
+const createRefundReceiptAdapter = (): RefundReceiptAccountingAdapter => ({
+  async upsertRefundReceipt(input) {
+    const totalCents = sumRefundLineAmounts(input.lines ?? []);
+    if (totalCents <= 0) {
+      return null;
+    }
+
+    const result = await postRefundToQbo({
+      amount: totalCents,
+      memo: input.memo,
+      date: input.txnDate,
+    });
+
+    return { id: result.qboId, type: result.type };
+  },
+});
+
+const createPayoutAdapter = (): PayoutAccountingAdapter => ({
+  async upsertDeposit(input) {
+    const amountCents = Math.abs(Math.trunc(input.totalAmountCents ?? 0));
+    if (amountCents <= 0) {
+      return null;
+    }
+
+    const result = await postPayoutToQbo({
+      amount: amountCents,
+      memo: input.memo,
+      date: input.txnDate,
+    });
+
+    return { id: result.qboId, type: result.type };
+  },
+  async markDepositForReview() {
+    return;
+  },
+});
+
 const createDefaultDependencies = (): StripeWebhookDependencies => ({
   stripe: createStripeServices(),
   idempotencyStore:
@@ -149,6 +196,8 @@ const createDefaultDependencies = (): StripeWebhookDependencies => ({
     postChargeToQbo,
     postRefundToQbo,
     postDisputeToQbo,
+    refundReceipts: createRefundReceiptAdapter(),
+    payouts: createPayoutAdapter(),
   },
 });
 

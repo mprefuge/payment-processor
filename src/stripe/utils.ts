@@ -96,15 +96,6 @@ export const resolveBalanceTransaction = async (
   charge: Stripe.Charge | null,
   fallback: Stripe.PaymentIntent | Stripe.Refund | Stripe.Dispute | Stripe.Payout | null,
 ): Promise<Stripe.BalanceTransaction | null> => {
-  const id = extractBalanceTransactionId(charge?.balance_transaction);
-  if (id) {
-    try {
-      return await stripe.balanceTransactions.retrieve(id);
-    } catch (error) {
-      return null;
-    }
-  }
-
   const fallbackId = fallback
     ? extractBalanceTransactionId(
         (fallback as { balance_transaction?: unknown }).balance_transaction,
@@ -114,6 +105,15 @@ export const resolveBalanceTransaction = async (
   if (fallbackId) {
     try {
       return await stripe.balanceTransactions.retrieve(fallbackId);
+    } catch (error) {
+      // Ignore fallback retrieval errors and continue to the charge lookup.
+    }
+  }
+
+  const id = extractBalanceTransactionId(charge?.balance_transaction);
+  if (id) {
+    try {
+      return await stripe.balanceTransactions.retrieve(id);
     } catch (error) {
       return null;
     }

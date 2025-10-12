@@ -10,6 +10,7 @@ import type {
 } from '../types';
 import { normalizeStripeId, timestampToDate } from '../utils';
 import { ensureStripeClient } from './common';
+import env from '../../config/env';
 
 type Logger = (...args: unknown[]) => void;
 
@@ -453,6 +454,14 @@ export const handlePayoutEvent = async (
   const eventType = event.type;
 
   if (eventType === 'payout.paid' || eventType === 'payout.reconciliation_completed') {
+    if (!env.accounting.syncEnabled) {
+      context.log('[StripeWebhook] Accounting sync disabled, skipping payout posting', {
+        payoutId: payout.id,
+        eventType,
+      });
+      return;
+    }
+
     if (!adapter) {
       context.log('[StripeWebhook] Payout accounting adapter not configured, skipping deposit posting', {
         payoutId: payout.id,

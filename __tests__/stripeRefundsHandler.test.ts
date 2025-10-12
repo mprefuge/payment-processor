@@ -74,11 +74,15 @@ interface TestSetupOptions {
   balanceTransactions?: Record<string, Stripe.BalanceTransaction>;
 }
 
-const defaultBalanceTransaction = (id: string, amount: number): Stripe.BalanceTransaction => ({
+const defaultBalanceTransaction = (
+  id: string,
+  amount: number,
+  fee = 0,
+): Stripe.BalanceTransaction => ({
   id,
   amount,
-  fee: 0,
-  net: -amount,
+  fee,
+  net: amount - fee,
   currency: 'usd',
   created: 1_700_000_010,
   available_on: 1_700_000_020,
@@ -95,8 +99,8 @@ const setup = ({
   paymentIntent = createPaymentIntent(),
   refund = createRefund(),
   balanceTransactions = {
-    bt_refund: defaultBalanceTransaction('bt_refund', refund.amount ?? 0),
-    bt_charge: defaultBalanceTransaction('bt_charge', charge.amount ?? 0),
+    bt_refund: defaultBalanceTransaction('bt_refund', -Math.abs(refund.amount ?? 0)),
+    bt_charge: defaultBalanceTransaction('bt_charge', Math.abs(charge.amount ?? 0)),
   },
 }: TestSetupOptions = {}) => {
   const stripeClient = {
@@ -329,9 +333,27 @@ describe('handleRefundEvent', () => {
       expect.objectContaining({ stripeRefundId: refund.id }),
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
-      expect.objectContaining({ status__c: 'refund_failed' }),
+      expect.objectContaining({ status__c: 'failed' }),
       'stripe_refund_id__c',
     );
+  });
+
+  it('records negative gross and net amounts in Salesforce for refunds', async () => {
+    const refund = createRefund({ amount: 2_500 });
+    const balanceTransactions = {
+      bt_refund: defaultBalanceTransaction('bt_refund', -2_500, 0),
+    };
+
+    const { deps, event, salesforce } = setup({ refund, balanceTransactions });
+    const { context } = createContext();
+
+    await handleRefundEvent(context, event, deps);
+
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalled();
+    const [transaction] = salesforce.upsertTransactionByExternalId.mock.calls[0];
+    expect(transaction.amount_gross__c).toBe(-25);
+    expect(transaction.amount_net__c).toBe(-25);
+    expect(transaction.amount_fee__c).toBe(0);
   });
 });
 
