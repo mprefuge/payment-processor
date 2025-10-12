@@ -1,0 +1,40 @@
+name: Scenario validations
+
+on:
+  push:
+    branches: [prod]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  run-scenarios:
+    name: "Scenario: ${{ matrix.scenario }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - new-customer
+          - new-payment
+          - new-recurring-payment
+          - cancel
+          - refund
+          - dispute
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run ${{ matrix.scenario }} scenario
+        run: npm run scenario:${{ matrix.scenario }}

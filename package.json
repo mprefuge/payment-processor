@@ -15,7 +15,13 @@
     "format": "prettier --write .",
     "ci": "npm run lint && npm run test",
     "test:unit": "vitest run",
-    "test:watch": "vitest watch"
+    "test:watch": "vitest watch",
+    "scenario:new-customer": "node scripts/run-scenario-tests.js new-customer",
+    "scenario:new-payment": "node scripts/run-scenario-tests.js new-payment",
+    "scenario:new-recurring-payment": "node scripts/run-scenario-tests.js new-recurring-payment",
+    "scenario:cancel": "node scripts/run-scenario-tests.js cancel",
+    "scenario:refund": "node scripts/run-scenario-tests.js refund",
+    "scenario:dispute": "node scripts/run-scenario-tests.js dispute"
   },
   "engines": {
     "node": ">=20.0.0 <21"
