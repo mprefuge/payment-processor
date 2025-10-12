@@ -116,20 +116,41 @@ const createDisabledSalesforceSvc = (): SalesforceSvc => {
   };
 };
 
+const resolveSalesforceUsername = (): string | undefined =>
+  env.salesforce.username ||
+  process.env.SALESFORCE_USERNAME ||
+  process.env.SF_USERNAME ||
+  undefined;
+
+const resolveSalesforcePassword = (): string | undefined =>
+  process.env.SALESFORCE_PASSWORD || process.env.SF_PASSWORD || undefined;
+
+const resolveSalesforceSecurityToken = (): string =>
+  process.env.SALESFORCE_SECURITY_TOKEN || process.env.SF_SECURITY_TOKEN || '';
+
+const resolveSalesforceLoginUrl = (): string =>
+  env.salesforce.loginUrl ||
+  process.env.SALESFORCE_LOGIN_URL ||
+  process.env.SF_LOGIN_URL ||
+  'https://login.salesforce.com';
+
 const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   if (env.salesforce.authMode === 'disabled') {
     const disabledSvc = createDisabledSalesforceSvc();
     return async () => disabledSvc;
   }
 
+  if (env.salesforce.authMode !== 'username-password') {
+    throw new Error(`Unsupported Salesforce auth mode: ${env.salesforce.authMode}`);
+  }
+
   return async (): Promise<SalesforceSvc> => {
     if (!defaultSalesforceSvcPromise) {
       defaultSalesforceSvcPromise = (async () => {
-        const username = process.env.SALESFORCE_USERNAME;
-        const password = process.env.SALESFORCE_PASSWORD;
-        const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
-        const loginUrl =
-          process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
+        const username = resolveSalesforceUsername();
+        const password = resolveSalesforcePassword();
+        const securityToken = resolveSalesforceSecurityToken();
+        const loginUrl = resolveSalesforceLoginUrl();
 
         if (!username || !password) {
           throw new Error('Salesforce credentials are not configured.');

@@ -109,17 +109,38 @@ function loadEnv(): EnvConfig {
     missing.push('STRIPE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET_LIVE / STRIPE_WEBHOOK_SECRET_TEST)');
   }
 
+  const authModeEnvValue = resolveEnv('SF_AUTH_MODE', {
+    fallbackNames: ['SALESFORCE_AUTH_MODE'],
+    defaultValue: 'disabled',
+  });
+  const authModeExplicitlySet = Boolean(
+    process.env.SF_AUTH_MODE ?? process.env.SALESFORCE_AUTH_MODE,
+  );
+  const salesforceUsername = resolveEnv('SF_USERNAME', {
+    fallbackNames: ['SALESFORCE_USERNAME'],
+  });
+  const salesforcePassword = resolveEnv('SF_PASSWORD', {
+    fallbackNames: ['SALESFORCE_PASSWORD'],
+  });
+
+  let resolvedSalesforceAuthMode: SalesforceAuthMode = (authModeEnvValue ?? 'disabled')
+    .toLowerCase() as SalesforceAuthMode;
+
+  if (
+    !authModeExplicitlySet &&
+    resolvedSalesforceAuthMode === 'disabled' &&
+    salesforceUsername &&
+    salesforcePassword
+  ) {
+    resolvedSalesforceAuthMode = 'username-password';
+  }
+
   const salesforceRaw = {
-    authMode: (resolveEnv('SF_AUTH_MODE', {
-      fallbackNames: ['SALESFORCE_AUTH_MODE'],
-      defaultValue: 'disabled',
-    }) ?? 'disabled').toLowerCase(),
+    authMode: resolvedSalesforceAuthMode,
     clientId: resolveEnv('SF_CLIENT_ID', {
       fallbackNames: ['SALESFORCE_CLIENT_ID'],
     }),
-    username: resolveEnv('SF_USERNAME', {
-      fallbackNames: ['SALESFORCE_USERNAME'],
-    }),
+    username: salesforceUsername,
     loginUrl:
       resolveEnv('SF_LOGIN_URL', {
         fallbackNames: ['SALESFORCE_LOGIN_URL'],
@@ -150,6 +171,15 @@ function loadEnv(): EnvConfig {
     }
     if (!salesforce.jwtPrivateKey) {
       missing.push('SF_JWT_PRIVATE_KEY');
+    }
+  }
+
+  if (salesforce.authMode === 'username-password') {
+    if (!salesforce.username) {
+      missing.push('SF_USERNAME (or SALESFORCE_USERNAME)');
+    }
+    if (!salesforcePassword) {
+      missing.push('SF_PASSWORD (or SALESFORCE_PASSWORD)');
     }
   }
 
