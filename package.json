@@ -21,7 +21,8 @@
     "stripe:inv:failed": "stripe trigger invoice.payment_failed",
     "stripe:refund:created": "stripe trigger refund.created",
     "stripe:payout:paid": "stripe trigger payout.paid",
-    "stripe:payout:recon": "stripe trigger payout.reconciliation_completed"
+    "stripe:payout:recon": "stripe trigger payout.reconciliation_completed",
+    "stripe:webhook:test": "node scripts/run-stripe-webhook-tests.js"
   },
   "engines": {
     "node": ">=20.0.0 <21"
