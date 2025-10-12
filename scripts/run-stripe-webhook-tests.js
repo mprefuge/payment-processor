@@ -197,15 +197,18 @@ const runStripeTrigger = async (eventName) => {
   const args = [
     'trigger',
     eventName,
-    '--url',
+    '--webhook-endpoint',
     webhookUrl,
-    '--api-key',
-    stripeSecretKey,
     '--webhook-secret',
     webhookSecret,
   ];
 
-  await spawnAndCapture('stripe', args, { env: process.env });
+  const env = {
+    ...process.env,
+    STRIPE_API_KEY: stripeSecretKey,
+  };
+
+  await spawnAndCapture('stripe', args, { env });
 };
 
 const waitForStripeEvent = async (eventType, earliestCreated) => {
