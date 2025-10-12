@@ -2,30 +2,38 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 
+const scenarioScript = (name) => `tests/scenarios/${name}.test.js`;
+
 const scenarios = {
   'new-customer': {
-    description: 'Validates CRM sync for first-time donors',
-    tests: ['tests/checkoutCrmSync.test.js'],
+    description:
+      'Validates that a first-time donor creates CRM and QuickBooks records',
+    tests: [scenarioScript('newCustomerScenario')],
   },
   'new-payment': {
-    description: 'Covers initial payment capture and transaction creation',
-    tests: ['tests/transactionCreationFlow.test.js'],
+    description:
+      'Confirms captured payments override pending CRM entries and reach QuickBooks',
+    tests: [scenarioScript('newPaymentScenario')],
   },
   'new-recurring-payment': {
-    description: 'Exercises recurring subscription payments syncing to Salesforce and QuickBooks',
-    tests: ['tests/recurringSubscriptionSync.test.js'],
+    description:
+      'Exercises recurring subscription renewals synchronizing to Salesforce and QuickBooks',
+    tests: [scenarioScript('recurringSubscriptionScenario')],
   },
   cancel: {
-    description: 'Ensures canceled intents propagate to Salesforce',
-    tests: ['tests/failedCanceledTransactions.test.js'],
+    description:
+      'Simulates a payment cancelled after capture and ensures CRM and QuickBooks reconciliation',
+    tests: [scenarioScript('cancelScenario')],
   },
   refund: {
-    description: 'Checks refund handling across accounting integrations',
-    tests: ['tests/stripeQboSync.test.js'],
+    description:
+      'Verifies refunds flow through CRM tracking and QuickBooks journal postings',
+    tests: [scenarioScript('refundScenario')],
   },
   dispute: {
-    description: 'Verifies dispute events fan out to CRM and accounting summaries',
-    tests: ['tests/payoutCrmIntegration.test.js'],
+    description:
+      'Checks lost disputes update CRM and propagate the loss to QuickBooks',
+    tests: [scenarioScript('disputeScenario')],
   },
 };
 
