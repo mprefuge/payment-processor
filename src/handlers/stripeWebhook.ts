@@ -7,6 +7,7 @@ import {
   type IdempotencyStore,
 } from '../services/idempotencyStore';
 import { createSalesforceSvc, type SalesforceSvc } from '../services/salesforceSvc';
+import type { UpsertResult } from 'jsforce/lib/types';
 import { postChargeToQbo, postRefundToQbo, postDisputeToQbo } from '../services/qboSvc';
 import type { TransactionUpsertDTO } from '../domain/transactions';
 import {
@@ -89,7 +90,31 @@ const createStripeServices = (): StripeWebhookDependencies['stripe'] => {
 
 let defaultSalesforceSvcPromise: Promise<SalesforceSvc> | null = null;
 
+const createDisabledSalesforceSvc = (): SalesforceSvc => {
+  const disabledUpsertResult = { success: true, id: '', errors: [] } as unknown as UpsertResult;
+
+  return {
+    async upsertTransactionByExternalId(): Promise<UpsertResult> {
+      return disabledUpsertResult;
+    },
+    async linkPayoutOnTransactions(): Promise<UpsertResult[]> {
+      return [];
+    },
+    async markPostedToQbo(): Promise<void> {
+      return;
+    },
+    async findTransactionIdByExternalId(): Promise<string | null> {
+      return null;
+    },
+  };
+};
+
 const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
+  if (env.salesforce.authMode === 'disabled') {
+    const disabledSvc = createDisabledSalesforceSvc();
+    return async () => disabledSvc;
+  }
+
   return async (): Promise<SalesforceSvc> => {
     if (!defaultSalesforceSvcPromise) {
       defaultSalesforceSvcPromise = (async () => {
