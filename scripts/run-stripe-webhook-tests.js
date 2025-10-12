@@ -59,6 +59,141 @@ const tableClient = TableClient.fromConnectionString(
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+let lastPayoutId = null;
+
+const randomId = (prefix) =>
+  `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+
+const cloneStripeObject = (obj) => JSON.parse(JSON.stringify(obj));
+
+const waitForPaymentIntentStatus = async (paymentIntentId, targetStatus) => {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (pi?.status === targetStatus) {
+      return pi;
+    }
+    await delay(1_000);
+  }
+  throw new Error(`Timed out waiting for PaymentIntent ${paymentIntentId} to reach status ${targetStatus}`);
+};
+
+const createConfirmedPaymentIntent = async (amountCents) => {
+  const pi = await stripe.paymentIntents.create({
+    amount: amountCents,
+    currency: 'usd',
+    payment_method: 'pm_card_visa',
+    automatic_payment_methods: {
+      enabled: true,
+      allow_redirects: 'never',
+    },
+    confirm: true,
+  });
+
+  if (pi.status !== 'succeeded') {
+    return waitForPaymentIntentStatus(pi.id, 'succeeded');
+  }
+
+  return pi;
+};
+
+const waitForAvailableBalance = async (minimumCents, currency = 'usd') => {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const balance = await stripe.balance.retrieve();
+    const available = Array.isArray(balance?.available)
+      ? balance.available.find((entry) => entry.currency === currency)?.amount ?? 0
+      : 0;
+    if (available >= minimumCents) {
+      return;
+    }
+    await delay(2_000);
+  }
+  throw new Error(`Stripe balance did not reach ${minimumCents} ${currency} in time.`);
+};
+
+const waitForPayoutStatus = async (payoutId, targetStatus) => {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const payout = await stripe.payouts.retrieve(payoutId);
+    if (payout?.status === targetStatus) {
+      return payout;
+    }
+    await delay(2_000);
+  }
+  throw new Error(`Timed out waiting for payout ${payoutId} to reach status ${targetStatus}`);
+};
+
+const waitForPayoutTransactions = async (payoutId) => {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const transactions = await stripe.balanceTransactions.list({ payout: payoutId, limit: 1 });
+    if (Array.isArray(transactions?.data) && transactions.data.length > 0) {
+      return;
+    }
+    await delay(2_000);
+  }
+  throw new Error(`Timed out waiting for balance transactions on payout ${payoutId}`);
+};
+
+const createTestPayout = async () => {
+  const payoutAmountCents = 1_000;
+  await createConfirmedPaymentIntent(4_000);
+  await waitForAvailableBalance(payoutAmountCents);
+
+  let payout;
+  try {
+    payout = await stripe.payouts.create({
+      amount: payoutAmountCents,
+      currency: 'usd',
+      method: 'standard',
+      statement_descriptor: 'Webhook Test',
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to create test payout. Ensure your Stripe test account has an external account configured. ${error?.message ?? error}`,
+    );
+  }
+
+  const settled = await waitForPayoutStatus(payout.id, 'paid');
+  await waitForPayoutTransactions(settled.id);
+  lastPayoutId = settled.id;
+  return settled;
+};
+
+const loadLastPayoutOrCreate = async () => {
+  if (!lastPayoutId) {
+    return createTestPayout();
+  }
+  try {
+    const payout = await stripe.payouts.retrieve(lastPayoutId);
+    await waitForPayoutTransactions(payout.id);
+    return payout;
+  } catch (error) {
+    console.warn(
+      `⚠️  Failed to reload payout ${lastPayoutId}, creating a new test payout instead. ${error?.message ?? error}`,
+    );
+    return createTestPayout();
+  }
+};
+
+const buildSyntheticStripeEvent = (type, stripeObject) => ({
+  id: randomId(`evt_${type.replace(/\./g, '_')}`),
+  object: 'event',
+  api_version: STRIPE_API_VERSION,
+  created: Math.floor(Date.now() / 1000),
+  data: {
+    object: cloneStripeObject(stripeObject),
+  },
+  livemode: false,
+  pending_webhooks: 0,
+  request: {
+    id: null,
+    idempotency_key: null,
+  },
+  type,
+});
+
 const TRIGGERS = [
   { command: 'payment_intent.succeeded', eventType: 'payment_intent.succeeded' },
   { command: 'invoice.paid', eventType: 'invoice.paid' },
@@ -67,16 +202,7 @@ const TRIGGERS = [
     command: 'refund.created',
     eventType: 'refund.created',
     execute: async () => {
-      const pi = await stripe.paymentIntents.create({
-        amount: 2_000,
-        currency: 'usd',
-        payment_method: 'pm_card_visa',
-        automatic_payment_methods: {
-          enabled: true,
-          allow_redirects: 'never',
-        },
-        confirm: true,
-      });
+      const pi = await createConfirmedPaymentIntent(2_000);
 
       await stripe.refunds.create({
         payment_intent: pi.id,
@@ -84,8 +210,20 @@ const TRIGGERS = [
       });
     },
   },
-  { command: 'payout.paid', eventType: 'payout.paid' },
-  { command: 'payout.reconciliation_completed', eventType: 'payout.reconciliation_completed' },
+  {
+    eventType: 'payout.paid',
+    generateEvent: async () => {
+      const payout = await createTestPayout();
+      return buildSyntheticStripeEvent('payout.paid', payout);
+    },
+  },
+  {
+    eventType: 'payout.reconciliation_completed',
+    generateEvent: async () => {
+      const payout = await loadLastPayoutOrCreate();
+      return buildSyntheticStripeEvent('payout.reconciliation_completed', payout);
+    },
+  },
 ];
 
 const spawnAndCapture = (command, args, options = {}) => {
@@ -306,19 +444,30 @@ const main = async () => {
 
   try {
     for (const trigger of TRIGGERS) {
-      console.log(`\n▶️  Triggering ${trigger.command}`);
-      const startTime = Math.floor(Date.now() / 1000);
-      if (typeof trigger.execute === 'function') {
-        await trigger.execute();
+      console.log(`\n▶️  Triggering ${trigger.command ?? trigger.eventType}`);
+      let event;
+      if (typeof trigger.generateEvent === 'function') {
+        event = await trigger.generateEvent();
       } else {
-        await runStripeTrigger(trigger.command);
+        const startTime = Math.floor(Date.now() / 1000);
+        if (typeof trigger.execute === 'function') {
+          await trigger.execute();
+        } else if (trigger.command) {
+          await runStripeTrigger(trigger.command);
+        } else {
+          throw new Error(`Trigger for ${trigger.eventType} is missing a command or generator.`);
+        }
+        const eventId = await waitForStripeEvent(trigger.eventType, startTime);
+        console.log(`ℹ️  Stripe generated event ${eventId} (${trigger.eventType})`);
+        event = await stripe.events.retrieve(eventId);
       }
-      const eventId = await waitForStripeEvent(trigger.eventType, startTime);
-      console.log(`ℹ️  Stripe generated event ${eventId} (${trigger.eventType})`);
-      const event = await stripe.events.retrieve(eventId);
+
+      if (!event || typeof event.id !== 'string') {
+        throw new Error(`Failed to load event payload for ${trigger.eventType}`);
+      }
       await deliverEventToWebhook(event);
-      await waitForIdempotencyRecord(eventId);
-      console.log(`✅ Webhook processed ${trigger.eventType} (${eventId})`);
+      await waitForIdempotencyRecord(event.id);
+      console.log(`✅ Webhook processed ${trigger.eventType} (${event.id})`);
     }
   } finally {
     console.log('\n🛑 Stopping Azure Functions host');
