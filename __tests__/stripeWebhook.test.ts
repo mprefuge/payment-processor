@@ -488,4 +488,122 @@ describe('stripeWebhook', () => {
     expect(store.markProcessed).toHaveBeenCalledWith('evt_evt_invoice');
     expect(context.res.status).toBe(200);
   });
+
+  it('forces the transaction status to paid when the invoice indicates payment completion', async () => {
+    const store = mockIdempotencyStore();
+    const invoiceEvent: Stripe.Event = {
+      id: 'evt_invoice_paid',
+      type: 'invoice.paid',
+      data: {
+        object: {
+          id: 'in_paid',
+          payment_intent: 'pi_paid',
+          subscription: 'sub_paid',
+          customer: 'cus_paid',
+          status: 'paid',
+          paid: true,
+        },
+      } as Stripe.Event.Data,
+      livemode: false,
+    };
+
+    const charge: Partial<Stripe.Charge> = {
+      id: 'ch_paid',
+      status: 'pending',
+      amount: 5_000,
+      currency: 'usd',
+      balance_transaction: 'bt_paid',
+      invoice: 'in_paid',
+    };
+
+    const paymentIntent: Partial<Stripe.PaymentIntent> = {
+      id: 'pi_paid',
+      status: 'processing',
+      currency: 'usd',
+      customer: 'cus_paid',
+      created: 1_700_000_700,
+      invoice: 'in_paid',
+      latest_charge: 'ch_paid',
+      charges: { data: [charge as Stripe.Charge] },
+    };
+
+    const stripeClient = {
+      paymentIntents: {
+        retrieve: vi.fn().mockResolvedValue(paymentIntent),
+      },
+      balanceTransactions: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'bt_paid',
+          amount: 5_000,
+          fee: 150,
+          net: 4_850,
+          currency: 'usd',
+          created: 1_700_000_700,
+          available_on: 1_700_000_800,
+          type: 'charge',
+        }),
+      },
+      charges: {
+        retrieve: vi.fn().mockResolvedValue(charge),
+      },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({ id: 'cus_paid' }),
+      },
+      checkout: {
+        sessions: {
+          list: vi.fn().mockResolvedValue({ data: [] }),
+        },
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'sf_paid', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn().mockResolvedValue(undefined),
+      findTransactionIdByExternalId: vi
+        .fn()
+        .mockImplementation(async (field: string) =>
+          field === 'stripe_subscription_id__c' ? 'sf_sub' : null,
+        ),
+    };
+
+    const accounting = {
+      postChargeToQbo: vi.fn().mockResolvedValue({ qboId: 'paid', type: 'journal-entry' }),
+      postRefundToQbo: vi.fn(),
+      postDisputeToQbo: vi.fn(),
+    };
+
+    const stripe = {
+      verifyEvent: vi.fn(() => invoiceEvent),
+      getClient: vi.fn(() => stripeClient),
+    };
+
+    internals?.setDependencies({
+      stripe,
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce,
+      accounting,
+    });
+
+    const { context } = createContext();
+    const req = baseRequest();
+
+    await handler(context, req);
+
+    expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledWith('pi_paid');
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_payment_intent_id__c: 'pi_paid',
+        status__c: 'paid',
+        stripe_subscription_id__c: 'sub_paid',
+      }),
+      'stripe_payment_intent_id__c',
+      { overrideId: 'sf_sub' },
+    );
+    expect(accounting.postChargeToQbo).toHaveBeenCalled();
+    expect(store.markProcessed).toHaveBeenCalledWith('evt_evt_invoice_paid');
+  });
 });

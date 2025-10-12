@@ -497,6 +497,8 @@ const processSuccessfulPaymentIntent = async ({
     normalizeStripeId(charge?.invoice) ||
     normalizeStripeId(invoice?.id);
 
+  let resolvedInvoice: Stripe.Invoice | null = invoice ?? null;
+
   let subscriptionId =
     transaction.stripe_subscription_id__c ||
     normalizeStripeId(checkoutSession?.subscription) ||
@@ -505,6 +507,7 @@ const processSuccessfulPaymentIntent = async ({
   if (!subscriptionId && invoiceId && !invoice) {
     try {
       const loadedInvoice = await stripe.invoices.retrieve(invoiceId);
+      resolvedInvoice = loadedInvoice as Stripe.Invoice;
       subscriptionId = normalizeStripeId(loadedInvoice?.subscription);
     } catch (error) {
       const message =
@@ -521,6 +524,13 @@ const processSuccessfulPaymentIntent = async ({
 
   if (subscriptionId && !transaction.stripe_subscription_id__c) {
     transaction.stripe_subscription_id__c = subscriptionId;
+  }
+
+  if (
+    resolvedInvoice &&
+    (resolvedInvoice.status === 'paid' || resolvedInvoice.paid === true)
+  ) {
+    transaction.status__c = 'paid';
   }
 
   let overrideId: string | null = null;
