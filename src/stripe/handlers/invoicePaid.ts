@@ -26,6 +26,7 @@ const buildInvoiceTransaction = (invoice: Stripe.Invoice): TransactionUpsertDTO 
   return {
     transaction_type__c: 'charge',
     status__c: 'paid',
+    stripe_invoice_id__c: invoice.id,
     stripe_subscription_id__c: normalizeStripeId(invoice.subscription),
     stripe_customer_id__c: normalizeStripeId(invoice.customer),
     amount_gross__c: amountPaid,

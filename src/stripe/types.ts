@@ -59,6 +59,13 @@ export interface RefundReceiptAccountingAdapter {
     paymentIntent: Stripe.PaymentIntent | null;
     reason?: string | null;
   }) => Promise<void>;
+  markRefundVoided?: (input: {
+    stripeRefundId: string;
+    stripeEventId: string;
+    charge: Stripe.Charge | null;
+    paymentIntent: Stripe.PaymentIntent | null;
+    reason?: string | null;
+  }) => Promise<void>;
 }
 
 export type PayoutDepositLineType = 'charge' | 'fee' | 'refund' | 'adjustment';

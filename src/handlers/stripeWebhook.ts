@@ -29,6 +29,7 @@ import {
 import { handleChargeRefunded, handleRefundEvent } from '../stripe/handlers/refunds';
 import { handlePayoutEvent } from '../stripe/handlers/payouts';
 import { handleDisputeClosed } from '../stripe/handlers/disputes';
+import { handleCreditNoteEvent } from '../stripe/handlers/creditNotes';
 import {
   centsToMajorUnits,
   normalizeStripeId,
@@ -287,6 +288,11 @@ const processEvent = async (
     case 'payout.canceled':
     case 'payout.reconciliation_completed':
       await handlePayoutEvent(context, event, deps);
+      return;
+    case 'credit_note.created':
+    case 'credit_note.updated':
+    case 'credit_note.voided':
+      await handleCreditNoteEvent(context, event, deps);
       return;
     default:
       context.log('[StripeWebhook] Ignoring unsupported event type', {

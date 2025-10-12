@@ -127,6 +127,10 @@ const processSuccessfulPaymentIntent = async ({
     normalizeStripeId(charge?.invoice) ||
     normalizeStripeId(invoice?.id);
 
+  if (invoiceId && !transaction.stripe_invoice_id__c) {
+    transaction.stripe_invoice_id__c = invoiceId;
+  }
+
   let resolvedInvoice: Stripe.Invoice | null = invoice ?? null;
 
   let subscriptionId =

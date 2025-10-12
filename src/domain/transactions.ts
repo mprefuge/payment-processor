@@ -27,6 +27,8 @@ export const transactionUpsertSchema = z
     stripe_balance_transaction_id__c: stringOrNullSchema.optional(),
     stripe_refund_id__c: stringOrNullSchema.optional(),
     stripe_dispute_id__c: stringOrNullSchema.optional(),
+    stripe_invoice_id__c: stringOrNullSchema.optional(),
+    stripe_credit_note_id__c: stringOrNullSchema.optional(),
     stripe_checkout_session_id__c: stringOrNullSchema.optional(),
     stripe_customer_id__c: stringOrNullSchema.optional(),
     stripe_subscription_id__c: stringOrNullSchema.optional(),

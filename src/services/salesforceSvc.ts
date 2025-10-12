@@ -11,6 +11,8 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   stripe_balance_transaction_id__c: 'Stripe_Balance_Transaction_Id__c',
   stripe_refund_id__c: 'Stripe_Refund_Id__c',
   stripe_dispute_id__c: 'Stripe_Dispute_Id__c',
+  stripe_invoice_id__c: 'Stripe_Invoice_Id__c',
+  stripe_credit_note_id__c: 'Stripe_Credit_Note_Id__c',
   stripe_checkout_session_id__c: 'Stripe_Checkout_Session_Id__c',
   stripe_customer_id__c: 'Stripe_Customer_Id__c',
   stripe_subscription_id__c: 'Stripe_Subscription_Id__c',
@@ -52,7 +54,9 @@ export type TransactionExternalIdField =
   | 'stripe_balance_transaction_id__c'
   | 'stripe_checkout_session_id__c'
   | 'stripe_charge_id__c'
-  | 'stripe_subscription_id__c';
+  | 'stripe_subscription_id__c'
+  | 'stripe_invoice_id__c'
+  | 'stripe_credit_note_id__c';
 
 export interface QuickBooksDocumentReference {
   type: string;
