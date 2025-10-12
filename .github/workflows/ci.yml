@@ -98,7 +98,7 @@ jobs:
       STRIPE_SECRET: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
       STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
-      STRIPE_WEBHOOK_URL: http://127.0.0.1:7071/api/stripeWebhook
+      STRIPE_WEBHOOK_URL: http://127.0.0.1:7071/api/stripe/webhook
       SUCCESS_URL: ${{ secrets.SUCCESS_URL }}
     steps:
       - name: Check out repository
