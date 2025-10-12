@@ -135,8 +135,9 @@ const resolveSalesforceLoginUrl = (): string =>
   'https://login.salesforce.com';
 
 const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
+  const disabledSvc = createDisabledSalesforceSvc();
+
   if (env.salesforce.authMode === 'disabled') {
-    const disabledSvc = createDisabledSalesforceSvc();
     return async () => disabledSvc;
   }
 
@@ -147,18 +148,30 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   return async (): Promise<SalesforceSvc> => {
     if (!defaultSalesforceSvcPromise) {
       defaultSalesforceSvcPromise = (async () => {
-        const username = resolveSalesforceUsername();
-        const password = resolveSalesforcePassword();
-        const securityToken = resolveSalesforceSecurityToken();
-        const loginUrl = resolveSalesforceLoginUrl();
+        try {
+          const username = resolveSalesforceUsername();
+          const password = resolveSalesforcePassword();
+          const securityToken = resolveSalesforceSecurityToken();
+          const loginUrl = resolveSalesforceLoginUrl();
 
-        if (!username || !password) {
-          throw new Error('Salesforce credentials are not configured.');
+          if (!username || !password) {
+            throw new Error('Salesforce credentials are not configured.');
+          }
+
+          const connection = new jsforce.Connection({ loginUrl });
+          await connection.login(username, `${password}${securityToken}`);
+          return createSalesforceSvc({ connection });
+        } catch (error) {
+          defaultSalesforceSvcPromise = null;
+
+          const message =
+            error instanceof Error ? error.message : 'Unknown Salesforce initialization error';
+          console.warn('[StripeWebhook] Falling back to disabled Salesforce service', {
+            error: message,
+          });
+
+          return disabledSvc;
         }
-
-        const connection = new jsforce.Connection({ loginUrl });
-        await connection.login(username, `${password}${securityToken}`);
-        return createSalesforceSvc({ connection });
       })();
     }
 
