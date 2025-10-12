@@ -11,7 +11,7 @@ const Stripe = require('stripe').default;
 const { TableClient } = require('@azure/data-tables');
 
 const STRIPE_API_VERSION = '2023-10-16';
-const DEFAULT_WEBHOOK_URL = 'http://127.0.0.1:7071/api/stripeWebhook';
+const DEFAULT_WEBHOOK_URL = 'http://127.0.0.1:7071/api/stripe/webhook';
 const FUNCTION_START_TIMEOUT_MS = 120_000;
 const EVENT_LOOKUP_TIMEOUT_MS = 120_000;
 const TABLE_POLL_INTERVAL_MS = 2_000;
