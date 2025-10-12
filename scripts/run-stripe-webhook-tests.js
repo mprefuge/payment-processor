@@ -270,7 +270,14 @@ const waitForIdempotencyRecord = async (eventId) => {
   throw new Error(`Event ${eventId} was not marked as processed in table ${tableName}.`);
 };
 
+const runBuild = async () => {
+  console.log('🧱 Building Functions bundle');
+  await spawnAndCapture('npm', ['run', 'build'], { cwd: path.resolve(__dirname, '..') });
+};
+
 const main = async () => {
+  await runBuild();
+
   console.log('➡️  Preparing idempotency table');
   await ensureTableExists();
 
