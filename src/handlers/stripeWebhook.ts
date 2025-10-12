@@ -450,15 +450,23 @@ const markPosted = async (
   }
 };
 
-const handlePaymentIntentSucceeded = async (
-  context: HttpContext,
-  event: Stripe.Event,
-  deps: Dependencies,
-): Promise<void> => {
-  const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  const stripe = deps.stripe.getClient(Boolean(event.livemode));
-  const salesforce = await deps.getSalesforceSvc();
+interface ProcessPaymentIntentOptions {
+  context: HttpContext;
+  paymentIntent: Stripe.PaymentIntent;
+  stripe: Stripe;
+  salesforce: SalesforceSvc;
+  deps: Dependencies;
+  invoice?: Stripe.Invoice | null;
+}
 
+const processSuccessfulPaymentIntent = async ({
+  context,
+  paymentIntent,
+  stripe,
+  salesforce,
+  deps,
+  invoice,
+}: ProcessPaymentIntentOptions): Promise<void> => {
   const charge = await resolveCharge(stripe, paymentIntent);
   const balanceTransaction = await resolveBalanceTransaction(
     stripe,
@@ -485,15 +493,19 @@ const handlePaymentIntentSucceeded = async (
   });
 
   const invoiceId =
-    normalizeStripeId(paymentIntent.invoice) || normalizeStripeId(charge?.invoice);
+    normalizeStripeId(paymentIntent.invoice) ||
+    normalizeStripeId(charge?.invoice) ||
+    normalizeStripeId(invoice?.id);
 
   let subscriptionId =
-    transaction.stripe_subscription_id__c || normalizeStripeId(checkoutSession?.subscription);
+    transaction.stripe_subscription_id__c ||
+    normalizeStripeId(checkoutSession?.subscription) ||
+    normalizeStripeId(invoice?.subscription);
 
-  if (!subscriptionId && invoiceId) {
+  if (!subscriptionId && invoiceId && !invoice) {
     try {
-      const invoice = await stripe.invoices.retrieve(invoiceId);
-      subscriptionId = normalizeStripeId(invoice?.subscription);
+      const loadedInvoice = await stripe.invoices.retrieve(invoiceId);
+      subscriptionId = normalizeStripeId(loadedInvoice?.subscription);
     } catch (error) {
       const message =
         error instanceof Error
@@ -600,6 +612,68 @@ const handlePaymentIntentSucceeded = async (
       await markPosted(salesforce, upsertResult, posting);
     },
   );
+};
+
+const handlePaymentIntentSucceeded = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: Dependencies,
+): Promise<void> => {
+  const paymentIntent = event.data.object as Stripe.PaymentIntent;
+  const stripe = deps.stripe.getClient(Boolean(event.livemode));
+  const salesforce = await deps.getSalesforceSvc();
+
+  await processSuccessfulPaymentIntent({
+    context,
+    paymentIntent,
+    stripe,
+    salesforce,
+    deps,
+  });
+};
+
+const handleInvoicePaymentSucceeded = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: Dependencies,
+): Promise<void> => {
+  const invoice = event.data.object as Stripe.Invoice;
+  const paymentIntentId = normalizeStripeId(invoice.payment_intent);
+
+  if (!paymentIntentId) {
+    context.log('[StripeWebhook] Invoice payment event missing payment intent', {
+      invoiceId: invoice.id,
+    });
+    return;
+  }
+
+  const stripe = deps.stripe.getClient(Boolean(event.livemode));
+  const salesforce = await deps.getSalesforceSvc();
+
+  let paymentIntent: Stripe.PaymentIntent;
+  try {
+    paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : 'Unknown error retrieving payment intent for invoice';
+    context.log('[StripeWebhook] Failed to retrieve payment intent for invoice', {
+      invoiceId: invoice.id,
+      paymentIntentId,
+      error: message,
+    });
+    return;
+  }
+
+  await processSuccessfulPaymentIntent({
+    context,
+    paymentIntent,
+    stripe,
+    salesforce,
+    deps,
+    invoice,
+  });
 };
 
 const getLatestRefund = (charge: Stripe.Charge): Stripe.Refund | null => {
@@ -849,6 +923,10 @@ const processEvent = async (
       return;
     case 'charge.dispute.closed':
       await handleDisputeClosed(context, event, deps);
+      return;
+    case 'invoice.paid':
+    case 'invoice.payment_succeeded':
+      await handleInvoicePaymentSucceeded(context, event, deps);
       return;
     default:
       context.log('[StripeWebhook] Ignoring unsupported event type', {
