@@ -1,3 +1,37 @@
+const path = require('path');
+const Module = require('module');
+
+const additionalModulePath = path.join(__dirname, '..', 'node_modules');
+const existingNodePath = process.env.NODE_PATH
+  ? process.env.NODE_PATH.split(path.delimiter)
+  : [];
+
+const defaultEnv = {
+  STRIPE_SECRET: 'sk_test_dummy',
+  STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
+  SF_AUTH_MODE: 'disabled',
+  ACCOUNTING_SYNC_ENABLED: 'true',
+  ACCOUNTING_POSTING_STRATEGY: 'je-transfer',
+  QBO_REALM_ID: '1234567890',
+  QBO_CLIENT_ID: 'client-id',
+  QBO_CLIENT_SECRET: 'client-secret',
+  QBO_REFRESH_TOKEN: 'refresh-token',
+  DISABLE_AZURE_TABLES: '1',
+};
+
+for (const [key, value] of Object.entries(defaultEnv)) {
+  if (!process.env[key]) {
+    process.env[key] = value;
+  }
+}
+
+if (!existingNodePath.includes(additionalModulePath)) {
+  process.env.NODE_PATH = [additionalModulePath, ...existingNodePath]
+    .filter(Boolean)
+    .join(path.delimiter);
+  Module._initPaths();
+}
+
 let stripeWebhookModule;
 
 try {
@@ -23,25 +57,6 @@ const stripeWebhook =
 
 if (!stripeWebhook.__internals) {
   throw new Error('Stripe webhook handler does not expose internals for testing');
-}
-
-const defaultEnv = {
-  STRIPE_SECRET: 'sk_test_dummy',
-  STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
-  SF_AUTH_MODE: 'disabled',
-  ACCOUNTING_SYNC_ENABLED: 'true',
-  ACCOUNTING_POSTING_STRATEGY: 'je-transfer',
-  QBO_REALM_ID: '1234567890',
-  QBO_CLIENT_ID: 'client-id',
-  QBO_CLIENT_SECRET: 'client-secret',
-  QBO_REFRESH_TOKEN: 'refresh-token',
-  DISABLE_AZURE_TABLES: '1',
-};
-
-for (const [key, value] of Object.entries(defaultEnv)) {
-  if (!process.env[key]) {
-    process.env[key] = value;
-  }
 }
 
 const parseEventPayload = (payload) => {

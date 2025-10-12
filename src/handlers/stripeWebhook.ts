@@ -319,15 +319,6 @@ const resolveBalanceTransaction = async (
   charge: Stripe.Charge | null,
   fallback: Stripe.PaymentIntent | Stripe.Refund | Stripe.Dispute | null,
 ): Promise<Stripe.BalanceTransaction | null> => {
-  const id = extractBalanceTransactionId(charge?.balance_transaction);
-  if (id) {
-    try {
-      return await stripe.balanceTransactions.retrieve(id);
-    } catch (error) {
-      return null;
-    }
-  }
-
   const fallbackId = fallback
     ? extractBalanceTransactionId(
         (fallback as { balance_transaction?: unknown }).balance_transaction,
@@ -337,6 +328,15 @@ const resolveBalanceTransaction = async (
   if (fallbackId) {
     try {
       return await stripe.balanceTransactions.retrieve(fallbackId);
+    } catch (error) {
+      // ignore and fall through to charge lookup
+    }
+  }
+
+  const id = extractBalanceTransactionId(charge?.balance_transaction);
+  if (id) {
+    try {
+      return await stripe.balanceTransactions.retrieve(id);
     } catch (error) {
       return null;
     }
@@ -698,9 +698,17 @@ const handleDisputeClosed = async (
     dispute,
   );
 
-  const lossTransactions = balanceTransactions.filter(
-    (bt) => bt.reporting_category === 'chargeback' || bt.type === 'adjustment',
-  );
+  const lossTransactions = balanceTransactions.filter((bt) => {
+    if (bt.reporting_category === 'chargeback') {
+      return true;
+    }
+
+    if (bt.reporting_category === 'chargeback_fee') {
+      return false;
+    }
+
+    return bt.type === 'adjustment';
+  });
   const feeTransactions = balanceTransactions.filter(
     (bt) => bt.reporting_category === 'chargeback_fee' || bt.type === 'stripe_fee',
   );
