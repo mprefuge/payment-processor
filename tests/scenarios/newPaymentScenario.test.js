@@ -1,84 +1,121 @@
-const { runStripeEvents } = require('../helpers/scenarioTestHarness');
+const {
+  runStripeEvents,
+  scenarioMode,
+  isLiveMode,
+} = require('../helpers/scenarioTestHarness');
+const {
+  createStripeClient,
+  createScenarioCustomer,
+  confirmCardPayment,
+  fetchBalanceTransaction,
+  createWebhookStripeClient,
+} = require('../helpers/liveStripeScenarioUtils');
 
 async function run() {
   console.log('🧪 Running New Payment Scenario');
 
-  const checkoutSession = {
-    id: 'cs_existing_customer',
-    payment_intent: 'pi_existing_payment',
-    customer: 'cus_existing_123',
-    currency: 'usd',
-    amount_total: 12500,
-    amount_subtotal: 12500,
-    created: 1_700_100_000,
-  };
+  const live = isLiveMode;
 
-  const paymentIntent = {
-    id: 'pi_existing_payment',
-    status: 'succeeded',
-    amount: 12500,
-    currency: 'usd',
-    customer: 'cus_existing_123',
-    metadata: {
-      contact__c: '0031N00000Existing',
-      campaign__c: '7011N00000Existing',
-    },
-    charges: {
-      data: [
-        {
-          id: 'ch_existing_payment',
-          status: 'succeeded',
-          amount: 12500,
-          currency: 'usd',
-          balance_transaction: 'bt_existing_payment',
-          customer: 'cus_existing_123',
-          payment_method_details: {
-            type: 'card',
-            card: { brand: 'visa', last4: '1881' },
+  let paymentIntent;
+  let balanceTransaction;
+  let stripeClient;
+
+  if (live) {
+    const stripe = createStripeClient();
+    const customer = await createScenarioCustomer(stripe, 'new-payment');
+    paymentIntent = await confirmCardPayment(stripe, {
+      amount: 12500,
+      currency: 'usd',
+      customerId: customer.id,
+      description: 'Scenario standalone payment',
+      metadata: {
+        contact__c: `003SCENARIO${Date.now()}`,
+        campaign__c: '701SCENARIO',
+      },
+    });
+
+    balanceTransaction = await fetchBalanceTransaction(stripe, paymentIntent);
+    stripeClient = createWebhookStripeClient(stripe, {
+      balanceTransactions: balanceTransaction ? [balanceTransaction] : [],
+    });
+  } else {
+    const checkoutSession = {
+      id: 'cs_existing_customer',
+      payment_intent: 'pi_existing_payment',
+      customer: 'cus_existing_123',
+      currency: 'usd',
+      amount_total: 12500,
+      amount_subtotal: 12500,
+      created: 1_700_100_000,
+    };
+
+    paymentIntent = {
+      id: 'pi_existing_payment',
+      status: 'succeeded',
+      amount: 12500,
+      currency: 'usd',
+      customer: 'cus_existing_123',
+      metadata: {
+        contact__c: '0031N00000Existing',
+        campaign__c: '7011N00000Existing',
+      },
+      charges: {
+        data: [
+          {
+            id: 'ch_existing_payment',
+            status: 'succeeded',
+            amount: 12500,
+            currency: 'usd',
+            balance_transaction: 'bt_existing_payment',
+            customer: 'cus_existing_123',
+            payment_method_details: {
+              type: 'card',
+              card: { brand: 'visa', last4: '1881' },
+            },
+          },
+        ],
+      },
+    };
+
+    balanceTransaction = {
+      id: 'bt_existing_payment',
+      amount: 12500,
+      fee: 450,
+      net: 12050,
+      currency: 'usd',
+      type: 'charge',
+      created: 1_700_100_001,
+    };
+
+    stripeClient = {
+      checkout: {
+        sessions: {
+          async list(params) {
+            if (params.payment_intent !== paymentIntent.id) {
+              throw new Error('Unexpected payment intent lookup');
+            }
+            return { data: [checkoutSession] };
           },
         },
-      ],
-    },
-  };
-
-  const balanceTransaction = {
-    id: 'bt_existing_payment',
-    amount: 12500,
-    fee: 450,
-    net: 12050,
-    currency: 'usd',
-    type: 'charge',
-    created: 1_700_100_001,
-  };
-
-  const stripeClient = {
-    checkout: {
-      sessions: {
-        async list(params) {
-          if (params.payment_intent !== paymentIntent.id) {
-            throw new Error('Unexpected payment intent lookup');
+      },
+      balanceTransactions: {
+        async retrieve(id) {
+          if (id !== balanceTransaction.id) {
+            throw new Error(`Unknown balance transaction ${id}`);
           }
-          return { data: [checkoutSession] };
+          return balanceTransaction;
         },
       },
-    },
-    balanceTransactions: {
-      async retrieve(id) {
-        if (id !== balanceTransaction.id) {
-          throw new Error(`Unknown balance transaction ${id}`);
-        }
-        return balanceTransaction;
+      customers: {
+        async retrieve(id) {
+          if (id !== 'cus_existing_123') {
+            throw new Error(`Unexpected customer id ${id}`);
+          }
+          return { id, email: 'existing.donor@example.com', name: 'Existing Donor' };
+        },
       },
-    },
-    customers: {
-      async retrieve(id) {
-        if (id !== 'cus_existing_123') {
-          throw new Error(`Unexpected customer id ${id}`);
-        }
-        return { id, email: 'existing.donor@example.com', name: 'Existing Donor' };
-      },
-    },
-  };
+    };
+  }
 
   const { salesforceCalls, accountingCalls, processedEvents } = await runStripeEvents({
     events: [
@@ -86,17 +123,26 @@ async function run() {
         id: 'evt_pi_existing_payment',
         type: 'payment_intent.succeeded',
         data: { object: paymentIntent },
-        livemode: true,
+        livemode: live,
       },
     ],
     stripeClient,
-    salesforceOverrides: {
-      findCheckoutResult: 'a00xx000000Pending',
-    },
+    salesforceOverrides: live
+      ? undefined
+      : {
+          findCheckoutResult: 'a00xx000000Pending',
+        },
+    mode: scenarioMode,
   });
 
   if (processedEvents.size !== 1) {
     throw new Error('Expected payment event to be marked processed');
+  }
+
+  if (live) {
+    console.log('✅ Live CRM and QBO sync triggered for new payment scenario');
+    console.log(`   • Stripe payment intent: ${paymentIntent.id}`);
+    return;
   }
 
   if (salesforceCalls.upserts.length !== 1) {
@@ -112,7 +158,7 @@ async function run() {
     throw new Error('Existing pending transaction should be overridden');
   }
 
-  if (accountingCalls.length !== 1 || accountingCalls[0].type !== 'charge') {
+  if (!accountingCalls || accountingCalls.length !== 1 || accountingCalls[0].type !== 'charge') {
     throw new Error('QuickBooks should receive a single charge posting');
   }
 

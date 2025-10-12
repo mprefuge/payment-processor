@@ -6,6 +6,11 @@ const existingNodePath = process.env.NODE_PATH
   ? process.env.NODE_PATH.split(path.delimiter)
   : [];
 
+const requestedMode = (process.env.SCENARIO_MODE || '').toLowerCase();
+const forceLive = process.env.SCENARIO_USE_REAL_SERVICES === '1';
+const scenarioMode = forceLive ? 'live' : requestedMode === 'live' ? 'live' : 'mock';
+const isLiveMode = scenarioMode === 'live';
+
 const defaultEnv = {
   STRIPE_SECRET: 'sk_test_dummy',
   STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
@@ -167,30 +172,41 @@ const runStripeEvents = async ({
   stripeClient,
   salesforceOverrides,
   accountingOverrides,
+  mode,
 }) => {
+  const effectiveMode = mode || scenarioMode;
+  const useMocks = effectiveMode !== 'live';
+
   const processedEvents = new Set();
   const idempotencyStore = createIdempotencyStore(processedEvents);
-  const { service: salesforce, calls: salesforceCalls } =
-    createMockSalesforce(salesforceOverrides);
-  const { accounting, calls: accountingCalls } = createMockAccounting(
-    accountingOverrides,
-  );
 
-  const stripeServices = {
-    verifyEvent(payload) {
-      return parseEventPayload(payload);
+  let salesforceCalls = null;
+  let accountingCalls = null;
+
+  const dependencyOverrides = {
+    stripe: {
+      verifyEvent(payload) {
+        return parseEventPayload(payload);
+      },
+      getClient() {
+        return stripeClient;
+      },
     },
-    getClient() {
-      return stripeClient;
-    },
+    idempotencyStore,
   };
 
-  stripeWebhook.__internals.setDependencies({
-    stripe: stripeServices,
-    idempotencyStore,
-    getSalesforceSvc: async () => salesforce,
-    accounting,
-  });
+  if (useMocks) {
+    const mockSalesforce = createMockSalesforce(salesforceOverrides);
+    const mockAccounting = createMockAccounting(accountingOverrides);
+
+    salesforceCalls = mockSalesforce.calls;
+    accountingCalls = mockAccounting.calls;
+
+    dependencyOverrides.getSalesforceSvc = async () => mockSalesforce.service;
+    dependencyOverrides.accounting = mockAccounting.accounting;
+  }
+
+  stripeWebhook.__internals.setDependencies(dependencyOverrides);
 
   const responses = [];
 
@@ -218,10 +234,13 @@ const runStripeEvents = async ({
     processedEvents,
     salesforceCalls,
     accountingCalls,
+    mode: effectiveMode,
   };
 };
 
 module.exports = {
   stripeWebhook,
   runStripeEvents,
+  scenarioMode,
+  isLiveMode,
 };
