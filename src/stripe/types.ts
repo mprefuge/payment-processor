@@ -20,10 +20,52 @@ export interface StripeServices {
   getClient: (livemode: boolean) => Stripe;
 }
 
+export interface RefundReceiptLineInput {
+  amountCents: number;
+  description?: string | null;
+  itemRef?: { value: string; name?: string | null } | null;
+  taxCodeRef?: { value: string; name?: string | null } | null;
+}
+
+export interface UpsertRefundReceiptInput {
+  stripeEventId: string;
+  stripeRefundId: string;
+  refundStatus: Stripe.Refund['status'];
+  memo: string;
+  docNumber: string | null;
+  txnDate: Date;
+  lines: RefundReceiptLineInput[];
+  customerContext: {
+    charge: Stripe.Charge | null;
+    paymentIntent: Stripe.PaymentIntent | null;
+  };
+  metadata: {
+    salesReceiptDocNumber: string | null;
+    chargeId: string | null;
+    paymentIntentId: string | null;
+    fallbackReason?: string | null;
+    rawSourceLines?: unknown;
+  };
+}
+
+export interface RefundReceiptAccountingAdapter {
+  upsertRefundReceipt: (
+    input: UpsertRefundReceiptInput,
+  ) => Promise<StripeQuickBooksDocument | null | void>;
+  markRefundFailed?: (input: {
+    stripeRefundId: string;
+    stripeEventId: string;
+    charge: Stripe.Charge | null;
+    paymentIntent: Stripe.PaymentIntent | null;
+    reason?: string | null;
+  }) => Promise<void>;
+}
+
 export interface AccountingServices {
   postChargeToQbo: typeof postChargeToQbo;
   postRefundToQbo: typeof postRefundToQbo;
   postDisputeToQbo: typeof postDisputeToQbo;
+  refundReceipts?: RefundReceiptAccountingAdapter;
 }
 
 export interface StripeWebhookDependencies {
