@@ -47,6 +47,10 @@ const tableName = process.env.IDEMPOTENCY_TABLE_NAME || 'IdempotencyState';
 const processedPartitionKey = process.env.IDEMPOTENCY_PROCESSED_PARTITION || 'processed';
 const webhookUrl = process.env.STRIPE_WEBHOOK_URL || DEFAULT_WEBHOOK_URL;
 
+if (typeof fetch !== 'function') {
+  throw new Error('Global fetch API is required (Node.js 18+).');
+}
+
 const stripe = new Stripe(stripeSecretKey, { apiVersion: STRIPE_API_VERSION });
 const tableClient = TableClient.fromConnectionString(
   process.env.AZURE_TABLES_CONNECTION_STRING,
@@ -194,14 +198,7 @@ const ensureTableExists = async () => {
 };
 
 const runStripeTrigger = async (eventName) => {
-  const args = [
-    'trigger',
-    eventName,
-    '--webhook-endpoint',
-    webhookUrl,
-    '--webhook-secret',
-    webhookSecret,
-  ];
+  const args = ['trigger', eventName];
 
   const env = {
     ...process.env,
@@ -209,6 +206,30 @@ const runStripeTrigger = async (eventName) => {
   };
 
   await spawnAndCapture('stripe', args, { env });
+};
+
+const deliverEventToWebhook = async (event) => {
+  const payload = JSON.stringify(event);
+  const signatureHeader = stripe.webhooks.generateTestHeaderString({
+    payload,
+    secret: webhookSecret,
+  });
+
+  const response = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Stripe-Signature': signatureHeader,
+    },
+    body: payload,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `Stripe webhook endpoint ${webhookUrl} responded with ${response.status}: ${text}`,
+    );
+  }
 };
 
 const waitForStripeEvent = async (eventType, earliestCreated) => {
@@ -263,6 +284,8 @@ const main = async () => {
       await runStripeTrigger(trigger.command);
       const eventId = await waitForStripeEvent(trigger.eventType, startTime);
       console.log(`ℹ️  Stripe generated event ${eventId} (${trigger.eventType})`);
+      const event = await stripe.events.retrieve(eventId, { expand: ['data.object'] });
+      await deliverEventToWebhook(event);
       await waitForIdempotencyRecord(eventId);
       console.log(`✅ Webhook processed ${trigger.eventType} (${eventId})`);
     }
