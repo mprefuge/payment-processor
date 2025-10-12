@@ -16,6 +16,8 @@
     "ci": "npm run lint && npm run test",
     "test:unit": "vitest run",
     "test:watch": "vitest watch",
+    "scenario": "node scripts/run-scenario-tests.js",
+    "scenario:all": "node scripts/run-scenario-tests.js all",
     "scenario:new-customer": "node scripts/run-scenario-tests.js new-customer",
     "scenario:new-payment": "node scripts/run-scenario-tests.js new-payment",
     "scenario:new-recurring-payment": "node scripts/run-scenario-tests.js new-recurring-payment",

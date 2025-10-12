@@ -30,47 +30,63 @@ const scenarios = {
 };
 
 function printUsage() {
-  console.error('Usage: node run-scenario-tests.js <scenario>');
-  console.error('Available scenarios:');
+  console.error('Usage: node run-scenario-tests.js <scenario> [additional-scenarios...]');
+  console.error('       node run-scenario-tests.js all');
+  console.error('\nAvailable scenarios:');
   for (const [name, details] of Object.entries(scenarios)) {
     console.error(`  - ${name}: ${details.description}`);
   }
 }
 
-const scenarioName = process.argv[2];
-if (!scenarioName) {
+const requestedScenarios = process.argv.slice(2);
+if (requestedScenarios.length === 0) {
   printUsage();
   process.exit(1);
 }
 
-const scenario = scenarios[scenarioName];
-if (!scenario) {
-  console.error(`Unknown scenario: ${scenarioName}`);
-  printUsage();
-  process.exit(1);
-}
-
-console.log(`\n🚀 Running scenario: ${scenarioName}`);
-console.log(`ℹ️  ${scenario.description}`);
-console.log('');
-
-for (const relativeTestPath of scenario.tests) {
-  const resolvedPath = path.resolve(__dirname, '..', relativeTestPath);
-  console.log(`▶️  Executing ${path.relative(process.cwd(), resolvedPath)}`);
-  const result = spawnSync(process.execPath, [resolvedPath], {
-    stdio: 'inherit',
-    env: process.env,
-  });
-
-  if (result.error) {
-    console.error(`Failed to launch ${relativeTestPath}:`, result.error.message);
-    process.exit(1);
-  }
-
-  if (typeof result.status === 'number' && result.status !== 0) {
-    console.error(`Test runner exited with status ${result.status}`);
-    process.exit(result.status);
+let scenarioNames;
+if (requestedScenarios.length === 1 && requestedScenarios[0] === 'all') {
+  scenarioNames = Object.keys(scenarios);
+} else {
+  scenarioNames = [];
+  for (const scenarioName of requestedScenarios) {
+    const scenario = scenarios[scenarioName];
+    if (!scenario) {
+      console.error(`Unknown scenario: ${scenarioName}`);
+      printUsage();
+      process.exit(1);
+    }
+    if (!scenarioNames.includes(scenarioName)) {
+      scenarioNames.push(scenarioName);
+    }
   }
 }
 
-console.log(`\n✅ Scenario ${scenarioName} completed successfully.`);
+for (const scenarioName of scenarioNames) {
+  const scenario = scenarios[scenarioName];
+
+  console.log(`\n🚀 Running scenario: ${scenarioName}`);
+  console.log(`ℹ️  ${scenario.description}`);
+  console.log('');
+
+  for (const relativeTestPath of scenario.tests) {
+    const resolvedPath = path.resolve(__dirname, '..', relativeTestPath);
+    console.log(`▶️  Executing ${path.relative(process.cwd(), resolvedPath)}`);
+    const result = spawnSync(process.execPath, [resolvedPath], {
+      stdio: 'inherit',
+      env: process.env,
+    });
+
+    if (result.error) {
+      console.error(`Failed to launch ${relativeTestPath}:`, result.error.message);
+      process.exit(1);
+    }
+
+    if (typeof result.status === 'number' && result.status !== 0) {
+      console.error(`Test runner exited with status ${result.status}`);
+      process.exit(result.status);
+    }
+  }
+
+  console.log(`\n✅ Scenario ${scenarioName} completed successfully.`);
+}

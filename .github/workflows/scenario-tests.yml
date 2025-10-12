@@ -5,21 +5,46 @@ on:
     branches: [prod]
   pull_request:
   workflow_dispatch:
-
-jobs:
-  run-scenarios:
-    name: "Scenario: ${{ matrix.scenario }}"
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        scenario:
+    inputs:
+      scenario:
+        description: "Scenario to run (leave as 'all' to execute the full matrix)"
+        type: choice
+        default: all
+        options:
+          - all
           - new-customer
           - new-payment
           - new-recurring-payment
           - cancel
           - refund
           - dispute
+
+jobs:
+  determine-scenarios:
+    runs-on: ubuntu-latest
+    outputs:
+      scenarios: ${{ steps.set-matrix.outputs.scenarios }}
+    steps:
+      - id: set-matrix
+        env:
+          DEFAULT_MATRIX: '["new-customer","new-payment","new-recurring-payment","cancel","refund","dispute"]'
+          SELECTED_SCENARIO: ${{ github.event.inputs.scenario || 'all' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          matrix="$DEFAULT_MATRIX"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$SELECTED_SCENARIO" != "all" ]; then
+            matrix="[\"$SELECTED_SCENARIO\"]"
+          fi
+          echo "scenarios=$matrix" >> "$GITHUB_OUTPUT"
+
+  run-scenarios:
+    needs: determine-scenarios
+    name: "Scenario: ${{ matrix.scenario }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJson(needs.determine-scenarios.outputs.scenarios) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
