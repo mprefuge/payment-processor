@@ -284,7 +284,7 @@ const main = async () => {
       await runStripeTrigger(trigger.command);
       const eventId = await waitForStripeEvent(trigger.eventType, startTime);
       console.log(`ℹ️  Stripe generated event ${eventId} (${trigger.eventType})`);
-      const event = await stripe.events.retrieve(eventId, { expand: ['data.object'] });
+      const event = await stripe.events.retrieve(eventId);
       await deliverEventToWebhook(event);
       await waitForIdempotencyRecord(eventId);
       console.log(`✅ Webhook processed ${trigger.eventType} (${eventId})`);
