@@ -442,7 +442,7 @@ const buildRefundTransaction = (
 
   return {
     transaction_type__c: 'refund',
-    status__c: refund.status === 'failed' ? 'refund_failed' : 'refunded',
+    status__c: refund.status === 'failed' ? 'failed' : 'refunded',
     stripe_refund_id__c: refund.id,
     stripe_charge_id__c: charge?.id ?? null,
     stripe_payment_intent_id__c:
