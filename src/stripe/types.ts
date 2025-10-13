@@ -27,6 +27,21 @@ export interface RefundReceiptLineInput {
   taxCodeRef?: { value: string; name?: string | null } | null;
 }
 
+export interface SalesReceiptAdjustmentLineInput
+  extends RefundReceiptLineInput {
+  amountCents: number;
+}
+
+export interface AppendSalesReceiptAdjustmentsInput {
+  docNumber: string;
+  lines: SalesReceiptAdjustmentLineInput[];
+  memo: string;
+  stripeRefundId: string;
+  stripeEventId: string;
+  charge: Stripe.Charge | null;
+  paymentIntent: Stripe.PaymentIntent | null;
+}
+
 export interface UpsertRefundReceiptInput {
   stripeEventId: string;
   stripeRefundId: string;
@@ -66,6 +81,9 @@ export interface RefundReceiptAccountingAdapter {
     paymentIntent: Stripe.PaymentIntent | null;
     reason?: string | null;
   }) => Promise<void>;
+  appendSalesReceiptAdjustments?: (
+    input: AppendSalesReceiptAdjustmentsInput,
+  ) => Promise<void>;
 }
 
 export type PayoutDepositLineType = 'charge' | 'fee' | 'refund' | 'adjustment';

@@ -119,6 +119,12 @@ const setup = ({
         return transaction;
       }),
     },
+    refunds: {
+      list: vi.fn().mockResolvedValue({
+        data: Array.isArray(charge.refunds?.data) ? charge.refunds.data : [],
+        has_more: false,
+      }),
+    },
   } as unknown as Stripe;
 
   const upsertResult = { id: 'sf_txn_1' };
@@ -141,6 +147,7 @@ const setup = ({
       .fn()
       .mockResolvedValue({ qboId: 'RR-1', type: 'refund-receipt' }),
     markRefundFailed: vi.fn().mockResolvedValue(undefined),
+    appendSalesReceiptAdjustments: vi.fn().mockResolvedValue(undefined),
   };
 
   const deps: StripeWebhookDependencies = {
@@ -213,6 +220,7 @@ describe('handleRefundEvent', () => {
         qbo_sales_receipt_number: 'CHG-20240101-1000',
         qbo_sales_receipt_lines: lineMetadata,
       },
+      amount_refunded: 1_000,
     });
 
     const paymentIntent = createPaymentIntent({ metadata: {} });
@@ -235,10 +243,27 @@ describe('handleRefundEvent', () => {
       600,
       400,
     ]);
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledTimes(2);
+    const [refundCall, chargeCall] = salesforce.upsertTransactionByExternalId.mock.calls;
+    expect(refundCall[1]).toBe('stripe_refund_id__c');
+    expect(chargeCall[1]).toBe('stripe_charge_id__c');
+    expect(chargeCall[2]).toEqual({ overrideId: 'sf_charge_1' });
+    expect(chargeCall[0].amount_net__c).toBe(0);
+    expect(chargeCall[0].status__c).toBe('refunded');
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_txn_1', {
       qboId: 'RR-1',
       type: 'refund-receipt',
     });
+    expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledWith(
+      expect.objectContaining({
+        docNumber: 'CHG-20240101-1000',
+        lines: [
+          expect.objectContaining({ amountCents: -600 }),
+          expect.objectContaining({ amountCents: -400 }),
+        ],
+        stripeRefundId: 're_123',
+      }),
+    );
   });
 
   it('prorates refund lines for partial refunds', async () => {
@@ -260,6 +285,7 @@ describe('handleRefundEvent', () => {
         qbo_sales_receipt_number: 'CHG-20240101-1000',
         qbo_sales_receipt_lines: lineMetadata,
       },
+      amount_refunded: 500,
     });
 
     const refund = createRefund({ amount: 500 });
@@ -275,6 +301,20 @@ describe('handleRefundEvent', () => {
       300,
       200,
     ]);
+    const chargeCall = salesforce.upsertTransactionByExternalId.mock.calls.find(
+      (call) => call[1] === 'stripe_charge_id__c',
+    );
+    expect(chargeCall).toBeDefined();
+    expect(chargeCall?.[0].amount_net__c).toBe(5);
+    expect(chargeCall?.[0].status__c).toBe('paid');
+    expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lines: [
+          expect.objectContaining({ amountCents: -300 }),
+          expect.objectContaining({ amountCents: -200 }),
+        ],
+      }),
+    );
   });
 
   it('updates refund receipt when refund amount changes', async () => {
@@ -293,6 +333,7 @@ describe('handleRefundEvent', () => {
     const firstRefund = createRefund({ id: 're_partial', amount: 400 });
     const secondRefund = createRefund({ id: 're_partial', amount: 700 });
 
+    charge.amount_refunded = 400;
     const firstSetup = setup({ charge, refund: firstRefund });
     const { deps, refundAdapter } = firstSetup;
     const { context } = createContext();
@@ -307,7 +348,9 @@ describe('handleRefundEvent', () => {
     ).toEqual([240, 160]);
 
     refundAdapter.upsertRefundReceipt.mockClear();
+    refundAdapter.appendSalesReceiptAdjustments.mockClear();
 
+    charge.amount_refunded = 700;
     const secondSetup = setup({ charge, refund: secondRefund });
     await handleRefundEvent(context, secondSetup.event, secondSetup.deps);
 
@@ -317,6 +360,7 @@ describe('handleRefundEvent', () => {
         (line: RefundReceiptLineInput) => line.amountCents,
       ),
     ).toEqual([420, 280]);
+    expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledTimes(1);
   });
 
   it('skips refund receipt creation for failed refunds', async () => {
@@ -332,6 +376,7 @@ describe('handleRefundEvent', () => {
     expect(refundAdapter.markRefundFailed).toHaveBeenCalledWith(
       expect.objectContaining({ stripeRefundId: refund.id }),
     );
+    expect(refundAdapter.appendSalesReceiptAdjustments).not.toHaveBeenCalled();
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({ status__c: 'failed' }),
       'stripe_refund_id__c',
@@ -350,10 +395,14 @@ describe('handleRefundEvent', () => {
     await handleRefundEvent(context, event, deps);
 
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalled();
-    const [transaction] = salesforce.upsertTransactionByExternalId.mock.calls[0];
-    expect(transaction.amount_gross__c).toBe(-25);
-    expect(transaction.amount_net__c).toBe(-25);
-    expect(transaction.amount_fee__c).toBe(0);
+    const refundCall = salesforce.upsertTransactionByExternalId.mock.calls.find(
+      (call) => call[1] === 'stripe_refund_id__c',
+    );
+    expect(refundCall).toBeDefined();
+    const transaction = refundCall?.[0];
+    expect(transaction?.amount_gross__c).toBe(-25);
+    expect(transaction?.amount_net__c).toBe(-25);
+    expect(transaction?.amount_fee__c).toBe(0);
   });
 });
 
