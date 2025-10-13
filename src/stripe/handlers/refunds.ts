@@ -92,22 +92,25 @@ const summarizeBalanceTransaction = (
 
 const buildSalesReceiptAdjustments = (
   lines: RefundReceiptLineInput[],
-): SalesReceiptAdjustmentLineInput[] =>
-  lines
-    .map((line) => {
-      const amount = Math.round(Math.abs(line.amountCents ?? 0));
-      if (amount === 0) {
-        return null;
-      }
+): SalesReceiptAdjustmentLineInput[] => {
+  const adjustments: SalesReceiptAdjustmentLineInput[] = [];
 
-      return {
-        amountCents: -amount,
-        description: line.description ?? null,
-        itemRef: line.itemRef ? { ...line.itemRef } : null,
-        taxCodeRef: line.taxCodeRef ? { ...line.taxCodeRef } : null,
-      } satisfies SalesReceiptAdjustmentLineInput;
-    })
-    .filter((line): line is SalesReceiptAdjustmentLineInput => Boolean(line));
+  for (const line of lines) {
+    const amount = Math.round(Math.abs(line.amountCents ?? 0));
+    if (amount === 0) {
+      continue;
+    }
+
+    adjustments.push({
+      amountCents: -amount,
+      description: line.description ?? null,
+      itemRef: line.itemRef ? { ...line.itemRef } : null,
+      taxCodeRef: line.taxCodeRef ? { ...line.taxCodeRef } : null,
+    });
+  }
+
+  return adjustments;
+};
 
 const collectRefundContexts = async (
   stripe: Stripe,
