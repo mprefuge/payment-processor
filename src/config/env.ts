@@ -37,6 +37,12 @@ export interface EnvConfig {
   accounting: {
     postingStrategy: AccountingPostingStrategy;
     syncEnabled: boolean;
+    defaultSalesItem: string;
+    refundAccount: {
+      autoCreate: boolean;
+      accountType: string;
+      accountSubType: string;
+    };
   };
   appInsights?: {
     instrumentationKey: string;
@@ -263,6 +269,30 @@ function loadEnv(): EnvConfig {
   });
   const syncEnabled = parseBoolean('ACCOUNTING_SYNC_ENABLED', accountingSyncEnabledRaw, false);
 
+  const defaultSalesItem =
+    resolveEnv('QBO_DEFAULT_SALES_ITEM', {
+      fallbackNames: ['ACCOUNTING_DEFAULT_SALES_ITEM'],
+      defaultValue: 'Stripe Donation',
+    }) ?? 'Stripe Donation';
+
+  const autoCreateRefundAccountRaw = resolveEnv('ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT', {
+    defaultValue: 'true',
+  });
+  const autoCreateRefundAccount = parseBoolean(
+    'ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT',
+    autoCreateRefundAccountRaw,
+    true,
+  );
+
+  const refundAccountType =
+    resolveEnv('ACCOUNTING_REFUND_ACCOUNT_TYPE', {
+      defaultValue: 'Expense',
+    }) ?? 'Expense';
+  const refundAccountSubType =
+    resolveEnv('ACCOUNTING_REFUND_ACCOUNT_SUBTYPE', {
+      defaultValue: 'OtherExpense',
+    }) ?? 'OtherExpense';
+
   if (syncEnabled) {
     if (!quickBooks.realmId) {
       missing.push('QBO_REALM_ID');
@@ -317,6 +347,12 @@ function loadEnv(): EnvConfig {
         ? postingStrategy.data
         : 'je-transfer') as AccountingPostingStrategy,
       syncEnabled,
+      defaultSalesItem,
+      refundAccount: {
+        autoCreate: autoCreateRefundAccount,
+        accountType: refundAccountType,
+        accountSubType: refundAccountSubType,
+      },
     },
     appInsights: appInsightsInstrumentationKey
       ? { instrumentationKey: appInsightsInstrumentationKey }

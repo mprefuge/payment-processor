@@ -24,6 +24,12 @@ const baseEnv = {
   accounting: {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
+    defaultSalesItem: 'Stripe Donation',
+    refundAccount: {
+      autoCreate: true,
+      accountType: 'Expense',
+      accountSubType: 'OtherExpense',
+    },
   },
 } as any;
 
@@ -222,6 +228,12 @@ const buildStripeContext = (
 afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
+  baseEnv.accounting.defaultSalesItem = 'Stripe Donation';
+  baseEnv.accounting.refundAccount = {
+    autoCreate: true,
+    accountType: 'Expense',
+    accountSubType: 'OtherExpense',
+  };
   resetAccounts();
   resetTokens();
 });
@@ -335,6 +347,44 @@ describe('postChargeToQbo', () => {
         amount: 3.25,
       },
     ]);
+  });
+
+  it('uses default sales item when checkout metadata is missing', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.accounting.defaultSalesItem = 'Fallback Item';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-fallback', DisplayName: 'Donor Example' } },
+      { QueryResponse: {} },
+      { Item: { Id: 'item-fallback', Name: 'Fallback Item' } },
+      { SalesReceipt: { Id: 'sr-fallback' } },
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 5_000,
+      fee: 0,
+      memo: 'No metadata',
+      date: new Date('2024-04-01'),
+      stripe: buildStripeContext({}, { metadata: { transactionType: '   ' } }),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-fallback', type: 'sales-receipt' });
+
+    const itemCreateRequest = requests.find((request) => request.url.includes('/item'));
+    expect(itemCreateRequest).toBeDefined();
+
+    const salesReceiptRequest = requests.find((request) =>
+      request.url.includes('salesreceipt'),
+    );
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      name: 'Fallback Item',
+    });
   });
 
   it('updates an existing QuickBooks customer with Stripe-provided details before posting the sales receipt', async () => {
@@ -913,6 +963,38 @@ describe('postRefundToQbo', () => {
         amount: 85,
       },
     ]);
+  });
+
+  it('auto-creates the refunds account when configured by name', async () => {
+    baseEnv.quickBooks.accounts.refunds = 'Refunds';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { Account: { Id: '789', Name: 'Refunds' } },
+      { JournalEntry: { Id: 'refund-2' } },
+    );
+
+    const { postRefundToQbo } = await importQboSvc();
+
+    const result = await postRefundToQbo({
+      amount: 4_200,
+      memo: 'Auto create refund account',
+      date: new Date('2024-05-05'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'refund-2', type: 'journal-entry' });
+    expect(requests[0].url).toContain('/query?query=');
+    expect(requests[1].url).toContain('/account');
+
+    const journalBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
+    const debitLine = journalBody.Line.find(
+      (line: any) => line.JournalEntryLineDetail?.PostingType === 'Debit',
+    );
+    expect(debitLine?.JournalEntryLineDetail?.AccountRef).toMatchObject({
+      value: '789',
+      name: 'Refunds',
+    });
   });
 });
 

@@ -489,16 +489,26 @@ const getCheckoutTransactionType = (
   session: Stripe.Checkout.Session | null | undefined,
 ): string | null => {
   if (!session) {
-    return null;
+    const fallback = toTrimmed(env.accounting.defaultSalesItem);
+    return fallback ?? null;
   }
 
   const metadata = session.metadata as Record<string, unknown> | null | undefined;
   if (!metadata || typeof metadata !== 'object') {
-    return null;
+    const fallback = toTrimmed(env.accounting.defaultSalesItem);
+    return fallback ?? null;
   }
 
   const value = metadata.transactionType;
-  return typeof value === 'string' ? toTrimmed(value) : null;
+  if (typeof value === 'string') {
+    const normalized = toTrimmed(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  const fallback = toTrimmed(env.accounting.defaultSalesItem);
+  return fallback ?? null;
 };
 
 const normalizeDate = (value: string | Date): string => {
@@ -1525,16 +1535,31 @@ const isLookupRequired = (ref: AccountRefWithMetadata): boolean => {
   return Boolean(metadata && metadata.resolved === false);
 };
 
-const resolveAccountId = async (
+const buildAccountCacheKey = (name: string): string =>
+  `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:${name.toLowerCase()}`;
+
+const configuredRefundAccountName = (() => {
+  try {
+    const parsed = parseReferenceInput(env.quickBooks.accounts.refunds, 'account');
+    if (parsed.lookupName && parsed.lookupName.trim()) {
+      return parsed.lookupName.trim();
+    }
+    if (typeof parsed.reference.name === 'string' && parsed.reference.name.trim()) {
+      return parsed.reference.name.trim();
+    }
+    if (typeof parsed.reference.value === 'string' && parsed.reference.value.trim()) {
+      return parsed.reference.value.trim();
+    }
+  } catch {
+    // configuration validation occurs during env load; ignore here
+  }
+  return null;
+})();
+
+const lookupAccountIdByName = async (
   name: string,
   context: QuickBooksRequestContext,
-): Promise<string> => {
-  const cacheKey = `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:${name.toLowerCase()}`;
-  const cached = accountLookupCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
+): Promise<string | null> => {
   const query = `select Id, Name from Account where Name = '${escapeQueryValue(name)}'`;
   const url = buildQboQueryUrl(query);
   const response = await context.request(url, {
@@ -1547,7 +1572,7 @@ const resolveAccountId = async (
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
     throw new Error(
-      `Failed to resolve QuickBooks account "${name}" (status ${response.status}): ${
+      `QuickBooks account lookup failed for "${name}" (status ${response.status}): ${
         errorText ?? response.statusText
       }`,
     );
@@ -1577,10 +1602,7 @@ const resolveAccountId = async (
   }) ?? accountList[0];
 
   if (!match || typeof match !== 'object') {
-    throw new Error(
-      `QuickBooks account "${name}" could not be found. ` +
-        'Provide the account ID in configuration or ensure the account exists in QuickBooks.',
-    );
+    return null;
   }
 
   const idValue = (match as Record<string, unknown>).Id;
@@ -1598,8 +1620,104 @@ const resolveAccountId = async (
     );
   }
 
-  accountLookupCache.set(cacheKey, id);
+  accountLookupCache.set(buildAccountCacheKey(name), id);
   return id;
+};
+
+const maybeCreateConfiguredAccount = async (
+  name: string,
+  context: QuickBooksRequestContext,
+): Promise<string | null> => {
+  if (!env.accounting.refundAccount.autoCreate) {
+    return null;
+  }
+
+  if (!configuredRefundAccountName) {
+    return null;
+  }
+
+  if (configuredRefundAccountName.toLowerCase() !== name.trim().toLowerCase()) {
+    return null;
+  }
+
+  const payload: Record<string, unknown> = {
+    Name: configuredRefundAccountName,
+    AccountType: env.accounting.refundAccount.accountType,
+    AccountSubType: env.accounting.refundAccount.accountSubType,
+    Description: 'Auto-created by Stripe webhook integration',
+  };
+
+  const url = buildQboUrl('account');
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+
+    if (response.status === 400 && errorText && /Duplicate Name Exists Error/i.test(errorText)) {
+      return lookupAccountIdByName(name, context);
+    }
+
+    throw new Error(
+      `Failed to auto-create QuickBooks account "${configuredRefundAccountName}" (status ${
+        response.status
+      }): ${errorText ?? response.statusText}`,
+    );
+  }
+
+  const data = (await response.json().catch(() => undefined)) ?? {};
+  const account =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).Account as Record<string, unknown> | undefined)
+      : undefined;
+  const idValue = account?.Id;
+
+  let id: string | null = null;
+  if (typeof idValue === 'string' && idValue.trim()) {
+    id = idValue.trim();
+  } else if (typeof idValue === 'number' && Number.isFinite(idValue)) {
+    id = idValue.toString();
+  }
+
+  if (id) {
+    accountLookupCache.set(buildAccountCacheKey(name), id);
+    return id;
+  }
+
+  return lookupAccountIdByName(name, context);
+};
+
+const resolveAccountId = async (
+  name: string,
+  context: QuickBooksRequestContext,
+): Promise<string> => {
+  const cacheKey = buildAccountCacheKey(name);
+  const cached = accountLookupCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const lookedUpId = await lookupAccountIdByName(name, context);
+  if (lookedUpId) {
+    return lookedUpId;
+  }
+
+  const createdId = await maybeCreateConfiguredAccount(name, context);
+  if (createdId) {
+    accountLookupCache.set(cacheKey, createdId);
+    return createdId;
+  }
+
+  throw new Error(
+    `QuickBooks account "${name}" could not be found. ` +
+      'Provide the account ID in configuration or ensure the account exists in QuickBooks.',
+  );
 };
 
 type ReferenceCollections = {

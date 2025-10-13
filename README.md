@@ -91,8 +91,12 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `QBO_ACCOUNT_FEES` | QuickBooks ID (or `Name|ID`) for Stripe fee expense. |
 | `QBO_ACCOUNT_REFUNDS` | QuickBooks ID (or `Name|ID`) for refunds liability. |
 | `QBO_ACCOUNT_DISPUTES` | QuickBooks ID (or `Name|ID`) for dispute losses. |
+| `QBO_DEFAULT_SALES_ITEM` | Fallback QuickBooks Product/Service name (or `Name|ID`) used when Stripe metadata omits a `transactionType`. |
 | `ACCOUNTING_SYNC_ENABLED` | Set to `true` to post into accounting after validation. |
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
+| `ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT` | When `true`, automatically creates the configured refunds account if it does not exist. |
+| `ACCOUNTING_REFUND_ACCOUNT_TYPE` | QuickBooks AccountType used when auto-creating the refunds account (default `Expense`). |
+| `ACCOUNTING_REFUND_ACCOUNT_SUBTYPE` | QuickBooks AccountSubType used when auto-creating the refunds account (default `OtherExpense`). |
 
 When specifying account or item mappings you should provide the QuickBooks ID.
 You can either supply the raw ID (for example, `123`) or a `Name|ID` pair such
