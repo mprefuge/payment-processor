@@ -28,7 +28,7 @@ const baseEnv = {
     refundAccount: {
       autoCreate: true,
       accountType: 'Expense',
-      accountSubType: 'OtherExpense',
+      accountSubType: 'OtherMiscellaneousExpense',
     },
   },
 } as any;
@@ -232,7 +232,7 @@ afterEach(() => {
   baseEnv.accounting.refundAccount = {
     autoCreate: true,
     accountType: 'Expense',
-    accountSubType: 'OtherExpense',
+    accountSubType: 'OtherMiscellaneousExpense',
   };
   resetAccounts();
   resetTokens();

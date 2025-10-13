@@ -96,7 +96,7 @@ Copy the template in `local.settings.json.template` and populate the following k
 | `ACCOUNTING_POSTING_STRATEGY` | Chooses how transactions post into QuickBooks. |
 | `ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT` | When `true`, automatically creates the configured refunds account if it does not exist. |
 | `ACCOUNTING_REFUND_ACCOUNT_TYPE` | QuickBooks AccountType used when auto-creating the refunds account (default `Expense`). |
-| `ACCOUNTING_REFUND_ACCOUNT_SUBTYPE` | QuickBooks AccountSubType used when auto-creating the refunds account (default `OtherExpense`). |
+| `ACCOUNTING_REFUND_ACCOUNT_SUBTYPE` | QuickBooks AccountSubType used when auto-creating the refunds account (default `OtherMiscellaneousExpense`). |
 
 When specifying account or item mappings you should provide the QuickBooks ID.
 You can either supply the raw ID (for example, `123`) or a `Name|ID` pair such

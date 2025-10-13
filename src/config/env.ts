@@ -290,8 +290,8 @@ function loadEnv(): EnvConfig {
     }) ?? 'Expense';
   const refundAccountSubType =
     resolveEnv('ACCOUNTING_REFUND_ACCOUNT_SUBTYPE', {
-      defaultValue: 'OtherExpense',
-    }) ?? 'OtherExpense';
+      defaultValue: 'OtherMiscellaneousExpense',
+    }) ?? 'OtherMiscellaneousExpense';
 
   if (syncEnabled) {
     if (!quickBooks.realmId) {
