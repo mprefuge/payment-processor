@@ -272,8 +272,8 @@ function loadEnv(): EnvConfig {
   const defaultSalesItem =
     resolveEnv('QBO_DEFAULT_SALES_ITEM', {
       fallbackNames: ['ACCOUNTING_DEFAULT_SALES_ITEM'],
-      defaultValue: 'Stripe Donation',
-    }) ?? 'Stripe Donation';
+      defaultValue: 'Stripe Transaction',
+    }) ?? 'Stripe Transaction';
 
   const autoCreateRefundAccountRaw = resolveEnv('ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT', {
     defaultValue: 'true',

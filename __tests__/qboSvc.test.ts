@@ -24,7 +24,7 @@ const baseEnv = {
   accounting: {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
-    defaultSalesItem: 'Stripe Donation',
+    defaultSalesItem: 'Stripe Transaction',
     refundAccount: {
       autoCreate: true,
       accountType: 'Expense',
@@ -228,7 +228,7 @@ const buildStripeContext = (
 afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
-  baseEnv.accounting.defaultSalesItem = 'Stripe Donation';
+  baseEnv.accounting.defaultSalesItem = 'Stripe Transaction';
   baseEnv.accounting.refundAccount = {
     autoCreate: true,
     accountType: 'Expense',
