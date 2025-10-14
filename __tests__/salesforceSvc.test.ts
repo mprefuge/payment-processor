@@ -10,17 +10,15 @@ import type { TransactionUpsertDTO } from '../src/domain/transactions';
 
 type MockConnection = {
   upsert: ReturnType<typeof vi.fn>;
+  query: ReturnType<typeof vi.fn>;
   sobject: ReturnType<typeof vi.fn>;
 };
 
-const createMockConnection = (): MockConnection & { queryBuilder: any } => {
+const createMockConnection = (): MockConnection => {
   const upsert = vi.fn();
-  const queryBuilder: any = {};
-  queryBuilder.find = vi.fn().mockImplementation(() => queryBuilder);
-  queryBuilder.limit = vi.fn().mockImplementation(() => queryBuilder);
-  queryBuilder.execute = vi.fn().mockResolvedValue([]);
-  const sobject = vi.fn().mockReturnValue(queryBuilder);
-  return { upsert, sobject, queryBuilder };
+  const query = vi.fn().mockResolvedValue({ records: [] });
+  const sobject = vi.fn();
+  return { upsert, query, sobject };
 };
 
 describe('createSalesforceSvc', () => {
@@ -62,11 +60,11 @@ describe('createSalesforceSvc', () => {
   });
 
   it('maps DTO fields to Salesforce API names when upserting', async () => {
-    const { upsert, sobject } = createMockConnection();
+    const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
 
     const service: SalesforceSvc = createSalesforceSvc({
-      connection: { upsert, sobject } as unknown as Connection,
+      connection: { upsert, sobject, query } as unknown as Connection,
     });
 
     const dto = buildDto();
@@ -92,12 +90,12 @@ describe('createSalesforceSvc', () => {
   });
 
   it('uses Salesforce API names when looking up transactions by external id', async () => {
-    const { upsert, sobject, queryBuilder } = createMockConnection();
+    const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
-    queryBuilder.execute.mockResolvedValue([{ Id: 'sf_1' }]);
+    query.mockResolvedValue({ records: [{ Id: 'sf_1' }] });
 
     const service: SalesforceSvc = createSalesforceSvc({
-      connection: { upsert, sobject } as unknown as Connection,
+      connection: { upsert, sobject, query } as unknown as Connection,
     });
 
     const result = await service.findTransactionIdByExternalId(
@@ -105,22 +103,18 @@ describe('createSalesforceSvc', () => {
       'cs_test_123',
     );
 
-    expect(queryBuilder.find).toHaveBeenCalledWith(
-      {
-        [TRANSACTION_FIELD_API_NAMES.stripe_checkout_session_id__c]: 'cs_test_123',
-      },
-      ['Id'],
+    expect(query).toHaveBeenCalledWith(
+      "SELECT Id, Transaction_Type__c FROM Transaction__c WHERE Stripe_Checkout_Session_Id__c = 'cs_test_123' ORDER BY LastModifiedDate DESC LIMIT 10",
     );
-    expect(queryBuilder.limit).toHaveBeenCalledWith(1);
     expect(result).toBe('sf_1');
   });
 
   it('normalizes payout linkage upserts to Salesforce API names', async () => {
-    const { upsert, sobject } = createMockConnection();
+    const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
 
     const service: SalesforceSvc = createSalesforceSvc({
-      connection: { upsert, sobject } as unknown as Connection,
+      connection: { upsert, sobject, query } as unknown as Connection,
     });
 
     await service.linkPayoutOnTransactions('po_123', ['bt_1']);
@@ -139,11 +133,11 @@ describe('createSalesforceSvc', () => {
   });
 
   it('leaves existing Salesforce lookups untouched when metadata omits them', async () => {
-    const { upsert, sobject } = createMockConnection();
+    const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
 
     const service: SalesforceSvc = createSalesforceSvc({
-      connection: { upsert, sobject } as unknown as Connection,
+      connection: { upsert, sobject, query } as unknown as Connection,
     });
 
     const dto = buildDto();
@@ -163,5 +157,70 @@ describe('createSalesforceSvc', () => {
     expect(records[0]).not.toHaveProperty('Fund__c');
     expect(records[0]).not.toHaveProperty('Designation__c');
     expect(records[0]).not.toHaveProperty('Restriction__c');
+  });
+
+  it('falls back to updating by Id when duplicate external ids are detected', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert
+      .mockResolvedValueOnce([
+        {
+          success: false,
+          id: null,
+          errors: [
+            {
+              message: 'Stripe Charge ID: more than one record found for external id field: [a1, a2]',
+            },
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([{ success: true, id: 'a1', errors: [] }]);
+
+    query.mockResolvedValue({
+      records: [
+        { Id: 'a1', Transaction_Type__c: 'charge' },
+        { Id: 'a2', Transaction_Type__c: 'refund' },
+      ],
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+
+    const result = await service.upsertTransactionByExternalId(dto, 'stripe_charge_id__c');
+
+    expect(query).toHaveBeenCalledWith(
+      "SELECT Id, Transaction_Type__c FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' ORDER BY LastModifiedDate DESC LIMIT 10",
+    );
+
+    expect(upsert).toHaveBeenCalledTimes(2);
+    const [, firstCallRecords, firstExternalIdField] = upsert.mock.calls[0];
+    expect(firstExternalIdField).toBe(TRANSACTION_FIELD_API_NAMES.stripe_charge_id__c);
+    expect(firstCallRecords[0]).not.toHaveProperty('Id');
+
+    const [, secondCallRecords, secondExternalIdField] = upsert.mock.calls[1];
+    expect(secondExternalIdField).toBe('Id');
+    expect(secondCallRecords[0]).toMatchObject({ Id: 'a1' });
+    expect(result).toEqual({ success: true, id: 'a1', errors: [] });
+  });
+
+  it('prefers charge transactions when resolving duplicate lookups', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+    query.mockResolvedValue({
+      records: [
+        { Id: 'refund1', Transaction_Type__c: 'refund' },
+        { Id: 'charge1', Transaction_Type__c: 'charge' },
+      ],
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const result = await service.findTransactionIdByExternalId('stripe_charge_id__c', 'ch_456');
+
+    expect(result).toBe('charge1');
   });
 });
