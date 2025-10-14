@@ -91,10 +91,7 @@ type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
 
 type TransactionRecord = Record<string, TransactionFieldValue>;
 
-type TransactionLookupRecord = {
-  Id?: string;
-  Transaction_Type__c?: string | null;
-};
+type TransactionLookupRecord = { Id?: string };
 
 const TRANSACTION_OBJECT = 'Transaction__c';
 
@@ -166,63 +163,22 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return [];
   };
 
-  const pickPreferredTransactionId = (
-    records: TransactionLookupRecord[],
-    desiredType?: string | null,
-  ): string | null => {
-    if (!records || records.length === 0) {
-      return null;
-    }
-
-    const normalizedDesired =
-      typeof desiredType === 'string' ? desiredType.trim().toLowerCase() : null;
-
-    if (normalizedDesired) {
-      const matching = records.find((record) => {
-        const recordType =
-          typeof record.Transaction_Type__c === 'string'
-            ? record.Transaction_Type__c.trim().toLowerCase()
-            : null;
-        return recordType === normalizedDesired && typeof record.Id === 'string' && record.Id.trim();
-      });
-
-      if (matching && typeof matching.Id === 'string') {
-        return matching.Id;
-      }
-    }
-
-    const chargeRecord = records.find((record) => {
-      const recordType =
-        typeof record.Transaction_Type__c === 'string'
-          ? record.Transaction_Type__c.trim().toLowerCase()
-          : null;
-      return recordType === 'charge' && typeof record.Id === 'string' && record.Id.trim();
-    });
-
-    if (chargeRecord && typeof chargeRecord.Id === 'string') {
-      return chargeRecord.Id;
-    }
-
-    const firstWithId = records.find(
-      (record) => typeof record.Id === 'string' && record.Id.trim().length > 0,
-    );
-
-    return firstWithId?.Id ?? null;
-  };
-
   const resolveExistingTransactionId = async (
     field: TransactionExternalIdField,
     value: string,
-    transactionType?: string | null,
   ): Promise<string | null> => {
     const apiField = resolveExternalIdField(field);
     const escapedValue = escapeForSoqlLiteral(value);
-    const soql = `SELECT Id, Transaction_Type__c FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}' ORDER BY LastModifiedDate DESC LIMIT 10`;
+    const soql = `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}' LIMIT 1`;
 
     const result = await connection.query<TransactionLookupRecord>(soql);
     const records = toLookupRecords(result);
 
-    return pickPreferredTransactionId(records, transactionType ?? null);
+    const recordWithId = records.find(
+      (record): record is { Id: string } => typeof record.Id === 'string' && record.Id.trim().length > 0,
+    );
+
+    return recordWithId?.Id ?? null;
   };
 
   const upsertTransactionByExternalId = async (
@@ -259,11 +215,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       );
 
       if (duplicateError) {
-        const fallbackId = await resolveExistingTransactionId(
-          key,
-          normalizedExternalId,
-          dto.transaction_type__c ?? null,
-        );
+        const fallbackId = await resolveExistingTransactionId(key, normalizedExternalId);
 
         if (fallbackId) {
           const fallbackRecords = [
@@ -370,7 +322,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return resolveExistingTransactionId(
       normalizedKey as TransactionExternalIdField,
       normalizedValue,
-      null,
     );
   };
 

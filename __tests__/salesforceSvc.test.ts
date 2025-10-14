@@ -104,7 +104,7 @@ describe('createSalesforceSvc', () => {
     );
 
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id, Transaction_Type__c FROM Transaction__c WHERE Stripe_Checkout_Session_Id__c = 'cs_test_123' ORDER BY LastModifiedDate DESC LIMIT 10",
+      "SELECT Id FROM Transaction__c WHERE Stripe_Checkout_Session_Id__c = 'cs_test_123' LIMIT 1",
     );
     expect(result).toBe('sf_1');
   });
@@ -175,12 +175,7 @@ describe('createSalesforceSvc', () => {
       ])
       .mockResolvedValueOnce([{ success: true, id: 'a1', errors: [] }]);
 
-    query.mockResolvedValue({
-      records: [
-        { Id: 'a1', Transaction_Type__c: 'charge' },
-        { Id: 'a2', Transaction_Type__c: 'refund' },
-      ],
-    });
+    query.mockResolvedValue({ records: [{ Id: 'a1' }] });
 
     const service: SalesforceSvc = createSalesforceSvc({
       connection: { upsert, query, sobject } as unknown as Connection,
@@ -191,7 +186,7 @@ describe('createSalesforceSvc', () => {
     const result = await service.upsertTransactionByExternalId(dto, 'stripe_charge_id__c');
 
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id, Transaction_Type__c FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' ORDER BY LastModifiedDate DESC LIMIT 10",
+      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' LIMIT 1",
     );
 
     expect(upsert).toHaveBeenCalledTimes(2);
@@ -205,22 +200,4 @@ describe('createSalesforceSvc', () => {
     expect(result).toEqual({ success: true, id: 'a1', errors: [] });
   });
 
-  it('prefers charge transactions when resolving duplicate lookups', async () => {
-    const { upsert, query, sobject } = createMockConnection();
-    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
-    query.mockResolvedValue({
-      records: [
-        { Id: 'refund1', Transaction_Type__c: 'refund' },
-        { Id: 'charge1', Transaction_Type__c: 'charge' },
-      ],
-    });
-
-    const service: SalesforceSvc = createSalesforceSvc({
-      connection: { upsert, query, sobject } as unknown as Connection,
-    });
-
-    const result = await service.findTransactionIdByExternalId('stripe_charge_id__c', 'ch_456');
-
-    expect(result).toBe('charge1');
-  });
 });
