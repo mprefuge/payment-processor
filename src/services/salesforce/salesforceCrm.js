@@ -67,18 +67,23 @@ class SalesforceCrmService extends BaseCrmService {
   }
 
   /**
-   * Search for contacts in Salesforce using email, phone, or name
+   * Search for contacts in Salesforce using email, phone, name, or Stripe Customer ID
    * @param {Object} searchCriteria - Search criteria
    * @returns {Promise<Array>} Array of matching contacts
    */
   async searchContact(searchCriteria) {
     await this.connect();
 
-    const { email, phone, firstName, lastName } = searchCriteria;
+    const { email, phone, firstName, lastName, stripeCustomerId } = searchCriteria;
 
     try {
       // Build SOQL query with multiple search criteria
       let whereConditions = [];
+
+      // Prioritize Stripe Customer ID if provided
+      if (stripeCustomerId) {
+        whereConditions.push(`Stripe_Customer_ID__c = '${stripeCustomerId.replace(/'/g, "\\'")}'`);
+      }
 
       if (email) {
         whereConditions.push(`Email = '${email.replace(/'/g, "\\'")}'`);
@@ -101,7 +106,7 @@ class SalesforceCrmService extends BaseCrmService {
         return [];
       }
 
-      const query = `SELECT Id, FirstName, LastName, Email, Phone, MobilePhone, MailingStreet, MailingCity, MailingState, MailingPostalCode, MailingCountry, CreatedDate 
+      const query = `SELECT Id, FirstName, LastName, Email, Phone, MobilePhone, MailingStreet, MailingCity, MailingState, MailingPostalCode, MailingCountry, Stripe_Customer_ID__c, CreatedDate 
                           FROM Contact 
                           WHERE ${whereConditions.join(' OR ')} 
                           ORDER BY CreatedDate DESC 
@@ -126,7 +131,7 @@ class SalesforceCrmService extends BaseCrmService {
   async createContact(contactData) {
     await this.connect();
 
-    const { email, firstName, lastName, phone, address } = contactData;
+    const { email, firstName, lastName, phone, address, stripeCustomerId } = contactData;
 
     const configuredLeadSource =
       typeof this.config?.contactLeadSource === 'string'
@@ -150,6 +155,7 @@ class SalesforceCrmService extends BaseCrmService {
       MailingState: address?.state || null,
       MailingPostalCode: address?.postalCode || address?.postal_code || null, // Handle both normalized and original field names
       MailingCountry: address?.country || 'US',
+      ...(stripeCustomerId ? { Stripe_Customer_ID__c: stripeCustomerId } : {}),
       ...(includeLeadSource && leadSource ? { LeadSource: leadSource } : {}),
     });
 
@@ -261,22 +267,32 @@ class SalesforceCrmService extends BaseCrmService {
   async updateContact(contactId, contactData) {
     await this.connect();
 
-    const { address } = contactData;
+    const { address, email, firstName, lastName, phone, stripeCustomerId } = contactData;
 
-    // Only update address fields if address is provided and has meaningful data
-    if (!address) {
-      return null;
+    // Build update record with fields to update
+    const updateRecord = {};
+
+    // Update address fields if provided
+    if (address) {
+      if (address.line1) updateRecord.MailingStreet = address.line1;
+      if (address.city) updateRecord.MailingCity = address.city;
+      if (address.state) updateRecord.MailingState = address.state;
+      if (address.postalCode || address.postal_code) {
+        updateRecord.MailingPostalCode = address.postalCode || address.postal_code;
+      }
+      if (address.country) updateRecord.MailingCountry = address.country;
     }
 
-    const updateRecord = {
-      MailingStreet: address.line1 || null,
-      MailingCity: address.city || null,
-      MailingState: address.state || null,
-      MailingPostalCode: address.postalCode || address.postal_code || null,
-      MailingCountry: address.country || 'US',
-    };
+    // Update contact info fields if provided
+    if (email) updateRecord.Email = email;
+    if (firstName) updateRecord.FirstName = firstName;
+    if (lastName) updateRecord.LastName = lastName;
+    if (phone) updateRecord.Phone = phone;
 
-    // Remove null values to avoid overwriting existing data with null
+    // Update Stripe Customer ID if provided
+    if (stripeCustomerId) updateRecord.Stripe_Customer_ID__c = stripeCustomerId;
+
+    // Remove null/empty values to avoid overwriting existing data
     Object.keys(updateRecord).forEach((key) => {
       if (updateRecord[key] === null || updateRecord[key] === '') {
         delete updateRecord[key];
@@ -285,9 +301,10 @@ class SalesforceCrmService extends BaseCrmService {
 
     // Only proceed if we have at least one field to update
     if (Object.keys(updateRecord).length === 0) {
-      logger.info('No meaningful address data to update');
+      logger.info('No meaningful data to update');
       return null;
     }
+
     try {
       const result = await this.conn.sobject('Contact').update({
         Id: contactId,
@@ -295,7 +312,7 @@ class SalesforceCrmService extends BaseCrmService {
       });
 
       if (result.success) {
-        logger.info(`Updated Salesforce contact ${contactId} with address information`);
+        logger.info(`Updated Salesforce contact ${contactId}`, updateRecord);
 
         // Fetch the updated contact to return complete data
         const updatedContact = await this.conn.sobject('Contact').retrieve(contactId);

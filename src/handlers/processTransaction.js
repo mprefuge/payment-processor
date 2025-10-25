@@ -442,12 +442,13 @@ const syncContactToCrm = async (context, customerData) => {
     // Create CRM service
     const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
 
-    // Prepare search criteria
+    // Prepare search criteria including Stripe Customer ID if available
     const searchCriteria = {
       email: customerData.email,
       firstName: customerData.firstname,
       lastName: customerData.lastname,
       phone: customerData.phone,
+      stripeCustomerId: customerData.stripeCustomerId || null,
     };
 
     console.log('Searching for existing contact in CRM...');
@@ -456,7 +457,64 @@ const syncContactToCrm = async (context, customerData) => {
     let contact = null;
 
     if (existingContacts && existingContacts.length > 0) {
-      // Validate that name matches before accepting a contact
+      // Priority 1: Check for exact Stripe Customer ID match
+      if (searchCriteria.stripeCustomerId) {
+        const stripeIdMatch = existingContacts.find(
+          (c) => c.Stripe_Customer_ID__c === searchCriteria.stripeCustomerId
+        );
+
+        if (stripeIdMatch) {
+          contact = stripeIdMatch;
+          console.log(
+            `Found contact by Stripe Customer ID: ${contact.FirstName} ${contact.LastName} (${contact.Email})`
+          );
+
+          // Update contact with latest information from Stripe
+          const updateData = {
+            email: customerData.email,
+            firstName: customerData.firstname,
+            lastName: customerData.lastname,
+            phone: customerData.phone,
+          };
+
+          // Handle both nested address object and flat address fields
+          const addressData =
+            customerData.address && typeof customerData.address === 'object'
+              ? {
+                  line1: customerData.address.line1,
+                  city: customerData.address.city,
+                  state: customerData.address.state,
+                  postal_code: customerData.address.postal_code,
+                  country: 'US',
+                }
+              : {
+                  line1: customerData.address,
+                  city: customerData.city,
+                  state: customerData.state,
+                  postal_code: customerData.zipcode,
+                  country: 'US',
+                };
+
+          updateData.address = addressData;
+
+          try {
+            const updatedContact = await crmService.updateContact(contact.Id, updateData);
+            if (updatedContact) {
+              contact = updatedContact;
+              console.log(
+                `Updated contact from Stripe data: ${contact.FirstName} ${contact.LastName}`
+              );
+            }
+          } catch (error) {
+            console.log(`Failed to update contact: ${error.message}`);
+            // Continue - don't fail for update issues
+          }
+
+          return contact;
+        }
+      }
+
+      // Priority 2: Validate that name matches before accepting a contact
       // This prevents updating wrong contacts when email/phone match but name differs
       const matchingContact = existingContacts.find((c) => {
         const firstNameMatch =
@@ -473,7 +531,9 @@ const syncContactToCrm = async (context, customerData) => {
           `Found existing contact with matching name: ${contact.FirstName} ${contact.LastName} (${contact.Email})`
         );
 
-        // Update contact with address information if available
+        // Prepare update data
+        const updateData = {};
+
         // Handle both nested address object and flat address fields
         const addressData =
           customerData.address && typeof customerData.address === 'object'
@@ -494,17 +554,31 @@ const syncContactToCrm = async (context, customerData) => {
 
         // Only update if we have address data
         if (addressData.line1 || addressData.city || addressData.state || addressData.postal_code) {
+          updateData.address = addressData;
+        }
+
+        // If the contact doesn't have a Stripe Customer ID but we do, add it
+        if (
+          searchCriteria.stripeCustomerId &&
+          (!contact.Stripe_Customer_ID__c || contact.Stripe_Customer_ID__c.trim() === '')
+        ) {
+          updateData.stripeCustomerId = searchCriteria.stripeCustomerId;
+          console.log(
+            `Adding Stripe Customer ID to existing contact: ${searchCriteria.stripeCustomerId}`
+          );
+        }
+
+        // Perform update if we have data to update
+        if (Object.keys(updateData).length > 0) {
           try {
-            const updatedContact = await crmService.updateContact(contact.Id, {
-              address: addressData,
-            });
+            const updatedContact = await crmService.updateContact(contact.Id, updateData);
             if (updatedContact) {
               contact = updatedContact;
-              console.log(`Updated contact address for: ${contact.FirstName} ${contact.LastName}`);
+              console.log(`Updated contact: ${contact.FirstName} ${contact.LastName}`);
             }
           } catch (error) {
-            console.log(`Failed to update contact address: ${error.message}`);
-            // Continue - don't fail for address update issues
+            console.log(`Failed to update contact: ${error.message}`);
+            // Continue - don't fail for update issues
           }
         }
       } else {
@@ -526,6 +600,7 @@ const syncContactToCrm = async (context, customerData) => {
         firstName: customerData.firstname,
         lastName: customerData.lastname,
         phone: customerData.phone,
+        stripeCustomerId: searchCriteria.stripeCustomerId || null,
         address:
           customerData.address && typeof customerData.address === 'object'
             ? {
@@ -1026,6 +1101,9 @@ module.exports = async function (request, context) {
       log('Updating existing Stripe customer with latest information');
       await updateStripeCustomer(stripe, customerId, customerDetails);
     }
+
+    // Add Stripe Customer ID to customerDetails for CRM sync
+    customerDetails.stripeCustomerId = customerId;
 
     // Create checkout session
     log('Creating Stripe checkout session');
