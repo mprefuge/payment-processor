@@ -1198,16 +1198,40 @@ module.exports = async function (request, context) {
 
     // Get request body - handle both v3 and v4
     let body;
-    if (actualRequest.body && typeof actualRequest.body === 'object') {
-      // v3 style - body is already parsed
-      body = actualRequest.body;
-    } else if (typeof actualRequest.json === 'function') {
+    
+    // Debug: Log what we're receiving
+    log('Request object type check', {
+      hasBody: !!actualRequest.body,
+      bodyType: typeof actualRequest.body,
+      bodyKeys: actualRequest.body ? Object.keys(actualRequest.body).length : 0,
+      hasJson: typeof actualRequest.json === 'function',
+      hasText: typeof actualRequest.text === 'function',
+      isV3,
+    });
+    
+    // For v4, always try json() first even if body exists
+    if (!isV3 && typeof actualRequest.json === 'function') {
       // v4 style - need to call json()
       body = await actualRequest.json();
+      log('Using v4 style body (from json())', { bodyKeys: Object.keys(body) });
+    } else if (actualRequest.body && typeof actualRequest.body === 'object' && Object.keys(actualRequest.body).length > 0) {
+      // v3 style - body is already parsed and has content
+      body = actualRequest.body;
+      log('Using v3 style body', { bodyKeys: Object.keys(body) });
+    } else if (typeof actualRequest.text === 'function') {
+      // v4 style fallback - try text() and parse
+      const text = await actualRequest.text();
+      log('Got text from request', { textLength: text?.length, textPreview: text?.substring(0, 100) });
+      try {
+        body = JSON.parse(text);
+        log('Parsed JSON from text()', { bodyKeys: Object.keys(body) });
+      } catch (e) {
+        log('Failed to parse JSON from text', { error: e.message });
+      }
     }
     
-    if (!body) {
-      log('No request body provided');
+    if (!body || Object.keys(body).length === 0) {
+      log('No request body provided or body is empty');
       return sendResponse({
         status: 400,
         jsonBody: {
@@ -1217,6 +1241,7 @@ module.exports = async function (request, context) {
     }
 
     const requestSummary = createRequestSummary(body);
+    console.error('[DEBUG] Request body summary:', requestSummary);
     log('Request body summary', requestSummary);
 
     if (secureDebugEnabled) {
@@ -1225,11 +1250,19 @@ module.exports = async function (request, context) {
 
     // Validate request
     const validation = validateRequest(body);
+    console.error('[DEBUG] Validation result:', {
+      isValid: validation.isValid,
+      hasError: Boolean(validation.error),
+      errorDetails: validation.error,
+    });
     log('Validation result', {
       isValid: validation.isValid,
       hasError: Boolean(validation.error),
+      errorDetails: validation.error,
     });
     if (!validation.isValid) {
+      console.error('[DEBUG] Validation failed with error:', validation.error);
+      log('Validation failed with error:', validation.error);
       return sendResponse({
         status: 400,
         jsonBody: {

@@ -1,0 +1,19 @@
+﻿{
+  "transactionType": "Donation",
+  "email": "customerTEST2@example.com",
+  "firstname": "Micah",
+  "lastname": "Testing",
+  "phone": "+1234567823",
+  "amount": 2520,
+  "frequency": "onetime",
+  "category": "General",
+  "coverFee": true,
+  "feeAmount": 220,
+  "address": {
+    "line1": "1234 Main St",
+    "city": "New York",
+    "state": "NY",
+    "postal_code": "10001",
+    "country": "US"
+  }
+}
