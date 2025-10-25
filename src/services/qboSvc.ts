@@ -145,6 +145,8 @@ interface BuildSalesReceiptInput {
   revenueItemName: string;
   depositAccountName?: string;
   customer?: SalesReceiptCustomerDetails | null;
+  description?: string;
+  coverFeesAmountCents?: number;
 }
 
 type StripeCustomerContext = {
@@ -507,6 +509,77 @@ const getCheckoutTransactionType = (
 
   const fallback = toTrimmed(env.accounting.defaultSalesItem);
   return fallback ?? null;
+};
+
+const getCheckoutCategory = (
+  session: Stripe.Checkout.Session | null | undefined
+): string | null => {
+  if (!session) {
+    return null;
+  }
+
+  const metadata = session.metadata as Record<string, unknown> | null | undefined;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+
+  const value = metadata.category;
+  if (typeof value === 'string') {
+    const normalized = toTrimmed(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
+};
+
+const getCoverFeesInfo = (
+  session: Stripe.Checkout.Session | null | undefined
+): { enabled: boolean; amountCents: number } => {
+  if (!session) {
+    return { enabled: false, amountCents: 0 };
+  }
+
+  const metadata = session.metadata as Record<string, unknown> | null | undefined;
+  if (!metadata || typeof metadata !== 'object') {
+    return { enabled: false, amountCents: 0 };
+  }
+
+  // Check for cover_fees flag
+  const coverFeesRaw = metadata.cover_fees || metadata.Cover_Fees__c || metadata.cover_fees__c;
+  let enabled = false;
+  
+  if (typeof coverFeesRaw === 'boolean') {
+    enabled = coverFeesRaw;
+  } else if (typeof coverFeesRaw === 'string') {
+    const normalized = coverFeesRaw.toLowerCase().trim();
+    enabled = normalized === 'true' || normalized === '1' || normalized === 'yes';
+  }
+
+  if (!enabled) {
+    return { enabled: false, amountCents: 0 };
+  }
+
+  // Get cover fees amount
+  const amountRaw = 
+    metadata.cover_fees_amount || 
+    metadata.Cover_Fees_Amount__c || 
+    metadata.cover_fees_amount__c;
+  
+  let amountCents = 0;
+  
+  if (typeof amountRaw === 'number') {
+    // Assume it's in cents if it's a whole number, dollars if it has decimals
+    amountCents = Math.round(amountRaw >= 100 ? amountRaw : amountRaw * 100);
+  } else if (typeof amountRaw === 'string') {
+    const parsed = parseFloat(amountRaw);
+    if (!isNaN(parsed)) {
+      amountCents = Math.round(parsed >= 100 ? parsed : parsed * 100);
+    }
+  }
+
+  return { enabled: true, amountCents };
 };
 
 const normalizeDate = (value: string | Date): string => {
@@ -1111,7 +1184,24 @@ const createItemRef = (input: string): ItemRefWithMetadata => {
   return itemRef;
 };
 
-const buildDocNumber = (prefix: string, date: string | Date, amountCents: number): string => {
+const buildDocNumber = (
+  prefix: string,
+  date: string | Date,
+  amountCents: number,
+  chargeId?: string | null
+): string => {
+  // If a charge ID is provided, use it for uniqueness instead of amount
+  if (chargeId) {
+    // Extract the unique part from charge ID (e.g., "ch_3ABC123" -> "3ABC123")
+    const chargeIdPart = chargeId.startsWith('ch_') ? chargeId.slice(3) : chargeId;
+    const formattedDate = normalizeDate(date).replace(/-/g, '');
+    const suffix = `${formattedDate}-${chargeIdPart}`;
+    const maxPrefixLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - suffix.length - 1);
+    const safePrefix = prefix.slice(0, maxPrefixLength);
+    return `${safePrefix}-${suffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
+  }
+
+  // Fallback to original behavior using amount
   const formattedDate = normalizeDate(date).replace(/-/g, '');
   const amountPart = Math.abs(Math.round(amountCents)).toString().slice(-10);
   const suffix = `${formattedDate}-${amountPart}`;
@@ -1129,6 +1219,8 @@ export const buildSalesReceipt = ({
   revenueItemName,
   depositAccountName = env.quickBooks.accounts.stripeClearing,
   customer = null,
+  description,
+  coverFeesAmountCents = 0,
 }: BuildSalesReceiptInput): QuickBooksSalesReceipt => {
   const amount = ensurePositiveAmount(amountCents, 'Sales receipt amount');
   if (amount === 0) {
@@ -1140,22 +1232,46 @@ export const buildSalesReceipt = ({
     throw new Error('QuickBooks revenue item reference must be provided for sales receipts.');
   }
 
+  const coverFees = ensurePositiveAmount(coverFeesAmountCents, 'Cover fees amount');
+  const baseAmount = amount - coverFees;
+
+  if (baseAmount <= 0 && coverFees > 0) {
+    throw new Error('Cover fees amount cannot exceed or equal total amount.');
+  }
+
+  const lineDescription = description || memo;
+  const lines: QuickBooksSalesReceiptLine[] = [];
+
+  // Main line item (base amount if cover fees exist, otherwise full amount)
+  lines.push({
+    Amount: centsToDollars(baseAmount > 0 ? baseAmount : amount),
+    DetailType: 'SalesItemLineDetail',
+    Description: lineDescription,
+    SalesItemLineDetail: {
+      ItemRef: createItemRef(itemReference),
+      ItemAccountRef: createAccountRef(revenueAccountName),
+    },
+  });
+
+  // Add separate line for cover fees if applicable
+  if (coverFees > 0) {
+    lines.push({
+      Amount: centsToDollars(coverFees),
+      DetailType: 'SalesItemLineDetail',
+      Description: 'Processing Fee Coverage',
+      SalesItemLineDetail: {
+        ItemRef: createItemRef(itemReference),
+        ItemAccountRef: createAccountRef(revenueAccountName),
+      },
+    });
+  }
+
   const receipt: QuickBooksSalesReceipt = {
     DocNumber: docNumber,
     TxnDate: normalizeDate(date),
     PrivateNote: memo,
     DepositToAccountRef: createAccountRef(depositAccountName),
-    Line: [
-      {
-        Amount: centsToDollars(amount),
-        DetailType: 'SalesItemLineDetail',
-        Description: memo,
-        SalesItemLineDetail: {
-          ItemRef: createItemRef(itemReference),
-          ItemAccountRef: createAccountRef(revenueAccountName),
-        },
-      },
-    ],
+    Line: lines,
   };
 
   if (customer?.ref?.value) {
@@ -2152,7 +2268,8 @@ export const postChargeToQbo = async ({
   const strategy = env.accounting.postingStrategy;
 
   if (strategy === 'sales-receipt') {
-    const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount);
+    const chargeId = stripe?.charge?.id ?? null;
+    const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount, chargeId);
     const context = createRequestContext(options);
     let receiptCustomer: SalesReceiptCustomerDetails | null = null;
 
@@ -2198,6 +2315,15 @@ export const postChargeToQbo = async ({
       name: revenueItemReference.name ?? transactionTypeName,
     });
 
+    // Build description as "Category - TransactionType"
+    const category = getCheckoutCategory(stripe?.checkoutSession);
+    const description = category 
+      ? `${category} - ${transactionTypeName}` 
+      : transactionTypeName;
+
+    // Get cover fees information
+    const coverFeesInfo = getCoverFeesInfo(stripe?.checkoutSession);
+
     const salesReceipt = buildSalesReceipt({
       docNumber: salesReceiptDocNumber,
       amountCents: grossAmount,
@@ -2205,12 +2331,14 @@ export const postChargeToQbo = async ({
       date,
       revenueItemName: revenueItemPayload,
       customer: receiptCustomer,
+      description,
+      coverFeesAmountCents: coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0,
     });
 
     const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
 
     if (feeAmount > 0) {
-      const feeDocNumber = buildDocNumber('FEE', date, feeAmount);
+      const feeDocNumber = buildDocNumber('FEE', date, feeAmount, chargeId);
       const feeJournalEntry = buildFeesJE({
         docNumber: feeDocNumber,
         feeAmountCents: feeAmount,
@@ -2224,7 +2352,8 @@ export const postChargeToQbo = async ({
     return { qboId: salesReceiptResult.id, type: 'sales-receipt' };
   }
 
-  const journalDocNumber = buildDocNumber('CHGJE', date, grossAmount + feeAmount);
+  const chargeId = stripe?.charge?.id ?? null;
+  const journalDocNumber = buildDocNumber('CHGJE', date, grossAmount + feeAmount, chargeId);
   const journalEntry = buildSingleJE({
     docNumber: journalDocNumber,
     grossAmountCents: grossAmount,

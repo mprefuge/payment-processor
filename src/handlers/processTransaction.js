@@ -204,6 +204,9 @@ const modernRequestSchema = z
     customer: customerSchema,
     metadata: metadataSchema,
     attribution: z.string().optional(),
+    coverFee: z.boolean().optional(),
+    feeAmount: z.number().int().nonnegative().optional(),
+    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
   })
   .passthrough();
 
@@ -222,6 +225,9 @@ const legacyRequestSchema = z
     postalCode: z.string().optional(),
     metadata: metadataSchema,
     attribution: z.string().optional(),
+    coverFee: z.boolean().optional(),
+    feeAmount: z.number().int().nonnegative().optional(),
+    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
   })
   .passthrough();
 
@@ -318,6 +324,9 @@ function normalizeRequestData(data) {
     customer,
     metadata,
     attribution,
+    coverFee: data.coverFee || false,
+    feeAmount: data.feeAmount,
+    paymentMethod: data.paymentMethod || 'card',
   };
 
   if (data.category) {
@@ -351,12 +360,90 @@ function sanitizeStripeMetadata(metadata) {
   }, {});
 }
 
+/**
+ * Calculate cover fees for a transaction
+ * Supports multiple fee structures based on nonprofit status and payment method
+ * 
+ * Fee structures:
+ * - Standard business, online domestic card: 2.9% + $0.30
+ * - Standard business, in-person domestic card: 2.7% + $0.05
+ * - Nonprofit (eligible), card donation: 2.2% + $0.30
+ * - Nonprofit, Amex donation: 3.5% (no fixed fee)
+ * - Nonprofit, ACH / bank debit: 0.8% (capped at $5.00)
+ * 
+ * @param {number} baseAmountCents - The base transaction amount in cents
+ * @param {string} paymentMethod - Payment method: 'card', 'card_present', 'us_bank_account', 'amex'
+ * @returns {number} The fee amount in cents
+ */
+function calculateCoverFees(baseAmountCents, paymentMethod = 'card') {
+  const isNonprofit = parseBooleanFlag(process.env.STRIPE_NONPROFIT_RATES);
+  
+  let percentageFee;
+  let fixedFee;
+  let cap = null;
+  
+  if (isNonprofit) {
+    // Nonprofit rates
+    switch (paymentMethod) {
+      case 'amex':
+        percentageFee = Math.round(baseAmountCents * 0.035);
+        fixedFee = 0;
+        break;
+      case 'us_bank_account':
+        percentageFee = Math.round(baseAmountCents * 0.008);
+        fixedFee = 0;
+        cap = 500; // $5.00 cap in cents
+        break;
+      case 'card_present':
+        // In-person rates (same as standard for nonprofit)
+        percentageFee = Math.round(baseAmountCents * 0.027);
+        fixedFee = 5; // $0.05 in cents
+        break;
+      case 'card':
+      default:
+        percentageFee = Math.round(baseAmountCents * 0.022);
+        fixedFee = 30; // $0.30 in cents
+        break;
+    }
+  } else {
+    // Standard business rates
+    switch (paymentMethod) {
+      case 'card_present':
+        percentageFee = Math.round(baseAmountCents * 0.027);
+        fixedFee = 5; // $0.05 in cents
+        break;
+      case 'us_bank_account':
+      case 'amex':
+      case 'card':
+      default:
+        percentageFee = Math.round(baseAmountCents * 0.029);
+        fixedFee = 30; // $0.30 in cents
+        break;
+    }
+  }
+  
+  const totalFee = percentageFee + fixedFee;
+  
+  // Apply cap if specified
+  if (cap !== null && totalFee > cap) {
+    return cap;
+  }
+  
+  return totalFee;
+}
+
 function formatStripeMetadata(transactionData) {
   const baseMetadata = {
     category: transactionData.category || 'General',
     frequency: transactionData.frequency || 'onetime',
     transactionType: transactionData.transactionType || 'Payment',
   };
+
+  // Add cover fees information if enabled
+  if (transactionData.coverFee && transactionData.coverFeesAmount) {
+    baseMetadata.cover_fees = 'true';
+    baseMetadata.cover_fees_amount = String(transactionData.coverFeesAmount);
+  }
 
   const additionalMetadata = sanitizeStripeMetadata(transactionData.metadata || {});
   return { ...baseMetadata, ...additionalMetadata };
@@ -947,6 +1034,33 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
 const createCheckoutSession = async (stripe, customerId, transactionData) => {
   const isOneTime = transactionData.frequency === 'onetime';
 
+  // Calculate total amount including cover fees if enabled
+  let totalAmount = transactionData.amount;
+  let coverFeesAmount = 0;
+
+  if (transactionData.coverFee) {
+    // Use provided feeAmount if specified, otherwise calculate
+    if (typeof transactionData.feeAmount === 'number' && transactionData.feeAmount >= 0) {
+      coverFeesAmount = transactionData.feeAmount;
+      logger.info(`Cover fees enabled: using provided fee amount ${coverFeesAmount} cents`);
+    } else {
+      coverFeesAmount = calculateCoverFees(transactionData.amount, transactionData.paymentMethod);
+      const isNonprofit = parseBooleanFlag(process.env.STRIPE_NONPROFIT_RATES);
+      logger.info(
+        `Cover fees enabled: calculated fee for ${transactionData.paymentMethod} ` +
+        `(${isNonprofit ? 'nonprofit' : 'standard'} rates): ` +
+        `base amount ${transactionData.amount} cents, ` +
+        `cover fees ${coverFeesAmount} cents, ` +
+        `total ${transactionData.amount + coverFeesAmount} cents`
+      );
+    }
+    
+    totalAmount = transactionData.amount + coverFeesAmount;
+    
+    // Store the cover fees amount in cents for metadata
+    transactionData.coverFeesAmount = coverFeesAmount;
+  }
+
   const baseParams = {
     customer: customerId,
     success_url:
@@ -960,7 +1074,7 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
           product_data: {
             name: transactionData.category || transactionData.transactionType || 'Payment',
           },
-          unit_amount: transactionData.amount,
+          unit_amount: totalAmount,
         },
         quantity: 1,
       },
@@ -1013,6 +1127,32 @@ const getIntervalCount = (frequency) => {
 
 // Main function handler for Azure Functions v4 model
 module.exports = async function (request, context) {
+  // Handle both v3 (context, req) and v4 (request, context) signatures
+  let actualRequest = request;
+  let actualContext = context;
+  let isV3 = false;
+  
+  // Detect v3 signature: first param has res/bindings, second has body
+  if (request && typeof request === 'object' && ('res' in request || 'bindings' in request)) {
+    actualContext = request;
+    actualRequest = context;
+    isV3 = true;
+  }
+  
+  // Helper to handle both v3 and v4 responses
+  const sendResponse = (response) => {
+    if (isV3) {
+      actualContext.res = {
+        status: response.status,
+        headers: response.headers || {},
+        body: response.jsonBody ? JSON.stringify(response.jsonBody) : response.body,
+      };
+      return;
+    } else {
+      return response;
+    }
+  };
+
   const requestId = randomUUID();
   const secureDebugEnabled = process.env.SECURE_DEBUG === 'true';
   const log = (message, extra = {}) => {
@@ -1022,14 +1162,23 @@ module.exports = async function (request, context) {
   try {
     log('Processing payment request');
 
-    // Check for idempotency key
-    const idempotencyKey = request.headers.get('idempotency-key') || request.headers.get('Idempotency-Key');
+    // Check for idempotency key - handle both v3 and v4 header access
+    let idempotencyKey;
+    if (actualRequest.headers) {
+      if (typeof actualRequest.headers.get === 'function') {
+        // v4 style
+        idempotencyKey = actualRequest.headers.get('idempotency-key') || actualRequest.headers.get('Idempotency-Key');
+      } else {
+        // v3 style - headers is a plain object
+        idempotencyKey = actualRequest.headers['idempotency-key'] || actualRequest.headers['Idempotency-Key'];
+      }
+    }
     
     if (idempotencyKey && idempotencyStore) {
       const isProcessed = await idempotencyStore.isProcessed(idempotencyKey);
       if (isProcessed) {
         log('Duplicate request detected via idempotency key', { idempotencyKey });
-        return {
+        return sendResponse({
           status: 200,
           headers: {
             'Content-Type': 'application/json',
@@ -1039,19 +1188,28 @@ module.exports = async function (request, context) {
             message: 'Request already processed',
             idempotencyKey,
           },
-        };
+        });
       }
     }
 
-    let body = await request.json();
+    // Get request body - handle both v3 and v4
+    let body;
+    if (actualRequest.body && typeof actualRequest.body === 'object') {
+      // v3 style - body is already parsed
+      body = actualRequest.body;
+    } else if (typeof actualRequest.json === 'function') {
+      // v4 style - need to call json()
+      body = await actualRequest.json();
+    }
+    
     if (!body) {
       log('No request body provided');
-      return {
+      return sendResponse({
         status: 400,
         jsonBody: {
           error: 'Request body is required',
         },
-      };
+      });
     }
 
     const requestSummary = createRequestSummary(body);
@@ -1068,19 +1226,19 @@ module.exports = async function (request, context) {
       hasError: Boolean(validation.error),
     });
     if (!validation.isValid) {
-      return {
+      return sendResponse({
         status: 400,
         jsonBody: {
           error: validation.error,
         },
-      };
+      });
     }
 
     const requestData = validation.value;
     const customerDetails = requestData.customer;
 
     // Initialize services
-    const isLiveMode = getConfiguredMode(context);
+    const isLiveMode = getConfiguredMode(actualContext);
     const { stripe } = initializeServices(isLiveMode);
 
     // Search for existing customer
@@ -1111,13 +1269,13 @@ module.exports = async function (request, context) {
 
     // Sync contact to CRM (Salesforce) if configured
     // This happens after checkout session creation to not block the payment flow
-    const contact = await syncContactToCrm(context, customerDetails);
+    const contact = await syncContactToCrm(actualContext, customerDetails);
 
     let pendingTransactionUpserted = false;
 
     if (contact?.Id) {
       const pendingResult = await createPendingTransaction(
-        context,
+        actualContext,
         session,
         contact.Id,
         requestData
@@ -1129,7 +1287,7 @@ module.exports = async function (request, context) {
 
     // Upsert pending transaction in CRM as a fallback when contact sync fails
     if (!pendingTransactionUpserted) {
-      await upsertSalesforceTransaction(context, session, requestData);
+      await upsertSalesforceTransaction(actualContext, session, requestData);
     }
 
     // Mark request as processed if idempotency key was provided
@@ -1139,7 +1297,7 @@ module.exports = async function (request, context) {
     }
 
     // Return success response with checkout URL
-    return {
+    return sendResponse({
       status: 200,
       headers: {
         'Content-Type': 'application/json',
@@ -1148,18 +1306,18 @@ module.exports = async function (request, context) {
         url: session.url,
         id: session.id,
       },
-    };
+    });
   } catch (error) {
     log('Error processing donation', { error: error.message });
     logger.error('Donation processing error details:', { requestId, stack: error.stack });
 
-    return {
+    return sendResponse({
       status: 500,
       jsonBody: {
         error: 'Internal server error',
         message: error.message,
       },
-    };
+    });
   }
 };
 
