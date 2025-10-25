@@ -44,11 +44,13 @@ type LockEntity = {
 };
 
 function isRestError(error: unknown): error is RestError {
-  return Boolean(error && typeof error === 'object' && 'statusCode' in (error as Record<string, unknown>));
+  return Boolean(
+    error && typeof error === 'object' && 'statusCode' in (error as Record<string, unknown>)
+  );
 }
 
 function isStatus(error: unknown, status: number): boolean {
-  return isRestError(error) && (error.statusCode === status);
+  return isRestError(error) && error.statusCode === status;
 }
 
 function nowPlusSeconds(seconds: number): string {
@@ -101,7 +103,9 @@ export class AzureIdempotencyStore implements IdempotencyStore {
       process.env.AZURE_STORAGE_CONNECTION_STRING;
 
     if (!connectionString) {
-      throw new Error('An Azure Tables connection string is required. Set AZURE_TABLES_CONNECTION_STRING or AZURE_STORAGE_CONNECTION_STRING.');
+      throw new Error(
+        'An Azure Tables connection string is required. Set AZURE_TABLES_CONNECTION_STRING or AZURE_STORAGE_CONNECTION_STRING.'
+      );
     }
 
     return TableClient.fromConnectionString(connectionString, tableName);
@@ -294,7 +298,9 @@ export class AzureIdempotencyStore implements IdempotencyStore {
       }
     }
 
-    throw new Error(`Failed to acquire lock for key "${key}" after ${this.lockMaxAttempts} attempts.`);
+    throw new Error(
+      `Failed to acquire lock for key "${key}" after ${this.lockMaxAttempts} attempts.`
+    );
   }
 
   private async getLockEntity(key: string): Promise<TableEntityResult<LockEntity> | null> {

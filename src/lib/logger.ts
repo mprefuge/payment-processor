@@ -34,7 +34,8 @@ function initializeTelemetry(): TelemetryClient | undefined {
 
   const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING;
   const instrumentationKey =
-    process.env.APPLICATIONINSIGHTS_INSTRUMENTATIONKEY ?? process.env.APPINSIGHTS_INSTRUMENTATIONKEY;
+    process.env.APPLICATIONINSIGHTS_INSTRUMENTATIONKEY ??
+    process.env.APPINSIGHTS_INSTRUMENTATIONKEY;
 
   const key = connectionString ?? instrumentationKey;
 
@@ -62,7 +63,8 @@ function initializeTelemetry(): TelemetryClient | undefined {
 
     if (telemetryClient) {
       const cloudRoleKey = telemetryClient.context.keys.cloudRole;
-      telemetryClient.context.tags[cloudRoleKey] = telemetryClient.context.tags[cloudRoleKey] ?? 'payment-processor';
+      telemetryClient.context.tags[cloudRoleKey] =
+        telemetryClient.context.tags[cloudRoleKey] ?? 'payment-processor';
     }
   } catch (error) {
     baseConsole.warn('Failed to initialize Application Insights telemetry', error);
@@ -100,7 +102,11 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function extractStripeIdFromValue(value: unknown, visited: WeakSet<object>, depth = 0): string | undefined {
+function extractStripeIdFromValue(
+  value: unknown,
+  visited: WeakSet<object>,
+  depth = 0
+): string | undefined {
   if (typeof value === 'string') {
     const match = value.match(STRIPE_ID_REGEX);
     return match?.[0];
@@ -119,7 +125,11 @@ function extractStripeIdFromValue(value: unknown, visited: WeakSet<object>, dept
   if (value instanceof Error) {
     return (
       extractStripeIdFromValue(value.message, visited, depth + 1) ||
-      extractStripeIdFromValue((value as Error & { requestId?: string }).requestId, visited, depth + 1)
+      extractStripeIdFromValue(
+        (value as Error & { requestId?: string }).requestId,
+        visited,
+        depth + 1
+      )
     );
   }
 
@@ -204,7 +214,11 @@ function mapSeverity(level: LogLevel): KnownSeverityLevel {
   }
 }
 
-function sendToTelemetry(level: LogLevel, args: unknown[], properties: Record<string, unknown>): void {
+function sendToTelemetry(
+  level: LogLevel,
+  args: unknown[],
+  properties: Record<string, unknown>
+): void {
   const client = initializeTelemetry();
   if (!client) {
     return;
@@ -237,12 +251,12 @@ function invokeConsole(level: LogLevel, args: unknown[]): void {
     level === 'error'
       ? baseConsole.error
       : level === 'warn'
-      ? baseConsole.warn
-      : level === 'debug'
-      ? baseConsole.debug ?? baseConsole.log
-      : level === 'info'
-      ? baseConsole.info ?? baseConsole.log
-      : baseConsole.log;
+        ? baseConsole.warn
+        : level === 'debug'
+          ? (baseConsole.debug ?? baseConsole.log)
+          : level === 'info'
+            ? (baseConsole.info ?? baseConsole.log)
+            : baseConsole.log;
 
   method.apply(baseConsole, args as []);
 }

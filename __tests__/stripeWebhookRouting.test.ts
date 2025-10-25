@@ -17,9 +17,16 @@ const createContext = (): HttpContext => {
     invocationId: 'test',
     functionName: 'stripeWebhook',
     traceContext: {} as any,
-    bindingData: {},
     log,
-  };
+    extraInputs: new Map(),
+    extraOutputs: new Map(),
+    options: {} as any,
+    trace: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+  } as unknown as HttpContext;
 };
 
 const createDeps = ({
@@ -50,7 +57,9 @@ const createDeps = ({
     idempotencyStore: {
       isProcessed: vi.fn().mockResolvedValue(false),
       markProcessed: vi.fn().mockResolvedValue(undefined),
-      withLock: vi.fn().mockImplementation(async (_key: string, fn: () => Promise<unknown>) => fn()),
+      withLock: vi
+        .fn()
+        .mockImplementation(async (_key: string, fn: () => Promise<unknown>) => fn()),
       flush: vi.fn().mockResolvedValue(undefined),
     },
     getSalesforceSvc: vi.fn(async () => salesforce),
@@ -127,11 +136,16 @@ describe('invoice handlers', () => {
       currency: 'usd',
     } as unknown as Stripe.Invoice;
 
-    await handleInvoicePaidNoPI(context, invoice, {
-      type: 'invoice.paid',
-      data: { object: invoice },
-      livemode: false,
-    } as Stripe.Event, deps);
+    await handleInvoicePaidNoPI(
+      context,
+      invoice,
+      {
+        type: 'invoice.paid',
+        data: { object: invoice },
+        livemode: false,
+      } as Stripe.Event,
+      deps
+    );
 
     expect(upsert).toHaveBeenCalledTimes(1);
     const payload = upsert.mock.calls[0][0];
@@ -161,11 +175,16 @@ describe('invoice handlers', () => {
       collection_method: 'send_invoice',
     } as unknown as Stripe.Invoice;
 
-    await handleInvoicePaidNoPI(context, invoice, {
-      type: 'invoice.paid',
-      data: { object: invoice },
-      livemode: false,
-    } as Stripe.Event, deps);
+    await handleInvoicePaidNoPI(
+      context,
+      invoice,
+      {
+        type: 'invoice.paid',
+        data: { object: invoice },
+        livemode: false,
+      } as Stripe.Event,
+      deps
+    );
 
     expect(upsert).toHaveBeenCalledTimes(1);
     const payload = upsert.mock.calls[0][0];
@@ -214,14 +233,13 @@ describe('invoice handlers', () => {
         data: { object: invoice },
         livemode: false,
       } as Stripe.Event,
-      deps,
+      deps
     );
 
     expect(retrieve).toHaveBeenCalledWith('pi_fail');
 
     const salesforce = await deps.getSalesforceSvc();
-    const payload = (salesforce.upsertTransactionByExternalId as any).mock
-      .calls[0][0];
+    const payload = (salesforce.upsertTransactionByExternalId as any).mock.calls[0][0];
 
     expect(payload.status__c).toBe('failed');
     expect(payload.next_retry_at__c).toBe(new Date(nextAttempt * 1000).toISOString());
@@ -232,7 +250,7 @@ describe('invoice handlers', () => {
           code: 'card_declined',
           decline_code: 'insufficient_funds',
         }),
-      }),
+      })
     );
   });
 
@@ -278,12 +296,11 @@ describe('invoice handlers', () => {
         data: { object: invoice },
         livemode: false,
       } as Stripe.Event,
-      deps,
+      deps
     );
 
     const salesforce = await deps.getSalesforceSvc();
-    const payload = (salesforce.upsertTransactionByExternalId as any).mock
-      .calls[0][0];
+    const payload = (salesforce.upsertTransactionByExternalId as any).mock.calls[0][0];
 
     expect(payload.status__c).toBe('pending');
     expect(payload.next_retry_at__c).toBe(new Date(retryTimestamp * 1000).toISOString());
@@ -322,8 +339,8 @@ describe('payment intent action required handler', () => {
         type: 'payment_intent.payment_action_required',
         data: { object: paymentIntent },
         livemode: false,
-      } as Stripe.Event,
-      deps,
+      } as unknown as Stripe.Event,
+      deps
     );
 
     expect(upsert).toHaveBeenCalledWith(
@@ -332,7 +349,7 @@ describe('payment intent action required handler', () => {
         next_retry_at__c: new Date(retryTimestamp * 1000).toISOString(),
         status__c: 'pending',
       }),
-      'stripe_payment_intent_id__c',
+      'stripe_payment_intent_id__c'
     );
   });
 });
@@ -343,7 +360,7 @@ describe('stripeWebhook idempotency', () => {
 
   beforeEach(() => {
     vi.resetModules();
-    handler = require('../src/handlers/stripeWebhook');
+    handler = require('../dist/handlers/stripeWebhook').default;
     internals = handler.__internals;
   });
 
@@ -367,7 +384,7 @@ describe('stripeWebhook idempotency', () => {
         type: 'refund.created',
         data: { object: { id: 're_123', charge: 'ch_123' } },
         livemode: false,
-      } satisfies Stripe.Event),
+      } as unknown as Stripe.Event),
       getClient: vi.fn(),
     };
 
@@ -391,7 +408,7 @@ describe('stripeWebhook idempotency', () => {
 
     await handler(context, req);
 
-    expect(store.isProcessed).toHaveBeenCalledWith('evt_evt_duplicate');
+    expect(store.isProcessed).toHaveBeenCalledWith('evt_duplicate');
     expect(store.markProcessed).not.toHaveBeenCalled();
     expect(context.res?.status).toBe(200);
   });

@@ -4,7 +4,11 @@ export interface HttpResponse<T = unknown> {
   body?: T;
 }
 
-export const jsonResponse = <T>(status: number, body: T, headers: Record<string, string> = {}): HttpResponse<T> => ({
+export const jsonResponse = <T>(
+  status: number,
+  body: T,
+  headers: Record<string, string> = {}
+): HttpResponse<T> => ({
   status,
   headers: {
     'Content-Type': 'application/json',

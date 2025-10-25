@@ -35,19 +35,21 @@ const toCents = (value: unknown): number => {
 
 const listPayoutTransactions = async (
   stripe: Stripe,
-  payoutId: string,
+  payoutId: string
 ): Promise<Stripe.BalanceTransaction[]> => {
   const transactions: Stripe.BalanceTransaction[] = [];
   let startingAfter: string | undefined;
   let hasMore = true;
 
   while (hasMore) {
-    const listTransactionsMethod = (stripe.payouts as {
-      listTransactions?: (
-        id: string,
-        params: Record<string, unknown>,
-      ) => Promise<Stripe.ApiList<Stripe.BalanceTransaction>>;
-    }).listTransactions;
+    const listTransactionsMethod = (
+      stripe.payouts as {
+        listTransactions?: (
+          id: string,
+          params: Record<string, unknown>
+        ) => Promise<Stripe.ApiList<Stripe.BalanceTransaction>>;
+      }
+    ).listTransactions;
 
     const page =
       typeof listTransactionsMethod === 'function'
@@ -79,7 +81,7 @@ const listPayoutTransactions = async (
 const resolveChargePaymentIntentMap = async (
   stripe: Stripe,
   chargeIds: Set<string>,
-  logger: Logger,
+  logger: Logger
 ): Promise<Map<string, string | null>> => {
   const result = new Map<string, string | null>();
   if (chargeIds.size === 0) {
@@ -105,15 +107,13 @@ const resolveChargePaymentIntentMap = async (
         });
         result.set(chargeId, null);
       }
-    }),
+    })
   );
 
   return result;
 };
 
-const formatChargeReferenceMemo = (
-  references: PayoutDepositLineReference[],
-): string | null => {
+const formatChargeReferenceMemo = (references: PayoutDepositLineReference[]): string | null => {
   if (references.length === 0) {
     return null;
   }
@@ -143,7 +143,7 @@ const categorizeTransactions = async (
   stripe: Stripe,
   payout: Stripe.Payout,
   transactions: Stripe.BalanceTransaction[],
-  logger: Logger,
+  logger: Logger
 ): Promise<{
   lines: PayoutDepositLineInput[];
   calculatedTotal: number;
@@ -198,7 +198,7 @@ const categorizeTransactions = async (
       continue;
     }
     const chargeId = normalizeStripeId(charge.source);
-    const paymentIntentId = chargeId ? paymentIntentMap.get(chargeId) ?? null : null;
+    const paymentIntentId = chargeId ? (paymentIntentMap.get(chargeId) ?? null) : null;
     const currency = normalizeCurrency(charge.currency, payoutCurrency);
     const reference: PayoutDepositLineReference = {
       balanceTransactionId: charge.id,
@@ -231,7 +231,10 @@ const categorizeTransactions = async (
     });
   }
 
-  const feeAggregation = new Map<string, { amount: number; references: PayoutDepositLineReference[] }>();
+  const feeAggregation = new Map<
+    string,
+    { amount: number; references: PayoutDepositLineReference[] }
+  >();
   for (const fee of fees) {
     const amount = toCents(fee.amount);
     if (amount === 0) {
@@ -341,7 +344,7 @@ const buildDepositInput = async (
   stripe: Stripe,
   payout: Stripe.Payout,
   transactions: Stripe.BalanceTransaction[],
-  eventId: string,
+  eventId: string
 ): Promise<UpsertPayoutDepositInput | null> => {
   if (!Array.isArray(transactions) || transactions.length === 0) {
     context.log('[StripeWebhook] No payout transactions to post to QuickBooks', {
@@ -354,7 +357,7 @@ const buildDepositInput = async (
     stripe,
     payout,
     transactions,
-    context.log,
+    context.log
   );
 
   if (lines.length === 0) {
@@ -395,22 +398,21 @@ const buildDepositInput = async (
   };
 };
 
-const getPayoutAdapter = (
-  deps: StripeWebhookDependencies,
-): PayoutAccountingAdapter | undefined => deps.accounting?.payouts;
+const getPayoutAdapter = (deps: StripeWebhookDependencies): PayoutAccountingAdapter | undefined =>
+  deps.accounting?.payouts;
 
 const linkTransactionsInSalesforce = async (
   salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
   payoutId: string,
   transactions: Stripe.BalanceTransaction[],
-  logger: Logger,
+  logger: Logger
 ): Promise<void> => {
   const ids = Array.from(
     new Set(
       transactions
         .map((txn) => (typeof txn.id === 'string' ? txn.id : null))
-        .filter((id): id is string => Boolean(id)),
-    ),
+        .filter((id): id is string => Boolean(id))
+    )
   );
 
   if (ids.length === 0) {
@@ -430,7 +432,7 @@ const linkTransactionsInSalesforce = async (
 export const handlePayoutEvent = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const payout = event.data.object as Stripe.Payout;
   const stripe = ensureStripeClient(deps, event);
@@ -463,19 +465,16 @@ export const handlePayoutEvent = async (
     }
 
     if (!adapter) {
-      context.log('[StripeWebhook] Payout accounting adapter not configured, skipping deposit posting', {
-        payoutId: payout.id,
-      });
+      context.log(
+        '[StripeWebhook] Payout accounting adapter not configured, skipping deposit posting',
+        {
+          payoutId: payout.id,
+        }
+      );
       return;
     }
 
-    const depositInput = await buildDepositInput(
-      context,
-      stripe,
-      payout,
-      transactions,
-      event.id,
-    );
+    const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
     if (!depositInput) {
       return;
     }

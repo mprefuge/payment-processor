@@ -9,6 +9,7 @@ export interface EnvConfig {
     secret: string;
     webhookSecret: string;
   };
+  testMode: boolean;
   salesforce: {
     authMode: SalesforceAuthMode;
     clientId?: string;
@@ -94,7 +95,9 @@ function parseBoolean(name: string, value: string | undefined, defaultValue: boo
     return false;
   }
 
-  throw new EnvConfigError(`Invalid boolean value for ${name}: ${value}. Expected "true" or "false".`);
+  throw new EnvConfigError(
+    `Invalid boolean value for ${name}: ${value}. Expected "true" or "false".`
+  );
 }
 
 function loadEnv(): EnvConfig {
@@ -112,7 +115,9 @@ function loadEnv(): EnvConfig {
     fallbackNames: ['STRIPE_WEBHOOK_SECRET_LIVE', 'STRIPE_WEBHOOK_SECRET_TEST'],
   });
   if (!stripeWebhookSecret) {
-    missing.push('STRIPE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET_LIVE / STRIPE_WEBHOOK_SECRET_TEST)');
+    missing.push(
+      'STRIPE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET_LIVE / STRIPE_WEBHOOK_SECRET_TEST)'
+    );
   }
 
   const authModeEnvValue = resolveEnv('SF_AUTH_MODE', {
@@ -120,7 +125,7 @@ function loadEnv(): EnvConfig {
     defaultValue: 'disabled',
   });
   const authModeExplicitlySet = Boolean(
-    process.env.SF_AUTH_MODE ?? process.env.SALESFORCE_AUTH_MODE,
+    process.env.SF_AUTH_MODE ?? process.env.SALESFORCE_AUTH_MODE
   );
   const salesforceUsername = resolveEnv('SF_USERNAME', {
     fallbackNames: ['SALESFORCE_USERNAME'],
@@ -129,8 +134,9 @@ function loadEnv(): EnvConfig {
     fallbackNames: ['SALESFORCE_PASSWORD'],
   });
 
-  let resolvedSalesforceAuthMode: SalesforceAuthMode = (authModeEnvValue ?? 'disabled')
-    .toLowerCase() as SalesforceAuthMode;
+  let resolvedSalesforceAuthMode: SalesforceAuthMode = (
+    authModeEnvValue ?? 'disabled'
+  ).toLowerCase() as SalesforceAuthMode;
 
   if (
     !authModeExplicitlySet &&
@@ -190,10 +196,12 @@ function loadEnv(): EnvConfig {
   }
 
   const quickBooksRaw = {
-    environment: (resolveEnv('QBO_ENV', {
-      fallbackNames: ['QBO_ENVIRONMENT'],
-      defaultValue: 'sandbox',
-    }) ?? 'sandbox').toLowerCase(),
+    environment: (
+      resolveEnv('QBO_ENV', {
+        fallbackNames: ['QBO_ENVIRONMENT'],
+        defaultValue: 'sandbox',
+      }) ?? 'sandbox'
+    ).toLowerCase(),
     realmId: resolveEnv('QBO_REALM_ID', {
       fallbackNames: ['QBO_COMPANY_ID'],
     }),
@@ -257,11 +265,11 @@ function loadEnv(): EnvConfig {
   });
   const postingStrategySchema = z.enum(['je-transfer', 'sales-receipt'] as const);
 
-  const postingStrategy = postingStrategySchema.safeParse((postingStrategyRaw ?? 'je-transfer').toLowerCase());
+  const postingStrategy = postingStrategySchema.safeParse(
+    (postingStrategyRaw ?? 'je-transfer').toLowerCase()
+  );
   if (!postingStrategy.success) {
-    errors.push(
-      'ACCOUNTING_POSTING_STRATEGY must be one of: "je-transfer", "sales-receipt".'
-    );
+    errors.push('ACCOUNTING_POSTING_STRATEGY must be one of: "je-transfer", "sales-receipt".');
   }
 
   const accountingSyncEnabledRaw = resolveEnv('ACCOUNTING_SYNC_ENABLED', {
@@ -281,7 +289,7 @@ function loadEnv(): EnvConfig {
   const autoCreateRefundAccount = parseBoolean(
     'ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT',
     autoCreateRefundAccountRaw,
-    true,
+    true
   );
 
   const refundAccountType =
@@ -312,10 +320,13 @@ function loadEnv(): EnvConfig {
     fallbackNames: ['APPINSIGHTS_INSTRUMENTATION_KEY'],
   });
 
+  const testModeRaw = resolveEnv('TEST_MODE', {
+    defaultValue: 'false',
+  });
+  const testMode = parseBoolean('TEST_MODE', testModeRaw, false);
+
   if (missing.length > 0) {
-    throw new EnvConfigError(
-      `Missing required environment variables: ${missing.join(', ')}`
-    );
+    throw new EnvConfigError(`Missing required environment variables: ${missing.join(', ')}`);
   }
 
   if (errors.length > 0) {
@@ -327,6 +338,7 @@ function loadEnv(): EnvConfig {
       secret: stripeSecret!,
       webhookSecret: stripeWebhookSecret!,
     },
+    testMode,
     salesforce: {
       authMode: salesforce.authMode,
       clientId: salesforce.clientId,

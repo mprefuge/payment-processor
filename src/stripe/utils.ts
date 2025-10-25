@@ -17,9 +17,7 @@ export const normalizeStripeId = (value: unknown): string | null => {
   return null;
 };
 
-export const centsToMajorUnits = (
-  value: number | null | undefined,
-): number | null => {
+export const centsToMajorUnits = (value: number | null | undefined): number | null => {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return null;
   }
@@ -27,9 +25,7 @@ export const centsToMajorUnits = (
   return value / 100;
 };
 
-export const centsToPositiveMajorUnits = (
-  value: number | null | undefined,
-): number | null => {
+export const centsToPositiveMajorUnits = (value: number | null | undefined): number | null => {
   const converted = centsToMajorUnits(value);
   if (converted === null) {
     return null;
@@ -46,9 +42,7 @@ export const timestampToDate = (timestamp: number | null | undefined): Date => {
   return new Date();
 };
 
-export const timestampToIsoString = (
-  timestamp: number | null | undefined,
-): string | null => {
+export const timestampToIsoString = (timestamp: number | null | undefined): string | null => {
   if (typeof timestamp !== 'number' || Number.isNaN(timestamp)) {
     return null;
   }
@@ -56,25 +50,20 @@ export const timestampToIsoString = (
   return new Date(timestamp * 1000).toISOString();
 };
 
-export const extractBalanceTransactionId = (
-  source: unknown,
-): string | null => normalizeStripeId(source);
+export const extractBalanceTransactionId = (source: unknown): string | null =>
+  normalizeStripeId(source);
 
 export const resolveCharge = async (
   stripe: Stripe,
-  paymentIntent: Stripe.PaymentIntent,
+  paymentIntent: Stripe.PaymentIntent
 ): Promise<Stripe.Charge | null> => {
   const piWithCharges = paymentIntent as Stripe.PaymentIntent & {
     charges?: { data?: Stripe.Charge[] };
   };
 
-  const charges = Array.isArray(piWithCharges.charges?.data)
-    ? piWithCharges.charges!.data!
-    : [];
+  const charges = Array.isArray(piWithCharges.charges?.data) ? piWithCharges.charges!.data! : [];
   if (charges.length > 0) {
-    const succeededCharge = charges.find(
-      (charge: Stripe.Charge) => charge.status === 'succeeded',
-    );
+    const succeededCharge = charges.find((charge: Stripe.Charge) => charge.status === 'succeeded');
     return succeededCharge || charges[0];
   }
 
@@ -94,11 +83,11 @@ export const resolveCharge = async (
 export const resolveBalanceTransaction = async (
   stripe: Stripe,
   charge: Stripe.Charge | null,
-  fallback: Stripe.PaymentIntent | Stripe.Refund | Stripe.Dispute | Stripe.Payout | null,
+  fallback: Stripe.PaymentIntent | Stripe.Refund | Stripe.Dispute | Stripe.Payout | null
 ): Promise<Stripe.BalanceTransaction | null> => {
   const fallbackId = fallback
     ? extractBalanceTransactionId(
-        (fallback as { balance_transaction?: unknown }).balance_transaction,
+        (fallback as { balance_transaction?: unknown }).balance_transaction
       )
     : null;
 
@@ -126,11 +115,10 @@ export const resolveStripeCustomer = async (
   stripe: Stripe,
   charge: Stripe.Charge | null,
   paymentIntent: Stripe.PaymentIntent | null,
-  logger: (...args: unknown[]) => void,
+  logger: (...args: unknown[]) => void
 ): Promise<(Stripe.Customer | Stripe.DeletedCustomer) | null> => {
   const customerId =
-    normalizeStripeId(charge?.customer) ||
-    normalizeStripeId(paymentIntent?.customer);
+    normalizeStripeId(charge?.customer) || normalizeStripeId(paymentIntent?.customer);
 
   if (!customerId) {
     return null;
@@ -150,7 +138,7 @@ export const resolveStripeCustomer = async (
 
 export const findCheckoutSessionForPaymentIntent = async (
   stripe: Stripe,
-  paymentIntentId: string | null | undefined,
+  paymentIntentId: string | null | undefined
 ): Promise<Stripe.Checkout.Session | null> => {
   if (!paymentIntentId || typeof paymentIntentId !== 'string') {
     return null;
@@ -161,14 +149,28 @@ export const findCheckoutSessionForPaymentIntent = async (
     return null;
   }
 
+  // First try the direct lookup
   const sessions = await stripe.checkout.sessions.list({
     payment_intent: trimmed,
     limit: 1,
   });
 
-  if (!sessions || !Array.isArray(sessions.data) || sessions.data.length === 0) {
-    return null;
+  if (sessions && Array.isArray(sessions.data) && sessions.data.length > 0) {
+    return sessions.data[0] ?? null;
   }
 
-  return sessions.data[0] ?? null;
+  // If direct lookup fails, check the payment intent's metadata for checkout_session_id
+  try {
+    const paymentIntent = await stripe.paymentIntents.retrieve(trimmed);
+    const checkoutSessionId = paymentIntent.metadata?.checkout_session_id;
+
+    if (checkoutSessionId && typeof checkoutSessionId === 'string') {
+      const session = await stripe.checkout.sessions.retrieve(checkoutSessionId.trim());
+      return session;
+    }
+  } catch (error) {
+    // Ignore errors when trying to retrieve payment intent or session
+  }
+
+  return null;
 };

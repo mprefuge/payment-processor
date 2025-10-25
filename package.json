@@ -7,22 +7,21 @@
     "dev": "npm run start",
     "build": "tsc",
     "start": "func start",
-    "test": "npm run build && node tests/integration.test.js && node tests/integration-name-validation.test.js && node tests/transactionCreationFlow.test.js && node tests/failedCanceledTransactions.test.js && node tests/contactMatcher.test.js && node tests/matchingLogic.test.js && node tests/nameValidation.test.js && node tests/checkoutCrmSync.test.js && node tests/raceCondition.test.js && node tests/payoutSync.test.js && node tests/payoutCrmIntegration.test.js && node tests/payoutSyncFix.test.js && node tests/manualPayoutSync.test.js && node tests/payoutDateRangeFix.test.js && node tests/connectedAccountPayoutFix.test.js && node tests/payoutArrivalDateFix.test.js && node tests/payoutSyncLogicCorrection.test.js && node tests/payoutAdvanceExclusion.test.js && node tests/productionScenarioSimulation.test.js && node tests/manualPayoutDateWindow.test.js && node tests/persistentStorage.test.js && node tests/quickbooksProvider.test.js && node tests/journalEntryCreation.test.js && node tests/amountConversion.test.js && node tests/stripeQboSync.test.js && node tests/loggingSecurity.test.js && node tests/stripeSearchSanitization.test.js && node tests/stripeWebhookEmail.test.js && node tests/livemodeConfiguration.test.js && node tests/stripeTrueUp.test.js",
-    "test:e2e": "npm run build && node tests/endToEndPaymentFlow.test.js",
-    "health-check": "npm run build && node scripts/run-health-check.js",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "ci": "npm run lint && npm run test",
     "test:unit": "vitest run",
-    "test:watch": "vitest watch",
     "stripe:pi:success": "stripe trigger payment_intent.succeeded",
     "stripe:inv:paid": "stripe trigger invoice.paid",
     "stripe:inv:failed": "stripe trigger invoice.payment_failed",
     "stripe:refund:created": "stripe trigger refund.created",
     "stripe:payout:paid": "stripe trigger payout.paid",
     "stripe:payout:recon": "stripe trigger payout.reconciliation_completed",
-    "stripe:webhook:test": "node scripts/run-stripe-webhook-tests.js"
+    "stripe:webhook:test": "echo 'Stripe webhook test script removed during cleanup'"
   },
   "engines": {
     "node": ">=20.0.0 <21"

@@ -77,9 +77,7 @@ export const stripePaymentIntentFragmentSchema = z
     id: z.string(),
     status: z.string().optional(),
     currency: z.string().optional(),
-    customer: z
-      .union([z.string(), z.object({ id: z.string() }).passthrough()])
-      .nullish(),
+    customer: z.union([z.string(), z.object({ id: z.string() }).passthrough()]).nullish(),
     created: z.number().optional(),
     metadata: metadataSchema.optional(),
     payment_method_types: z.array(z.string()).optional(),
@@ -91,7 +89,7 @@ export const stripePaymentIntentFragmentSchema = z
             .object({
               id: z.string(),
             })
-            .passthrough(),
+            .passthrough()
         ),
       })
       .optional(),
@@ -123,9 +121,7 @@ export const stripeChargeFragmentSchema = z
       })
       .partial()
       .optional(),
-    customer: z
-      .union([z.string(), z.object({ id: z.string() }).passthrough()])
-      .nullish(),
+    customer: z.union([z.string(), z.object({ id: z.string() }).passthrough()]).nullish(),
     disputed: z.boolean().optional(),
     dispute: z.union([z.string(), z.object({ id: z.string() }).passthrough()]).nullish(),
     refunds: z
@@ -135,7 +131,7 @@ export const stripeChargeFragmentSchema = z
             .object({
               id: z.string(),
             })
-            .passthrough(),
+            .passthrough()
         ),
       })
       .optional(),
@@ -152,9 +148,7 @@ export const stripeBalanceTransactionFragmentSchema = z
     fee: z.number().optional(),
     net: z.number().optional(),
     type: z.string(),
-    source: z
-      .union([z.string(), z.object({ id: z.string() }).passthrough()])
-      .nullish(),
+    source: z.union([z.string(), z.object({ id: z.string() }).passthrough()]).nullish(),
     status: z.string().optional(),
   })
   .passthrough();
@@ -232,11 +226,21 @@ const parseMetadataBoolean = (
 
     if (typeof raw === 'string') {
       const normalized = raw.trim().toLowerCase();
-      if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+      if (
+        normalized === 'true' ||
+        normalized === '1' ||
+        normalized === 'yes' ||
+        normalized === 'on'
+      ) {
         return true;
       }
 
-      if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+      if (
+        normalized === 'false' ||
+        normalized === '0' ||
+        normalized === 'no' ||
+        normalized === 'off'
+      ) {
         return false;
       }
     }
@@ -276,20 +280,18 @@ const parseMetadataNumber = (
 };
 
 const toMetadataRecord = (
-  metadata: Stripe.Metadata | Stripe.MetadataParam | null | undefined,
+  metadata: Stripe.Metadata | Stripe.MetadataParam | null | undefined
 ): Record<string, unknown> => {
   if (!metadata) {
     return {};
   }
 
-  return Object.fromEntries(
-    Object.entries(metadata).map(([key, value]) => [key, value ?? null]),
-  );
+  return Object.fromEntries(Object.entries(metadata).map(([key, value]) => [key, value ?? null]));
 };
 
 const deriveTransactionType = (
   charge: Stripe.Charge | null | undefined,
-  balanceTransaction: Stripe.BalanceTransaction | null | undefined,
+  balanceTransaction: Stripe.BalanceTransaction | null | undefined
 ): TransactionType => {
   const balanceType = balanceTransaction?.type;
 
@@ -314,7 +316,7 @@ const deriveTransactionType = (
 
 const deriveStatus = (
   paymentIntent: Stripe.PaymentIntent | null | undefined,
-  charge: Stripe.Charge | null | undefined,
+  charge: Stripe.Charge | null | undefined
 ): TransactionStatus => {
   if (charge?.disputed) {
     return 'disputed';
@@ -355,7 +357,7 @@ const deriveStatus = (
 const deriveCurrency = (
   paymentIntent: Stripe.PaymentIntent | null | undefined,
   charge: Stripe.Charge | null | undefined,
-  balanceTransaction: Stripe.BalanceTransaction | null | undefined,
+  balanceTransaction: Stripe.BalanceTransaction | null | undefined
 ): string | null => {
   const currency =
     balanceTransaction?.currency || charge?.currency || paymentIntent?.currency || undefined;
@@ -365,7 +367,7 @@ const deriveCurrency = (
 
 const deriveReceivedAt = (
   paymentIntent: Stripe.PaymentIntent | null | undefined,
-  charge: Stripe.Charge | null | undefined,
+  charge: Stripe.Charge | null | undefined
 ): string | null => {
   const timestamp = charge?.created ?? paymentIntent?.created;
 
@@ -392,12 +394,12 @@ const extractDisputeId = (metadata: Record<string, unknown>): string | null =>
     'stripe_dispute_id__c',
     'Stripe_Dispute_Id__c',
     'stripe_dispute_id',
-    'dispute_id',
+    'dispute_id'
   );
 
 const extractBalanceTransactionId = (
   charge: Stripe.Charge | null | undefined,
-  balanceTransaction: Stripe.BalanceTransaction | null | undefined,
+  balanceTransaction: Stripe.BalanceTransaction | null | undefined
 ): string | null => {
   if (balanceTransaction?.id) {
     return balanceTransaction.id;
@@ -417,7 +419,7 @@ const extractBalanceTransactionId = (
 };
 
 const extractPayoutId = (
-  balanceTransaction: Stripe.BalanceTransaction | null | undefined,
+  balanceTransaction: Stripe.BalanceTransaction | null | undefined
 ): string | null => {
   const source = balanceTransaction?.source;
   const sourceId = normalizeStripeId(source);
@@ -436,14 +438,14 @@ const extractPayoutId = (
 const extractSubscriptionId = (
   paymentIntent: Stripe.PaymentIntent | null | undefined,
   charge: Stripe.Charge | null | undefined,
-  metadata: Record<string, unknown>,
+  metadata: Record<string, unknown>
 ): string | null => {
   const fromMetadata = parseMetadataString(
     metadata,
     'stripe_subscription_id__c',
     'Stripe_Subscription_Id__c',
     'stripe_subscription_id',
-    'subscription_id',
+    'subscription_id'
   );
   if (fromMetadata) {
     return fromMetadata;
@@ -472,7 +474,7 @@ const extractSubscriptionId = (
 
 const derivePaymentMethod = (
   paymentIntent: Stripe.PaymentIntent | null | undefined,
-  charge: Stripe.Charge | null | undefined,
+  charge: Stripe.Charge | null | undefined
 ): string | null => {
   const chargeMethod = charge?.payment_method_details?.type;
   if (chargeMethod) {
@@ -503,7 +505,7 @@ const derivePaymentLast4 = (charge: Stripe.Charge | null | undefined): string | 
 };
 
 export const mapStripeToTransaction = (
-  input: MapStripeToTransactionInput,
+  input: MapStripeToTransactionInput
 ): TransactionUpsertDTO => {
   const paymentIntent = input.paymentIntent ?? null;
   if (paymentIntent) {
@@ -525,41 +527,26 @@ export const mapStripeToTransaction = (
     ...toMetadataRecord(charge?.metadata ?? null),
   };
 
-  const contactId = parseMetadataString(
-    combinedMetadata,
-    'contact__c',
-    'Contact__c',
-    'contact',
-  );
-  const accountId = parseMetadataString(
-    combinedMetadata,
-    'account__c',
-    'Account__c',
-    'account',
-  );
+  const contactId = parseMetadataString(combinedMetadata, 'contact__c', 'Contact__c', 'contact');
+  const accountId = parseMetadataString(combinedMetadata, 'account__c', 'Account__c', 'account');
   const campaignId = parseMetadataString(
     combinedMetadata,
     'campaign__c',
     'Campaign__c',
-    'campaign',
+    'campaign'
   );
-  const fundId = parseMetadataString(
-    combinedMetadata,
-    'fund__c',
-    'Fund__c',
-    'fund',
-  );
+  const fundId = parseMetadataString(combinedMetadata, 'fund__c', 'Fund__c', 'fund');
   const designationId = parseMetadataString(
     combinedMetadata,
     'designation__c',
     'Designation__c',
-    'designation',
+    'designation'
   );
   const restrictionId = parseMetadataString(
     combinedMetadata,
     'restriction__c',
     'Restriction__c',
-    'restriction',
+    'restriction'
   );
 
   const transactionCandidate: TransactionUpsertDTO = {
@@ -575,7 +562,7 @@ export const mapStripeToTransaction = (
       'stripe_checkout_session_id__c',
       'Stripe_Checkout_Session_Id__c',
       'stripe_checkout_session_id',
-      'checkout_session_id',
+      'checkout_session_id'
     ),
     stripe_customer_id__c:
       normalizeStripeId(charge?.customer) || normalizeStripeId(paymentIntent?.customer),
@@ -592,25 +579,35 @@ export const mapStripeToTransaction = (
       parseMetadataNumber(combinedMetadata, 'amount_net__c', 'Amount_Net__c', 'amount_net'),
     currency_iso_code__c:
       deriveCurrency(paymentIntent, charge, balanceTransaction) ||
-      parseMetadataString(combinedMetadata, 'currency_iso_code__c', 'Currency_ISO_Code__c', 'currency'),
-    frequency__c: parseMetadataString(combinedMetadata, 'frequency__c', 'Frequency__c', 'frequency'),
+      parseMetadataString(
+        combinedMetadata,
+        'currency_iso_code__c',
+        'Currency_ISO_Code__c',
+        'currency'
+      ),
+    frequency__c: parseMetadataString(
+      combinedMetadata,
+      'frequency__c',
+      'Frequency__c',
+      'frequency'
+    ),
     attribution__c: parseMetadataString(
       combinedMetadata,
       'attribution__c',
       'Attribution__c',
-      'attribution',
+      'attribution'
     ),
     cover_fees__c: parseMetadataBoolean(
       combinedMetadata,
       'cover_fees__c',
       'Cover_Fees__c',
-      'cover_fees',
+      'cover_fees'
     ),
     cover_fees_amount__c: parseMetadataNumber(
       combinedMetadata,
       'cover_fees_amount__c',
       'Cover_Fees_Amount__c',
-      'cover_fees_amount',
+      'cover_fees_amount'
     ),
     payment_method__c: derivePaymentMethod(paymentIntent, charge),
     payment_brand__c: derivePaymentBrand(charge),
@@ -620,31 +617,31 @@ export const mapStripeToTransaction = (
       combinedMetadata,
       'posted_to_qbo__c',
       'Posted_to_QBO__c',
-      'posted_to_qbo',
+      'posted_to_qbo'
     ),
     qbo_doc_type__c: parseMetadataString(
       combinedMetadata,
       'qbo_doc_type__c',
       'QBO_Doc_Type__c',
-      'qbo_doc_type',
+      'qbo_doc_type'
     ),
     qbo_doc_id__c: parseMetadataString(
       combinedMetadata,
       'qbo_doc_id__c',
       'QBO_Doc_Id__c',
-      'qbo_doc_id',
+      'qbo_doc_id'
     ),
     qbo_posted_at__c: parseMetadataString(
       combinedMetadata,
       'qbo_posted_at__c',
       'QBO_Posted_At__c',
-      'qbo_posted_at',
+      'qbo_posted_at'
     ),
     posting_error__c: parseMetadataString(
       combinedMetadata,
       'posting_error__c',
       'Posting_Error__c',
-      'posting_error',
+      'posting_error'
     ),
     ...(contactId !== null ? { contact__c: contactId } : {}),
     ...(accountId !== null ? { account__c: accountId } : {}),
@@ -656,4 +653,3 @@ export const mapStripeToTransaction = (
 
   return transactionUpsertSchema.parse(transactionCandidate);
 };
-

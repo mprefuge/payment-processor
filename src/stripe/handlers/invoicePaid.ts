@@ -41,7 +41,7 @@ const loadPaymentIntent = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies,
   invoice: Stripe.Invoice,
-  paymentIntentId: string,
+  paymentIntentId: string
 ): Promise<Stripe.PaymentIntent | null> => {
   const stripe = ensureStripeClient(deps, event);
 
@@ -66,7 +66,7 @@ export const handleInvoicePaidNoPI = async (
   context: HttpContext,
   invoice: Stripe.Invoice,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const salesforce = await deps.getSalesforceSvc();
   const subscriptionId = normalizeStripeId(invoice.subscription);
@@ -94,28 +94,19 @@ export const handleInvoicePaidNoPI = async (
     memo,
   });
 
-  await salesforce.upsertTransactionByExternalId(
-    transaction,
-    'stripe_subscription_id__c',
-  );
+  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_subscription_id__c');
 };
 
 export const handleInvoicePaid = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const invoice = event.data.object as Stripe.Invoice;
   const paymentIntentId = normalizeStripeId(invoice.payment_intent);
 
   if (paymentIntentId) {
-    const paymentIntent = await loadPaymentIntent(
-      context,
-      event,
-      deps,
-      invoice,
-      paymentIntentId,
-    );
+    const paymentIntent = await loadPaymentIntent(context, event, deps, invoice, paymentIntentId);
     if (!paymentIntent) {
       return;
     }
@@ -130,7 +121,7 @@ export const handleInvoicePaid = async (
 export const handleInvoicePaymentFailed = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const invoice = event.data.object as Stripe.Invoice;
   const paymentIntentId = normalizeStripeId(invoice.payment_intent);
@@ -142,13 +133,7 @@ export const handleInvoicePaymentFailed = async (
     return;
   }
 
-  const paymentIntent = await loadPaymentIntent(
-    context,
-    event,
-    deps,
-    invoice,
-    paymentIntentId,
-  );
+  const paymentIntent = await loadPaymentIntent(context, event, deps, invoice, paymentIntentId);
 
   if (!paymentIntent) {
     return;
@@ -176,7 +161,7 @@ export const handleInvoicePaymentFailed = async (
 export const handleInvoicePaymentActionRequired = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const invoice = event.data.object as Stripe.Invoice;
   const paymentIntentId = normalizeStripeId(invoice.payment_intent);
@@ -188,13 +173,7 @@ export const handleInvoicePaymentActionRequired = async (
     return;
   }
 
-  const paymentIntent = await loadPaymentIntent(
-    context,
-    event,
-    deps,
-    invoice,
-    paymentIntentId,
-  );
+  const paymentIntent = await loadPaymentIntent(context, event, deps, invoice, paymentIntentId);
 
   if (!paymentIntent) {
     return;

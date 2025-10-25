@@ -100,11 +100,11 @@ describe('createSalesforceSvc', () => {
 
     const result = await service.findTransactionIdByExternalId(
       'stripe_checkout_session_id__c',
-      'cs_test_123',
+      'cs_test_123'
     );
 
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id FROM Transaction__c WHERE Stripe_Checkout_Session_Id__c = 'cs_test_123' LIMIT 1",
+      "SELECT Id FROM Transaction__c WHERE Stripe_Checkout_Session_Id__c = 'cs_test_123' LIMIT 1"
     );
     expect(result).toBe('sf_1');
   });
@@ -128,7 +128,7 @@ describe('createSalesforceSvc', () => {
         }),
       ],
       TRANSACTION_FIELD_API_NAMES.stripe_balance_transaction_id__c,
-      { allOrNone: true },
+      { allOrNone: true }
     );
   });
 
@@ -168,7 +168,8 @@ describe('createSalesforceSvc', () => {
           id: null,
           errors: [
             {
-              message: 'Stripe Charge ID: more than one record found for external id field: [a1, a2]',
+              message:
+                'Stripe Charge ID: more than one record found for external id field: [a1, a2]',
             },
           ],
         },
@@ -186,7 +187,7 @@ describe('createSalesforceSvc', () => {
     const result = await service.upsertTransactionByExternalId(dto, 'stripe_charge_id__c');
 
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' LIMIT 1",
+      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' LIMIT 1"
     );
 
     expect(upsert).toHaveBeenCalledTimes(2);
@@ -199,5 +200,4 @@ describe('createSalesforceSvc', () => {
     expect(secondCallRecords[0]).toMatchObject({ Id: 'a1' });
     expect(result).toEqual({ success: true, id: 'a1', errors: [] });
   });
-
 });

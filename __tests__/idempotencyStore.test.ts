@@ -16,7 +16,10 @@ class FakeTableClient {
     return;
   }
 
-  async getEntity<T extends object>(partitionKey: string, rowKey: string): Promise<T & { etag: string }> {
+  async getEntity<T extends object>(
+    partitionKey: string,
+    rowKey: string
+  ): Promise<T & { etag: string }> {
     const key = this.key(partitionKey, rowKey);
     const stored = this.entities.get(key);
     if (!stored) {
@@ -50,7 +53,11 @@ class FakeTableClient {
     this.entities.set(key, { entity: merged, etag: this.nextEtag() });
   }
 
-  async deleteEntity(partitionKey: string, rowKey: string, options: { etag?: string } = {}): Promise<void> {
+  async deleteEntity(
+    partitionKey: string,
+    rowKey: string,
+    options: { etag?: string } = {}
+  ): Promise<void> {
     const key = this.key(partitionKey, rowKey);
     const existing = this.entities.get(key);
     if (!existing) {

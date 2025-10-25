@@ -5,239 +5,251 @@ const require = createRequire(import.meta.url);
 const { createContext } = require('./testUtils');
 
 describe('healthCheck', () => {
-    let handler;
-    let internals;
-    let originalEnv;
+  let handler;
+  let internals;
+  let originalEnv;
 
-    beforeEach(() => {
-        vi.resetModules();
-        handler = require('../healthCheck');
-        internals = handler.__internals;
-        originalEnv = { ...process.env };
+  beforeEach(() => {
+    vi.resetModules();
+    handler = require('../dist/handlers/healthCheck');
+    internals = handler.__internals;
+    originalEnv = { ...process.env };
+  });
+
+  afterEach(() => {
+    if (internals?.resetDependencies) {
+      internals.resetDependencies();
+    }
+    handler = undefined;
+    internals = undefined;
+    vi.restoreAllMocks();
+    Object.keys(process.env).forEach((key) => {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    });
+    Object.entries(originalEnv).forEach(([key, value]) => {
+      process.env[key] = value;
+    });
+  });
+
+  it('validates integrations and reports component statuses', async () => {
+    process.env.STRIPE_TEST_SECRET_KEY = 'sk_test';
+    process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live';
+    process.env.SENDGRID_API_KEY = 'sg_key';
+    process.env.CRM_PROVIDER = 'salesforce';
+    process.env.SALESFORCE_USERNAME = 'user@example.com';
+    process.env.SALESFORCE_PASSWORD = 'password';
+    process.env.SALESFORCE_SECURITY_TOKEN = 'token';
+    process.env.ACCOUNTING_SYNC_ENABLED = 'true';
+    process.env.ACCOUNTING_PROVIDER = 'quickbooks';
+    process.env.QBO_ACCESS_TOKEN = 'access';
+    process.env.QBO_REFRESH_TOKEN = 'refresh';
+    process.env.QBO_COMPANY_ID = '12345';
+    process.env.QBO_CLIENT_ID = 'client';
+    process.env.QBO_CLIENT_SECRET = 'secret';
+
+    const storageClient = {
+      set: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(true),
+    };
+
+    const stripePayoutList = vi.fn().mockResolvedValue({ data: [] });
+    const stripeFactory = vi.fn(() => ({
+      payouts: {
+        list: stripePayoutList,
+      },
+    }));
+
+    const sendGridRequest = vi.fn().mockResolvedValue({});
+
+    const crmHealthCheck = vi.fn().mockResolvedValue({
+      healthy: true,
+      message: 'Salesforce SOQL query succeeded',
+      details: { provider: 'salesforce' },
     });
 
-    afterEach(() => {
-        if (internals?.resetDependencies) {
-            internals.resetDependencies();
-        }
-        handler = undefined;
-        internals = undefined;
-        vi.restoreAllMocks();
-        Object.keys(process.env).forEach(key => {
-            if (!(key in originalEnv)) {
-                delete process.env[key];
-            }
-        });
-        Object.entries(originalEnv).forEach(([key, value]) => {
-            process.env[key] = value;
-        });
+    const crmFactory = {
+      validateConfig: vi.fn().mockReturnValue({ isValid: true }),
+      createCrmService: vi.fn(() => ({ healthCheck: crmHealthCheck })),
+    };
+
+    const providerHealthCheck = vi.fn().mockResolvedValue({
+      healthy: true,
+      message: 'QBO connection healthy',
+      details: { provider: 'quickbooks' },
+    });
+    const providerTokenExchange = vi
+      .fn()
+      .mockResolvedValue({ accessToken: 'new', refreshToken: 'next' });
+    const accountingProviderFactory = {
+      createProvider: vi.fn(() => ({
+        healthCheck: providerHealthCheck,
+        refreshTokens: providerTokenExchange,
+      })),
+    };
+
+    const accountingSyncConfig = {
+      isEnabled: () => true,
+      getConfig: () => ({ provider: 'quickbooks' }),
+      validate: () => ({ isValid: true, errors: [] }),
+      getProviderConfig: () => ({}),
+    };
+
+    internals.setDependencies({
+      stripeFactory,
+      sendGridClientFactory: () => ({
+        setApiKey: vi.fn(),
+        request: sendGridRequest,
+      }),
+      crmFactory,
+      accountingProviderFactory,
+      accountingSyncConfigFactory: () => accountingSyncConfig,
+      persistentStorageFactory: () => ({ syncLedgerStore: storageClient }),
     });
 
-    it('validates integrations and reports component statuses', async () => {
-        process.env.STRIPE_TEST_SECRET_KEY = 'sk_test';
-        process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live';
-        process.env.SENDGRID_API_KEY = 'sg_key';
-        process.env.CRM_PROVIDER = 'salesforce';
-        process.env.SALESFORCE_USERNAME = 'user@example.com';
-        process.env.SALESFORCE_PASSWORD = 'password';
-        process.env.SALESFORCE_SECURITY_TOKEN = 'token';
-        process.env.ACCOUNTING_SYNC_ENABLED = 'true';
-        process.env.ACCOUNTING_PROVIDER = 'quickbooks';
-        process.env.QBO_ACCESS_TOKEN = 'access';
-        process.env.QBO_REFRESH_TOKEN = 'refresh';
-        process.env.QBO_COMPANY_ID = '12345';
-        process.env.QBO_CLIENT_ID = 'client';
-        process.env.QBO_CLIENT_SECRET = 'secret';
+    const { context } = createContext();
+    const req = {};
 
-        const storageClient = {
-            set: vi.fn().mockResolvedValue(undefined),
-            delete: vi.fn().mockResolvedValue(true)
-        };
+    await handler(context, req);
 
-        const stripePayoutList = vi.fn().mockResolvedValue({ data: [] });
-        const stripeFactory = vi.fn(() => ({
-            payouts: {
-                list: stripePayoutList
-            }
-        }));
-
-        const sendGridRequest = vi.fn().mockResolvedValue({});
-
-        const crmHealthCheck = vi.fn().mockResolvedValue({
-            healthy: true,
-            message: 'Salesforce SOQL query succeeded',
-            details: { provider: 'salesforce' }
-        });
-
-        const crmFactory = {
-            validateConfig: vi.fn().mockReturnValue({ isValid: true }),
-            createCrmService: vi.fn(() => ({ healthCheck: crmHealthCheck }))
-        };
-
-        const providerHealthCheck = vi.fn().mockResolvedValue({
-            healthy: true,
-            message: 'QBO connection healthy',
-            details: { provider: 'quickbooks' }
-        });
-        const providerTokenExchange = vi.fn().mockResolvedValue({ accessToken: 'new', refreshToken: 'next' });
-        const accountingProviderFactory = {
-            createProvider: vi.fn(() => ({
-                healthCheck: providerHealthCheck,
-                refreshTokens: providerTokenExchange
-            }))
-        };
-
-        const accountingSyncConfig = {
-            isEnabled: () => true,
-            getConfig: () => ({ provider: 'quickbooks' }),
-            validate: () => ({ isValid: true, errors: [] }),
-            getProviderConfig: () => ({})
-        };
-
-        internals.setDependencies({
-            stripeFactory,
-            sendGridClientFactory: () => ({
-                setApiKey: vi.fn(),
-                request: sendGridRequest
-            }),
-            crmFactory,
-            accountingProviderFactory,
-            accountingSyncConfigFactory: () => accountingSyncConfig,
-            persistentStorageFactory: () => ({ syncLedgerStore: storageClient })
-        });
-
-        const { context } = createContext();
-        const req = {};
-
-        await handler(context, req);
-
-        expect(context.res.status).toBe(200);
-        expect(Array.isArray(context.res.body.connections)).toBe(true);
-        expect(context.res.body.connections.length).toBeGreaterThan(0);
-        expect(Array.isArray(context.res.body.components)).toBe(true);
-        expect(context.res.body.components.length).toBe(context.res.body.connections.length);
-        context.res.body.connections.forEach(connection => {
-            expect(connection).toHaveProperty('name');
-            expect(connection).toHaveProperty('type');
-            expect(connection).toHaveProperty('status');
-        });
-
-        expect(storageClient.set).toHaveBeenCalled();
-        expect(storageClient.delete).toHaveBeenCalled();
-
-        expect(stripeFactory).toHaveBeenCalledWith('sk_test', expect.any(Object));
-        expect(stripeFactory).toHaveBeenCalledWith('sk_live', expect.any(Object));
-        expect(stripePayoutList).toHaveBeenCalledTimes(2);
-        expect(stripePayoutList).toHaveBeenCalledWith({ limit: 1 });
-        expect(sendGridRequest).toHaveBeenCalledWith({ method: 'GET', url: '/v3/user/account' });
-        expect(crmFactory.validateConfig).toHaveBeenCalled();
-        expect(crmFactory.createCrmService).toHaveBeenCalled();
-        expect(crmHealthCheck).toHaveBeenCalled();
-        expect(accountingProviderFactory.createProvider).toHaveBeenCalled();
-        expect(providerHealthCheck).toHaveBeenCalled();
-        expect(providerTokenExchange).toHaveBeenCalledWith({ persist: false });
-
-        const environmentComponent = context.res.body.components.find(component => component.component === 'environment');
-        expect(environmentComponent).toBeDefined();
-        expect(environmentComponent.status).toBe('healthy');
-        const quickBooksConnection = context.res.body.connections.find(connection => connection.name === 'accounting_quickbooks');
-        expect(quickBooksConnection?.details?.tokenExchange).toEqual({ success: true });
+    expect(context.res.status).toBe(200);
+    expect(Array.isArray(context.res.body.connections)).toBe(true);
+    expect(context.res.body.connections.length).toBeGreaterThan(0);
+    expect(Array.isArray(context.res.body.components)).toBe(true);
+    expect(context.res.body.components.length).toBe(context.res.body.connections.length);
+    context.res.body.connections.forEach((connection) => {
+      expect(connection).toHaveProperty('name');
+      expect(connection).toHaveProperty('type');
+      expect(connection).toHaveProperty('status');
     });
 
-    it('flags missing environment configuration', async () => {
-        delete process.env.STRIPE_TEST_SECRET_KEY;
-        delete process.env.STRIPE_LIVE_SECRET_KEY;
-        process.env.CRM_PROVIDER = 'salesforce';
-        delete process.env.SALESFORCE_USERNAME;
-        delete process.env.SALESFORCE_PASSWORD;
-        delete process.env.SALESFORCE_SECURITY_TOKEN;
-        process.env.ACCOUNTING_SYNC_ENABLED = 'true';
-        process.env.ACCOUNTING_PROVIDER = 'quickbooks';
-        delete process.env.QBO_ACCESS_TOKEN;
-        delete process.env.QBO_REFRESH_TOKEN;
-        delete process.env.QBO_COMPANY_ID;
-        delete process.env.QBO_CLIENT_ID;
-        delete process.env.QBO_CLIENT_SECRET;
+    expect(storageClient.set).toHaveBeenCalled();
+    expect(storageClient.delete).toHaveBeenCalled();
 
-        const storageClient = {
-            set: vi.fn().mockResolvedValue(undefined),
-            delete: vi.fn().mockResolvedValue(true)
-        };
+    expect(stripeFactory).toHaveBeenCalledWith('sk_test', expect.any(Object));
+    expect(stripeFactory).toHaveBeenCalledWith('sk_live', expect.any(Object));
+    expect(stripePayoutList).toHaveBeenCalledTimes(2);
+    expect(stripePayoutList).toHaveBeenCalledWith({ limit: 1 });
+    expect(sendGridRequest).toHaveBeenCalledWith({ method: 'GET', url: '/v3/user/account' });
+    expect(crmFactory.validateConfig).toHaveBeenCalled();
+    expect(crmFactory.createCrmService).toHaveBeenCalled();
+    expect(crmHealthCheck).toHaveBeenCalled();
+    expect(accountingProviderFactory.createProvider).toHaveBeenCalled();
+    expect(providerHealthCheck).toHaveBeenCalled();
+    expect(providerTokenExchange).toHaveBeenCalledWith({ persist: false });
 
-        internals.setDependencies({
-            persistentStorageFactory: () => ({ syncLedgerStore: storageClient }),
-            accountingSyncConfigFactory: () => ({
-                isEnabled: () => false
-            }),
-            crmFactory: {
-                validateConfig: vi.fn().mockReturnValue({ isValid: false, error: 'Missing credentials' })
-            }
-        });
+    const environmentComponent = context.res.body.components.find(
+      (component) => component.component === 'environment'
+    );
+    expect(environmentComponent).toBeDefined();
+    expect(environmentComponent.status).toBe('healthy');
+    const quickBooksConnection = context.res.body.connections.find(
+      (connection) => connection.name === 'accounting_quickbooks'
+    );
+    expect(quickBooksConnection?.details?.tokenExchange).toEqual({ success: true });
+  });
 
-        const { context } = createContext();
+  it('flags missing environment configuration', async () => {
+    delete process.env.STRIPE_TEST_SECRET_KEY;
+    delete process.env.STRIPE_LIVE_SECRET_KEY;
+    process.env.CRM_PROVIDER = 'salesforce';
+    delete process.env.SALESFORCE_USERNAME;
+    delete process.env.SALESFORCE_PASSWORD;
+    delete process.env.SALESFORCE_SECURITY_TOKEN;
+    process.env.ACCOUNTING_SYNC_ENABLED = 'true';
+    process.env.ACCOUNTING_PROVIDER = 'quickbooks';
+    delete process.env.QBO_ACCESS_TOKEN;
+    delete process.env.QBO_REFRESH_TOKEN;
+    delete process.env.QBO_COMPANY_ID;
+    delete process.env.QBO_CLIENT_ID;
+    delete process.env.QBO_CLIENT_SECRET;
 
-        await handler(context, {});
+    const storageClient = {
+      set: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(true),
+    };
 
-        const environmentConnection = context.res.body.connections.find(connection => connection.name === 'environment');
-        expect(environmentConnection).toBeDefined();
-        expect(environmentConnection.healthy).toBe(false);
-        expect(environmentConnection.details.missingKeys.length).toBeGreaterThan(0);
-
-        const environmentComponent = context.res.body.components.find(component => component.component === 'environment');
-        expect(environmentComponent).toBeDefined();
-        expect(environmentComponent.status).toBe('unhealthy');
+    internals.setDependencies({
+      persistentStorageFactory: () => ({ syncLedgerStore: storageClient }),
+      accountingSyncConfigFactory: () => ({
+        isEnabled: () => false,
+      }),
+      crmFactory: {
+        validateConfig: vi.fn().mockReturnValue({ isValid: false, error: 'Missing credentials' }),
+      },
     });
 
-    it('redacts secret values from responses and logs', async () => {
-        process.env.STRIPE_TEST_SECRET_KEY = 'sk_test_secret_value';
-        process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live_secret_value';
-        process.env.SENDGRID_API_KEY = 'SG.secret_value';
-        delete process.env.CRM_PROVIDER;
-        delete process.env.ACCOUNTING_SYNC_ENABLED;
+    const { context } = createContext();
 
-        const stripeFactory = vi.fn(secretKey => ({
-            payouts: {
-                list: vi.fn().mockRejectedValue(new Error(`Invalid API Key provided: ${secretKey}`))
-            }
-        }));
+    await handler(context, {});
 
-        const sendGridRequest = vi.fn().mockRejectedValue(new Error(`invalid key ${process.env.SENDGRID_API_KEY}`));
+    const environmentConnection = context.res.body.connections.find(
+      (connection) => connection.name === 'environment'
+    );
+    expect(environmentConnection).toBeDefined();
+    expect(environmentConnection.healthy).toBe(false);
+    expect(environmentConnection.details.missingKeys.length).toBeGreaterThan(0);
 
-        internals.setDependencies({
-            stripeFactory,
-            sendGridClientFactory: () => ({
-                setApiKey: vi.fn(),
-                request: sendGridRequest
-            }),
-            accountingSyncConfigFactory: () => ({
-                isEnabled: () => false
-            }),
-            persistentStorageFactory: () => ({
-                syncLedgerStore: {
-                    set: vi.fn().mockResolvedValue(undefined),
-                    delete: vi.fn().mockResolvedValue(undefined)
-                }
-            })
-        });
+    const environmentComponent = context.res.body.components.find(
+      (component) => component.component === 'environment'
+    );
+    expect(environmentComponent).toBeDefined();
+    expect(environmentComponent.status).toBe('unhealthy');
+  });
 
-        const { context, logs } = createContext();
+  it('redacts secret values from responses and logs', async () => {
+    process.env.STRIPE_TEST_SECRET_KEY = 'sk_test_secret_value';
+    process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live_secret_value';
+    process.env.SENDGRID_API_KEY = 'SG.secret_value';
+    delete process.env.CRM_PROVIDER;
+    delete process.env.ACCOUNTING_SYNC_ENABLED;
 
-        await handler(context, {});
+    const stripeFactory = vi.fn((secretKey) => ({
+      payouts: {
+        list: vi.fn().mockRejectedValue(new Error(`Invalid API Key provided: ${secretKey}`)),
+      },
+    }));
 
-        const serializedBody = JSON.stringify(context.res.body);
-        expect(serializedBody).not.toContain('sk_test_secret_value');
-        expect(serializedBody).not.toContain('sk_live_secret_value');
-        expect(serializedBody).not.toContain('SG.secret_value');
-        expect(serializedBody).toContain('***REDACTED***');
+    const sendGridRequest = vi
+      .fn()
+      .mockRejectedValue(new Error(`invalid key ${process.env.SENDGRID_API_KEY}`));
 
-        const serializedLogs = logs.map(args => JSON.stringify(args)).join(' ');
-        expect(serializedLogs).not.toContain('sk_test_secret_value');
-        expect(serializedLogs).not.toContain('sk_live_secret_value');
-        expect(serializedLogs).not.toContain('SG.secret_value');
-        expect(serializedLogs).toContain('***REDACTED***');
-
-        expect(stripeFactory).toHaveBeenCalledWith('sk_test_secret_value', expect.any(Object));
-        expect(stripeFactory).toHaveBeenCalledWith('sk_live_secret_value', expect.any(Object));
-        expect(sendGridRequest).toHaveBeenCalled();
+    internals.setDependencies({
+      stripeFactory,
+      sendGridClientFactory: () => ({
+        setApiKey: vi.fn(),
+        request: sendGridRequest,
+      }),
+      accountingSyncConfigFactory: () => ({
+        isEnabled: () => false,
+      }),
+      persistentStorageFactory: () => ({
+        syncLedgerStore: {
+          set: vi.fn().mockResolvedValue(undefined),
+          delete: vi.fn().mockResolvedValue(undefined),
+        },
+      }),
     });
+
+    const { context, logs } = createContext();
+
+    await handler(context, {});
+
+    const serializedBody = JSON.stringify(context.res.body);
+    expect(serializedBody).not.toContain('sk_test_secret_value');
+    expect(serializedBody).not.toContain('sk_live_secret_value');
+    expect(serializedBody).not.toContain('SG.secret_value');
+    expect(serializedBody).toContain('***REDACTED***');
+
+    const serializedLogs = logs.map((args) => JSON.stringify(args)).join(' ');
+    expect(serializedLogs).not.toContain('sk_test_secret_value');
+    expect(serializedLogs).not.toContain('sk_live_secret_value');
+    expect(serializedLogs).not.toContain('SG.secret_value');
+    expect(serializedLogs).toContain('***REDACTED***');
+
+    expect(stripeFactory).toHaveBeenCalledWith('sk_test_secret_value', expect.any(Object));
+    expect(stripeFactory).toHaveBeenCalledWith('sk_live_secret_value', expect.any(Object));
+    expect(sendGridRequest).toHaveBeenCalled();
+  });
 });

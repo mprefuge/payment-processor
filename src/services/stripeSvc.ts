@@ -3,10 +3,7 @@ import type Stripe from 'stripe';
 import env from '../config/env';
 import type { StripeClient } from '../domain/stripe';
 
-type CheckoutSessionBaseParams = Omit<
-  Stripe.Checkout.SessionCreateParams,
-  'mode' | 'metadata'
->;
+type CheckoutSessionBaseParams = Omit<Stripe.Checkout.SessionCreateParams, 'mode' | 'metadata'>;
 
 export interface CreateCheckoutSessionInput extends CheckoutSessionBaseParams {
   stripe: StripeClient;
@@ -38,9 +35,7 @@ export interface ListPayoutsInput {
   endingBefore?: Stripe.PayoutListParams['ending_before'];
 }
 
-const toUnixTimestamp = (
-  value?: Date | number | string | null
-): number | undefined => {
+const toUnixTimestamp = (value?: Date | number | string | null): number | undefined => {
   if (value === undefined || value === null) {
     return undefined;
   }

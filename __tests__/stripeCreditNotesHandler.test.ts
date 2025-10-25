@@ -8,9 +8,7 @@ import type { StripeWebhookDependencies } from '../src/stripe/types';
 const require = createRequire(import.meta.url);
 const { createContext } = require('./testUtils');
 
-const createCreditNote = (
-  overrides: Partial<Stripe.CreditNote> = {},
-): Stripe.CreditNote =>
+const createCreditNote = (overrides: Partial<Stripe.CreditNote> = {}): Stripe.CreditNote =>
   ({
     id: 'cn_123',
     number: 'CN-1001',
@@ -61,9 +59,7 @@ const createInvoice = (overrides: Partial<Stripe.Invoice> = {}): Stripe.Invoice 
     ...overrides,
   }) as Stripe.Invoice;
 
-const createPaymentIntent = (
-  overrides: Partial<Stripe.PaymentIntent> = {},
-): Stripe.PaymentIntent =>
+const createPaymentIntent = (overrides: Partial<Stripe.PaymentIntent> = {}): Stripe.PaymentIntent =>
   ({
     id: 'pi_123',
     amount: 1000,
@@ -131,9 +127,7 @@ const setup = ({
   };
 
   const refundAdapter = {
-    upsertRefundReceipt: vi
-      .fn()
-      .mockResolvedValue({ qboId: 'RR-1', type: 'RefundReceipt' }),
+    upsertRefundReceipt: vi.fn().mockResolvedValue({ qboId: 'RR-1', type: 'RefundReceipt' }),
     markRefundVoided: vi.fn().mockResolvedValue(undefined),
   };
 
@@ -209,14 +203,17 @@ describe('handleCreditNoteEvent', () => {
 
     expect(deps.idempotencyStore.withLock).toHaveBeenCalledWith(
       `stripe_evt_${event.id}`,
-      expect.any(Function),
+      expect.any(Function)
     );
 
     expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
     const refundInput = refundAdapter.upsertRefundReceipt.mock.calls[0][0];
     expect(refundInput.stripeRefundId).toBe(creditNote.id);
     expect(refundInput.lines).toHaveLength(2);
-    const total = refundInput.lines.reduce((sum: number, line: { amountCents: number }) => sum + line.amountCents, 0);
+    const total = refundInput.lines.reduce(
+      (sum: number, line: { amountCents: number }) => sum + line.amountCents,
+      0
+    );
     expect(total).toBe(creditNote.amount);
 
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_cn_1', {

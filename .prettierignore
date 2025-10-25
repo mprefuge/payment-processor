@@ -1,0 +1,9 @@
+# .prettierignore
+node_modules/
+dist/
+coverage/
+*.min.js
+package-lock.json
+__azurite_db_*.json
+__blobstorage__/
+__queuestorage__/

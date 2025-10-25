@@ -1,10 +1,7 @@
 import Stripe from 'stripe';
 
 import env from '../../config/env';
-import type {
-  HttpContext,
-  StripeWebhookDependencies,
-} from '../types';
+import type { HttpContext, StripeWebhookDependencies } from '../types';
 import {
   centsToMajorUnits,
   centsToPositiveMajorUnits,
@@ -17,7 +14,7 @@ import type { TransactionUpsertDTO } from '../../domain/transactions';
 
 const resolveDisputeBalanceTransactions = async (
   stripe: Stripe,
-  dispute: Stripe.Dispute,
+  dispute: Stripe.Dispute
 ): Promise<Stripe.BalanceTransaction[]> => {
   const ids = (dispute.balance_transactions || [])
     .map((entry) => normalizeStripeId(entry))
@@ -40,7 +37,7 @@ const resolveDisputeBalanceTransactions = async (
 export const handleDisputeClosed = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const dispute = event.data.object as Stripe.Dispute;
 
@@ -58,35 +55,22 @@ export const handleDisputeClosed = async (
   const chargeId = normalizeStripeId(dispute.charge);
   const charge = chargeId ? await stripe.charges.retrieve(chargeId) : null;
 
-  const balanceTransactions = await resolveDisputeBalanceTransactions(
-    stripe,
-    dispute,
-  );
+  const balanceTransactions = await resolveDisputeBalanceTransactions(stripe, dispute);
 
   const lossTransactions = balanceTransactions.filter(
-    (bt) => bt.reporting_category === 'chargeback' || bt.type === 'adjustment',
+    (bt) => bt.reporting_category === 'chargeback' || bt.type === 'adjustment'
   );
   const feeTransactions = balanceTransactions.filter(
-    (bt) => bt.reporting_category === 'chargeback_fee' || bt.type === 'stripe_fee',
+    (bt) => bt.reporting_category === 'chargeback_fee' || bt.type === 'stripe_fee'
   );
 
-  const lossAmountCents = lossTransactions.reduce(
-    (sum, bt) => sum + Math.abs(bt.amount ?? 0),
-    0,
-  );
-  const feeAmountCents = feeTransactions.reduce(
-    (sum, bt) => sum + Math.abs(bt.amount ?? 0),
-    0,
-  );
+  const lossAmountCents = lossTransactions.reduce((sum, bt) => sum + Math.abs(bt.amount ?? 0), 0);
+  const feeAmountCents = feeTransactions.reduce((sum, bt) => sum + Math.abs(bt.amount ?? 0), 0);
 
-  const primaryBalanceTransaction =
-    lossTransactions[0] || balanceTransactions[0] || null;
+  const primaryBalanceTransaction = lossTransactions[0] || balanceTransactions[0] || null;
 
   const parentId = chargeId
-    ? await salesforce.findTransactionIdByExternalId(
-        'stripe_charge_id__c',
-        chargeId,
-      )
+    ? await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', chargeId)
     : null;
 
   const transaction: TransactionUpsertDTO = {
@@ -95,7 +79,7 @@ export const handleDisputeClosed = async (
     stripe_dispute_id__c: dispute.id,
     stripe_charge_id__c: chargeId,
     stripe_payment_intent_id__c: normalizeStripeId(
-      (charge as Stripe.Charge | null)?.payment_intent ?? dispute.payment_intent,
+      (charge as Stripe.Charge | null)?.payment_intent ?? dispute.payment_intent
     ),
     stripe_balance_transaction_id__c: primaryBalanceTransaction?.id ?? null,
     stripe_customer_id__c: normalizeStripeId((charge as Stripe.Charge | null)?.customer),
@@ -105,11 +89,9 @@ export const handleDisputeClosed = async (
       lossAmountCents + feeAmountCents > 0
         ? centsToMajorUnits(-(lossAmountCents + feeAmountCents))
         : null,
-    currency_iso_code__c: dispute.currency
-      ? dispute.currency.toUpperCase()
-      : null,
+    currency_iso_code__c: dispute.currency ? dispute.currency.toUpperCase() : null,
     received_at__c: timestampToIsoString(
-      dispute.created ?? primaryBalanceTransaction?.created ?? null,
+      dispute.created ?? primaryBalanceTransaction?.created ?? null
     ),
     parent_transaction__c: parentId,
     payment_brand__c: (charge as Stripe.Charge | null)?.payment_method_details?.card?.brand ?? null,
@@ -123,7 +105,7 @@ export const handleDisputeClosed = async (
 
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
-    'stripe_dispute_id__c',
+    'stripe_dispute_id__c'
   );
 
   if (!env.accounting.syncEnabled) {
@@ -146,7 +128,7 @@ export const handleDisputeClosed = async (
         primaryBalanceTransaction?.created ??
           primaryBalanceTransaction?.available_on ??
           dispute.created ??
-          null,
+          null
       ),
     });
 

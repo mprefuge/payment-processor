@@ -124,7 +124,7 @@ export function validateConfig(config: ContactMatchConfig): true {
   const totalMaxWeight = Object.values(config.weights).reduce((sum, weight) => sum + weight, 0);
   if (totalMaxWeight < config.thresholds.high) {
     logger.warn(
-      `Warning: Maximum possible score (${totalMaxWeight}) is less than high threshold (${config.thresholds.high})`,
+      `Warning: Maximum possible score (${totalMaxWeight}) is less than high threshold (${config.thresholds.high})`
     );
   }
 
@@ -135,7 +135,10 @@ export function validateConfig(config: ContactMatchConfig): true {
   return true;
 }
 
-export function normalizeTransactionCategory(inputCategory: string | undefined | null, config: ContactMatchConfig): string {
+export function normalizeTransactionCategory(
+  inputCategory: string | undefined | null,
+  config: ContactMatchConfig
+): string {
   if (!inputCategory) {
     return config.transaction.defaultCategory;
   }
@@ -149,7 +152,7 @@ export function normalizeTransactionCategory(inputCategory: string | undefined |
 export function generateTransactionName(
   category: string,
   config: ContactMatchConfig,
-  metadata: TransactionMetadata = {},
+  metadata: TransactionMetadata = {}
 ): string {
   let name = config.transaction.nameTemplate;
 

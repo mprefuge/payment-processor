@@ -33,7 +33,7 @@ const toPositiveCents = (value: number | null | undefined): number => {
 };
 
 const mapStatus = (
-  status: Stripe.CreditNote.Status | null | undefined,
+  status: Stripe.CreditNote.Status | null | undefined
 ): TransactionUpsertDTO['status__c'] => {
   const normalized = typeof status === 'string' ? status : null;
   switch (normalized) {
@@ -47,7 +47,7 @@ const mapStatus = (
 
 const normalizeMetadataValue = (
   metadata: Stripe.Metadata | null | undefined,
-  key: string,
+  key: string
 ): string | null => {
   if (!metadata) {
     return null;
@@ -64,7 +64,7 @@ const normalizeMetadataValue = (
 
 const resolveSalesReceiptDocNumber = (
   paymentIntent: Stripe.PaymentIntent | null,
-  charge: Stripe.Charge | null,
+  charge: Stripe.Charge | null
 ): string | null => {
   const metadataSources = [paymentIntent?.metadata ?? null, charge?.metadata ?? null];
 
@@ -92,7 +92,7 @@ const buildCreditNoteTransaction = (
     paymentIntent: Stripe.PaymentIntent | null;
     charge: Stripe.Charge | null;
     invoice: Stripe.Invoice | null;
-  },
+  }
 ): TransactionUpsertDTO => {
   const amount = centsToPositiveMajorUnits(creditNote.amount ?? null);
   const invoice = options.invoice;
@@ -127,15 +127,15 @@ const buildCreditNoteTransaction = (
     currency_iso_code__c: creditNote.currency
       ? creditNote.currency.toUpperCase()
       : invoice?.currency
-      ? invoice.currency.toUpperCase()
-      : null,
+        ? invoice.currency.toUpperCase()
+        : null,
     received_at__c: timestampToIsoString(creditNote.created ?? null),
     memo__c: memoParts.join('; '),
   };
 };
 
 const buildRefundReceiptLines = (
-  creditNote: Stripe.CreditNote,
+  creditNote: Stripe.CreditNote
 ): { lines: RefundReceiptLineInput[]; fallbackReason?: string | null } => {
   const data = Array.isArray(creditNote.lines?.data) ? creditNote.lines!.data! : [];
 
@@ -200,7 +200,7 @@ const buildRefundReceiptInput = (
     paymentIntent: Stripe.PaymentIntent | null;
     charge: Stripe.Charge | null;
     invoice: Stripe.Invoice | null;
-  },
+  }
 ): UpsertRefundReceiptInput => {
   const { lines, fallbackReason } = buildRefundReceiptLines(creditNote);
   const docNumber =
@@ -241,7 +241,7 @@ const buildRefundReceiptInput = (
 };
 
 const getRefundAdapter = (
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): RefundReceiptAccountingAdapter | null => {
   const adapter = deps.accounting?.refundReceipts;
   if (adapter && typeof adapter.upsertRefundReceipt === 'function') {
@@ -251,7 +251,7 @@ const getRefundAdapter = (
 };
 
 const normalizeDocumentReference = (
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void,
+  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
 ): StripeQuickBooksDocument | null => {
   if (!doc) {
     return null;
@@ -274,7 +274,7 @@ const normalizeDocumentReference = (
 const markCreditNotePosted = async (
   salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
   upsertResult: unknown,
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void,
+  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
 ): Promise<void> => {
   const reference = normalizeDocumentReference(doc);
   if (!reference) {
@@ -299,7 +299,7 @@ const markCreditNotePosted = async (
 const loadInvoice = async (
   stripe: Stripe,
   creditNote: Stripe.CreditNote,
-  context: HttpContext,
+  context: HttpContext
 ): Promise<Stripe.Invoice | null> => {
   const invoiceId = normalizeStripeId(creditNote.invoice);
   if (!invoiceId) {
@@ -322,7 +322,7 @@ const loadInvoice = async (
 const loadPaymentIntent = async (
   stripe: Stripe,
   invoice: Stripe.Invoice | null,
-  context: HttpContext,
+  context: HttpContext
 ): Promise<Stripe.PaymentIntent | null> => {
   const paymentIntentId = normalizeStripeId(invoice?.payment_intent);
   if (!paymentIntentId) {
@@ -345,7 +345,7 @@ const loadCharge = async (
   stripe: Stripe,
   invoice: Stripe.Invoice | null,
   paymentIntent: Stripe.PaymentIntent | null,
-  context: HttpContext,
+  context: HttpContext
 ): Promise<Stripe.Charge | null> => {
   if (paymentIntent) {
     const charge = await resolveCharge(stripe, paymentIntent);
@@ -374,7 +374,7 @@ const loadCharge = async (
 export const handleCreditNoteEvent = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const creditNote = event.data.object as Stripe.CreditNote;
   const stripe = ensureStripeClient(deps, event);
@@ -389,10 +389,7 @@ export const handleCreditNoteEvent = async (
   const invoiceId = normalizeStripeId(invoice?.id) || normalizeStripeId(creditNote.invoice);
   if (invoiceId) {
     try {
-      parentId = await salesforce.findTransactionIdByExternalId(
-        'stripe_invoice_id__c',
-        invoiceId,
-      );
+      parentId = await salesforce.findTransactionIdByExternalId('stripe_invoice_id__c', invoiceId);
     } catch (error) {
       context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {
         creditNoteId: creditNote.id,
@@ -412,7 +409,7 @@ export const handleCreditNoteEvent = async (
 
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
-    'stripe_credit_note_id__c',
+    'stripe_credit_note_id__c'
   );
 
   if (event.type === 'credit_note.voided') {

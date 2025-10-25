@@ -1,19 +1,9 @@
 import type { InvocationContext, HttpRequest } from '@azure/functions';
 import type Stripe from 'stripe';
 
-import type {
-  AzureIdempotencyStore,
-  IdempotencyStore,
-} from '../services/idempotencyStore';
-import type {
-  SalesforceSvc,
-  QuickBooksDocumentReference,
-} from '../services/salesforceSvc';
-import type {
-  postChargeToQbo,
-  postRefundToQbo,
-  postDisputeToQbo,
-} from '../services/qboSvc';
+import type { AzureIdempotencyStore, IdempotencyStore } from '../services/idempotencyStore';
+import type { SalesforceSvc, QuickBooksDocumentReference } from '../services/salesforceSvc';
+import type { postChargeToQbo, postRefundToQbo, postDisputeToQbo } from '../services/qboSvc';
 
 export interface StripeServices {
   verifyEvent: (payload: Buffer | string, signature: string) => Stripe.Event;
@@ -27,8 +17,7 @@ export interface RefundReceiptLineInput {
   taxCodeRef?: { value: string; name?: string | null } | null;
 }
 
-export interface SalesReceiptAdjustmentLineInput
-  extends RefundReceiptLineInput {
+export interface SalesReceiptAdjustmentLineInput extends RefundReceiptLineInput {
   amountCents: number;
 }
 
@@ -65,7 +54,7 @@ export interface UpsertRefundReceiptInput {
 
 export interface RefundReceiptAccountingAdapter {
   upsertRefundReceipt: (
-    input: UpsertRefundReceiptInput,
+    input: UpsertRefundReceiptInput
   ) => Promise<StripeQuickBooksDocument | null | void>;
   markRefundFailed?: (input: {
     stripeRefundId: string;
@@ -81,9 +70,7 @@ export interface RefundReceiptAccountingAdapter {
     paymentIntent: Stripe.PaymentIntent | null;
     reason?: string | null;
   }) => Promise<void>;
-  appendSalesReceiptAdjustments?: (
-    input: AppendSalesReceiptAdjustmentsInput,
-  ) => Promise<void>;
+  appendSalesReceiptAdjustments?: (input: AppendSalesReceiptAdjustmentsInput) => Promise<void>;
 }
 
 export type PayoutDepositLineType = 'charge' | 'fee' | 'refund' | 'adjustment';
@@ -129,7 +116,7 @@ export interface UpsertPayoutDepositInput {
 
 export interface PayoutAccountingAdapter {
   upsertDeposit: (
-    input: UpsertPayoutDepositInput,
+    input: UpsertPayoutDepositInput
   ) => Promise<StripeQuickBooksDocument | null | void>;
   markDepositForReview?: (input: {
     payout: Stripe.Payout;
@@ -151,6 +138,7 @@ export interface StripeWebhookDependencies {
   stripe: StripeServices;
   idempotencyStore: IdempotencyStore | AzureIdempotencyStore;
   getSalesforceSvc: () => Promise<SalesforceSvc>;
+  getCrmSvc: () => Promise<any>; // CRM service for contact/campaign lookups
   accounting: AccountingServices;
 }
 
@@ -167,6 +155,7 @@ export type DependencyOverrides = {
   stripe?: Partial<StripeServices>;
   idempotencyStore?: IdempotencyStore;
   getSalesforceSvc?: () => Promise<SalesforceSvc>;
+  getCrmSvc?: () => Promise<any>;
   accounting?: Partial<AccountingServices>;
 };
 

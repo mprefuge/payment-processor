@@ -3,69 +3,67 @@ import { createRequire } from 'module';
 import type Stripe from 'stripe';
 
 import { handleRefundEvent } from '../src/stripe/handlers/refunds';
-import type {
-  RefundReceiptLineInput,
-  StripeWebhookDependencies,
-} from '../src/stripe/types';
+import type { RefundReceiptLineInput, StripeWebhookDependencies } from '../src/stripe/types';
 
 const require = createRequire(import.meta.url);
 const { createContext } = require('./testUtils');
 
-const createRefund = (overrides: Partial<Stripe.Refund> = {}): Stripe.Refund => ({
-  id: 're_123',
-  amount: 1_000,
-  currency: 'usd',
-  status: 'succeeded',
-  charge: 'ch_123',
-  payment_intent: 'pi_123',
-  created: 1_700_000_000,
-  metadata: {},
-  object: 'refund',
-  livemode: false,
-  balance_transaction: 'bt_refund',
-  ...overrides,
-} as Stripe.Refund);
+const createRefund = (overrides: Partial<Stripe.Refund> = {}): Stripe.Refund =>
+  ({
+    id: 're_123',
+    amount: 1_000,
+    currency: 'usd',
+    status: 'succeeded',
+    charge: 'ch_123',
+    payment_intent: 'pi_123',
+    created: 1_700_000_000,
+    metadata: {},
+    object: 'refund',
+    livemode: false,
+    balance_transaction: 'bt_refund',
+    ...overrides,
+  }) as Stripe.Refund;
 
-const createCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge => ({
-  id: 'ch_123',
-  amount: 1_000,
-  currency: 'usd',
-  payment_intent: 'pi_123',
-  customer: 'cus_123',
-  created: 1_700_000_000,
-  metadata: {},
-  object: 'charge',
-  balance_transaction: 'bt_charge',
-  payment_method_details: {
-    type: 'card',
-    card: {
-      brand: 'visa',
-      last4: '4242',
+const createCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge =>
+  ({
+    id: 'ch_123',
+    amount: 1_000,
+    currency: 'usd',
+    payment_intent: 'pi_123',
+    customer: 'cus_123',
+    created: 1_700_000_000,
+    metadata: {},
+    object: 'charge',
+    balance_transaction: 'bt_charge',
+    payment_method_details: {
+      type: 'card',
+      card: {
+        brand: 'visa',
+        last4: '4242',
+      },
     },
-  },
-  refunds: {
-    data: [],
-    has_more: false,
-    object: 'list',
-    total_count: 0,
-    url: '/v1/charges/ch_123/refunds',
-  },
-  ...overrides,
-} as Stripe.Charge);
+    refunds: {
+      data: [],
+      has_more: false,
+      object: 'list',
+      total_count: 0,
+      url: '/v1/charges/ch_123/refunds',
+    },
+    ...overrides,
+  }) as Stripe.Charge;
 
-const createPaymentIntent = (
-  overrides: Partial<Stripe.PaymentIntent> = {},
-): Stripe.PaymentIntent => ({
-  id: 'pi_123',
-  amount: 1_000,
-  currency: 'usd',
-  customer: 'cus_123',
-  metadata: {},
-  object: 'payment_intent',
-  created: 1_700_000_000,
-  status: 'succeeded',
-  ...overrides,
-} as Stripe.PaymentIntent);
+const createPaymentIntent = (overrides: Partial<Stripe.PaymentIntent> = {}): Stripe.PaymentIntent =>
+  ({
+    id: 'pi_123',
+    amount: 1_000,
+    currency: 'usd',
+    customer: 'cus_123',
+    metadata: {},
+    object: 'payment_intent',
+    created: 1_700_000_000,
+    status: 'succeeded',
+    ...overrides,
+  }) as Stripe.PaymentIntent;
 
 interface TestSetupOptions {
   charge?: Stripe.Charge;
@@ -77,7 +75,7 @@ interface TestSetupOptions {
 const defaultBalanceTransaction = (
   id: string,
   amount: number,
-  fee = 0,
+  fee = 0
 ): Stripe.BalanceTransaction => ({
   id,
   amount,
@@ -143,9 +141,7 @@ const setup = ({
   };
 
   const refundAdapter = {
-    upsertRefundReceipt: vi
-      .fn()
-      .mockResolvedValue({ qboId: 'RR-1', type: 'refund-receipt' }),
+    upsertRefundReceipt: vi.fn().mockResolvedValue({ qboId: 'RR-1', type: 'refund-receipt' }),
     markRefundFailed: vi.fn().mockResolvedValue(undefined),
     appendSalesReceiptAdjustments: vi.fn().mockResolvedValue(undefined),
   };
@@ -239,10 +235,7 @@ describe('handleRefundEvent', () => {
     expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
     const [input] = refundAdapter.upsertRefundReceipt.mock.calls[0];
     expect(input.memo).toBe('Refund of SR CHG-20240101-1000 – Stripe refund re_123');
-    expect(input.lines.map((line: RefundReceiptLineInput) => line.amountCents)).toEqual([
-      600,
-      400,
-    ]);
+    expect(input.lines.map((line: RefundReceiptLineInput) => line.amountCents)).toEqual([600, 400]);
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledTimes(2);
     const [refundCall, chargeCall] = salesforce.upsertTransactionByExternalId.mock.calls;
     expect(refundCall[1]).toBe('stripe_refund_id__c');
@@ -262,7 +255,7 @@ describe('handleRefundEvent', () => {
           expect.objectContaining({ amountCents: -400 }),
         ],
         stripeRefundId: 're_123',
-      }),
+      })
     );
   });
 
@@ -297,12 +290,9 @@ describe('handleRefundEvent', () => {
 
     expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
     const [input] = refundAdapter.upsertRefundReceipt.mock.calls[0];
-    expect(input.lines.map((line: RefundReceiptLineInput) => line.amountCents)).toEqual([
-      300,
-      200,
-    ]);
+    expect(input.lines.map((line: RefundReceiptLineInput) => line.amountCents)).toEqual([300, 200]);
     const chargeCall = salesforce.upsertTransactionByExternalId.mock.calls.find(
-      (call) => call[1] === 'stripe_charge_id__c',
+      (call) => call[1] === 'stripe_charge_id__c'
     );
     expect(chargeCall).toBeDefined();
     expect(chargeCall?.[0].amount_net__c).toBe(5);
@@ -313,7 +303,7 @@ describe('handleRefundEvent', () => {
           expect.objectContaining({ amountCents: -300 }),
           expect.objectContaining({ amountCents: -200 }),
         ],
-      }),
+      })
     );
   });
 
@@ -343,8 +333,8 @@ describe('handleRefundEvent', () => {
     expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
     expect(
       refundAdapter.upsertRefundReceipt.mock.calls[0][0].lines.map(
-        (line: RefundReceiptLineInput) => line.amountCents,
-      ),
+        (line: RefundReceiptLineInput) => line.amountCents
+      )
     ).toEqual([240, 160]);
 
     refundAdapter.upsertRefundReceipt.mockClear();
@@ -357,8 +347,8 @@ describe('handleRefundEvent', () => {
     expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
     expect(
       refundAdapter.upsertRefundReceipt.mock.calls[0][0].lines.map(
-        (line: RefundReceiptLineInput) => line.amountCents,
-      ),
+        (line: RefundReceiptLineInput) => line.amountCents
+      )
     ).toEqual([420, 280]);
     expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledTimes(1);
   });
@@ -374,12 +364,12 @@ describe('handleRefundEvent', () => {
 
     expect(refundAdapter.upsertRefundReceipt).not.toHaveBeenCalled();
     expect(refundAdapter.markRefundFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ stripeRefundId: refund.id }),
+      expect.objectContaining({ stripeRefundId: refund.id })
     );
     expect(refundAdapter.appendSalesReceiptAdjustments).not.toHaveBeenCalled();
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({ status__c: 'failed' }),
-      'stripe_refund_id__c',
+      'stripe_refund_id__c'
     );
   });
 
@@ -396,7 +386,7 @@ describe('handleRefundEvent', () => {
 
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalled();
     const refundCall = salesforce.upsertTransactionByExternalId.mock.calls.find(
-      (call) => call[1] === 'stripe_refund_id__c',
+      (call) => call[1] === 'stripe_refund_id__c'
     );
     expect(refundCall).toBeDefined();
     const transaction = refundCall?.[0];
@@ -405,4 +395,3 @@ describe('handleRefundEvent', () => {
     expect(transaction?.amount_fee__c).toBe(0);
   });
 });
-

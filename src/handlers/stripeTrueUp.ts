@@ -10,20 +10,14 @@ import {
   fetchBalanceTransactionsForPayout,
   normalizeSince,
 } from '../services/qbo/stripe/fetchStripe';
-import {
-  mapStripeToTransaction,
-  type TransactionUpsertDTO,
-} from '../domain/transactions';
+import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
 import {
   postChargeToQbo,
   postRefundToQbo,
   postPayoutToQbo,
   type PostChargeToQboResult,
 } from '../services/qboSvc';
-import {
-  AzureIdempotencyStore,
-  type IdempotencyStore,
-} from '../services/idempotencyStore';
+import { AzureIdempotencyStore, type IdempotencyStore } from '../services/idempotencyStore';
 import {
   createSalesforceSvc,
   type SalesforceSvc,
@@ -157,9 +151,7 @@ const createDefaultDependencies = (): Dependencies => ({
     payoutBalance: fetchBalanceTransactionsForPayout,
   },
   idempotencyStore:
-    process.env.DISABLE_AZURE_TABLES === '1'
-      ? createInMemoryStore()
-      : new AzureIdempotencyStore(),
+    process.env.DISABLE_AZURE_TABLES === '1' ? createInMemoryStore() : new AzureIdempotencyStore(),
   getSalesforceSvc: createSalesforceGetter(),
   accounting: {
     postChargeToQbo,
@@ -214,15 +206,13 @@ const getHeader = (req: HttpRequest, name: string): string | undefined => {
 
   if (typeof (headers as Headers).get === 'function') {
     const cast = headers as Headers;
-    return cast.get(name) ?? cast.get(name.toLowerCase()) ?? cast.get(name.toUpperCase()) ?? undefined;
+    return (
+      cast.get(name) ?? cast.get(name.toLowerCase()) ?? cast.get(name.toUpperCase()) ?? undefined
+    );
   }
 
   const record = headers as Record<string, string | undefined>;
-  return (
-    record[name] ||
-    record[name.toLowerCase()] ||
-    record[name.toUpperCase()]
-  );
+  return record[name] || record[name.toLowerCase()] || record[name.toUpperCase()];
 };
 
 const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
@@ -273,7 +263,7 @@ const timestampToIsoString = (timestamp: number | null | undefined): string | nu
 const markPosted = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown,
-  doc: PostChargeToQboResult,
+  doc: PostChargeToQboResult
 ): Promise<void> => {
   if (!salesforce || typeof salesforce.markPostedToQbo !== 'function') {
     return;
@@ -296,7 +286,7 @@ const markPosted = async (
 };
 
 const ensureStripeBalanceTransaction = (
-  value: Stripe.BalanceTransaction | string | null | undefined,
+  value: Stripe.BalanceTransaction | string | null | undefined
 ): Stripe.BalanceTransaction | null => {
   if (!value) {
     return null;
@@ -327,7 +317,7 @@ const extractStripeId = (value: unknown): string | null => {
 const resolveCustomerForCharge = async (
   stripe: Stripe,
   charge: Stripe.Charge,
-  logger: (...args: unknown[]) => void,
+  logger: (...args: unknown[]) => void
 ): Promise<(Stripe.Customer | Stripe.DeletedCustomer) | null> => {
   const customerId = extractStripeId(charge.customer);
   if (!customerId) {
@@ -352,7 +342,7 @@ const processPayments = async (
   stripe: Stripe,
   from: number,
   to: number | null,
-  dryRun: boolean,
+  dryRun: boolean
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -381,7 +371,7 @@ const processPayments = async (
   for (const charge of charges) {
     try {
       const balanceTransaction = ensureStripeBalanceTransaction(
-        charge.balance_transaction as Stripe.BalanceTransaction | string | undefined,
+        charge.balance_transaction as Stripe.BalanceTransaction | string | undefined
       );
 
       if (!balanceTransaction || !balanceTransaction.id) {
@@ -406,14 +396,14 @@ const processPayments = async (
 
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
-          'stripe_charge_id__c',
+          'stripe_charge_id__c'
         );
         summary.salesforceUpdates += 1;
 
         const stripeCustomer = await resolveCustomerForCharge(
           stripe,
           charge as Stripe.Charge,
-          context.log,
+          context.log
         );
 
         const posting = await dependencies.accounting.postChargeToQbo({
@@ -421,9 +411,7 @@ const processPayments = async (
           fee: Math.abs(balanceTransaction.fee ?? 0),
           memo: `Stripe charge ${charge.id}`,
           date: timestampToDate(
-            balanceTransaction.created ??
-              balanceTransaction.available_on ??
-              null,
+            balanceTransaction.created ?? balanceTransaction.available_on ?? null
           ),
           stripe: {
             charge: charge as Stripe.Charge,
@@ -455,7 +443,7 @@ const processRefunds = async (
   stripe: Stripe,
   from: number,
   to: number | null,
-  dryRun: boolean,
+  dryRun: boolean
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -484,7 +472,7 @@ const processRefunds = async (
   for (const refund of refunds) {
     try {
       const balanceTransaction = ensureStripeBalanceTransaction(
-        refund.balance_transaction as Stripe.BalanceTransaction | string | undefined,
+        refund.balance_transaction as Stripe.BalanceTransaction | string | undefined
       );
 
       if (!balanceTransaction || !balanceTransaction.id) {
@@ -510,16 +498,16 @@ const processRefunds = async (
         if (chargeId && typeof salesforce.findTransactionIdByExternalId === 'function') {
           parentId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
-            chargeId,
+            chargeId
           );
         }
 
         const chargeFragment =
           typeof refund.charge === 'object' && refund.charge
             ? (refund.charge as Stripe.Charge)
-            : (chargeId
-                ? ({ id: chargeId } as unknown as Stripe.Charge)
-                : null);
+            : chargeId
+              ? ({ id: chargeId } as unknown as Stripe.Charge)
+              : null;
 
         const transaction: TransactionUpsertDTO = mapStripeToTransaction({
           paymentIntent: null,
@@ -533,7 +521,7 @@ const processRefunds = async (
 
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
-          'stripe_refund_id__c',
+          'stripe_refund_id__c'
         );
         summary.salesforceUpdates += 1;
 
@@ -541,9 +529,7 @@ const processRefunds = async (
           amount: Math.abs(balanceTransaction.amount ?? 0),
           memo: `Stripe refund ${refund.id}`,
           date: timestampToDate(
-            balanceTransaction.created ??
-              balanceTransaction.available_on ??
-              null,
+            balanceTransaction.created ?? balanceTransaction.available_on ?? null
           ),
         });
         summary.qboPosts += 1;
@@ -570,7 +556,7 @@ const processPayouts = async (
   stripe: Stripe,
   from: number,
   to: number | null,
-  dryRun: boolean,
+  dryRun: boolean
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -613,11 +599,9 @@ const processPayouts = async (
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
         if (typeof salesforce.linkPayoutOnTransactions === 'function') {
-          const balanceTransactions = await dependencies.fetchers.payoutBalance(
-            stripe,
-            payout.id,
-            { logger: context.log },
-          );
+          const balanceTransactions = await dependencies.fetchers.payoutBalance(stripe, payout.id, {
+            logger: context.log,
+          });
 
           const ids = balanceTransactions
             .map((txn) => txn?.id)
@@ -632,11 +616,7 @@ const processPayouts = async (
         const posting = await dependencies.accounting.postPayoutToQbo({
           amount: Math.abs(payout.amount ?? 0),
           memo: `Stripe payout ${payout.id}`,
-          date: timestampToDate(
-            payout.created ??
-              payout.arrival_date ??
-              null,
-          ),
+          date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
         });
         summary.qboPosts += 1;
 

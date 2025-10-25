@@ -75,13 +75,13 @@ export interface SalesforceSvc {
   upsertTransactionByExternalId: (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
-    options?: UpsertOptions,
+    options?: UpsertOptions
   ) => Promise<UpsertResult>;
   linkPayoutOnTransactions: (payoutId: string, btIds: string[]) => Promise<UpsertResult[]>;
   markPostedToQbo: (salesforceId: string, doc: QuickBooksDocumentReference) => Promise<void>;
   findTransactionIdByExternalId: (
     key: TransactionExternalIdField,
-    value: string,
+    value: string
   ) => Promise<string | null>;
 }
 
@@ -122,7 +122,8 @@ const toArray = <T>(value: T | T[]): T[] => (Array.isArray(value) ? value : [val
 
 type FailedUpsertResult = Extract<UpsertResult, { success: false }>;
 
-const isFailedUpsertResult = (result: UpsertResult): result is FailedUpsertResult => !result.success;
+const isFailedUpsertResult = (result: UpsertResult): result is FailedUpsertResult =>
+  !result.success;
 
 const collectErrorMessages = (results: UpsertResult[]): string =>
   results
@@ -145,9 +146,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const escapeForSoqlLiteral = (value: string): string =>
     value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
-  const toLookupRecords = (
-    result: unknown,
-  ): TransactionLookupRecord[] => {
+  const toLookupRecords = (result: unknown): TransactionLookupRecord[] => {
     if (Array.isArray(result)) {
       return result as TransactionLookupRecord[];
     }
@@ -165,7 +164,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
   const resolveExistingTransactionId = async (
     field: TransactionExternalIdField,
-    value: string,
+    value: string
   ): Promise<string | null> => {
     const apiField = resolveExternalIdField(field);
     const escapedValue = escapeForSoqlLiteral(value);
@@ -175,7 +174,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const records = toLookupRecords(result);
 
     const recordWithId = records.find(
-      (record): record is { Id: string } => typeof record.Id === 'string' && record.Id.trim().length > 0,
+      (record): record is { Id: string } =>
+        typeof record.Id === 'string' && record.Id.trim().length > 0
     );
 
     return recordWithId?.Id ?? null;
@@ -184,7 +184,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const upsertTransactionByExternalId = async (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
-    options: UpsertOptions = {},
+    options: UpsertOptions = {}
   ): Promise<UpsertResult> => {
     const externalId = dto[key];
     if (typeof externalId !== 'string' || externalId.trim().length === 0) {
@@ -205,13 +205,13 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const [result] = toArray(
       await connection.upsert(TRANSACTION_OBJECT, records, resolveExternalIdField(key), {
         allOrNone: true,
-      }),
+      })
     );
     if (!result.success) {
       const duplicateError = result.errors.find(
         (error) =>
           typeof error?.message === 'string' &&
-          error.message.includes('more than one record found for external id field'),
+          error.message.includes('more than one record found for external id field')
       );
 
       if (duplicateError) {
@@ -229,7 +229,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
           const [fallbackResult] = toArray(
             await connection.upsert(TRANSACTION_OBJECT, fallbackRecords, 'Id', {
               allOrNone: true,
-            }),
+            })
           );
 
           if (!fallbackResult.success) {
@@ -244,7 +244,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       }
 
       const message =
-        collectErrorMessages([result]) || `Failed to upsert transaction with ${key}=${normalizedExternalId}.`;
+        collectErrorMessages([result]) ||
+        `Failed to upsert transaction with ${key}=${normalizedExternalId}.`;
       throw new Error(message);
     }
     return result;
@@ -252,11 +253,11 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
   const linkPayoutOnTransactions = async (
     payoutId: string,
-    btIds: string[],
+    btIds: string[]
   ): Promise<UpsertResult[]> => {
     const normalizedPayoutId = ensureNonEmpty(payoutId, 'Stripe payout ID');
     const normalizedIds = Array.from(
-      new Set(btIds.map((value) => ensureNonEmpty(value, 'Stripe balance transaction ID'))),
+      new Set(btIds.map((value) => ensureNonEmpty(value, 'Stripe balance transaction ID')))
     );
     if (normalizedIds.length === 0) {
       return [];
@@ -265,7 +266,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       sanitizeTransactionRecord({
         stripe_balance_transaction_id__c: balanceTransactionId,
         stripe_payout_id__c: normalizedPayoutId,
-      }),
+      })
     );
     const results = toArray(
       await connection.upsert(
@@ -274,13 +275,14 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         resolveExternalIdField('stripe_balance_transaction_id__c'),
         {
           allOrNone: true,
-        },
-      ),
+        }
+      )
     );
     const failures = results.filter((result) => !result.success);
     if (failures.length > 0) {
       const message =
-        collectErrorMessages(failures) || `Failed to link payout ${normalizedPayoutId} to one or more transactions.`;
+        collectErrorMessages(failures) ||
+        `Failed to link payout ${normalizedPayoutId} to one or more transactions.`;
       throw new Error(message);
     }
     return results;
@@ -288,7 +290,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
   const markPostedToQbo = async (
     salesforceId: string,
-    doc: QuickBooksDocumentReference,
+    doc: QuickBooksDocumentReference
   ): Promise<void> => {
     const normalizedId = ensureNonEmpty(salesforceId, 'Salesforce transaction ID');
     const normalizedDocType = ensureNonEmpty(doc.type, 'QuickBooks document type');
@@ -304,24 +306,25 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const [result] = toArray(
       await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', {
         allOrNone: true,
-      }),
+      })
     );
     if (!result.success) {
       const message =
-        collectErrorMessages([result]) || `Failed to mark transaction ${normalizedId} as posted to QuickBooks.`;
+        collectErrorMessages([result]) ||
+        `Failed to mark transaction ${normalizedId} as posted to QuickBooks.`;
       throw new Error(message);
     }
   };
 
   const findTransactionIdByExternalId = async (
     key: TransactionExternalIdField,
-    value: string,
+    value: string
   ): Promise<string | null> => {
     const normalizedKey = ensureNonEmpty(key, 'External ID field');
     const normalizedValue = ensureNonEmpty(value, 'External ID value');
     return resolveExistingTransactionId(
       normalizedKey as TransactionExternalIdField,
-      normalizedValue,
+      normalizedValue
     );
   };
 

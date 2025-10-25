@@ -21,7 +21,7 @@ const createContext = (): HttpContext => {
 };
 
 const createApiList = (
-  data: Stripe.BalanceTransaction[],
+  data: Stripe.BalanceTransaction[]
 ): Stripe.ApiList<Stripe.BalanceTransaction> => ({
   object: 'list',
   data,
@@ -52,7 +52,7 @@ const createDeps = ({
   const defaultPage = pages[pages.length - 1] ?? [];
 
   const listTransactions = vi.fn(async () =>
-    createApiList(queue.length > 0 ? queue.shift()! : defaultPage),
+    createApiList(queue.length > 0 ? queue.shift()! : defaultPage)
   );
 
   const retrieveCharge = vi.fn(async (id: string) => {
@@ -112,68 +112,71 @@ const createDeps = ({
 };
 
 const createTransaction = (
-  overrides: Partial<Stripe.BalanceTransaction>,
-): Stripe.BalanceTransaction => ({
-  id: 'txn_1',
-  object: 'balance_transaction',
-  amount: 0,
-  currency: 'usd',
-  fee: 0,
-  net: 0,
-  reporting_category: 'charge',
-  status: 'available',
-  type: 'charge',
-  source: 'ch_1',
-  created: 0,
-  available_on: 0,
-  exchange_rate: null,
-  description: null,
-  fee_details: [],
-  ...overrides,
-} as Stripe.BalanceTransaction);
+  overrides: Partial<Stripe.BalanceTransaction>
+): Stripe.BalanceTransaction =>
+  ({
+    id: 'txn_1',
+    object: 'balance_transaction',
+    amount: 0,
+    currency: 'usd',
+    fee: 0,
+    net: 0,
+    reporting_category: 'charge',
+    status: 'available',
+    type: 'charge',
+    source: 'ch_1',
+    created: 0,
+    available_on: 0,
+    exchange_rate: null,
+    description: null,
+    fee_details: [],
+    ...overrides,
+  }) as Stripe.BalanceTransaction;
 
-const createPayout = (overrides: Partial<Stripe.Payout> = {}): Stripe.Payout => ({
-  id: 'po_123',
-  object: 'payout',
-  amount: 0,
-  currency: 'usd',
-  arrival_date: 1_700_000_000,
-  created: 1_700_000_000,
-  status: 'paid',
-  method: 'standard',
-  type: 'bank_account',
-  livemode: false,
-  automatic: true,
-  description: null,
-  destination: null,
-  failure_balance_transaction: null,
-  failure_code: null,
-  failure_message: null,
-  metadata: {},
-  source_type: 'card',
-  statement_descriptor: null,
-  balance_transaction: null,
-  ...overrides,
-} as Stripe.Payout);
+const createPayout = (overrides: Partial<Stripe.Payout> = {}): Stripe.Payout =>
+  ({
+    id: 'po_123',
+    object: 'payout',
+    amount: 0,
+    currency: 'usd',
+    arrival_date: 1_700_000_000,
+    created: 1_700_000_000,
+    status: 'paid',
+    method: 'standard',
+    type: 'bank_account',
+    livemode: false,
+    automatic: true,
+    description: null,
+    destination: null,
+    failure_balance_transaction: null,
+    failure_code: null,
+    failure_message: null,
+    metadata: {},
+    source_type: 'card',
+    statement_descriptor: null,
+    balance_transaction: null,
+    ...overrides,
+  }) as Stripe.Payout;
 
-const createCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge => ({
-  id: 'ch_123',
-  object: 'charge',
-  amount: 1000,
-  currency: 'usd',
-  created: 1_700_000_000,
-  paid: true,
-  status: 'succeeded',
-  refunded: false,
-  captured: true,
-  livemode: false,
-  metadata: {},
-  payment_intent: null,
-  refunds: { object: 'list', data: [], has_more: false, url: '/v1/refunds' },
-  source: null,
-  balance_transaction: null,
-  ...overrides,
-} as Stripe.Charge);
+const createCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge =>
+  ({
+    id: 'ch_123',
+    object: 'charge',
+    amount: 1000,
+    currency: 'usd',
+    created: 1_700_000_000,
+    paid: true,
+    status: 'succeeded',
+    refunded: false,
+    captured: true,
+    livemode: false,
+    metadata: {},
+    payment_intent: null,
+    refunds: { object: 'list', data: [], has_more: false, url: '/v1/refunds' },
+    source: null,
+    balance_transaction: null,
+    ...overrides,
+  }) as Stripe.Charge;
 
 describe('handlePayoutEvent', () => {
   beforeEach(() => {
@@ -319,7 +322,10 @@ describe('handlePayoutEvent', () => {
     });
 
     const { deps, upsertDeposit } = createDeps({
-      transactionPages: [[chargeTxn, feeTxn], [chargeTxn, feeTxn, refundTxn]],
+      transactionPages: [
+        [chargeTxn, feeTxn],
+        [chargeTxn, feeTxn, refundTxn],
+      ],
       charges: {
         ch_789: createCharge({ id: 'ch_789', payment_intent: 'pi_999' }),
       },

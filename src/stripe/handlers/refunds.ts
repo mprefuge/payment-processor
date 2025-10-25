@@ -61,7 +61,7 @@ const toSafeInteger = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
 const summarizeBalanceTransaction = (
-  balanceTransaction: Stripe.BalanceTransaction | null,
+  balanceTransaction: Stripe.BalanceTransaction | null
 ): { gross: number; fee: number; net: number; currency: string | null } => {
   if (!balanceTransaction) {
     return { gross: 0, fee: 0, net: 0, currency: null };
@@ -72,11 +72,11 @@ const summarizeBalanceTransaction = (
     typeof balanceTransaction.fee === 'number' && Number.isFinite(balanceTransaction.fee)
       ? balanceTransaction.fee
       : Array.isArray(balanceTransaction.fee_details)
-      ? balanceTransaction.fee_details.reduce(
-          (sum, detail) => sum + toSafeInteger(detail?.amount),
-          0,
-        )
-      : 0;
+        ? balanceTransaction.fee_details.reduce(
+            (sum, detail) => sum + toSafeInteger(detail?.amount),
+            0
+          )
+        : 0;
   const net =
     typeof balanceTransaction.net === 'number' && Number.isFinite(balanceTransaction.net)
       ? balanceTransaction.net
@@ -91,7 +91,7 @@ const summarizeBalanceTransaction = (
 };
 
 const buildSalesReceiptAdjustments = (
-  lines: RefundReceiptLineInput[],
+  lines: RefundReceiptLineInput[]
 ): SalesReceiptAdjustmentLineInput[] => {
   const adjustments: SalesReceiptAdjustmentLineInput[] = [];
 
@@ -117,7 +117,7 @@ const collectRefundContexts = async (
   context: HttpContext,
   charge: Stripe.Charge,
   refund: Stripe.Refund,
-  knownBalanceTransaction: Stripe.BalanceTransaction | null,
+  knownBalanceTransaction: Stripe.BalanceTransaction | null
 ): Promise<RefundBalanceTransactionContext[]> => {
   const refundsById = new Map<string, Stripe.Refund>();
   const addRefund = (entry: Stripe.Refund | null | undefined) => {
@@ -135,14 +135,10 @@ const collectRefundContexts = async (
 
   addRefund(refund);
 
-  if (
-    charge.refunds?.has_more &&
-    stripe.refunds &&
-    typeof stripe.refunds.list === 'function'
-  ) {
+  if (charge.refunds?.has_more && stripe.refunds && typeof stripe.refunds.list === 'function') {
     let startingAfter =
       charge.refunds.data && charge.refunds.data.length > 0
-        ? charge.refunds.data[charge.refunds.data.length - 1]?.id ?? null
+        ? (charge.refunds.data[charge.refunds.data.length - 1]?.id ?? null)
         : null;
 
     while (true) {
@@ -202,7 +198,7 @@ const collectRefundContexts = async (
 
     try {
       const transaction = (await stripe.balanceTransactions.retrieve(
-        balanceTransactionId,
+        balanceTransactionId
       )) as Stripe.BalanceTransaction;
       known.set(balanceTransactionId, transaction);
       contexts.push({ refund: refundEntry, balanceTransaction: transaction });
@@ -224,14 +220,11 @@ const computeChargeTotalsWithRefunds = async (
   context: HttpContext,
   stripeContext: StripeContext,
   refund: Stripe.Refund,
-  refundBalanceTransaction: Stripe.BalanceTransaction | null,
-): Promise<
-  | {
-      totals: { gross: number; fee: number; net: number; currency: string | null };
-      chargeBalanceTransaction: Stripe.BalanceTransaction | null;
-    }
-  | null
-> => {
+  refundBalanceTransaction: Stripe.BalanceTransaction | null
+): Promise<{
+  totals: { gross: number; fee: number; net: number; currency: string | null };
+  chargeBalanceTransaction: Stripe.BalanceTransaction | null;
+} | null> => {
   const charge = stripeContext.charge;
   if (!charge) {
     return null;
@@ -240,7 +233,7 @@ const computeChargeTotalsWithRefunds = async (
   const chargeBalanceTransaction = await resolveBalanceTransaction(
     stripe,
     charge,
-    stripeContext.paymentIntent,
+    stripeContext.paymentIntent
   );
 
   let baseSummary = summarizeBalanceTransaction(chargeBalanceTransaction);
@@ -265,7 +258,7 @@ const computeChargeTotalsWithRefunds = async (
     context,
     charge,
     refund,
-    refundBalanceTransaction,
+    refundBalanceTransaction
   );
 
   const totals = { ...baseSummary };
@@ -307,7 +300,7 @@ const updateChargeTransaction = async (
   stripeContext: StripeContext,
   refundBalanceTransaction: Stripe.BalanceTransaction | null,
   salesforce: SalesforceSvc,
-  parentId: string | null,
+  parentId: string | null
 ): Promise<void> => {
   const charge = stripeContext.charge;
   const chargeId = normalizeStripeId(charge?.id);
@@ -321,7 +314,7 @@ const updateChargeTransaction = async (
     context,
     stripeContext,
     refund,
-    refundBalanceTransaction,
+    refundBalanceTransaction
   );
 
   if (!summary) {
@@ -335,12 +328,10 @@ const updateChargeTransaction = async (
   const fullyRefunded = amountCharged > 0 && amountRefunded >= amountCharged;
 
   const paymentIntentId =
-    normalizeStripeId(charge.payment_intent) ||
-    normalizeStripeId(stripeContext.paymentIntent?.id);
+    normalizeStripeId(charge.payment_intent) || normalizeStripeId(stripeContext.paymentIntent?.id);
 
   const customerId =
-    normalizeStripeId(charge.customer) ||
-    normalizeStripeId(stripeContext.paymentIntent?.customer);
+    normalizeStripeId(charge.customer) || normalizeStripeId(stripeContext.paymentIntent?.customer);
 
   const transaction: TransactionUpsertDTO = {
     transaction_type__c: 'charge',
@@ -361,7 +352,7 @@ const updateChargeTransaction = async (
   await salesforce.upsertTransactionByExternalId(
     transaction,
     'stripe_charge_id__c',
-    parentId ? { overrideId: parentId } : undefined,
+    parentId ? { overrideId: parentId } : undefined
   );
 };
 
@@ -371,7 +362,7 @@ const appendAdjustmentsIfAvailable = async (
   refundInput: UpsertRefundReceiptInput,
   stripeContext: StripeContext,
   refund: Stripe.Refund,
-  event: Stripe.Event,
+  event: Stripe.Event
 ): Promise<void> => {
   if (typeof adapter.appendSalesReceiptAdjustments !== 'function') {
     return;
@@ -426,7 +417,7 @@ const parseAmountToCents = (value: unknown): number | null => {
 
 const normalizeMetadataValue = (
   metadata: Nullable<Stripe.Metadata>,
-  key: string,
+  key: string
 ): string | null => {
   if (!metadata) {
     return null;
@@ -441,9 +432,7 @@ const normalizeMetadataValue = (
   return trimmed.length > 0 ? trimmed : null;
 };
 
-const parseSalesReceiptLines = (
-  metadata: Nullable<Stripe.Metadata>,
-): SalesReceiptLine[] | null => {
+const parseSalesReceiptLines = (metadata: Nullable<Stripe.Metadata>): SalesReceiptLine[] | null => {
   const raw = normalizeMetadataValue(metadata, SALES_RECEIPT_LINES_KEY);
   if (!raw) {
     return null;
@@ -501,9 +490,7 @@ const parseSalesReceiptLines = (
       lines.push({
         amountCents: amount,
         description:
-          typeof description === 'string' && description.trim().length > 0
-            ? description
-            : null,
+          typeof description === 'string' && description.trim().length > 0 ? description : null,
         itemRef,
         taxCodeRef,
       });
@@ -515,9 +502,7 @@ const parseSalesReceiptLines = (
   }
 };
 
-const resolveSalesReceiptDocNumber = (
-  sources: Nullable<Stripe.Metadata>[],
-): string | null => {
+const resolveSalesReceiptDocNumber = (sources: Nullable<Stripe.Metadata>[]): string | null => {
   for (const metadata of sources) {
     if (!metadata) {
       continue;
@@ -535,7 +520,7 @@ const resolveSalesReceiptDocNumber = (
 
 const resolveSalesReceiptContext = (
   paymentIntent: Stripe.PaymentIntent | null,
-  charge: Stripe.Charge | null,
+  charge: Stripe.Charge | null
 ): SalesReceiptContext => {
   const metadataSources = [paymentIntent?.metadata ?? null, charge?.metadata ?? null];
   const docNumber = resolveSalesReceiptDocNumber(metadataSources);
@@ -559,7 +544,7 @@ const resolveSalesReceiptContext = (
 };
 
 const createFallbackLines = (
-  amountCents: number,
+  amountCents: number
 ): { lines: RefundReceiptLineInput[]; fallbackReason: string } => ({
   lines: [
     {
@@ -574,7 +559,7 @@ const createFallbackLines = (
 
 const prorateRefundLines = (
   sourceLines: SalesReceiptLine[],
-  refundAmountCents: number,
+  refundAmountCents: number
 ): { lines: RefundReceiptLineInput[]; fallbackReason?: string | null } => {
   if (refundAmountCents <= 0) {
     return { lines: [] };
@@ -643,7 +628,7 @@ const buildRefundReceiptInput = (
   stripeEventId: string,
   refund: Stripe.Refund,
   context: StripeContext,
-  salesReceipt: SalesReceiptContext,
+  salesReceipt: SalesReceiptContext
 ): UpsertRefundReceiptInput => {
   const amountCents = Math.abs(refund.amount ?? 0);
   const { lines, fallbackReason } = prorateRefundLines(salesReceipt.lines, amountCents);
@@ -675,7 +660,7 @@ const buildRefundReceiptInput = (
 };
 
 const getRefundAdapter = (
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): RefundReceiptAccountingAdapter | null => {
   const adapter = deps.accounting?.refundReceipts;
   if (adapter && typeof adapter.upsertRefundReceipt === 'function') {
@@ -685,7 +670,7 @@ const getRefundAdapter = (
 };
 
 const normalizeDocumentReference = (
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void,
+  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
 ): StripeQuickBooksDocument | null => {
   if (!doc) {
     return null;
@@ -708,7 +693,7 @@ const normalizeDocumentReference = (
 const markRefundPosted = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown,
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void,
+  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
 ): Promise<void> => {
   const reference = normalizeDocumentReference(doc);
   if (!reference || typeof reference.id !== 'string' || typeof reference.type !== 'string') {
@@ -733,7 +718,7 @@ const loadStripeContext = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies,
   refund: Stripe.Refund,
-  existingCharge?: Stripe.Charge | null,
+  existingCharge?: Stripe.Charge | null
 ): Promise<StripeContext> => {
   const stripe = ensureStripeClient(deps, event);
 
@@ -754,13 +739,12 @@ const loadStripeContext = async (
 
   let paymentIntent: Stripe.PaymentIntent | null = null;
   const paymentIntentId =
-    normalizeStripeId(refund.payment_intent) ||
-    normalizeStripeId(charge?.payment_intent);
+    normalizeStripeId(refund.payment_intent) || normalizeStripeId(charge?.payment_intent);
 
   if (paymentIntentId) {
     try {
       paymentIntent = (await stripe.paymentIntents.retrieve(
-        paymentIntentId,
+        paymentIntentId
       )) as Stripe.PaymentIntent;
     } catch (error) {
       context.log('[StripeWebhook] Failed to retrieve payment intent for refund', {
@@ -778,30 +762,25 @@ const buildRefundTransaction = (
   refund: Stripe.Refund,
   stripeContext: StripeContext,
   balanceTransaction: Stripe.BalanceTransaction | null,
-  parentId: string | null,
+  parentId: string | null
 ): TransactionUpsertDTO => {
   const { charge, paymentIntent } = stripeContext;
 
-  const currency =
-    refund.currency ||
-    charge?.currency ||
-    paymentIntent?.currency ||
-    null;
+  const currency = refund.currency || charge?.currency || paymentIntent?.currency || null;
 
   const grossCents =
     typeof balanceTransaction?.amount === 'number'
       ? balanceTransaction.amount
       : refund.amount !== undefined && refund.amount !== null
-      ? -Math.abs(refund.amount)
-      : null;
-  const feeCents =
-    typeof balanceTransaction?.fee === 'number' ? balanceTransaction.fee : null;
+        ? -Math.abs(refund.amount)
+        : null;
+  const feeCents = typeof balanceTransaction?.fee === 'number' ? balanceTransaction.fee : null;
   const netCents =
     typeof balanceTransaction?.net === 'number'
       ? balanceTransaction.net
       : grossCents !== null
-      ? grossCents - (feeCents ?? 0)
-      : null;
+        ? grossCents - (feeCents ?? 0)
+        : null;
 
   return {
     transaction_type__c: 'refund',
@@ -814,8 +793,7 @@ const buildRefundTransaction = (
       normalizeStripeId(paymentIntent?.id),
     stripe_balance_transaction_id__c: balanceTransaction?.id ?? null,
     stripe_customer_id__c:
-      normalizeStripeId(charge?.customer) ||
-      normalizeStripeId(paymentIntent?.customer),
+      normalizeStripeId(charge?.customer) || normalizeStripeId(paymentIntent?.customer),
     amount_gross__c: centsToMajorUnits(grossCents),
     amount_fee__c: centsToMajorUnits(feeCents),
     amount_net__c: centsToMajorUnits(netCents),
@@ -832,14 +810,14 @@ const upsertSalesforceTransaction = async (
   refund: Stripe.Refund,
   stripeContext: StripeContext,
   balanceTransaction: Stripe.BalanceTransaction | null,
-  salesforce: SalesforceSvc,
+  salesforce: SalesforceSvc
 ): Promise<{ upsertResult: unknown; parentId: string | null }> => {
   let parentId: string | null = null;
   if (stripeContext.charge?.id) {
     try {
       parentId = await salesforce.findTransactionIdByExternalId(
         'stripe_charge_id__c',
-        stripeContext.charge.id,
+        stripeContext.charge.id
       );
     } catch (error) {
       context.log('[StripeWebhook] Failed to locate parent transaction for refund', {
@@ -849,12 +827,7 @@ const upsertSalesforceTransaction = async (
     }
   }
 
-  const transaction = buildRefundTransaction(
-    refund,
-    stripeContext,
-    balanceTransaction,
-    parentId,
-  );
+  const transaction = buildRefundTransaction(refund, stripeContext, balanceTransaction, parentId);
 
   context.log('[StripeWebhook] Upserting refund transaction', {
     refundId: refund.id,
@@ -862,7 +835,7 @@ const upsertSalesforceTransaction = async (
 
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
-    'stripe_refund_id__c',
+    'stripe_refund_id__c'
   );
 
   return { upsertResult, parentId };
@@ -873,30 +846,20 @@ const processRefund = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies,
   refund: Stripe.Refund,
-  chargeHint?: Stripe.Charge | null,
+  chargeHint?: Stripe.Charge | null
 ): Promise<void> => {
   const stripe = ensureStripeClient(deps, event);
   const salesforce = await deps.getSalesforceSvc();
-  const stripeContext = await loadStripeContext(
-    context,
-    event,
-    deps,
-    refund,
-    chargeHint ?? null,
-  );
+  const stripeContext = await loadStripeContext(context, event, deps, refund, chargeHint ?? null);
 
-  const balanceTransaction = await resolveBalanceTransaction(
-    stripe,
-    stripeContext.charge,
-    refund,
-  );
+  const balanceTransaction = await resolveBalanceTransaction(stripe, stripeContext.charge, refund);
 
   const { upsertResult, parentId } = await upsertSalesforceTransaction(
     context,
     refund,
     stripeContext,
     balanceTransaction,
-    salesforce,
+    salesforce
   );
 
   if (refund.status === 'failed') {
@@ -920,7 +883,7 @@ const processRefund = async (
     stripeContext,
     balanceTransaction,
     salesforce,
-    parentId,
+    parentId
   );
 
   if (!env.accounting.syncEnabled) {
@@ -945,35 +908,27 @@ const processRefund = async (
 
   const salesReceiptContext = resolveSalesReceiptContext(
     stripeContext.paymentIntent,
-    stripeContext.charge,
+    stripeContext.charge
   );
 
-  const refundInput = buildRefundReceiptInput(
-    event.id,
-    refund,
-    stripeContext,
-    salesReceiptContext,
-  );
+  const refundInput = buildRefundReceiptInput(event.id, refund, stripeContext, salesReceiptContext);
 
-  await deps.idempotencyStore.withLock(
-    `stripe_evt_${event.id}`,
-    async () => {
-      const result = await adapter.upsertRefundReceipt(refundInput);
-      await markRefundPosted(
-        salesforce,
-        upsertResult,
-        result as StripeQuickBooksDocument | { qboId: string; type: string } | null | void,
-      );
-      await appendAdjustmentsIfAvailable(
-        adapter,
-        salesReceiptContext,
-        refundInput,
-        stripeContext,
-        refund,
-        event,
-      );
-    },
-  );
+  await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
+    const result = await adapter.upsertRefundReceipt(refundInput);
+    await markRefundPosted(
+      salesforce,
+      upsertResult,
+      result as StripeQuickBooksDocument | { qboId: string; type: string } | null | void
+    );
+    await appendAdjustmentsIfAvailable(
+      adapter,
+      salesReceiptContext,
+      refundInput,
+      stripeContext,
+      refund,
+      event
+    );
+  });
 };
 
 const getLatestRefund = (charge: Stripe.Charge): Stripe.Refund | null => {
@@ -988,7 +943,7 @@ const getLatestRefund = (charge: Stripe.Charge): Stripe.Refund | null => {
 export const handleChargeRefunded = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const charge = event.data.object as Stripe.Charge;
   const refund = getLatestRefund(charge);
@@ -1006,7 +961,7 @@ export const handleChargeRefunded = async (
 export const handleRefundEvent = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const refund = event.data.object as Stripe.Refund;
 
@@ -1033,4 +988,3 @@ export const handleRefundEvent = async (
 
   await processRefund(context, event, deps, refund, charge);
 };
-

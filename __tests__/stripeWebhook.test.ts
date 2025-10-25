@@ -21,8 +21,11 @@ describe('stripeWebhook', () => {
     flush: vi.fn().mockResolvedValue(undefined),
   });
 
-  const createStripeEvent = (overrides: Partial<Stripe.Event> = {}): Stripe.Event => ({
+  const createStripeEvent = (overrides: Partial<Stripe.Event> = {}): any => ({
     id: 'evt_test',
+    object: 'event',
+    api_version: '2023-10-16',
+    created: Math.floor(Date.now() / 1000),
     type: 'payment_intent.succeeded',
     data: {
       object: {
@@ -51,8 +54,10 @@ describe('stripeWebhook', () => {
           ],
         },
       },
-    } as Stripe.Event.Data,
+    },
     livemode: false,
+    pending_webhooks: 0,
+    request: null,
     ...overrides,
   });
 
@@ -71,7 +76,7 @@ describe('stripeWebhook', () => {
     process.env.QBO_ACCESS_TOKEN = 'access';
     process.env.AZURE_TABLES_CONNECTION_STRING = 'UseDevelopmentStorage=true;';
     process.env.DISABLE_AZURE_TABLES = '1';
-    handler = require('../stripeWebhook');
+    handler = require('../dist/handlers/stripeWebhook').default;
     internals = handler.__internals;
   });
 
@@ -360,7 +365,7 @@ describe('stripeWebhook', () => {
 
   it('processes invoice payment events and updates subscription transactions to paid', async () => {
     const store = mockIdempotencyStore();
-    const invoiceEvent: Stripe.Event = {
+    const invoiceEvent: any = {
       id: 'evt_invoice',
       type: 'invoice.payment_succeeded',
       data: {
@@ -370,11 +375,11 @@ describe('stripeWebhook', () => {
           subscription: 'sub_999',
           customer: 'cus_999',
         },
-      } as Stripe.Event.Data,
+      },
       livemode: false,
     };
 
-    const paymentIntent: Partial<Stripe.PaymentIntent> = {
+    const paymentIntent: any = {
       id: 'pi_invoice',
       status: 'succeeded',
       currency: 'usd',
@@ -491,7 +496,7 @@ describe('stripeWebhook', () => {
 
   it('forces the transaction status to paid when the invoice indicates payment completion', async () => {
     const store = mockIdempotencyStore();
-    const invoiceEvent: Stripe.Event = {
+    const invoiceEvent: any = {
       id: 'evt_invoice_paid',
       type: 'invoice.paid',
       data: {
@@ -503,11 +508,11 @@ describe('stripeWebhook', () => {
           status: 'paid',
           paid: true,
         },
-      } as Stripe.Event.Data,
+      },
       livemode: false,
     };
 
-    const charge: Partial<Stripe.Charge> = {
+    const charge: any = {
       id: 'ch_paid',
       status: 'pending',
       amount: 5_000,
@@ -516,7 +521,7 @@ describe('stripeWebhook', () => {
       invoice: 'in_paid',
     };
 
-    const paymentIntent: Partial<Stripe.PaymentIntent> = {
+    const paymentIntent: any = {
       id: 'pi_paid',
       status: 'processing',
       currency: 'usd',
@@ -524,7 +529,7 @@ describe('stripeWebhook', () => {
       created: 1_700_000_700,
       invoice: 'in_paid',
       latest_charge: 'ch_paid',
-      charges: { data: [charge as Stripe.Charge] },
+      charges: { data: [charge] },
     };
 
     const stripeClient = {

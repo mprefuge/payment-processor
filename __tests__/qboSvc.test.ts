@@ -56,7 +56,9 @@ const getAuthorizationHeader = (request: RequestRecord): string | undefined => {
   }
 
   if (typeof (headers as any).get === 'function') {
-    return (headers as any).get('Authorization') ?? (headers as any).get('authorization') ?? undefined;
+    return (
+      (headers as any).get('Authorization') ?? (headers as any).get('authorization') ?? undefined
+    );
   }
 
   if (Array.isArray(headers)) {
@@ -74,8 +76,8 @@ const getAuthorizationHeader = (request: RequestRecord): string | undefined => {
         return typeof value === 'string'
           ? value
           : Array.isArray(value)
-          ? (value[0] as string | undefined)
-          : undefined;
+            ? (value[0] as string | undefined)
+            : undefined;
       }
     }
   }
@@ -180,7 +182,7 @@ const createStripeCustomer = (overrides: Partial<Stripe.Customer> = {}): Stripe.
 };
 
 const createCheckoutSession = (
-  overrides: Partial<Stripe.Checkout.Session> = {},
+  overrides: Partial<Stripe.Checkout.Session> = {}
 ): Stripe.Checkout.Session => {
   const baseMetadata = { transactionType: 'Stripe Sales Item' } as Record<string, string>;
   const overrideMetadata =
@@ -217,7 +219,7 @@ const createCheckoutSession = (
 const buildStripeContext = (
   chargeOverrides: Partial<Stripe.Charge> = {},
   checkoutOverrides: Partial<Stripe.Checkout.Session> = {},
-  customer?: Stripe.Customer | null,
+  customer?: Stripe.Customer | null
 ) => ({
   charge: createStripeCharge(chargeOverrides),
   paymentIntent: null,
@@ -251,7 +253,7 @@ describe('postChargeToQbo', () => {
         },
       },
       { SalesReceipt: { Id: 'sr-1' } },
-      { JournalEntry: { Id: 'fee-je-1' } },
+      { JournalEntry: { Id: 'fee-je-1' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -273,11 +275,12 @@ describe('postChargeToQbo', () => {
     expect(customerCreateRequest.url).toContain('/customer');
     expect(customerCreateRequest.init?.method).toBe('POST');
 
-    const itemLookupRequest = requests.find((request) =>
-      request !== emailLookupRequest &&
-      request !== nameLookupRequest &&
-      request !== customerCreateRequest &&
-      request.url.includes('/query?query=')
+    const itemLookupRequest = requests.find(
+      (request) =>
+        request !== emailLookupRequest &&
+        request !== nameLookupRequest &&
+        request !== customerCreateRequest &&
+        request.url.includes('/query?query=')
     );
     expect(itemLookupRequest?.url).toContain('/query?query=');
     expect(itemLookupRequest?.init?.method ?? 'GET').toBe('GET');
@@ -289,12 +292,8 @@ describe('postChargeToQbo', () => {
       BillAddr: expect.objectContaining({ Line1: '123 Donation Ave', City: 'Givington' }),
     });
 
-    const salesReceiptRequest = requests.find((request) =>
-      request.url.includes('salesreceipt'),
-    );
-    const feeJournalRequest = requests.find((request) =>
-      request.url.includes('journalentry'),
-    );
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const feeJournalRequest = requests.find((request) => request.url.includes('journalentry'));
 
     expect(salesReceiptRequest).toBeDefined();
     expect(feeJournalRequest).toBeDefined();
@@ -359,7 +358,7 @@ describe('postChargeToQbo', () => {
       { Customer: { Id: 'cust-fallback', DisplayName: 'Donor Example' } },
       { QueryResponse: {} },
       { Item: { Id: 'item-fallback', Name: 'Fallback Item' } },
-      { SalesReceipt: { Id: 'sr-fallback' } },
+      { SalesReceipt: { Id: 'sr-fallback' } }
     );
 
     const { postChargeToQbo } = await importQboSvc();
@@ -378,9 +377,7 @@ describe('postChargeToQbo', () => {
     const itemCreateRequest = requests.find((request) => request.url.includes('/item'));
     expect(itemCreateRequest).toBeDefined();
 
-    const salesReceiptRequest = requests.find((request) =>
-      request.url.includes('salesreceipt'),
-    );
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
       name: 'Fallback Item',
@@ -422,7 +419,7 @@ describe('postChargeToQbo', () => {
           Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
         },
       },
-      { SalesReceipt: { Id: 'sr-3' } },
+      { SalesReceipt: { Id: 'sr-3' } }
     );
 
     const { postChargeToQbo } = await importQboSvc();
@@ -500,7 +497,7 @@ describe('postChargeToQbo', () => {
           Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
         },
       },
-      { SalesReceipt: { Id: 'sr-4' } },
+      { SalesReceipt: { Id: 'sr-4' } }
     );
 
     const { postChargeToQbo } = await importQboSvc();
@@ -533,7 +530,7 @@ describe('postChargeToQbo', () => {
           },
         },
         {},
-        stripeCustomer,
+        stripeCustomer
       ),
       options: { fetcher, accessToken: 'token' },
     });
@@ -591,7 +588,7 @@ describe('postChargeToQbo', () => {
           Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
         },
       },
-      { SalesReceipt: { Id: 'sr-2' } },
+      { SalesReceipt: { Id: 'sr-2' } }
     );
 
     const { postChargeToQbo } = await importQboSvc();
@@ -608,9 +605,7 @@ describe('postChargeToQbo', () => {
     expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
     expect(fetcher).toHaveBeenCalledTimes(7);
 
-    const salesReceiptRequests = requests.filter((request) =>
-      request.url.includes('salesreceipt'),
-    );
+    const salesReceiptRequests = requests.filter((request) => request.url.includes('salesreceipt'));
     expect(salesReceiptRequests).toHaveLength(2);
     const [initialPost, retryPost] = salesReceiptRequests;
     const itemLookupRequests = requests.filter((request, index) => {
@@ -706,7 +701,7 @@ describe('postChargeToQbo', () => {
         },
       },
       { SalesReceipt: { Id: 'sr-2' } },
-      { JournalEntry: { Id: 'fee-je-2' } },
+      { JournalEntry: { Id: 'fee-je-2' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -731,12 +726,8 @@ describe('postChargeToQbo', () => {
     expect(accountLookupRequest?.url).toContain('/query?query=');
     expect(accountLookupRequest?.init?.method).toBe('GET');
 
-    const salesReceiptRequest = requests.find((request) =>
-      request.url.includes('salesreceipt'),
-    );
-    const journalRequest = requests.find((request) =>
-      request.url.includes('journalentry'),
-    );
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const journalRequest = requests.find((request) => request.url.includes('journalentry'));
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
@@ -750,7 +741,7 @@ describe('postChargeToQbo', () => {
 
     const journalBody = JSON.parse((journalRequest?.init?.body ?? '{}') as string);
     const clearingLine = journalBody.Line.find(
-      (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing',
+      (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing'
     );
     expect(clearingLine?.JournalEntryLineDetail.AccountRef.value).toBe('999');
   });
@@ -764,7 +755,7 @@ describe('postChargeToQbo', () => {
       { QueryResponse: {} },
       { Item: { Id: '321', Name: 'New Donation' } },
       { SalesReceipt: { Id: 'sr-3' } },
-      { JournalEntry: { Id: 'fee-je-3' } },
+      { JournalEntry: { Id: 'fee-je-3' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -773,9 +764,12 @@ describe('postChargeToQbo', () => {
       fee: 300,
       memo: 'Item lookup memo',
       date: new Date('2024-06-01'),
-      stripe: buildStripeContext({}, {
-        metadata: { transactionType: 'New Donation' },
-      }),
+      stripe: buildStripeContext(
+        {},
+        {
+          metadata: { transactionType: 'New Donation' },
+        }
+      ),
       options: { fetcher, accessToken: 'token' },
     });
 
@@ -799,9 +793,7 @@ describe('postChargeToQbo', () => {
       IncomeAccountRef: { value: 'QBO_ACCOUNT_REVENUE' },
     });
 
-    const salesReceiptRequest = requests.find((request) =>
-      request.url.includes('salesreceipt'),
-    );
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
       value: '321',
@@ -815,7 +807,7 @@ describe('postChargeToQbo', () => {
       { QueryResponse: {} },
       { QueryResponse: {} },
       { Customer: { Id: 'cust-err', DisplayName: 'Donor Example' } },
-      { QueryResponse: { Account: [] } },
+      { QueryResponse: { Account: [] } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -827,7 +819,7 @@ describe('postChargeToQbo', () => {
         date: new Date('2024-04-01'),
         stripe: buildStripeContext(),
         options: { fetcher, accessToken: 'token' },
-      }),
+      })
     ).rejects.toThrow(/could not be found/i);
   });
 
@@ -857,7 +849,7 @@ describe('postChargeToQbo', () => {
           Account: [{ Id: '123', Name: 'Stripe Clearing' }],
         },
       },
-      { JournalEntry: { Id: 'je-401' } },
+      { JournalEntry: { Id: 'je-401' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -918,9 +910,9 @@ describe('postChargeToQbo', () => {
         memo: 'Refresh failure',
         date: new Date('2024-06-02'),
         options: { fetcher },
-      }),
+      })
     ).rejects.toThrow(
-      /QuickBooks access token refresh failed after unauthorized response: Failed to refresh QuickBooks access token \(status 400\): invalid refresh token/i,
+      /QuickBooks access token refresh failed after unauthorized response: Failed to refresh QuickBooks access token \(status 400\): invalid refresh token/i
     );
   });
 });
@@ -971,7 +963,7 @@ describe('postRefundToQbo', () => {
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} },
       { Account: { Id: '789', Name: 'Refunds' } },
-      { JournalEntry: { Id: 'refund-2' } },
+      { JournalEntry: { Id: 'refund-2' } }
     );
 
     const { postRefundToQbo } = await importQboSvc();
@@ -989,7 +981,7 @@ describe('postRefundToQbo', () => {
 
     const journalBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
     const debitLine = journalBody.Line.find(
-      (line: any) => line.JournalEntryLineDetail?.PostingType === 'Debit',
+      (line: any) => line.JournalEntryLineDetail?.PostingType === 'Debit'
     );
     expect(debitLine?.JournalEntryLineDetail?.AccountRef).toMatchObject({
       value: '789',

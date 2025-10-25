@@ -149,7 +149,10 @@ export function registerSecretValue(value: unknown, options: { force?: boolean }
   secretPatterns.set(trimmed, pattern);
 }
 
-export function registerSecretCollection(collection: unknown, options: { force?: boolean } = {}): void {
+export function registerSecretCollection(
+  collection: unknown,
+  options: { force?: boolean } = {}
+): void {
   if (!collection) {
     return;
   }
@@ -276,7 +279,10 @@ function cloneDate(value: Date): Date {
   return new Date(value.getTime());
 }
 
-function redactObject(value: Record<string, unknown>, seen: WeakMap<object, unknown>): Record<string, unknown> {
+function redactObject(
+  value: Record<string, unknown>,
+  seen: WeakMap<object, unknown>
+): Record<string, unknown> {
   if (seen.has(value)) {
     return seen.get(value) as Record<string, unknown>;
   }
@@ -306,7 +312,10 @@ function redactArray(value: unknown[], seen: WeakMap<object, unknown>): unknown[
   return clone;
 }
 
-function redactMap(value: Map<unknown, unknown>, seen: WeakMap<object, unknown>): Map<unknown, unknown> {
+function redactMap(
+  value: Map<unknown, unknown>,
+  seen: WeakMap<object, unknown>
+): Map<unknown, unknown> {
   if (seen.has(value)) {
     return seen.get(value) as Map<unknown, unknown>;
   }
@@ -359,7 +368,12 @@ function redactUnknown(value: unknown, seen: WeakMap<object, unknown>): unknown 
     return redactString(value);
   }
 
-  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint' || typeof value === 'undefined') {
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint' ||
+    typeof value === 'undefined'
+  ) {
     return value;
   }
 
@@ -420,4 +434,3 @@ export function registerEnvConfigSecrets(config: EnvConfig | null | undefined): 
 export function registeredSecretCount(): number {
   return secretPatterns.size;
 }
-

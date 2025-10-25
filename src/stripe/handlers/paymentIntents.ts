@@ -1,19 +1,10 @@
 import Stripe from 'stripe';
 
 import env from '../../config/env';
-import {
-  mapStripeToTransaction,
-  type TransactionUpsertDTO,
-} from '../../domain/transactions';
-import type {
-  SalesforceSvc,
-  QuickBooksDocumentReference,
-} from '../../services/salesforceSvc';
+import { mapStripeToTransaction, type TransactionUpsertDTO } from '../../domain/transactions';
+import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
-import type {
-  HttpContext,
-  StripeWebhookDependencies,
-} from '../types';
+import type { HttpContext, StripeWebhookDependencies } from '../types';
 import {
   centsToPositiveMajorUnits,
   findCheckoutSessionForPaymentIntent,
@@ -67,7 +58,7 @@ const toDateFromUnixSeconds = (value: number | null | undefined): Date | null =>
 };
 
 export const deriveNextRetryFromPaymentIntent = (
-  paymentIntent: Stripe.PaymentIntent,
+  paymentIntent: Stripe.PaymentIntent
 ): Date | null => {
   const timestamps: number[] = [];
   collectUnixTimestamps(paymentIntent.next_action, timestamps);
@@ -98,22 +89,34 @@ const processSuccessfulPaymentIntent = async ({
   invoice,
 }: ProcessPaymentIntentOptions): Promise<void> => {
   const charge = await resolveCharge(stripe, paymentIntent);
-  const balanceTransaction = await resolveBalanceTransaction(
-    stripe,
-    charge,
-    paymentIntent,
-  );
+  const balanceTransaction = await resolveBalanceTransaction(stripe, charge, paymentIntent);
 
   let checkoutSession: Stripe.Checkout.Session | null = null;
-  try {
-    checkoutSession = await findCheckoutSessionForPaymentIntent(stripe, paymentIntent.id);
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Unknown error retrieving checkout session';
-    context.log('[StripeWebhook] Failed to load checkout session for payment intent', {
-      paymentIntentId: paymentIntent.id,
-      error: message,
-    });
+  // Try to resolve checkout session id from metadata first (helps in TEST_MODE without Stripe lookups)
+  const metaSessionId = (() => {
+    const md = paymentIntent?.metadata ?? ({} as Record<string, string | undefined>);
+    const raw = (md['stripe_checkout_session_id__c'] ||
+      md['Stripe_Checkout_Session_Id__c'] ||
+      md['stripe_checkout_session_id'] ||
+      md['checkout_session_id'] ||
+      md['checkoutSessionId']) as string | undefined;
+    return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null;
+  })();
+  // If metadata had a session id, prefer that. Otherwise try to look it up from Stripe.
+  if (metaSessionId) {
+    // Populate onto the transaction later and use for lookups
+    (checkoutSession as any) = { id: metaSessionId } as Stripe.Checkout.Session;
+  } else {
+    try {
+      checkoutSession = await findCheckoutSessionForPaymentIntent(stripe, paymentIntent.id);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown error retrieving checkout session';
+      context.log('[StripeWebhook] Failed to load checkout session for payment intent', {
+        paymentIntentId: paymentIntent.id,
+        error: message,
+      });
+    }
   }
 
   const transaction = mapStripeToTransaction({
@@ -121,6 +124,56 @@ const processSuccessfulPaymentIntent = async ({
     charge: charge ?? undefined,
     balanceTransaction: balanceTransaction ?? undefined,
   });
+
+  // Resolve campaign name from metadata to Salesforce Campaign ID
+  // Combine metadata from payment intent, charge, and checkout session for best coverage
+  const combinedMetadata: Record<string, unknown> = {
+    ...(paymentIntent?.metadata ?? {}),
+    ...((charge as any)?.metadata ?? {}),
+    ...(checkoutSession as any)?.metadata ?? {},
+  };
+
+  const extractCampaign = (meta: Record<string, unknown>): string | null => {
+    const raw = (meta['campaign__c'] ?? meta['Campaign__c'] ?? meta['campaign']) as
+      | string
+      | undefined;
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  };
+
+  const maybeCampaign = extractCampaign(combinedMetadata);
+  if (maybeCampaign) {
+    // If already a Salesforce Campaign ID (15 or 18 chars, typically starting with 701), use as-is
+    const isSfId = /^701[0-9A-Za-z]{12}(?:[0-9A-Za-z]{3})?$/.test(maybeCampaign);
+    if (isSfId) {
+      transaction.campaign__c = maybeCampaign;
+      context.log('[StripeWebhook] Campaign metadata is a Salesforce ID; using as-is', {
+        campaignId: maybeCampaign,
+      });
+    } else {
+      try {
+        context.log('[StripeWebhook] Resolving campaign name to Salesforce ID', {
+          campaignName: maybeCampaign,
+        });
+        const crm = await deps.getCrmSvc();
+        const campaignId = await crm.findOrCreateCampaign(maybeCampaign);
+        if (campaignId && typeof campaignId === 'string' && campaignId.trim().length > 0) {
+          transaction.campaign__c = campaignId;
+          context.log('[StripeWebhook] Campaign resolved to Salesforce ID', {
+            campaignName: maybeCampaign,
+            campaignId,
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        context.log(
+          '[StripeWebhook] Failed to resolve campaign for payment intent; continuing without campaign',
+          { campaignName: maybeCampaign, error: message }
+        );
+      }
+    }
+  }
 
   const invoiceId =
     normalizeStripeId(paymentIntent.invoice) ||
@@ -160,15 +213,19 @@ const processSuccessfulPaymentIntent = async ({
     transaction.stripe_subscription_id__c = subscriptionId;
   }
 
-  if (
-    resolvedInvoice &&
-    (resolvedInvoice.status === 'paid' || resolvedInvoice.paid === true)
-  ) {
+  if (resolvedInvoice && (resolvedInvoice.status === 'paid' || resolvedInvoice.paid === true)) {
     transaction.status__c = 'paid';
   }
 
+  context.log('[StripeWebhook] Starting transaction search for payment intent', {
+    paymentIntentId: paymentIntent.id,
+    chargeId: charge?.id,
+    hasCheckoutSession: !!checkoutSession,
+  });
+
   let overrideId: string | null = null;
 
+  // Search for existing transaction by checkout session ID (from metadata or Stripe lookup)
   if (checkoutSession) {
     if (!transaction.stripe_checkout_session_id__c) {
       transaction.stripe_checkout_session_id__c = checkoutSession.id;
@@ -177,8 +234,14 @@ const processSuccessfulPaymentIntent = async ({
     try {
       overrideId = await salesforce.findTransactionIdByExternalId(
         'stripe_checkout_session_id__c',
-        checkoutSession.id,
+        checkoutSession.id
       );
+      if (overrideId) {
+        context.log('[StripeWebhook] Found existing transaction by checkout session ID', {
+          sessionId: checkoutSession.id,
+          transactionId: overrideId,
+        });
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -191,12 +254,68 @@ const processSuccessfulPaymentIntent = async ({
     }
   }
 
+  // If not found by checkout session, search by charge ID
+  if (!overrideId && charge?.id) {
+    try {
+      overrideId = await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', charge.id);
+      if (overrideId) {
+        context.log('[StripeWebhook] Found existing transaction by charge ID', {
+          chargeId: charge.id,
+          transactionId: overrideId,
+        });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown error locating transaction by charge ID';
+      context.log('[StripeWebhook] Failed to locate transaction by charge ID', {
+        chargeId: charge.id,
+        error: message,
+      });
+    }
+  }
+
+  // If not found by charge ID, search by payment intent ID
+  if (!overrideId) {
+    try {
+      overrideId = await salesforce.findTransactionIdByExternalId(
+        'stripe_payment_intent_id__c',
+        paymentIntent.id
+      );
+      if (overrideId) {
+        context.log('[StripeWebhook] Found existing transaction by payment intent ID', {
+          paymentIntentId: paymentIntent.id,
+          transactionId: overrideId,
+        });
+      } else {
+        context.log('[StripeWebhook] No existing transaction found by payment intent ID', {
+          paymentIntentId: paymentIntent.id,
+        });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error locating transaction by payment intent ID';
+      context.log('[StripeWebhook] Failed to locate transaction by payment intent ID', {
+        paymentIntentId: paymentIntent.id,
+        error: message,
+      });
+    }
+  }
+
+  // If not found by subscription, search by subscription ID (for backwards compatibility)
   if (!overrideId && subscriptionId) {
     try {
       overrideId = await salesforce.findTransactionIdByExternalId(
         'stripe_subscription_id__c',
-        subscriptionId,
+        subscriptionId
       );
+      if (overrideId) {
+        context.log('[StripeWebhook] Found existing transaction by subscription ID', {
+          subscriptionId,
+          transactionId: overrideId,
+        });
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -211,13 +330,23 @@ const processSuccessfulPaymentIntent = async ({
 
   context.log('[StripeWebhook] Upserting transaction for payment intent', {
     paymentIntentId: paymentIntent.id,
+    overrideId,
+    willUpdate: !!overrideId,
+    currentStatus: transaction.status__c,
   });
 
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
     'stripe_payment_intent_id__c',
-    overrideId ? { overrideId } : undefined,
+    overrideId ? { overrideId } : undefined
   );
+
+  context.log('[StripeWebhook] Transaction upserted successfully', {
+    paymentIntentId: paymentIntent.id,
+    transactionId: upsertResult?.id,
+    status: transaction.status__c,
+    wasUpdate: !!overrideId,
+  });
 
   if (!env.accounting.syncEnabled || !balanceTransaction) {
     return;
@@ -228,34 +357,24 @@ const processSuccessfulPaymentIntent = async ({
     return;
   }
 
-  await deps.idempotencyStore.withLock(
-    `bt_${balanceTransactionId}`,
-    async () => {
-      const stripeCustomer = await resolveStripeCustomer(
-        stripe,
-        charge,
+  await deps.idempotencyStore.withLock(`bt_${balanceTransactionId}`, async () => {
+    const stripeCustomer = await resolveStripeCustomer(stripe, charge, paymentIntent, context.log);
+
+    const posting = await deps.accounting.postChargeToQbo({
+      gross: Math.abs(balanceTransaction.amount ?? 0),
+      fee: Math.abs(balanceTransaction.fee ?? 0),
+      memo: `Stripe charge ${charge?.id || paymentIntent.id}`,
+      date: timestampToDate(balanceTransaction.created ?? balanceTransaction.available_on ?? null),
+      stripe: {
+        charge: charge ?? undefined,
         paymentIntent,
-        context.log,
-      );
+        customer: stripeCustomer,
+        checkoutSession: checkoutSession ?? undefined,
+      },
+    });
 
-      const posting = await deps.accounting.postChargeToQbo({
-        gross: Math.abs(balanceTransaction.amount ?? 0),
-        fee: Math.abs(balanceTransaction.fee ?? 0),
-        memo: `Stripe charge ${charge?.id || paymentIntent.id}`,
-        date: timestampToDate(
-          balanceTransaction.created ?? balanceTransaction.available_on ?? null,
-        ),
-        stripe: {
-          charge: charge ?? undefined,
-          paymentIntent,
-          customer: stripeCustomer,
-          checkoutSession: checkoutSession ?? undefined,
-        },
-      });
-
-      await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
-    },
-  );
+    await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
+  });
 };
 
 const buildFailureTransaction = (
@@ -264,7 +383,7 @@ const buildFailureTransaction = (
   options: {
     nextRetry?: Date | null;
     dunningRequired?: boolean;
-  } = {},
+  } = {}
 ): TransactionUpsertDTO => {
   const base: TransactionUpsertDTO = {
     transaction_type__c: 'charge',
@@ -272,9 +391,7 @@ const buildFailureTransaction = (
     stripe_payment_intent_id__c: paymentIntent.id,
     stripe_customer_id__c: normalizeStripeId(paymentIntent.customer),
     amount_gross__c: centsToPositiveMajorUnits(paymentIntent.amount ?? null),
-    currency_iso_code__c: paymentIntent.currency
-      ? paymentIntent.currency.toUpperCase()
-      : null,
+    currency_iso_code__c: paymentIntent.currency ? paymentIntent.currency.toUpperCase() : null,
     received_at__c: timestampToIsoString(paymentIntent.created ?? null),
   };
 
@@ -299,14 +416,12 @@ export const updatePaymentIntentStatus = async (
   options?: {
     nextRetry?: Date | null;
     dunningRequired?: boolean;
-  },
+  }
 ): Promise<void> => {
   const salesforce = await deps.getSalesforceSvc();
   const payload = buildFailureTransaction(paymentIntent, status, options);
 
-  const nextRetryIso = options?.nextRetry
-    ? options.nextRetry.toISOString()
-    : null;
+  const nextRetryIso = options?.nextRetry ? options.nextRetry.toISOString() : null;
   const lastError = paymentIntent.last_payment_error
     ? {
         code: paymentIntent.last_payment_error.code ?? null,
@@ -324,16 +439,13 @@ export const updatePaymentIntentStatus = async (
     lastError,
   });
 
-  await salesforce.upsertTransactionByExternalId(
-    payload,
-    'stripe_payment_intent_id__c',
-  );
+  await salesforce.upsertTransactionByExternalId(payload, 'stripe_payment_intent_id__c');
 };
 
 export const handlePaymentIntentSucceeded = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
   const stripe = ensureStripeClient(deps, event);
@@ -353,7 +465,7 @@ export const handleSuccessfulPaymentIntent = async (
   paymentIntent: Stripe.PaymentIntent,
   event: Stripe.Event,
   deps: StripeWebhookDependencies,
-  invoice?: Stripe.Invoice | null,
+  invoice?: Stripe.Invoice | null
 ): Promise<void> => {
   const stripe = ensureStripeClient(deps, event);
   const salesforce = await deps.getSalesforceSvc();
@@ -371,7 +483,7 @@ export const handleSuccessfulPaymentIntent = async (
 export const handlePaymentIntentFailed = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
   const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
@@ -387,14 +499,14 @@ export const handlePaymentIntentFailed = async (
         }
       : {
           dunningRequired: true,
-        },
+        }
   );
 };
 
 export const handlePaymentIntentCanceled = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
   await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, {
@@ -405,7 +517,7 @@ export const handlePaymentIntentCanceled = async (
 export const handlePaymentIntentActionRequired = async (
   context: HttpContext,
   event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
   const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
@@ -421,6 +533,6 @@ export const handlePaymentIntentActionRequired = async (
         }
       : {
           dunningRequired: true,
-        },
+        }
   );
 };

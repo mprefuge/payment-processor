@@ -56,4 +56,3 @@ for (const key of DELIMITED_SECRET_ENV_KEYS) {
     }
   }
 }
-
