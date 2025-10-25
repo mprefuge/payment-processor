@@ -207,6 +207,8 @@ const modernRequestSchema = z
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
     paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
+    category: z.string().optional(),
+    transactionType: z.string().optional(),
   })
   .passthrough();
 
@@ -228,6 +230,8 @@ const legacyRequestSchema = z
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
     paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
+    category: z.string().optional(),
+    transactionType: z.string().optional(),
   })
   .passthrough();
 
