@@ -384,7 +384,7 @@ const getTransactionNameFromMetadata = (charge: Stripe.Charge): string | null =>
 };
 
 const upsertStripeCustomerToSalesforce = async (
-  salesforce: any,
+  salesforce: SalesforceSvc,
   customer: Stripe.Customer | Stripe.DeletedCustomer | null,
   transactionName: string | null,
   logger: (...args: unknown[]) => void
@@ -428,7 +428,8 @@ const processPayments = async (
   stripe: Stripe,
   from: number,
   to: number | null,
-  dryRun: boolean
+  dryRun: boolean,
+  resubmit: boolean
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -480,8 +481,32 @@ const processPayments = async (
       }
 
       const key = `bt_${balanceTransaction.id}`;
-      const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
-      if (alreadyProcessed) {
+      
+      // Check if already processed
+      let shouldSkip = false;
+      if (resubmit) {
+        // In resubmit mode, check Salesforce for existing transaction
+        const salesforce = await ensureSalesforce();
+        const existingId = await salesforce.findTransactionIdByExternalId(
+          'stripe_charge_id__c',
+          charge.id
+        );
+        if (existingId) {
+          context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
+            chargeId: charge.id,
+            salesforceId: existingId,
+          });
+          shouldSkip = true;
+        }
+      } else {
+        // Normal mode: check idempotency store
+        const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
+        if (alreadyProcessed) {
+          shouldSkip = true;
+        }
+      }
+      
+      if (shouldSkip) {
         summary.skipped += 1;
         continue;
       }
@@ -554,7 +579,8 @@ const processRefunds = async (
   stripe: Stripe,
   from: number,
   to: number | null,
-  dryRun: boolean
+  dryRun: boolean,
+  resubmit: boolean
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -606,8 +632,32 @@ const processRefunds = async (
       }
 
       const key = `bt_${balanceTransaction.id}`;
-      const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
-      if (alreadyProcessed) {
+      
+      // Check if already processed
+      let shouldSkip = false;
+      if (resubmit) {
+        // In resubmit mode, check Salesforce for existing transaction
+        const salesforce = await ensureSalesforce();
+        const existingId = await salesforce.findTransactionIdByExternalId(
+          'stripe_refund_id__c',
+          refund.id
+        );
+        if (existingId) {
+          context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
+            refundId: refund.id,
+            salesforceId: existingId,
+          });
+          shouldSkip = true;
+        }
+      } else {
+        // Normal mode: check idempotency store
+        const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
+        if (alreadyProcessed) {
+          shouldSkip = true;
+        }
+      }
+      
+      if (shouldSkip) {
         summary.skipped += 1;
         continue;
       }
@@ -707,7 +757,8 @@ const processPayouts = async (
   stripe: Stripe,
   from: number,
   to: number | null,
-  dryRun: boolean
+  dryRun: boolean,
+  resubmit: boolean
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -751,8 +802,41 @@ const processPayouts = async (
       }
 
       const key = `payout_${payout.id}`;
-      const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
-      if (alreadyProcessed) {
+      
+      // Check if already processed
+      let shouldSkip = false;
+      if (resubmit) {
+        // In resubmit mode, check if any transactions already have this payout linked
+        const salesforce = await ensureSalesforce();
+        // Query for any transaction with this payout ID
+        try {
+          const existingId = await salesforce.findTransactionIdByExternalId(
+            'stripe_payout_id__c',
+            payout.id
+          );
+          if (existingId) {
+            context.log('[StripeTrueUp] Skipping payout already linked in Salesforce', {
+              payoutId: payout.id,
+              salesforceId: existingId,
+            });
+            shouldSkip = true;
+          }
+        } catch (error) {
+          // If query fails, log but continue processing
+          context.log('[StripeTrueUp] Failed to check payout in Salesforce, will process', {
+            payoutId: payout.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } else {
+        // Normal mode: check idempotency store
+        const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
+        if (alreadyProcessed) {
+          shouldSkip = true;
+        }
+      }
+      
+      if (shouldSkip) {
         summary.skipped += 1;
         continue;
       }
@@ -916,17 +1000,18 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
   }
 
   const dryRun = parseBoolean(query.dryRun, false);
+  const resubmit = parseBoolean(query.resubmit, false);
   const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
     const stripe = dependencies.stripe.getClient(liveMode);
 
     let summary: ProcessSummary;
     if (type === 'payments') {
-      summary = await processPayments(context, stripe, from, to, dryRun);
+      summary = await processPayments(context, stripe, from, to, dryRun, resubmit);
     } else if (type === 'refunds') {
-      summary = await processRefunds(context, stripe, from, to, dryRun);
+      summary = await processRefunds(context, stripe, from, to, dryRun, resubmit);
     } else {
-      summary = await processPayouts(context, stripe, from, to, dryRun);
+      summary = await processPayouts(context, stripe, from, to, dryRun, resubmit);
     }
 
     // Flush idempotency store to ensure all processed keys are persisted
@@ -938,6 +1023,7 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
     return respond(200, {
       type,
       dryRun,
+      resubmit,
       liveMode,
       range: {
         from: timestampToIsoString(from),
