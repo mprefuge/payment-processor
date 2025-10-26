@@ -387,6 +387,77 @@ class SalesforceCrmService extends BaseCrmService {
   }
 
   /**
+   * Add a contact as a campaign member (if not already a member)
+   * @param {string} campaignId - Salesforce Campaign ID
+   * @param {string} contactId - Salesforce Contact ID
+   * @param {string} status - Campaign member status (default: 'Sent')
+   * @returns {Promise<Object>} Campaign member result
+   */
+  async addCampaignMember(campaignId, contactId, status = 'Sent') {
+    await this.connect();
+
+    if (!campaignId || typeof campaignId !== 'string') {
+      throw new Error('Campaign ID is required');
+    }
+
+    if (!contactId || typeof contactId !== 'string') {
+      throw new Error('Contact ID is required');
+    }
+
+    try {
+      // Check if contact is already a member of this campaign
+      const query = `SELECT Id, Status FROM CampaignMember WHERE CampaignId = '${campaignId}' AND ContactId = '${contactId}' LIMIT 1`;
+      logger.info('Checking for existing campaign member', { campaignId, contactId });
+
+      const result = await this.conn.query(query);
+
+      if (result.records && result.records.length > 0) {
+        logger.info('Contact is already a campaign member', {
+          campaignId,
+          contactId,
+          campaignMemberId: result.records[0].Id,
+          currentStatus: result.records[0].Status,
+        });
+        return {
+          id: result.records[0].Id,
+          isNew: false,
+          status: result.records[0].Status,
+        };
+      }
+
+      // Contact is not a member, add them
+      logger.info('Adding contact as campaign member', { campaignId, contactId, status });
+
+      const campaignMemberRecord = {
+        CampaignId: campaignId,
+        ContactId: contactId,
+        Status: status,
+      };
+
+      const createResult = await this.conn.sobject('CampaignMember').create(campaignMemberRecord);
+
+      if (!createResult.success) {
+        throw new Error(`Campaign member creation failed: ${JSON.stringify(createResult.errors)}`);
+      }
+
+      logger.info('Successfully added contact as campaign member', {
+        campaignId,
+        contactId,
+        campaignMemberId: createResult.id,
+      });
+
+      return {
+        id: createResult.id,
+        isNew: true,
+        status,
+      };
+    } catch (error) {
+      logger.error('Error adding campaign member:', error);
+      throw new Error(`Failed to add campaign member: ${error.message}`);
+    }
+  }
+
+  /**
    * Create a completed task in Salesforce
    * @param {string} contactId - Salesforce Contact ID
    * @param {Object} taskData - Task information

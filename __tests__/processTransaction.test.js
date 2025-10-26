@@ -249,6 +249,11 @@ describe('processTransaction', () => {
 
     const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
     const findOrCreateCampaignMock = vi.fn().mockResolvedValue('701xx000000000AAA');
+    const addCampaignMemberMock = vi.fn().mockResolvedValue({
+      id: 'cm_test123',
+      isNew: true,
+      status: 'Sent',
+    });
     const crmServiceMock = {
       searchContact: vi.fn().mockResolvedValue([]),
       createContact: vi.fn().mockResolvedValue({
@@ -260,6 +265,7 @@ describe('processTransaction', () => {
       updateContact: vi.fn(),
       upsertTransactionsRecord: upsertMock,
       findOrCreateCampaign: findOrCreateCampaignMock,
+      addCampaignMember: addCampaignMemberMock,
     };
 
     const CrmFactory = require('../dist/services/salesforce/crmFactory');
@@ -295,6 +301,9 @@ describe('processTransaction', () => {
 
     // Verify campaign was resolved
     expect(findOrCreateCampaignMock).toHaveBeenCalledWith('Test Campaign');
+
+    // Verify contact was added as campaign member
+    expect(addCampaignMemberMock).toHaveBeenCalledWith('701xx000000000AAA', '003TEST');
 
     // Verify upsert was called with campaign ID
     expect(upsertMock).toHaveBeenCalledTimes(1);

@@ -823,6 +823,35 @@ const createPendingTransaction = async (context, session, contactId, transaction
       }
     }
 
+    // Add contact as campaign member if campaign was resolved
+    if (campaignId && typeof crmService.addCampaignMember === 'function') {
+      try {
+        console.log('Adding contact as campaign member', { campaignId, contactId });
+        const memberResult = await crmService.addCampaignMember(campaignId, contactId);
+        if (memberResult.isNew) {
+          console.log('Contact added as new campaign member', {
+            campaignId,
+            contactId,
+            campaignMemberId: memberResult.id,
+          });
+        } else {
+          console.log('Contact is already a campaign member', {
+            campaignId,
+            contactId,
+            campaignMemberId: memberResult.id,
+          });
+        }
+      } catch (error) {
+        // Log error but don't fail the transaction creation
+        console.log('Failed to add contact as campaign member', {
+          campaignId,
+          contactId,
+          error: error.message,
+        });
+        logger.error('Campaign member creation error:', error);
+      }
+    }
+
     const transactionRecord = {
       Stripe_Checkout_Session_Id__c: session.id,
       Transaction_Type__c: 'charge',
