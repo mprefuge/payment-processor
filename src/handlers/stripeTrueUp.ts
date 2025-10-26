@@ -373,16 +373,11 @@ const getTransactionNameFromMetadata = (charge: Stripe.Charge): string | null =>
     return null;
   }
 
-  // Check for category field (common in checkout sessions)
+  // Check for category field (customer categorization, not product type)
+  // Note: transactionType is used for QuickBooks item/product type, not customer categorization
   const category = metadata.category || metadata.Category;
   if (typeof category === 'string' && category.trim()) {
     return category.trim();
-  }
-
-  // Check for transactionType field
-  const transactionType = metadata.transactionType || metadata.TransactionType;
-  if (typeof transactionType === 'string' && transactionType.trim()) {
-    return transactionType.trim();
   }
 
   return null;
