@@ -4,6 +4,7 @@ import type { UpsertResult } from 'jsforce/lib/types';
 import type { TransactionUpsertDTO } from '../domain/transactions';
 
 export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, string> = {
+  Name: 'Name',
   transaction_type__c: 'Transaction_Type__c',
   status__c: 'Status__c',
   stripe_payment_intent_id__c: 'Stripe_Payment_Intent_Id__c',
@@ -56,7 +57,8 @@ export type TransactionExternalIdField =
   | 'stripe_charge_id__c'
   | 'stripe_subscription_id__c'
   | 'stripe_invoice_id__c'
-  | 'stripe_credit_note_id__c';
+  | 'stripe_credit_note_id__c'
+  | 'stripe_payout_id__c';
 
 export interface QuickBooksDocumentReference {
   type: string;

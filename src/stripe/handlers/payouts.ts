@@ -401,45 +401,74 @@ const buildDepositInput = async (
 const getPayoutAdapter = (deps: StripeWebhookDependencies): PayoutAccountingAdapter | undefined =>
   deps.accounting?.payouts;
 
-const linkTransactionsInSalesforce = async (
-  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
-  payoutId: string,
-  transactions: Stripe.BalanceTransaction[],
+const getBankName = async (
+  stripe: Stripe,
+  payout: Stripe.Payout,
   logger: Logger
-): Promise<void> => {
-  const ids = Array.from(
-    new Set(
-      transactions
-        .map((txn) => (typeof txn.id === 'string' ? txn.id : null))
-        .filter((id): id is string => Boolean(id))
-    )
-  );
-
-  if (ids.length === 0) {
-    return;
-  }
-
+): Promise<string> => {
   try {
-    await salesforce.linkPayoutOnTransactions(payoutId, ids);
+    if (!payout.destination || typeof payout.destination === 'string') {
+      const destinationId = typeof payout.destination === 'string' ? payout.destination : null;
+      
+      if (destinationId && stripe.accounts?.retrieveExternalAccount) {
+        const bankAccount = await stripe.accounts.retrieveExternalAccount(
+          'self',
+          destinationId
+        ) as Stripe.BankAccount;
+        
+        if (bankAccount && typeof bankAccount.bank_name === 'string') {
+          return bankAccount.bank_name;
+        }
+      }
+    } else if (typeof payout.destination === 'object' && 'bank_name' in payout.destination) {
+      const bankName = (payout.destination as { bank_name?: string }).bank_name;
+      if (typeof bankName === 'string') {
+        return bankName;
+      }
+    }
   } catch (error) {
-    logger('[StripeWebhook] Failed to link payout to Salesforce transactions', {
-      payoutId,
+    logger('[StripeWebhook] Failed to retrieve bank account name', {
+      payoutId: payout.id,
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  
+  return 'Bank Account';
 };
 
-const createPayoutTransactionInSalesforce = async (
-  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+const buildPayoutTransaction = async (
+  stripe: Stripe,
   payout: Stripe.Payout,
   depositInput: UpsertPayoutDepositInput | null,
+  eventType: string,
   logger: Logger
-): Promise<void> => {
+) => {
+  const bankName = await getBankName(stripe, payout, logger);
+  const transactionName = `Payout - ${bankName}`;
+  
   if (!depositInput) {
-    return;
+    // For created/updated events or manual payouts without transactions
+    return {
+      Name: transactionName,
+      transaction_type__c: 'payout' as 'payout',
+      status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
+      stripe_payout_id__c: payout.id,
+      stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
+      amount_gross__c: (toCents(payout.amount) / 100),
+      amount_fee__c: 0,
+      amount_net__c: (toCents(payout.amount) / 100),
+      currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
+      memo__c: `Stripe Payout ${payout.id} - ${eventType.replace('payout.', '')} (${payout.automatic ? 'automatic' : 'manual'})`,
+      received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+      posted_to_qbo__c: false,
+      qbo_doc_type__c: null,
+      qbo_doc_id__c: null,
+      qbo_posted_at__c: null,
+      posting_error__c: eventType === 'payout.paid' && !depositInput ? 'Manual payout without balance transaction history' : null,
+    };
   }
 
-  // Calculate totals from deposit lines
+  // For paid events with transaction details
   const chargeTotal = depositInput.lines
     .filter((line) => line.type === 'charge')
     .reduce((sum, line) => sum + line.amountCents, 0);
@@ -478,12 +507,13 @@ const createPayoutTransactionInSalesforce = async (
 
   memoLines.push(`Net: $${(netAmount / 100).toFixed(2)}`);
 
-  const payoutTransaction = {
+  return {
+    Name: transactionName,
     transaction_type__c: 'payout' as 'payout',
     status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
     stripe_payout_id__c: payout.id,
     stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction),
-    amount_gross__c: grossAmount / 100, // Convert cents to dollars
+    amount_gross__c: grossAmount / 100,
     amount_fee__c: feeTotal / 100,
     amount_net__c: netAmount / 100,
     currency_iso_code__c: (depositInput.currency ?? payout.currency ?? 'usd').toUpperCase(),
@@ -495,21 +525,31 @@ const createPayoutTransactionInSalesforce = async (
     qbo_posted_at__c: null,
     posting_error__c: null,
   };
+};
+
+const linkTransactionsInSalesforce = async (
+  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+  payoutId: string,
+  transactions: Stripe.BalanceTransaction[],
+  logger: Logger
+): Promise<void> => {
+  const ids = Array.from(
+    new Set(
+      transactions
+        .map((txn) => (typeof txn.id === 'string' ? txn.id : null))
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  if (ids.length === 0) {
+    return;
+  }
 
   try {
-    await salesforce.upsertTransactionByExternalId(
-      payoutTransaction,
-      'stripe_balance_transaction_id__c'
-    );
-    logger('[StripeWebhook] Created payout transaction in Salesforce', {
-      payoutId: payout.id,
-      grossAmount: payoutTransaction.amount_gross__c,
-      feeAmount: payoutTransaction.amount_fee__c,
-      netAmount: payoutTransaction.amount_net__c,
-    });
+    await salesforce.linkPayoutOnTransactions(payoutId, ids);
   } catch (error) {
-    logger('[StripeWebhook] Failed to create payout transaction in Salesforce', {
-      payoutId: payout.id,
+    logger('[StripeWebhook] Failed to link payout to Salesforce transactions', {
+      payoutId,
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -534,29 +574,19 @@ export const handlePayoutEvent = async (
       automatic: payout.automatic,
     });
 
-    // Create or update payout transaction in Salesforce with pending status
-    const payoutTransaction = {
-      transaction_type__c: 'payout' as 'payout',
-      status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
-      stripe_payout_id__c: payout.id,
-      stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
-      amount_gross__c: (toCents(payout.amount) / 100), // Store the payout amount
-      amount_fee__c: 0, // Will be calculated when paid
-      amount_net__c: (toCents(payout.amount) / 100),
-      currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
-      memo__c: `Stripe Payout ${payout.id} - ${eventType.replace('payout.', '')} (${payout.automatic ? 'automatic' : 'manual'})`,
-      received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
-      posted_to_qbo__c: false,
-      qbo_doc_type__c: null,
-      qbo_doc_id__c: null,
-      qbo_posted_at__c: null,
-      posting_error__c: null,
-    };
+    // Build and upsert payout transaction using consistent helper
+    const payoutTransaction = await buildPayoutTransaction(
+      stripe,
+      payout,
+      null,
+      eventType,
+      context.log
+    );
 
     try {
       await salesforce.upsertTransactionByExternalId(
         payoutTransaction,
-        'stripe_balance_transaction_id__c'
+        'stripe_payout_id__c'
       );
       context.log('[StripeWebhook] Tracked payout in Salesforce', {
         payoutId: payout.id,
@@ -631,48 +661,39 @@ export const handlePayoutEvent = async (
 
     // For manual payouts without transactions, create a simple deposit entry
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
-    if (!depositInput) {
-      // If no deposit input (no transactions), still track in Salesforce for manual payouts
-      if (isManualPayout) {
-        const payoutTransaction = {
-          transaction_type__c: 'payout' as 'payout',
-          status__c: 'paid' as 'paid',
-          stripe_payout_id__c: payout.id,
-          stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
-          amount_gross__c: (toCents(payout.amount) / 100),
-          amount_fee__c: 0,
-          amount_net__c: (toCents(payout.amount) / 100),
-          currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
-          memo__c: `Manual Stripe Payout ${payout.id} - No transaction details available`,
-          received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
-          posted_to_qbo__c: false,
-          qbo_doc_type__c: null,
-          qbo_doc_id__c: null,
-          qbo_posted_at__c: null,
-          posting_error__c: 'Manual payout without balance transaction history',
-        };
+    
+    // Build and upsert payout transaction in Salesforce
+    const payoutTransaction = await buildPayoutTransaction(
+      stripe,
+      payout,
+      depositInput,
+      eventType,
+      context.log
+    );
 
-        try {
-          await salesforce.upsertTransactionByExternalId(
-            payoutTransaction,
-            'stripe_balance_transaction_id__c'
-          );
-          context.log('[StripeWebhook] Tracked manual payout in Salesforce (no QBO sync)', {
-            payoutId: payout.id,
-            amount: payoutTransaction.amount_net__c,
-          });
-        } catch (error) {
-          context.log('[StripeWebhook] Failed to track manual payout in Salesforce', {
-            payoutId: payout.id,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      return;
+    try {
+      await salesforce.upsertTransactionByExternalId(
+        payoutTransaction,
+        'stripe_payout_id__c'
+      );
+      context.log('[StripeWebhook] Upserted payout transaction in Salesforce', {
+        payoutId: payout.id,
+        eventType,
+        hasTransactions: !!depositInput,
+        amount: payoutTransaction.amount_net__c,
+      });
+    } catch (error) {
+      context.log('[StripeWebhook] Failed to upsert payout transaction in Salesforce', {
+        payoutId: payout.id,
+        eventType,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
-    // Create payout transaction in Salesforce
-    await createPayoutTransactionInSalesforce(salesforce, payout, depositInput, context.log);
+    if (!depositInput) {
+      // Manual payout without transactions - logged in Salesforce, not synced to QBO
+      return;
+    }
 
     // Post deposit to QuickBooks
     let qboDocId: string | null = null;
@@ -689,8 +710,8 @@ export const handlePayoutEvent = async (
     if (qboDocId && qboDocType) {
       try {
         const payoutTxnId = await salesforce.findTransactionIdByExternalId(
-          'stripe_balance_transaction_id__c',
-          normalizeStripeId(payout.balance_transaction) ?? payout.id
+          'stripe_payout_id__c',
+          payout.id
         );
 
         if (payoutTxnId) {
@@ -725,8 +746,32 @@ export const handlePayoutEvent = async (
   if (eventType === 'payout.failed' || eventType === 'payout.canceled') {
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
     
-    // Still create the payout transaction in Salesforce with failed/canceled status
-    await createPayoutTransactionInSalesforce(salesforce, payout, depositInput, context.log);
+    // Upsert payout transaction in Salesforce with failed/canceled status
+    const payoutTransaction = await buildPayoutTransaction(
+      stripe,
+      payout,
+      depositInput,
+      eventType,
+      context.log
+    );
+
+    try {
+      await salesforce.upsertTransactionByExternalId(
+        payoutTransaction,
+        'stripe_payout_id__c'
+      );
+      context.log('[StripeWebhook] Updated payout transaction status in Salesforce', {
+        payoutId: payout.id,
+        eventType,
+        status: payoutTransaction.status__c,
+      });
+    } catch (error) {
+      context.log('[StripeWebhook] Failed to update payout transaction in Salesforce', {
+        payoutId: payout.id,
+        eventType,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     const markForReview = adapter?.markDepositForReview;
     if (markForReview) {

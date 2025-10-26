@@ -20,6 +20,7 @@ const booleanOrNullSchema = z.union([z.boolean(), z.null()]);
 
 export const transactionUpsertSchema = z
   .object({
+    Name: stringOrNullSchema.optional(),
     transaction_type__c: transactionTypeSchema,
     status__c: transactionStatusSchema,
     stripe_payment_intent_id__c: stringOrNullSchema.optional(),
