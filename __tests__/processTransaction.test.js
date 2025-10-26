@@ -217,4 +217,98 @@ describe('processTransaction', () => {
       'Stripe_Checkout_Session_Id__c'
     );
   });
+
+  it('resolves campaign name to Salesforce ID and includes it in pending transaction', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+        update: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test',
+            url: 'https://stripe.test/session',
+            metadata: {
+              campaign: 'Test Campaign',
+              category: 'General',
+              frequency: 'onetime',
+              transactionType: 'Donation',
+            },
+          }),
+        },
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    process.env.CRM_PROVIDER = 'salesforce';
+    process.env.SALESFORCE_USERNAME = 'test@example.com';
+    process.env.SALESFORCE_PASSWORD = 'password123';
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
+    const findOrCreateCampaignMock = vi.fn().mockResolvedValue('701xx000000000AAA');
+    const crmServiceMock = {
+      searchContact: vi.fn().mockResolvedValue([]),
+      createContact: vi.fn().mockResolvedValue({
+        Id: '003TEST',
+        FirstName: 'Cleanup',
+        LastName: 'Testing',
+        Email: 'campaigntest@example.com',
+      }),
+      updateContact: vi.fn(),
+      upsertTransactionsRecord: upsertMock,
+      findOrCreateCampaign: findOrCreateCampaignMock,
+    };
+
+    const CrmFactory = require('../dist/services/salesforce/crmFactory');
+    vi.spyOn(CrmFactory, 'validateConfig').mockReturnValue({ isValid: true });
+    vi.spyOn(CrmFactory, 'createCrmService').mockReturnValue(crmServiceMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        transactionType: 'Donation',
+        email: 'campaigntest@example.com',
+        firstname: 'Cleanup',
+        lastname: 'Testing',
+        phone: '+1234567823',
+        amount: 2520,
+        frequency: 'onetime',
+        category: 'General',
+        coverFee: false,
+        metadata: {
+          campaign: 'Test Campaign',
+        },
+        address: {
+          line1: '1234 Main St',
+          city: 'New York',
+          state: 'NY',
+          postal_code: '10001',
+          country: 'US',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    // Verify campaign was resolved
+    expect(findOrCreateCampaignMock).toHaveBeenCalledWith('Test Campaign');
+
+    // Verify upsert was called with campaign ID
+    expect(upsertMock).toHaveBeenCalledTimes(1);
+    expect(upsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Stripe_Checkout_Session_Id__c: 'cs_test',
+        Transaction_Type__c: 'charge',
+        Status__c: 'pending',
+        Contact__c: '003TEST',
+        Campaign__c: '701xx000000000AAA',
+        Frequency__c: 'onetime',
+        Payment_Method__c: 'Pending',
+      }),
+      'Stripe_Checkout_Session_Id__c'
+    );
+  });
 });

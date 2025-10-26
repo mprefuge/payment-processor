@@ -788,6 +788,41 @@ const createPendingTransaction = async (context, session, contactId, transaction
     const category = session.metadata?.category || transactionData.category || 'General';
     const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
 
+    // Resolve campaign name to Salesforce ID if present in metadata
+    let campaignId = null;
+    const campaignName = 
+      transactionData.metadata?.campaign__c || 
+      transactionData.metadata?.Campaign__c || 
+      transactionData.metadata?.campaign;
+
+    if (campaignName && typeof campaignName === 'string' && campaignName.trim().length > 0) {
+      const trimmedName = campaignName.trim();
+      
+      // Check if it's already a Salesforce ID (18-char starting with '701')
+      if (trimmedName.match(/^701[a-zA-Z0-9]{15}$/)) {
+        console.log('Campaign metadata is already a Salesforce ID', { campaignId: trimmedName });
+        campaignId = trimmedName;
+      } else if (typeof crmService.findOrCreateCampaign === 'function') {
+        // It's a campaign name, resolve to ID via CRM
+        try {
+          console.log('Resolving campaign name to Salesforce ID', { campaignName: trimmedName });
+          campaignId = await crmService.findOrCreateCampaign(trimmedName);
+          console.log('Campaign resolved to Salesforce ID', {
+            campaignName: trimmedName,
+            campaignId,
+          });
+        } catch (error) {
+          console.log('Failed to resolve campaign, will skip campaign assignment', {
+            campaignName: trimmedName,
+            error: error.message,
+          });
+          logger.error('Campaign resolution error:', error);
+        }
+      } else {
+        console.log('CRM service does not support campaign creation');
+      }
+    }
+
     const transactionRecord = {
       Stripe_Checkout_Session_Id__c: session.id,
       Transaction_Type__c: 'charge',
@@ -796,6 +831,11 @@ const createPendingTransaction = async (context, session, contactId, transaction
       Frequency__c: transactionData.frequency || 'onetime',
       Payment_Method__c: 'Pending',
     };
+
+    // Add campaign ID if resolved
+    if (campaignId) {
+      transactionRecord.Campaign__c = campaignId;
+    }
 
     const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
     if (paymentIntentId) {
