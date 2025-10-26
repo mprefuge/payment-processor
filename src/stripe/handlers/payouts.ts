@@ -346,11 +346,42 @@ const buildDepositInput = async (
   transactions: Stripe.BalanceTransaction[],
   eventId: string
 ): Promise<UpsertPayoutDepositInput | null> => {
+  // For manual payouts or payouts without transactions, create a simple deposit
   if (!Array.isArray(transactions) || transactions.length === 0) {
-    context.log('[StripeWebhook] No payout transactions to post to QuickBooks', {
+    context.log('[StripeWebhook] Creating simple payout deposit without transaction details', {
       payoutId: payout.id,
+      isManual: payout.automatic === false,
     });
-    return null;
+
+    const payoutAmount = toCents(payout.amount);
+    
+    // Create a simple deposit line with just the payout amount
+    const lines: PayoutDepositLineInput[] = [{
+      type: 'charge',
+      currency: typeof payout.currency === 'string' ? payout.currency.toLowerCase() : 'usd',
+      amountCents: payoutAmount,
+      description: `Payout ${payout.id}${payout.automatic === false ? ' (Manual)' : ''}`,
+      memo: `Stripe payout without transaction details`,
+      references: [],
+    }];
+
+    return {
+      stripeEventId: eventId,
+      payout,
+      depositExternalRef: payout.id,
+      docNumber: createDocNumber(payout.id),
+      memo: `Stripe payout ${payout.id}${payout.automatic === false ? ' (Manual)' : ''}`,
+      txnDate: timestampToDate(payout.arrival_date ?? payout.created ?? null),
+      currency: typeof payout.currency === 'string' ? payout.currency.toLowerCase() : null,
+      totalAmountCents: payoutAmount,
+      lines,
+      balanceTransactions: [],
+      summary: {
+        payoutAmountCents: payoutAmount,
+        calculatedAmountCents: payoutAmount,
+        differenceCents: 0,
+      },
+    };
   }
 
   const { lines, calculatedTotal } = await categorizeTransactions(
@@ -573,32 +604,34 @@ export const handlePayoutEvent = async (
       automatic: payout.automatic,
     });
 
-    // Build and upsert payout transaction using consistent helper
-    const payoutTransaction = await buildPayoutTransaction(
-      stripe,
-      payout,
-      null,
-      eventType,
-      context.log
-    );
-
-    try {
-      await salesforce.upsertTransactionByExternalId(
-        payoutTransaction,
-        'stripe_payout_id__c'
+    // Build and upsert payout transaction using consistent helper with idempotency lock
+    await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
+      const payoutTransaction = await buildPayoutTransaction(
+        stripe,
+        payout,
+        null,
+        eventType,
+        context.log
       );
-      context.log('[StripeWebhook] Tracked payout in Salesforce', {
-        payoutId: payout.id,
-        eventType,
-        amount: payoutTransaction.amount_net__c,
-      });
-    } catch (error) {
-      context.log('[StripeWebhook] Failed to track payout in Salesforce', {
-        payoutId: payout.id,
-        eventType,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          payoutTransaction,
+          'stripe_payout_id__c'
+        );
+        context.log('[StripeWebhook] Tracked payout in Salesforce', {
+          payoutId: payout.id,
+          eventType,
+          amount: payoutTransaction.amount_net__c,
+        });
+      } catch (error) {
+        context.log('[StripeWebhook] Failed to track payout in Salesforce', {
+          payoutId: payout.id,
+          eventType,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
 
     return;
   }
@@ -658,39 +691,44 @@ export const handlePayoutEvent = async (
       return;
     }
 
-    // For manual payouts without transactions, create a simple deposit entry
+    // Build deposit input - will create simple deposit for manual payouts
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
     
-    // Build and upsert payout transaction in Salesforce
-    const payoutTransaction = await buildPayoutTransaction(
-      stripe,
-      payout,
-      depositInput,
-      eventType,
-      context.log
-    );
-
-    try {
-      await salesforce.upsertTransactionByExternalId(
-        payoutTransaction,
-        'stripe_payout_id__c'
+    // Build and upsert payout transaction in Salesforce with idempotency lock
+    await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
+      const payoutTransaction = await buildPayoutTransaction(
+        stripe,
+        payout,
+        depositInput,
+        eventType,
+        context.log
       );
-      context.log('[StripeWebhook] Upserted payout transaction in Salesforce', {
-        payoutId: payout.id,
-        eventType,
-        hasTransactions: !!depositInput,
-        amount: payoutTransaction.amount_net__c,
-      });
-    } catch (error) {
-      context.log('[StripeWebhook] Failed to upsert payout transaction in Salesforce', {
-        payoutId: payout.id,
-        eventType,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
 
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          payoutTransaction,
+          'stripe_payout_id__c'
+        );
+        context.log('[StripeWebhook] Upserted payout transaction in Salesforce', {
+          payoutId: payout.id,
+          eventType,
+          hasTransactions: !!depositInput,
+          amount: payoutTransaction.amount_net__c,
+        });
+      } catch (error) {
+        context.log('[StripeWebhook] Failed to upsert payout transaction in Salesforce', {
+          payoutId: payout.id,
+          eventType,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    // depositInput should always exist now (even for manual payouts)
     if (!depositInput) {
-      // Manual payout without transactions - logged in Salesforce, not synced to QBO
+      context.log('[StripeWebhook] No deposit input created, skipping QBO sync', {
+        payoutId: payout.id,
+      });
       return;
     }
 
@@ -745,32 +783,34 @@ export const handlePayoutEvent = async (
   if (eventType === 'payout.failed' || eventType === 'payout.canceled') {
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
     
-    // Upsert payout transaction in Salesforce with failed/canceled status
-    const payoutTransaction = await buildPayoutTransaction(
-      stripe,
-      payout,
-      depositInput,
-      eventType,
-      context.log
-    );
-
-    try {
-      await salesforce.upsertTransactionByExternalId(
-        payoutTransaction,
-        'stripe_payout_id__c'
+    // Upsert payout transaction in Salesforce with failed/canceled status with idempotency lock
+    await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
+      const payoutTransaction = await buildPayoutTransaction(
+        stripe,
+        payout,
+        depositInput,
+        eventType,
+        context.log
       );
-      context.log('[StripeWebhook] Updated payout transaction status in Salesforce', {
-        payoutId: payout.id,
-        eventType,
-        status: payoutTransaction.status__c,
-      });
-    } catch (error) {
-      context.log('[StripeWebhook] Failed to update payout transaction in Salesforce', {
-        payoutId: payout.id,
-        eventType,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          payoutTransaction,
+          'stripe_payout_id__c'
+        );
+        context.log('[StripeWebhook] Updated payout transaction status in Salesforce', {
+          payoutId: payout.id,
+          eventType,
+          status: payoutTransaction.status__c,
+        });
+      } catch (error) {
+        context.log('[StripeWebhook] Failed to update payout transaction in Salesforce', {
+          payoutId: payout.id,
+          eventType,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
 
     const markForReview = adapter?.markDepositForReview;
     if (markForReview) {
