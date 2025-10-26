@@ -285,14 +285,19 @@ const markPosted = async (
   }
 };
 
-const ensureStripeBalanceTransaction = (
+const ensureStripeBalanceTransaction = async (
+  stripe: Stripe,
   value: Stripe.BalanceTransaction | string | null | undefined
-): Stripe.BalanceTransaction | null => {
+): Promise<Stripe.BalanceTransaction | null> => {
   if (!value) {
     return null;
   }
   if (typeof value === 'string') {
-    return null;
+    try {
+      return await stripe.balanceTransactions.retrieve(value);
+    } catch (error) {
+      return null;
+    }
   }
   return value;
 };
@@ -370,11 +375,25 @@ const processPayments = async (
 
   for (const charge of charges) {
     try {
-      const balanceTransaction = ensureStripeBalanceTransaction(
+      // Only process successful charges
+      if (charge.status !== 'succeeded') {
+        context.log('[StripeTrueUp] Skipping charge with non-successful status', {
+          chargeId: charge.id,
+          status: charge.status,
+        });
+        summary.skipped += 1;
+        continue;
+      }
+
+      const balanceTransaction = await ensureStripeBalanceTransaction(
+        stripe,
         charge.balance_transaction as Stripe.BalanceTransaction | string | undefined
       );
 
       if (!balanceTransaction || !balanceTransaction.id) {
+        context.log('[StripeTrueUp] Skipping charge without balance transaction', {
+          chargeId: charge.id,
+        });
         summary.errors += 1;
         continue;
       }
@@ -471,11 +490,25 @@ const processRefunds = async (
 
   for (const refund of refunds) {
     try {
-      const balanceTransaction = ensureStripeBalanceTransaction(
+      // Only process successful refunds
+      if (refund.status !== 'succeeded') {
+        context.log('[StripeTrueUp] Skipping refund with non-successful status', {
+          refundId: refund.id,
+          status: refund.status,
+        });
+        summary.skipped += 1;
+        continue;
+      }
+
+      const balanceTransaction = await ensureStripeBalanceTransaction(
+        stripe,
         refund.balance_transaction as Stripe.BalanceTransaction | string | undefined
       );
 
       if (!balanceTransaction || !balanceTransaction.id) {
+        context.log('[StripeTrueUp] Skipping refund without balance transaction', {
+          refundId: refund.id,
+        });
         summary.errors += 1;
         continue;
       }
@@ -586,6 +619,16 @@ const processPayouts = async (
     try {
       if (!payout || !payout.id) {
         summary.errors += 1;
+        continue;
+      }
+
+      // Only process successful payouts (paid status)
+      if (payout.status !== 'paid') {
+        context.log('[StripeTrueUp] Skipping payout with non-paid status', {
+          payoutId: payout.id,
+          status: payout.status,
+        });
+        summary.skipped += 1;
         continue;
       }
 
@@ -745,6 +788,12 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
       summary = await processRefunds(context, stripe, from, to, dryRun);
     } else {
       summary = await processPayouts(context, stripe, from, to, dryRun);
+    }
+
+    // Flush idempotency store to ensure all processed keys are persisted
+    if (!dryRun) {
+      await dependencies.idempotencyStore.flush();
+      context.log('[StripeTrueUp] Idempotency store flushed successfully');
     }
 
     respond(context, 200, {
