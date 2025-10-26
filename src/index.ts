@@ -9,7 +9,8 @@ const processTransaction = require('./handlers/processTransaction');
 const stripeWebhookModule = require('./handlers/stripeWebhook');
 const stripeWebhook = stripeWebhookModule.default || stripeWebhookModule;
 const payoutSyncTrigger = require('./handlers/payoutSyncTrigger');
-const stripeTrueUp = require('./handlers/stripeTrueUp');
+const stripeTrueUpModule = require('./handlers/stripeTrueUp');
+const stripeTrueUp = stripeTrueUpModule.default || stripeTrueUpModule;
 
 // Register HTTP-triggered functions
 app.http('healthCheck', {
