@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
+import type Stripe from 'stripe';
 
 const require = createRequire(import.meta.url);
 const { createContext } = require('./testUtils');
@@ -91,7 +92,7 @@ describe('checkout session lifecycle', () => {
     await wait;
 
     // Now simulate webhook for payment_intent.succeeded which should update the existing txn to paid
-    const stripeWebhook = require('../stripeWebhook').default;
+    const stripeWebhook = require('../dist/handlers/stripeWebhook').default;
     const internals = stripeWebhook.__internals;
 
     const paymentIntent = {
@@ -125,8 +126,8 @@ describe('checkout session lifecycle', () => {
     };
 
     const stripeDeps = {
-      verifyEvent: vi.fn(() => ({ id: 'evt_pi', type: 'payment_intent.succeeded', data: { object: paymentIntent }, livemode: false })),
-      getClient: vi.fn(() => stripeClient),
+      verifyEvent: vi.fn(() => ({ id: 'evt_pi', type: 'payment_intent.succeeded', data: { object: paymentIntent }, livemode: false } as unknown as Stripe.Event)),
+      getClient: vi.fn(() => stripeClient as unknown as Stripe),
     };
 
     // Idempotency store - simple mock
@@ -162,6 +163,7 @@ describe('checkout session lifecycle', () => {
       stripe: stripeDeps,
       idempotencyStore: store,
       getSalesforceSvc: async () => crmServiceMock,
+      getCrmSvc: async () => ({}),
       accounting: {
         postChargeToQbo: vi.fn().mockResolvedValue({ qboId: 'q_1', type: 'journal-entry' }),
         postRefundToQbo: vi.fn(),
@@ -169,7 +171,7 @@ describe('checkout session lifecycle', () => {
       },
     };
 
-    const event = { id: 'evt_pi', type: 'payment_intent.succeeded', data: { object: paymentIntent }, livemode: false };
+    const event = { id: 'evt_pi', type: 'payment_intent.succeeded', data: { object: paymentIntent }, livemode: false } as unknown as Stripe.Event;
     await paymentIntentsHandlers.handlePaymentIntentSucceeded(context, event, deps);
 
     // Expect an upsert to set status to paid using payment_intent external id and override the existing SF record

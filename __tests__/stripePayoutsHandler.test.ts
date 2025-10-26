@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type Stripe from 'stripe';
 
+vi.mock('../src/config/env', () => ({
+  default: {
+    accounting: {
+      syncEnabled: true,
+    },
+  },
+}));
+
 import { handlePayoutEvent } from '../src/stripe/handlers/payouts';
 import type {
   HttpContext,
@@ -15,9 +23,8 @@ const createContext = (): HttpContext => {
     invocationId: 'test',
     functionName: 'stripeWebhook',
     traceContext: {} as any,
-    bindingData: {},
     log,
-  };
+  } as unknown as HttpContext;
 };
 
 const createApiList = (
@@ -53,7 +60,7 @@ const createDeps = ({
 
   const listTransactions = vi.fn(async () =>
     createApiList(queue.length > 0 ? queue.shift()! : defaultPage)
-  );
+  ) as any;
 
   const retrieveCharge = vi.fn(async (id: string) => {
     const override = charges[id];
@@ -82,7 +89,7 @@ const createDeps = ({
     findTransactionIdByExternalId: vi.fn(),
   };
 
-  const withLock = vi.fn(async (_: string, fn: () => Promise<unknown>) => fn());
+  const withLock = vi.fn(async (_: string, fn: () => Promise<unknown>) => fn()) as any;
 
   const deps: StripeWebhookDependencies = {
     stripe: {
@@ -96,6 +103,7 @@ const createDeps = ({
       flush: vi.fn(),
     },
     getSalesforceSvc: vi.fn(async () => salesforce),
+    getCrmSvc: vi.fn(async () => ({})),
     accounting: {
       postChargeToQbo: vi.fn(),
       postRefundToQbo: vi.fn(),
@@ -181,11 +189,12 @@ const createCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge =>
 describe('handlePayoutEvent', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    process.env.ACCOUNTING_SYNC_ENABLED = 'true';
   });
 
   it('creates deposit lines for charges and fees', async () => {
     const context = createContext();
-    const payout = createPayout({ amount: 9_200 });
+    const payout = createPayout({ amount: 9_700 });
     const chargeTxn = createTransaction({
       id: 'txn_charge',
       amount: 10_000,

@@ -2,6 +2,7 @@ import type Stripe from 'stripe';
 import type { HttpContext } from '../../stripe/types';
 import type { StripeWebhookDependencies } from '../../stripe/types';
 import type { EventRouter } from './types';
+import { logger } from '../../lib/logger';
 import { handleCheckoutSessionCompleted } from '../../stripe/handlers/common';
 import {
   handlePaymentIntentActionRequired,
@@ -76,7 +77,7 @@ export class StripeEventRouter implements EventRouter {
         await handleCreditNoteEvent(context, event, deps);
         return;
       default:
-        console.log('[StripeWebhook] Ignoring unsupported event type', {
+        logger.info('[StripeWebhook] Ignoring unsupported event type', {
           eventType,
         });
     }

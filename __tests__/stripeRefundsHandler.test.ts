@@ -2,6 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
 import type Stripe from 'stripe';
 
+vi.mock('../src/config/env', () => ({
+  default: {
+    accounting: {
+      syncEnabled: true,
+    },
+  },
+}));
+
 import { handleRefundEvent } from '../src/stripe/handlers/refunds';
 import type { RefundReceiptLineInput, StripeWebhookDependencies } from '../src/stripe/types';
 
@@ -90,6 +98,8 @@ const defaultBalanceTransaction = (
   source: 're_123',
   fee_details: [],
   exchange_rate: null,
+  description: 'Refund transaction',
+  reporting_category: 'refund',
 });
 
 const setup = ({
@@ -153,6 +163,7 @@ const setup = ({
     },
     idempotencyStore,
     getSalesforceSvc: vi.fn().mockResolvedValue(salesforce),
+    getCrmSvc: vi.fn().mockResolvedValue({}),
     accounting: {
       postChargeToQbo: vi.fn(),
       postRefundToQbo: vi.fn(),
@@ -171,7 +182,7 @@ const setup = ({
     pending_webhooks: 1,
     request: { id: 'req_1', idempotency_key: null },
     api_version: '2023-10-16',
-  };
+  } as Stripe.Event;
 
   return {
     deps,
@@ -189,6 +200,7 @@ describe('handleRefundEvent', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
+    process.env.ACCOUNTING_SYNC_ENABLED = 'true';
   });
 
   afterEach(() => {
@@ -244,7 +256,7 @@ describe('handleRefundEvent', () => {
     expect(chargeCall[0].amount_net__c).toBe(0);
     expect(chargeCall[0].status__c).toBe('refunded');
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_txn_1', {
-      qboId: 'RR-1',
+      id: 'RR-1',
       type: 'refund-receipt',
     });
     expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledWith(
@@ -282,7 +294,7 @@ describe('handleRefundEvent', () => {
     });
 
     const refund = createRefund({ amount: 500 });
-    const { deps, event, refundAdapter } = setup({ charge, refund });
+    const { deps, event, refundAdapter, salesforce } = setup({ charge, refund });
 
     const { context } = createContext();
 
@@ -342,7 +354,8 @@ describe('handleRefundEvent', () => {
 
     charge.amount_refunded = 700;
     const secondSetup = setup({ charge, refund: secondRefund });
-    await handleRefundEvent(context, secondSetup.event, secondSetup.deps);
+    secondSetup.event.id = 'evt_test_2'; // Use different event ID to avoid idempotency
+    await handleRefundEvent(context, secondSetup.event, deps);
 
     expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
     expect(
@@ -357,7 +370,7 @@ describe('handleRefundEvent', () => {
     const refund = createRefund({ status: 'failed', amount: 500 });
     const { deps, event, refundAdapter, salesforce } = setup({ refund });
 
-    event.type = 'refund.failed';
+    (event as any).type = 'refund.failed';
 
     const { context } = createContext();
     await handleRefundEvent(context, event, deps);

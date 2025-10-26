@@ -63,6 +63,7 @@ const createDeps = ({
       flush: vi.fn().mockResolvedValue(undefined),
     },
     getSalesforceSvc: vi.fn(async () => salesforce),
+    getCrmSvc: vi.fn(async () => ({})),
     accounting: {
       postChargeToQbo: vi.fn(),
       postRefundToQbo: vi.fn(),
@@ -406,10 +407,10 @@ describe('stripeWebhook idempotency', () => {
       body: {},
     };
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
     expect(store.isProcessed).toHaveBeenCalledWith('evt_duplicate');
     expect(store.markProcessed).not.toHaveBeenCalled();
-    expect(context.res?.status).toBe(200);
+    expect(result.status).toBe(200);
   });
 });

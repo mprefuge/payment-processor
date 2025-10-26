@@ -127,9 +127,9 @@ describe('stripeWebhook', () => {
     const context: any = { bindingData: {}, log: logFn, res: {} };
     const req = baseRequest();
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
-    expect(context.res.status).toBe(400);
+    expect(result.status).toBe(400);
     expect(store.isProcessed).not.toHaveBeenCalled();
   });
 
@@ -156,12 +156,12 @@ describe('stripeWebhook', () => {
     const { context } = createContext();
     const req = baseRequest();
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
-    expect(store.isProcessed).toHaveBeenCalledWith('evt_evt_test');
+    expect(store.isProcessed).toHaveBeenCalledWith('evt_test');
     expect(store.markProcessed).not.toHaveBeenCalled();
-    expect(context.res.status).toBe(200);
-    expect(JSON.parse(context.res.body)).toMatchObject({ duplicate: true, eventType: 'checkout.session.completed' });
+    expect(result.status).toBe(200);
+    expect(result.jsonBody).toMatchObject({ duplicate: true, eventType: 'checkout.session.completed' });
   });
 
   it('processes payment_intent.succeeded events and posts to accounting', async () => {
@@ -238,9 +238,9 @@ describe('stripeWebhook', () => {
     const { context } = createContext();
     const req = baseRequest();
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
-    expect(store.isProcessed).toHaveBeenCalledWith('evt_evt_test');
+    expect(store.isProcessed).toHaveBeenCalledWith('evt_test');
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_checkout_session_id__c',
       'cs_test',
@@ -274,9 +274,9 @@ describe('stripeWebhook', () => {
       id: '123',
       type: 'journal-entry',
     });
-    expect(store.markProcessed).toHaveBeenCalledWith('evt_evt_test');
-    expect(context.res.status).toBe(200);
-    expect(JSON.parse(context.res.body)).toMatchObject({ received: true, eventType: 'payment_intent.succeeded' });
+    expect(store.markProcessed).toHaveBeenCalledWith('evt_test');
+    expect(result.status).toBe(200);
+    expect(result.jsonBody).toMatchObject({ received: true, eventType: 'payment_intent.succeeded' });
   });
 
   it('locates pending subscription transactions by subscription id when available', async () => {
@@ -346,7 +346,7 @@ describe('stripeWebhook', () => {
     const { context } = createContext();
     const req = baseRequest();
 
-    await handler(context, req);
+    await handler(req, context);
 
     expect(stripeClient.invoices.retrieve).toHaveBeenCalledWith('in_test');
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
@@ -472,7 +472,7 @@ describe('stripeWebhook', () => {
     const { context } = createContext();
     const req = baseRequest();
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
     expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledWith('pi_invoice');
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
@@ -490,8 +490,8 @@ describe('stripeWebhook', () => {
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
     expect(stripeClient.invoices.retrieve).not.toHaveBeenCalled();
-    expect(store.markProcessed).toHaveBeenCalledWith('evt_evt_invoice');
-    expect(context.res.status).toBe(200);
+    expect(store.markProcessed).toHaveBeenCalledWith('evt_invoice');
+    expect(result.status).toBe(200);
   });
 
   it('forces the transaction status to paid when the invoice indicates payment completion', async () => {
@@ -596,7 +596,7 @@ describe('stripeWebhook', () => {
     const { context } = createContext();
     const req = baseRequest();
 
-    await handler(context, req);
+    await handler(req, context);
 
     expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledWith('pi_paid');
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
@@ -609,6 +609,6 @@ describe('stripeWebhook', () => {
       { overrideId: 'sf_sub' },
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
-    expect(store.markProcessed).toHaveBeenCalledWith('evt_evt_invoice_paid');
+    expect(store.markProcessed).toHaveBeenCalledWith('evt_invoice_paid');
   });
 });

@@ -455,7 +455,7 @@ const checkEnvironmentConfiguration = async () => {
 
 module.exports = async function healthCheck(request, context) {
   const now = new Date();
-  console.log('Health check requested');
+  context.log('Health check requested');
 
   initializeSecretRedactor();
 
@@ -493,7 +493,7 @@ module.exports = async function healthCheck(request, context) {
     ? sanitizedBody.connections
     : redactSecrets(connections);
 
-  console.log('Health check connection statuses', safeConnections);
+  context.log('Health check connection statuses', safeConnections);
 
   return {
     status: 200,

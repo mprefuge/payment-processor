@@ -4,6 +4,7 @@ import type { WebhookRequestHandler } from './types';
 import { StripeEventRouter } from './StripeEventRouter';
 import { DefaultWebhookResponseFormatter } from './WebhookResponseFormatter';
 import type { StripeWebhookDependencies } from '../../stripe/types';
+import { logger } from '../../lib/logger';
 
 export class StripeWebhookProcessor implements WebhookRequestHandler {
   private readonly eventRouter: StripeEventRouter;
@@ -18,7 +19,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     const signature = this.getStripeSignature(req);
 
     if (!signature) {
-      console.log('[StripeWebhook] Missing signature');
+      logger.warn('[StripeWebhook] Missing signature');
       return this.responseFormatter.error('missing_signature');
     }
 
@@ -28,7 +29,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     try {
       event = this.dependencies.stripe.verifyEvent(payload, signature);
     } catch (error) {
-      console.log('[StripeWebhook] Signature verification failed', {
+      logger.warn('[StripeWebhook] Signature verification failed', {
         error: error instanceof Error ? error.message : String(error),
       });
       return this.responseFormatter.error('invalid_signature');
@@ -37,7 +38,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     // Check for duplicate events
     const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
     if (isProcessed) {
-      console.log('[StripeWebhook] Duplicate event detected', { eventId: event.id });
+      logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
       return {
         status: 200,
         headers: {
@@ -54,7 +55,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
       await this.eventRouter.route(event, this.dependencies, context);
       return this.responseFormatter.success(event.type);
     } catch (error) {
-      console.log('[StripeWebhook] Event processing failed', {
+      logger.error('[StripeWebhook] Event processing failed', {
         eventId: event.id,
         eventType: event.type,
         error: error instanceof Error ? error.message : String(error),
@@ -101,10 +102,10 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     if (typeof req.text === 'function') {
       try {
         const text = await req.text();
-        console.log('[StripeWebhook] Using req.text():', text.substring(0, 100));
+        logger.debug('[StripeWebhook] Using req.text():', text.substring(0, 100));
         return text;
       } catch (error) {
-        console.log('[StripeWebhook] req.text() failed:', error);
+        logger.warn('[StripeWebhook] req.text() failed:', error);
       }
     }
 
@@ -117,7 +118,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     if (req.body && typeof req.body === 'object') {
       try {
         const result = JSON.stringify(req.body);
-        console.log('[StripeWebhook] WARNING: Using stringified parsed body:', result.substring(0, 100));
+        logger.warn('[StripeWebhook] WARNING: Using stringified parsed body:', result.substring(0, 100));
         return result;
       } catch (error) {
         return '';

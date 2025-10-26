@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 import jsforce from 'jsforce';
 
 import env from '../config/env';
+import { logger } from '../lib/logger';
 import { AzureIdempotencyStore, type IdempotencyStore } from '../services/idempotencyStore';
 import { createSalesforceSvc, type SalesforceSvc } from '../services/salesforceSvc';
 import type { UpsertResult } from 'jsforce/lib/types';
@@ -207,7 +208,7 @@ const createCrmGetter = (): (() => Promise<any>) => {
         } catch (error) {
           defaultCrmSvcPromise = null;
           const message = error instanceof Error ? error.message : 'Unknown CRM initialization error';
-          console.error('[StripeWebhook] CRM initialization failed:', message);
+          logger.error('[StripeWebhook] CRM initialization failed:', message);
           
           // Return disabled service on error
           return {

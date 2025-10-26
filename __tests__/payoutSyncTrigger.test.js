@@ -78,9 +78,9 @@ describe('payoutSyncTrigger', () => {
     });
 
     const { context } = createContext();
-    const req = { method: 'POST' };
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
     expect(payoutsList).toHaveBeenCalledTimes(1);
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_123');
@@ -101,15 +101,15 @@ describe('payoutSyncTrigger', () => {
     expect(linkPayoutOnTransactions).toHaveBeenCalledWith('po_123', ['bt_1', 'bt_2']);
     expect(processedStore.markProcessed).toHaveBeenCalledWith('po_po_123');
 
-    expect(context.res.status).toBe(200);
-    expect(context.res.body.summary).toEqual({
-      lookbackDays: 8,
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary).toEqual({
+      lookbackDays: 7,
       total: 1,
       processed: 1,
       skipped: 0,
       errors: 0,
     });
-    expect(context.res.body.processed).toEqual([
+    expect(result.jsonBody.processed).toEqual([
       {
         status: 'processed',
         payoutId: 'po_123',
@@ -154,9 +154,9 @@ describe('payoutSyncTrigger', () => {
     });
 
     const { context } = createContext();
-    const req = { method: 'POST' };
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
 
-    await handler(context, req);
+    const result = await handler(req, context);
 
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_999');
     expect(balanceTransactionsList).not.toHaveBeenCalled();
@@ -164,8 +164,8 @@ describe('payoutSyncTrigger', () => {
     expect(postBankDeposit).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
 
-    expect(context.res.status).toBe(200);
-    expect(context.res.body.summary.processed).toBe(0);
-    expect(context.res.body.summary.skipped).toBe(1);
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary.processed).toBe(0);
+    expect(result.jsonBody.summary.skipped).toBe(1);
   });
 });

@@ -44,6 +44,7 @@ coverage/
 # Temporary folders
 tmp/
 temp/
+docs/
 
 # Azurite local storage
 __azurite_db_*.json

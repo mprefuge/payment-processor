@@ -165,6 +165,11 @@ class QBOTokenManager {
       if (tokens?.accessToken) {
         return tokens.accessToken;
       }
+      // Check env vars as fallback
+      const envToken = process.env.QBO_ACCESS_TOKEN;
+      if (envToken) {
+        return envToken;
+      }
     }
 
     // If no valid token, try to refresh

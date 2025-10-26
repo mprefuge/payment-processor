@@ -58,6 +58,9 @@ jobs:
       - name: Type check
         run: npm run lint
 
+      - name: Run unit tests
+        run: npm run test
+
       - name: Run platform health check
         run: npm run health-check
 
