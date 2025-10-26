@@ -1,7 +1,8 @@
 import { app } from '@azure/functions';
 
 import './preflight';
-import './config/env';
+// Removed: import './config/env' - this causes startup failures if env vars are missing
+// Each handler loads env as needed
 
 const healthCheck = require('./handlers/healthCheck');
 const processTransaction = require('./handlers/processTransaction');
