@@ -407,24 +407,23 @@ const getBankName = async (
   logger: Logger
 ): Promise<string> => {
   try {
-    if (!payout.destination || typeof payout.destination === 'string') {
-      const destinationId = typeof payout.destination === 'string' ? payout.destination : null;
-      
-      if (destinationId && stripe.accounts?.retrieveExternalAccount) {
-        const bankAccount = await stripe.accounts.retrieveExternalAccount(
-          'self',
-          destinationId
-        ) as Stripe.BankAccount;
-        
-        if (bankAccount && typeof bankAccount.bank_name === 'string') {
-          return bankAccount.bank_name;
-        }
+    // Check if destination is already expanded with bank details
+    if (payout.destination && typeof payout.destination === 'object') {
+      const dest = payout.destination as any;
+      if (dest.bank_name && typeof dest.bank_name === 'string') {
+        return dest.bank_name;
       }
-    } else if (typeof payout.destination === 'object' && 'bank_name' in payout.destination) {
-      const bankName = (payout.destination as { bank_name?: string }).bank_name;
-      if (typeof bankName === 'string') {
-        return bankName;
+      if (dest.last4 && typeof dest.last4 === 'string') {
+        return `Bank ****${dest.last4}`;
       }
+    }
+    
+    // If destination is just an ID string, we can't easily fetch it without knowing the account
+    // For standard Stripe accounts, the destination is on the connected account side
+    // So we'll just use a generic name with the last 4 of the payout ID
+    if (typeof payout.destination === 'string' && payout.destination.startsWith('ba_')) {
+      const last4 = payout.destination.slice(-4);
+      return `Bank ****${last4}`;
     }
   } catch (error) {
     logger('[StripeWebhook] Failed to retrieve bank account name', {
@@ -433,7 +432,7 @@ const getBankName = async (
     });
   }
   
-  return 'Bank Account';
+  return '';
 };
 
 const buildPayoutTransaction = async (
@@ -444,7 +443,7 @@ const buildPayoutTransaction = async (
   logger: Logger
 ) => {
   const bankName = await getBankName(stripe, payout, logger);
-  const transactionName = `Payout - ${bankName}`;
+  const transactionName = bankName ? `Payout - ${bankName}` : 'Payout';
   
   if (!depositInput) {
     // For created/updated events or manual payouts without transactions
