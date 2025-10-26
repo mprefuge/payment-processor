@@ -429,6 +429,92 @@ const linkTransactionsInSalesforce = async (
   }
 };
 
+const createPayoutTransactionInSalesforce = async (
+  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+  payout: Stripe.Payout,
+  depositInput: UpsertPayoutDepositInput | null,
+  logger: Logger
+): Promise<void> => {
+  if (!depositInput) {
+    return;
+  }
+
+  // Calculate totals from deposit lines
+  const chargeTotal = depositInput.lines
+    .filter((line) => line.type === 'charge')
+    .reduce((sum, line) => sum + line.amountCents, 0);
+
+  const feeTotal = depositInput.lines
+    .filter((line) => line.type === 'fee')
+    .reduce((sum, line) => sum + Math.abs(line.amountCents), 0);
+
+  const refundTotal = depositInput.lines
+    .filter((line) => line.type === 'refund')
+    .reduce((sum, line) => sum + Math.abs(line.amountCents), 0);
+
+  const adjustmentTotal = depositInput.lines
+    .filter((line) => line.type === 'adjustment')
+    .reduce((sum, line) => sum + line.amountCents, 0);
+
+  const grossAmount = chargeTotal + adjustmentTotal;
+  const netAmount = depositInput.totalAmountCents;
+
+  // Build memo with transaction breakdown
+  const memoLines = [
+    `Stripe Payout ${payout.id}`,
+    `Charges: $${(chargeTotal / 100).toFixed(2)}`,
+    `Fees: -$${(feeTotal / 100).toFixed(2)}`,
+  ];
+
+  if (refundTotal > 0) {
+    memoLines.push(`Refunds: -$${(refundTotal / 100).toFixed(2)}`);
+  }
+
+  if (adjustmentTotal !== 0) {
+    memoLines.push(
+      `Adjustments: ${adjustmentTotal > 0 ? '' : '-'}$${Math.abs(adjustmentTotal / 100).toFixed(2)}`
+    );
+  }
+
+  memoLines.push(`Net: $${(netAmount / 100).toFixed(2)}`);
+
+  const payoutTransaction = {
+    transaction_type__c: 'payout' as 'payout',
+    status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
+    stripe_payout_id__c: payout.id,
+    stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction),
+    amount_gross__c: grossAmount / 100, // Convert cents to dollars
+    amount_fee__c: feeTotal / 100,
+    amount_net__c: netAmount / 100,
+    currency_iso_code__c: (depositInput.currency ?? payout.currency ?? 'usd').toUpperCase(),
+    memo__c: memoLines.join(' | '),
+    received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+    posted_to_qbo__c: false,
+    qbo_doc_type__c: null,
+    qbo_doc_id__c: null,
+    qbo_posted_at__c: null,
+    posting_error__c: null,
+  };
+
+  try {
+    await salesforce.upsertTransactionByExternalId(
+      payoutTransaction,
+      'stripe_balance_transaction_id__c'
+    );
+    logger('[StripeWebhook] Created payout transaction in Salesforce', {
+      payoutId: payout.id,
+      grossAmount: payoutTransaction.amount_gross__c,
+      feeAmount: payoutTransaction.amount_fee__c,
+      netAmount: payoutTransaction.amount_net__c,
+    });
+  } catch (error) {
+    logger('[StripeWebhook] Failed to create payout transaction in Salesforce', {
+      payoutId: payout.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
 export const handlePayoutEvent = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -479,9 +565,46 @@ export const handlePayoutEvent = async (
       return;
     }
 
+    // Create payout transaction in Salesforce
+    await createPayoutTransactionInSalesforce(salesforce, payout, depositInput, context.log);
+
+    // Post deposit to QuickBooks
+    let qboDocId: string | null = null;
+    let qboDocType: string | null = null;
     await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
-      await adapter.upsertDeposit(depositInput);
+      const result = await adapter.upsertDeposit(depositInput);
+      if (result && typeof result === 'object' && 'id' in result && 'type' in result) {
+        qboDocId = (result as { id: string; type: string }).id;
+        qboDocType = (result as { id: string; type: string }).type;
+      }
     });
+
+    // Mark Salesforce transaction as posted to QBO
+    if (qboDocId && qboDocType) {
+      try {
+        const payoutTxnId = await salesforce.findTransactionIdByExternalId(
+          'stripe_balance_transaction_id__c',
+          normalizeStripeId(payout.balance_transaction) ?? payout.id
+        );
+
+        if (payoutTxnId) {
+          await salesforce.markPostedToQbo(payoutTxnId, {
+            id: qboDocId,
+            type: qboDocType,
+          });
+          context.log('[StripeWebhook] Marked payout transaction as posted to QBO', {
+            payoutId: payout.id,
+            salesforceId: payoutTxnId,
+            qboDocId,
+          });
+        }
+      } catch (error) {
+        context.log('[StripeWebhook] Failed to mark payout as posted to QBO in Salesforce', {
+          payoutId: payout.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     context.log('[StripeWebhook] Upserted QuickBooks deposit for payout', {
       payoutId: payout.id,
@@ -494,6 +617,11 @@ export const handlePayoutEvent = async (
   }
 
   if (eventType === 'payout.failed' || eventType === 'payout.canceled') {
+    const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
+    
+    // Still create the payout transaction in Salesforce with failed/canceled status
+    await createPayoutTransactionInSalesforce(salesforce, payout, depositInput, context.log);
+
     const markForReview = adapter?.markDepositForReview;
     if (markForReview) {
       await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
