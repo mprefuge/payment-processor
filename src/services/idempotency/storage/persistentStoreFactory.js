@@ -22,6 +22,7 @@ function createPersistentStorageClients(namespace = 'default') {
     idempotencyStore: createStore(path.join(basePath, 'idempotency.json')),
     webhookEventStore: createStore(path.join(basePath, 'webhook-events.json')),
     syncLedgerStore: createStore(path.join(basePath, 'sync-ledger.json')),
+    tokenStore: createStore(path.join(basePath, 'tokens.json')),
   };
 
   storeCache.set(namespace, clients);

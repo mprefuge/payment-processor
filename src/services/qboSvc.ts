@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import type Stripe from 'stripe';
 
 import env from '../config/env';
+import tokenManager from './qbo/qboTokenManager';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
   sandbox: 'https://sandbox-quickbooks.api.intuit.com/v3/company',
@@ -1427,12 +1428,15 @@ const getFetcher = (options?: PostOptions): Fetcher => {
   throw new Error('Fetch API is not available in the current environment.');
 };
 
-const getAccessToken = (options?: PostOptions): string => {
-  const token = options?.accessToken ?? process.env.QBO_ACCESS_TOKEN;
-  if (!token) {
-    throw new Error('QuickBooks access token is not configured.');
+const getAccessToken = async (options?: PostOptions): Promise<string> => {
+  // If access token is provided in options (for testing), use it
+  if (options?.accessToken) {
+    return options.accessToken;
   }
-  return token;
+
+  // Otherwise, get a valid token from the token manager
+  const fetcher = getFetcher(options);
+  return await tokenManager.getValidAccessToken(fetcher);
 };
 
 const getRealmId = (): string => {
@@ -1452,13 +1456,6 @@ const buildQboUrl = (entity: string): string => {
 const accountLookupCache = new Map<string, string>();
 const itemLookupCache = new Map<string, string>();
 
-const QUICKBOOKS_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
-
-interface RefreshTokenResult {
-  accessToken: string;
-  refreshToken?: string;
-}
-
 interface QuickBooksRequestContext {
   request: (url: string, init?: RequestInit) => Promise<Response>;
 }
@@ -1470,73 +1467,9 @@ const setAuthorizationHeader = (headers: Headers, token: string) => {
   }
 };
 
-const refreshAccessToken = async (fetcher: Fetcher): Promise<RefreshTokenResult> => {
-  const { clientId, clientSecret, refreshToken } = env.quickBooks;
-
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error(
-      'QuickBooks OAuth client ID, client secret, and refresh token must be configured to refresh the access token.'
-    );
-  }
-
-  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`, 'utf8').toString('base64');
-  const params = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-  });
-
-  const response = await fetcher(QUICKBOOKS_TOKEN_URL, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: `Basic ${basicAuth}`,
-    },
-    body: params.toString(),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => undefined);
-    throw new Error(
-      `Failed to refresh QuickBooks access token (status ${response.status}): ${
-        errorText ?? response.statusText
-      }`
-    );
-  }
-
-  const data = (await response.json().catch(() => undefined)) ?? {};
-  const accessToken =
-    data &&
-    typeof data === 'object' &&
-    typeof (data as Record<string, unknown>).access_token === 'string'
-      ? ((data as Record<string, unknown>).access_token as string).trim()
-      : '';
-
-  if (!accessToken) {
-    throw new Error(
-      'QuickBooks access token refresh response did not include an access_token value.'
-    );
-  }
-
-  const newRefreshToken =
-    data &&
-    typeof data === 'object' &&
-    typeof (data as Record<string, unknown>).refresh_token === 'string'
-      ? ((data as Record<string, unknown>).refresh_token as string).trim()
-      : undefined;
-
-  process.env.QBO_ACCESS_TOKEN = accessToken;
-  if (newRefreshToken) {
-    process.env.QBO_REFRESH_TOKEN = newRefreshToken;
-    env.quickBooks.refreshToken = newRefreshToken;
-  }
-
-  return { accessToken, refreshToken: newRefreshToken };
-};
-
-const createRequestContext = (options?: PostOptions): QuickBooksRequestContext => {
+const createRequestContext = async (options?: PostOptions): Promise<QuickBooksRequestContext> => {
   const fetcher = getFetcher(options);
-  let accessToken = getAccessToken(options);
+  let accessToken = await getAccessToken(options);
   let refreshAttempted = false;
 
   const execute = async (url: string, init: RequestInit = {}) => {
@@ -1557,7 +1490,7 @@ const createRequestContext = (options?: PostOptions): QuickBooksRequestContext =
       refreshAttempted = true;
 
       try {
-        const refreshed = await refreshAccessToken(fetcher);
+        const refreshed = await tokenManager.refreshTokens(fetcher);
         accessToken = refreshed.accessToken;
       } catch (error) {
         throw new Error(
@@ -2143,7 +2076,7 @@ const postToQbo = async <T extends QuickBooksDocType>(
         ? 'journalentry'
         : 'deposit'
   );
-  const context = createRequestContext(options);
+  const context = await createRequestContext(options);
 
   const references = collectReferences(entity, payload);
   await resolveAccountReferences(references.accounts, context);
@@ -2270,7 +2203,7 @@ export const postChargeToQbo = async ({
   if (strategy === 'sales-receipt') {
     const chargeId = stripe?.charge?.id ?? null;
     const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount, chargeId);
-    const context = createRequestContext(options);
+    const context = await createRequestContext(options);
     let receiptCustomer: SalesReceiptCustomerDetails | null = null;
 
     try {
@@ -2499,7 +2432,7 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
   }
 
   const url = buildQboQueryUrl(trimmedQuery);
-  const context = createRequestContext(options);
+  const context = await createRequestContext(options);
   const response = await context.request(url, {
     method: 'GET',
     headers: {

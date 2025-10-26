@@ -1,4 +1,4 @@
-const { logger: rootLogger } = require('../../../lib/logger');
+const rootLogger = console;
 const fs = require('fs');
 const path = require('path');
 
