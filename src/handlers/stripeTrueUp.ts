@@ -401,18 +401,34 @@ const upsertStripeCustomerToSalesforce = async (
     customerName = stripeCustomer.name || stripeCustomer.email || `Customer ${stripeCustomer.id}`;
   }
 
+  // Parse name into first and last name
+  let firstName: string | null = null;
+  let lastName: string | null = null;
+  
+  if (stripeCustomer.name) {
+    const nameParts = stripeCustomer.name.trim().split(/\s+/);
+    if (nameParts.length === 1) {
+      lastName = nameParts[0];
+    } else if (nameParts.length >= 2) {
+      firstName = nameParts[0];
+      lastName = nameParts.slice(1).join(' ');
+    }
+  }
+
   try {
     const result = await salesforce.upsertCustomerByStripeId({
       stripe_customer_id__c: stripeCustomer.id,
       Name: customerName,
       Email: stripeCustomer.email || null,
-      FirstName: null,
-      LastName: null,
+      FirstName: firstName,
+      LastName: lastName,
     });
     
     logger('[StripeTrueUp] Upserted customer to Salesforce', {
       customerId: stripeCustomer.id,
       customerName,
+      firstName,
+      lastName,
       contactId: result?.id,
     });
     

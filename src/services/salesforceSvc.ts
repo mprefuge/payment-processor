@@ -377,26 +377,35 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     );
     const name = ensureNonEmpty(dto.Name, 'Customer Name');
 
+    // Parse name into FirstName and LastName if not provided
+    let firstName = dto.FirstName?.trim() || null;
+    let lastName = dto.LastName?.trim() || null;
+
+    if (!firstName && !lastName) {
+      // Split the full name
+      const nameParts = name.trim().split(/\s+/);
+      if (nameParts.length === 1) {
+        // Single name - use as LastName (Salesforce requirement)
+        lastName = nameParts[0];
+      } else if (nameParts.length >= 2) {
+        // Multiple parts - first is FirstName, rest is LastName
+        firstName = nameParts[0];
+        lastName = nameParts.slice(1).join(' ');
+      }
+    }
+
     const contactRecord: Record<string, any> = {
       Stripe_Customer_Id__c: stripeCustomerId,
-      LastName: name, // Salesforce Contact requires LastName
+      LastName: lastName || name, // Salesforce Contact requires LastName
     };
+
+    if (firstName) {
+      contactRecord.FirstName = firstName;
+    }
 
     // Add optional fields if provided
     if (dto.Email && dto.Email.trim()) {
       contactRecord.Email = dto.Email.trim();
-    }
-
-    if (dto.FirstName && dto.FirstName.trim()) {
-      contactRecord.FirstName = dto.FirstName.trim();
-      // If FirstName is provided, use it for LastName if not already set with a proper value
-      if (!dto.LastName || !dto.LastName.trim()) {
-        contactRecord.LastName = name.includes(' ') ? name.split(' ').pop() : name;
-      }
-    }
-
-    if (dto.LastName && dto.LastName.trim()) {
-      contactRecord.LastName = dto.LastName.trim();
     }
 
     // Upsert using Stripe_Customer_Id__c as external ID
