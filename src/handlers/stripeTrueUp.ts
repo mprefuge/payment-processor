@@ -690,33 +690,6 @@ const respond = (context: HttpContext, status: number, body: Record<string, unkn
 };
 
 const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<void> => {
-  const token = process.env.STRIPE_TRUE_UP_TOKEN;
-  if (!token) {
-    respond(context, 500, {
-      error: 'configuration_error',
-      message: 'Stripe true-up token is not configured.',
-    });
-    return;
-  }
-
-  const authorization = getHeader(req, 'authorization');
-  if (!authorization || !authorization.toLowerCase().startsWith('bearer ')) {
-    respond(context, 401, {
-      error: 'unauthorized',
-      message: 'Authorization header with Bearer token is required.',
-    });
-    return;
-  }
-
-  const providedToken = authorization.slice(7).trim();
-  if (providedToken !== token) {
-    respond(context, 401, {
-      error: 'unauthorized',
-      message: 'Invalid authentication token.',
-    });
-    return;
-  }
-
   const queryRaw = (req as unknown as { query?: unknown }).query;
   let query: Record<string, string | undefined> = {};
 

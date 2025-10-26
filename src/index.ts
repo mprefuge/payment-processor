@@ -42,7 +42,7 @@ app.http('payoutSyncTrigger', {
 app.http('stripeTrueUp', {
   methods: ['GET', 'POST'],
   route: 'stripe/true-up',
-  authLevel: 'anonymous',
+  authLevel: 'function',
   handler: stripeTrueUp,
 });
 
