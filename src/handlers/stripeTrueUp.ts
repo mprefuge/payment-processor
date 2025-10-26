@@ -18,12 +18,10 @@ import {
   normalizeSince,
 } from '../services/qbo/stripe/fetchStripe';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
-import {
-  postChargeToQbo,
-  postRefundToQbo,
-  postPayoutToQbo,
-  type PostChargeToQboResult,
-} from '../services/qboSvc';
+
+// Import types only, not the actual implementations (to avoid env.ts loading)
+import type { PostChargeToQboResult } from '../services/qboSvc';
+
 import { AzureIdempotencyStore, type IdempotencyStore } from '../services/idempotencyStore';
 import {
   createSalesforceSvc,
@@ -44,10 +42,34 @@ interface FetchServices {
   payoutBalance: typeof fetchBalanceTransactionsForPayout;
 }
 
+// Lazy-load QBO functions to avoid importing env.ts at module load time
+let qboFunctions: any = null;
+const getQboFunctions = () => {
+  if (!qboFunctions) {
+    try {
+      const qboSvc = require('../services/qboSvc');
+      qboFunctions = {
+        postChargeToQbo: qboSvc.postChargeToQbo,
+        postRefundToQbo: qboSvc.postRefundToQbo,
+        postPayoutToQbo: qboSvc.postPayoutToQbo,
+      };
+    } catch (error) {
+      console.warn('[StripeTrueUp] Could not load qboSvc, QBO posting will be disabled:', error);
+      // Return no-op functions
+      qboFunctions = {
+        postChargeToQbo: async () => ({ success: false, error: 'QBO service not available' }),
+        postRefundToQbo: async () => ({ success: false, error: 'QBO service not available' }),
+        postPayoutToQbo: async () => ({ success: false, error: 'QBO service not available' }),
+      };
+    }
+  }
+  return qboFunctions;
+};
+
 interface AccountingServices {
-  postChargeToQbo: typeof postChargeToQbo;
-  postRefundToQbo: typeof postRefundToQbo;
-  postPayoutToQbo: typeof postPayoutToQbo;
+  postChargeToQbo: (charge: any, options?: any) => Promise<PostChargeToQboResult>;
+  postRefundToQbo: (refund: any, options?: any) => Promise<any>;
+  postPayoutToQbo: (payout: any, balanceTransactions?: any[], options?: any) => Promise<any>;
 }
 
 interface Dependencies {
@@ -160,11 +182,7 @@ const createDefaultDependencies = (): Dependencies => ({
   idempotencyStore:
     process.env.DISABLE_AZURE_TABLES === '1' ? createInMemoryStore() : new AzureIdempotencyStore(),
   getSalesforceSvc: createSalesforceGetter(),
-  accounting: {
-    postChargeToQbo,
-    postRefundToQbo,
-    postPayoutToQbo,
-  },
+  accounting: getQboFunctions(), // Lazy-load QBO functions
 });
 
 let dependencies: Dependencies = createDefaultDependencies();
