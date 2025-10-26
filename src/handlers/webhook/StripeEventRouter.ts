@@ -65,6 +65,8 @@ export class StripeEventRouter implements EventRouter {
       case 'invoice.payment_action_required':
         await handleInvoicePaymentActionRequired(context, event, deps);
         return;
+      case 'payout.created':
+      case 'payout.updated':
       case 'payout.paid':
       case 'payout.failed':
       case 'payout.canceled':

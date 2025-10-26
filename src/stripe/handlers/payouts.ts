@@ -523,15 +523,84 @@ export const handlePayoutEvent = async (
   const payout = event.data.object as Stripe.Payout;
   const stripe = ensureStripeClient(deps, event);
   const salesforce = await deps.getSalesforceSvc();
+  const eventType = event.type;
 
-  let transactions: Stripe.BalanceTransaction[] = [];
-  try {
-    transactions = await listPayoutTransactions(stripe, payout.id);
-  } catch (error) {
-    context.log('[StripeWebhook] Failed to load payout transactions', {
+  // For created and updated events, only track in Salesforce - don't sync to QBO
+  if (eventType === 'payout.created' || eventType === 'payout.updated') {
+    context.log('[StripeWebhook] Tracking payout lifecycle event in Salesforce', {
       payoutId: payout.id,
-      error: error instanceof Error ? error.message : String(error),
+      eventType,
+      status: payout.status,
+      automatic: payout.automatic,
     });
+
+    // Create or update payout transaction in Salesforce with pending status
+    const payoutTransaction = {
+      transaction_type__c: 'payout' as 'payout',
+      status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
+      stripe_payout_id__c: payout.id,
+      stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
+      amount_gross__c: (toCents(payout.amount) / 100), // Store the payout amount
+      amount_fee__c: 0, // Will be calculated when paid
+      amount_net__c: (toCents(payout.amount) / 100),
+      currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
+      memo__c: `Stripe Payout ${payout.id} - ${eventType.replace('payout.', '')} (${payout.automatic ? 'automatic' : 'manual'})`,
+      received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+      posted_to_qbo__c: false,
+      qbo_doc_type__c: null,
+      qbo_doc_id__c: null,
+      qbo_posted_at__c: null,
+      posting_error__c: null,
+    };
+
+    try {
+      await salesforce.upsertTransactionByExternalId(
+        payoutTransaction,
+        'stripe_balance_transaction_id__c'
+      );
+      context.log('[StripeWebhook] Tracked payout in Salesforce', {
+        payoutId: payout.id,
+        eventType,
+        amount: payoutTransaction.amount_net__c,
+      });
+    } catch (error) {
+      context.log('[StripeWebhook] Failed to track payout in Salesforce', {
+        payoutId: payout.id,
+        eventType,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    return;
+  }
+
+  // For paid/failed/canceled/reconciliation events, fetch transactions
+  // Skip transaction fetching for manual payouts as they don't have balance transaction history
+  let transactions: Stripe.BalanceTransaction[] = [];
+  const isManualPayout = payout.automatic === false;
+
+  if (isManualPayout) {
+    context.log('[StripeWebhook] Manual payout detected, skipping balance transaction retrieval', {
+      payoutId: payout.id,
+      eventType,
+    });
+  } else {
+    try {
+      transactions = await listPayoutTransactions(stripe, payout.id);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      context.log('[StripeWebhook] Failed to load payout transactions', {
+        payoutId: payout.id,
+        error: errorMessage,
+      });
+      
+      // If error mentions manual payouts, log more detail
+      if (errorMessage.includes('manual')) {
+        context.log('[StripeWebhook] Error indicates manual payout without transaction history', {
+          payoutId: payout.id,
+        });
+      }
+    }
   }
 
   if (transactions.length > 0) {
@@ -539,8 +608,8 @@ export const handlePayoutEvent = async (
   }
 
   const adapter = getPayoutAdapter(deps);
-  const eventType = event.type;
 
+  // Only sync to QBO when the payout is paid or reconciliation is completed
   if (eventType === 'payout.paid' || eventType === 'payout.reconciliation_completed') {
     if (!env.accounting.syncEnabled) {
       context.log('[StripeWebhook] Accounting sync disabled, skipping payout posting', {
@@ -560,8 +629,45 @@ export const handlePayoutEvent = async (
       return;
     }
 
+    // For manual payouts without transactions, create a simple deposit entry
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
     if (!depositInput) {
+      // If no deposit input (no transactions), still track in Salesforce for manual payouts
+      if (isManualPayout) {
+        const payoutTransaction = {
+          transaction_type__c: 'payout' as 'payout',
+          status__c: 'paid' as 'paid',
+          stripe_payout_id__c: payout.id,
+          stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
+          amount_gross__c: (toCents(payout.amount) / 100),
+          amount_fee__c: 0,
+          amount_net__c: (toCents(payout.amount) / 100),
+          currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
+          memo__c: `Manual Stripe Payout ${payout.id} - No transaction details available`,
+          received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+          posted_to_qbo__c: false,
+          qbo_doc_type__c: null,
+          qbo_doc_id__c: null,
+          qbo_posted_at__c: null,
+          posting_error__c: 'Manual payout without balance transaction history',
+        };
+
+        try {
+          await salesforce.upsertTransactionByExternalId(
+            payoutTransaction,
+            'stripe_balance_transaction_id__c'
+          );
+          context.log('[StripeWebhook] Tracked manual payout in Salesforce (no QBO sync)', {
+            payoutId: payout.id,
+            amount: payoutTransaction.amount_net__c,
+          });
+        } catch (error) {
+          context.log('[StripeWebhook] Failed to track manual payout in Salesforce', {
+            payoutId: payout.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       return;
     }
 
