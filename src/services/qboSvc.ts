@@ -429,7 +429,22 @@ const deriveSalesReceiptCustomer = (source: StripeCustomerContext): EnsureCustom
             : undefined)
     ) ?? null;
 
+  // Extract transaction name from charge or checkout session metadata (category or transactionType)
+  const chargeMetadata = source.charge?.metadata as Record<string, unknown> | null | undefined;
+  const checkoutMetadata = source.checkoutSession?.metadata as Record<string, unknown> | null | undefined;
+  
+  const transactionName =
+    toTrimmed(chargeMetadata?.category as string | undefined) ||
+    toTrimmed(chargeMetadata?.Category as string | undefined) ||
+    toTrimmed(chargeMetadata?.transactionType as string | undefined) ||
+    toTrimmed(chargeMetadata?.TransactionType as string | undefined) ||
+    toTrimmed(checkoutMetadata?.category as string | undefined) ||
+    toTrimmed(checkoutMetadata?.Category as string | undefined) ||
+    toTrimmed(checkoutMetadata?.transactionType as string | undefined) ||
+    toTrimmed(checkoutMetadata?.TransactionType as string | undefined);
+
   const preferredName =
+    transactionName || // Use transaction name/category as highest priority
     toTrimmed(activeCustomer?.name) ||
     toTrimmed(checkoutDetails?.name) ||
     toTrimmed(paymentShipping?.name) ||

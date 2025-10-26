@@ -73,6 +73,14 @@ export interface UpsertOptions {
   overrideId?: string | null;
 }
 
+export interface CustomerUpsertDTO {
+  stripe_customer_id__c: string;
+  Name: string;
+  Email?: string | null;
+  FirstName?: string | null;
+  LastName?: string | null;
+}
+
 export interface SalesforceSvc {
   upsertTransactionByExternalId: (
     dto: TransactionUpsertDTO,
@@ -85,6 +93,7 @@ export interface SalesforceSvc {
     key: TransactionExternalIdField,
     value: string
   ) => Promise<string | null>;
+  upsertCustomerByStripeId: (dto: CustomerUpsertDTO) => Promise<UpsertResult>;
 }
 
 type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -361,11 +370,58 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     );
   };
 
+  const upsertCustomerByStripeId = async (dto: CustomerUpsertDTO): Promise<UpsertResult> => {
+    const stripeCustomerId = ensureNonEmpty(
+      dto.stripe_customer_id__c,
+      'Stripe Customer ID'
+    );
+    const name = ensureNonEmpty(dto.Name, 'Customer Name');
+
+    const contactRecord: Record<string, any> = {
+      Stripe_Customer_Id__c: stripeCustomerId,
+      LastName: name, // Salesforce Contact requires LastName
+    };
+
+    // Add optional fields if provided
+    if (dto.Email && dto.Email.trim()) {
+      contactRecord.Email = dto.Email.trim();
+    }
+
+    if (dto.FirstName && dto.FirstName.trim()) {
+      contactRecord.FirstName = dto.FirstName.trim();
+      // If FirstName is provided, use it for LastName if not already set with a proper value
+      if (!dto.LastName || !dto.LastName.trim()) {
+        contactRecord.LastName = name.includes(' ') ? name.split(' ').pop() : name;
+      }
+    }
+
+    if (dto.LastName && dto.LastName.trim()) {
+      contactRecord.LastName = dto.LastName.trim();
+    }
+
+    // Upsert using Stripe_Customer_Id__c as external ID
+    const [result] = toArray(
+      await connection.upsert('Contact', [contactRecord], 'Stripe_Customer_Id__c', {
+        allOrNone: false,
+      })
+    );
+
+    if (!result.success) {
+      const message =
+        collectErrorMessages([result]) ||
+        `Failed to upsert contact with Stripe Customer ID ${stripeCustomerId}.`;
+      throw new Error(message);
+    }
+
+    return result;
+  };
+
   return {
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
     markPostedToQbo,
     findTransactionIdByExternalId,
+    upsertCustomerByStripeId,
   };
 };
 

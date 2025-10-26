@@ -96,6 +96,9 @@ const createDisabledSalesforceSvc = (): SalesforceSvc => {
     async findTransactionIdByExternalId(): Promise<string | null> {
       return null;
     },
+    async upsertCustomerByStripeId(): Promise<UpsertResult> {
+      return disabledUpsertResult;
+    },
   };
 };
 
