@@ -689,8 +689,58 @@ const respond = (context: HttpContext, status: number, body: Record<string, unkn
   };
 };
 
+const validateEnvironment = (): { valid: boolean; errors: string[] } => {
+  const errors: string[] = [];
+  const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
+
+  // Check Stripe credentials
+  if (liveMode) {
+    if (!process.env.STRIPE_LIVE_SECRET_KEY && !env.stripe.secret) {
+      errors.push('STRIPE_LIVE_SECRET_KEY is not configured for live mode');
+    }
+  } else {
+    if (!process.env.STRIPE_TEST_SECRET_KEY && !env.stripe.secret) {
+      errors.push('STRIPE_TEST_SECRET_KEY is not configured for test mode');
+    }
+  }
+
+  // Check Salesforce credentials (optional but warn if missing)
+  if (!process.env.SALESFORCE_USERNAME && !process.env.SF_USERNAME) {
+    errors.push('SALESFORCE_USERNAME or SF_USERNAME is not configured (Salesforce sync will be skipped)');
+  }
+  if (!process.env.SALESFORCE_PASSWORD && !process.env.SF_PASSWORD) {
+    errors.push('SALESFORCE_PASSWORD or SF_PASSWORD is not configured (Salesforce sync will be skipped)');
+  }
+
+  // Check QBO credentials (using the actual variable names from env.ts)
+  if (!process.env.QBO_CLIENT_ID) {
+    errors.push('QBO_CLIENT_ID is not configured (QuickBooks sync will fail)');
+  }
+  if (!process.env.QBO_CLIENT_SECRET) {
+    errors.push('QBO_CLIENT_SECRET is not configured (QuickBooks sync will fail)');
+  }
+  if (!process.env.QBO_REALM_ID && !process.env.QBO_COMPANY_ID) {
+    errors.push('QBO_REALM_ID or QBO_COMPANY_ID is not configured (QuickBooks sync will fail)');
+  }
+
+  return { valid: errors.length === 0, errors };
+};
+
 const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<void> => {
-  const queryRaw = (req as unknown as { query?: unknown }).query;
+  try {
+    // Validate environment first
+    const envCheck = validateEnvironment();
+    if (!envCheck.valid) {
+      context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
+      respond(context, 500, {
+        error: 'configuration_error',
+        message: 'Required environment variables are not configured.',
+        details: envCheck.errors,
+      });
+      return;
+    }
+
+    const queryRaw = (req as unknown as { query?: unknown }).query;
   let query: Record<string, string | undefined> = {};
 
   if (queryRaw instanceof URLSearchParams) {
@@ -751,7 +801,6 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
   const dryRun = parseBoolean(query.dryRun, false);
   const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
-  try {
     const stripe = dependencies.stripe.getClient(liveMode);
 
     let summary: ProcessSummary;
@@ -782,10 +831,12 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
   } catch (error) {
     context.log('[StripeTrueUp] Unhandled error', {
       error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
     });
     respond(context, 500, {
       error: 'internal_error',
       message: 'Failed to complete Stripe true-up operation.',
+      details: error instanceof Error ? error.message : String(error),
     });
   }
 };
