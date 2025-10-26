@@ -2,7 +2,14 @@ import type { InvocationContext, HttpRequest } from '@azure/functions';
 import Stripe from 'stripe';
 import jsforce from 'jsforce';
 
-import env from '../config/env';
+// Try to import env config, but don't fail if it's incomplete
+let env: any = { stripe: { secret: '' } };
+try {
+  env = require('../config/env').default;
+} catch (error) {
+  console.warn('[StripeTrueUp] env.ts failed to load, will use environment variables directly:', error);
+}
+
 import {
   fetchStripeChargesSince,
   fetchStripeRefundsSince,
