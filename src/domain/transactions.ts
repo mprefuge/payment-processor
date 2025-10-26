@@ -619,7 +619,7 @@ export const mapStripeToTransaction = (
       'posted_to_qbo__c',
       'Posted_to_QBO__c',
       'posted_to_qbo'
-    ),
+    ) ?? false,
     qbo_doc_type__c: parseMetadataString(
       combinedMetadata,
       'qbo_doc_type__c',

@@ -131,6 +131,7 @@ const buildCreditNoteTransaction = (
         : null,
     received_at__c: timestampToIsoString(creditNote.created ?? null),
     memo__c: memoParts.join('; '),
+    posted_to_qbo__c: false,
   };
 };
 

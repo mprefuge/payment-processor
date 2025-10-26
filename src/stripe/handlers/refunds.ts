@@ -347,6 +347,7 @@ const updateChargeTransaction = async (
     received_at__c: timestampToIsoString(charge.created ?? null),
     payment_brand__c: charge.payment_method_details?.card?.brand ?? null,
     payment_last4__c: charge.payment_method_details?.card?.last4 ?? null,
+    posted_to_qbo__c: false,
   };
 
   await salesforce.upsertTransactionByExternalId(
@@ -802,6 +803,7 @@ const buildRefundTransaction = (
     parent_transaction__c: parentId,
     payment_brand__c: charge?.payment_method_details?.card?.brand ?? null,
     payment_last4__c: charge?.payment_method_details?.card?.last4 ?? null,
+    posted_to_qbo__c: false,
   };
 };
 

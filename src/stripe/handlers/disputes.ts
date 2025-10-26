@@ -96,6 +96,7 @@ export const handleDisputeClosed = async (
     parent_transaction__c: parentId,
     payment_brand__c: (charge as Stripe.Charge | null)?.payment_method_details?.card?.brand ?? null,
     payment_last4__c: (charge as Stripe.Charge | null)?.payment_method_details?.card?.last4 ?? null,
+    posted_to_qbo__c: false,
   };
 
   context.log('[StripeWebhook] Upserting dispute transaction', {
