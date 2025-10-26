@@ -704,8 +704,8 @@ const processPayouts = async (
   return summary;
 };
 
-const respond = (context: HttpContext, status: number, body: Record<string, unknown>): void => {
-  context.res = {
+const respond = (status: number, body: Record<string, unknown>) => {
+  return {
     status,
     headers: {
       'Content-Type': 'application/json',
@@ -751,18 +751,17 @@ const validateEnvironment = (): { valid: boolean; errors: string[] } => {
   return { valid: errors.length === 0, errors };
 };
 
-const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<void> => {
+const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promise<any> => {
   try {
     // Validate environment first
     const envCheck = validateEnvironment();
     if (!envCheck.valid) {
       context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
-      respond(context, 500, {
+      return respond(500, {
         error: 'configuration_error',
         message: 'Required environment variables are not configured.',
         details: envCheck.errors,
       });
-      return;
     }
 
     const queryRaw = (req as unknown as { query?: unknown }).query;
@@ -775,7 +774,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
   }
   const fromParam = query.from;
   if (!fromParam) {
-    respond(context, 400, {
+    return respond(400, {
       error: 'bad_request',
       message: 'Query parameter "from" is required.',
     });
@@ -786,7 +785,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
   try {
     from = toEpochSeconds(fromParam);
   } catch (error) {
-    respond(context, 400, {
+    return respond(400, {
       error: 'bad_request',
       message: error instanceof Error ? error.message : String(error),
     });
@@ -798,7 +797,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
     try {
       to = toEpochSeconds(query.to);
     } catch (error) {
-      respond(context, 400, {
+      return respond(400, {
         error: 'bad_request',
         message: error instanceof Error ? error.message : String(error),
       });
@@ -806,7 +805,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
     }
 
     if (to < from) {
-      respond(context, 400, {
+      return respond(400, {
         error: 'bad_request',
         message: 'The "to" parameter must be greater than or equal to "from".',
       });
@@ -816,7 +815,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
 
   const type = (query.type || 'payments').toLowerCase();
   if (!['payments', 'refunds', 'payouts'].includes(type)) {
-    respond(context, 400, {
+    return respond(400, {
       error: 'bad_request',
       message: 'Query parameter "type" must be one of payments, refunds, or payouts.',
     });
@@ -843,7 +842,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
       context.log('[StripeTrueUp] Idempotency store flushed successfully');
     }
 
-    respond(context, 200, {
+    return respond(200, {
       type,
       dryRun,
       liveMode,
@@ -858,7 +857,7 @@ const stripeTrueUp = async (context: HttpContext, req: HttpRequest): Promise<voi
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
     });
-    respond(context, 500, {
+    return respond(500, {
       error: 'internal_error',
       message: 'Failed to complete Stripe true-up operation.',
       details: error instanceof Error ? error.message : String(error),
