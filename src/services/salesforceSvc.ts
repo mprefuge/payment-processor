@@ -89,6 +89,7 @@ export interface SalesforceSvc {
 
 type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
   Id?: string | null | undefined;
+  RecordTypeId?: string;
 };
 
 type TransactionRecord = Record<string, TransactionFieldValue>;
@@ -100,6 +101,10 @@ const TRANSACTION_OBJECT = 'Transaction__c';
 const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
   if (field === 'Id') {
     return 'Id';
+  }
+
+  if (field === 'RecordTypeId') {
+    return 'RecordTypeId';
   }
 
   const apiName = TRANSACTION_FIELD_API_NAMES[field as keyof TransactionUpsertDTO];
@@ -164,6 +169,25 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return [];
   };
 
+  const resolveRecordTypeId = async (recordTypeName: string): Promise<string> => {
+    const escapedName = escapeForSoqlLiteral(recordTypeName);
+    const soql = `SELECT Id FROM RecordType WHERE SObjectType = '${TRANSACTION_OBJECT}' AND Name = '${escapedName}' LIMIT 1`;
+
+    const result = await connection.query<{ Id: string }>(soql);
+    const records = toLookupRecords(result);
+
+    const recordWithId = records.find(
+      (record): record is { Id: string } =>
+        typeof record.Id === 'string' && record.Id.trim().length > 0
+    );
+
+    if (!recordWithId) {
+      throw new Error(`Record type '${recordTypeName}' not found for ${TRANSACTION_OBJECT}`);
+    }
+
+    return recordWithId.Id;
+  };
+
   const resolveExistingTransactionId = async (
     field: TransactionExternalIdField,
     value: string
@@ -197,11 +221,17 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       typeof options.overrideId === 'string' && options.overrideId.trim().length > 0
         ? options.overrideId.trim()
         : null;
+
+    // Determine record type based on transaction type
+    const recordTypeName = dto.transaction_type__c === 'payout' ? 'Payout' : 'General';
+    const recordTypeId = await resolveRecordTypeId(recordTypeName);
+
     const records = [
       sanitizeTransactionRecord({
         ...dto,
         [key]: normalizedExternalId,
         Id: overrideId ?? undefined,
+        RecordTypeId: recordTypeId,
       }),
     ];
     const [result] = toArray(
@@ -225,6 +255,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
               ...dto,
               [key]: normalizedExternalId,
               Id: fallbackId,
+              RecordTypeId: recordTypeId,
             }),
           ];
 
