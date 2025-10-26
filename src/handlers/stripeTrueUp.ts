@@ -383,8 +383,8 @@ const getTransactionNameFromMetadata = (charge: Stripe.Charge): string | null =>
   return null;
 };
 
-const upsertStripeCustomerToSalesforce = async (
-  salesforce: SalesforceSvc,
+const findOrCreateContactInSalesforce = async (
+  salesforceSvc: SalesforceSvc,
   customer: Stripe.Customer | Stripe.DeletedCustomer | null,
   transactionName: string | null,
   logger: (...args: unknown[]) => void
@@ -415,32 +415,206 @@ const upsertStripeCustomerToSalesforce = async (
     }
   }
 
+  // If we still don't have a lastName, use the customer name as lastName (required by Salesforce)
+  if (!lastName) {
+    lastName = customerName;
+  }
+
   try {
-    const result = await salesforce.upsertCustomerByStripeId({
-      stripe_customer_id__c: stripeCustomer.id,
-      Name: customerName,
-      Email: stripeCustomer.email || null,
-      FirstName: firstName,
-      LastName: lastName,
-    });
-    
-    logger('[StripeTrueUp] Upserted customer to Salesforce', {
-      customerId: stripeCustomer.id,
-      customerName,
-      firstName,
-      lastName,
-      contactId: result?.id,
-    });
-    
-    return result?.id ? { id: result.id } : null;
+    // Get the jsforce connection from the SalesforceSvc
+    // We need to access the internal connection to run SOQL queries
+    const connection = (salesforceSvc as any).__connection || 
+                       (await createSalesforceConnection());
+
+    // Step 1: Search for existing contact using SOQL
+    const whereConditions: string[] = [];
+
+    // Priority 1: Search by Stripe Customer ID
+    if (stripeCustomer.id) {
+      const escapedId = stripeCustomer.id.replace(/'/g, "\\'");
+      whereConditions.push(`Stripe_Customer_Id__c = '${escapedId}'`);
+    }
+
+    // Priority 2: Search by email
+    if (stripeCustomer.email) {
+      const escapedEmail = stripeCustomer.email.replace(/'/g, "\\'");
+      whereConditions.push(`Email = '${escapedEmail}'`);
+    }
+
+    // Priority 3: Search by name combination
+    if (firstName && lastName) {
+      const escapedFirst = firstName.replace(/'/g, "\\'");
+      const escapedLast = lastName.replace(/'/g, "\\'");
+      whereConditions.push(
+        `(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`
+      );
+    }
+
+    let existingContact: any = null;
+
+    if (whereConditions.length > 0) {
+      const query = `SELECT Id, FirstName, LastName, Email, Stripe_Customer_Id__c 
+                     FROM Contact 
+                     WHERE ${whereConditions.join(' OR ')} 
+                     ORDER BY CreatedDate DESC 
+                     LIMIT 10`;
+
+      logger('[StripeTrueUp] Searching for existing contact', { 
+        customerId: stripeCustomer.id,
+        email: stripeCustomer.email,
+        name: customerName 
+      });
+
+      const result = await connection.query(query);
+
+      if (result.records && result.records.length > 0) {
+        // Priority matching:
+        // 1. Exact Stripe Customer ID match
+        const stripeIdMatch = result.records.find(
+          (c: any) => c.Stripe_Customer_Id__c === stripeCustomer.id
+        );
+
+        if (stripeIdMatch) {
+          existingContact = stripeIdMatch;
+          logger('[StripeTrueUp] Found contact by Stripe Customer ID', {
+            contactId: existingContact.Id,
+            stripeCustomerId: stripeCustomer.id,
+          });
+        } else if (firstName && lastName) {
+          // 2. Name match (to prevent updating wrong contact)
+          const nameMatch = result.records.find((c: any) => {
+            const firstNameMatch =
+              c.FirstName &&
+              firstName &&
+              c.FirstName.toLowerCase() === firstName.toLowerCase();
+            const lastNameMatch =
+              c.LastName &&
+              lastName &&
+              c.LastName.toLowerCase() === lastName.toLowerCase();
+            return firstNameMatch && lastNameMatch;
+          });
+
+          if (nameMatch) {
+            existingContact = nameMatch;
+            logger('[StripeTrueUp] Found contact by name match', {
+              contactId: existingContact.Id,
+              firstName,
+              lastName,
+            });
+          }
+        } else {
+          // 3. Use first result (email match)
+          existingContact = result.records[0];
+          logger('[StripeTrueUp] Found contact by email', {
+            contactId: existingContact.Id,
+            email: stripeCustomer.email,
+          });
+        }
+      }
+    }
+
+    // Step 2: Update existing contact or create new one
+    if (existingContact) {
+      // Update existing contact
+      const updateFields: Record<string, any> = {
+        Id: existingContact.Id,
+      };
+
+      // Update Stripe Customer ID if not set
+      if (!existingContact.Stripe_Customer_Id__c && stripeCustomer.id) {
+        updateFields.Stripe_Customer_Id__c = stripeCustomer.id;
+        logger('[StripeTrueUp] Adding Stripe Customer ID to existing contact', {
+          contactId: existingContact.Id,
+          stripeCustomerId: stripeCustomer.id,
+        });
+      }
+
+      // Update email if provided and different
+      if (stripeCustomer.email && stripeCustomer.email !== existingContact.Email) {
+        updateFields.Email = stripeCustomer.email;
+      }
+
+      // Update name if provided and different
+      if (firstName && firstName !== existingContact.FirstName) {
+        updateFields.FirstName = firstName;
+      }
+      if (lastName && lastName !== existingContact.LastName) {
+        updateFields.LastName = lastName;
+      }
+
+      // Only update if there are changes beyond the Id
+      if (Object.keys(updateFields).length > 1) {
+        const updateResult = await connection.sobject('Contact').update(updateFields);
+        
+        if (!updateResult.success) {
+          logger('[StripeTrueUp] Failed to update contact', {
+            contactId: existingContact.Id,
+            errors: updateResult.errors,
+          });
+        } else {
+          logger('[StripeTrueUp] Updated existing contact', {
+            contactId: existingContact.Id,
+            updatedFields: Object.keys(updateFields).filter(k => k !== 'Id'),
+          });
+        }
+      }
+
+      return { id: existingContact.Id };
+    } else {
+      // Create new contact
+      const contactRecord: Record<string, any> = {
+        FirstName: firstName,
+        LastName: lastName,
+        Email: stripeCustomer.email || null,
+        Stripe_Customer_Id__c: stripeCustomer.id,
+      };
+
+      logger('[StripeTrueUp] Creating new contact', {
+        stripeCustomerId: stripeCustomer.id,
+        firstName,
+        lastName,
+        email: stripeCustomer.email,
+      });
+
+      const createResult = await connection.sobject('Contact').create(contactRecord);
+
+      if (!createResult.success) {
+        logger('[StripeTrueUp] Failed to create contact', {
+          errors: createResult.errors,
+        });
+        return null;
+      }
+
+      logger('[StripeTrueUp] Created new contact', {
+        contactId: createResult.id,
+        stripeCustomerId: stripeCustomer.id,
+      });
+
+      return { id: createResult.id };
+    }
   } catch (error) {
-    logger('[StripeTrueUp] Failed to upsert customer to Salesforce', {
+    logger('[StripeTrueUp] Failed to find/create contact in Salesforce', {
       customerId: stripeCustomer.id,
       error: error instanceof Error ? error.message : String(error),
     });
     // Don't throw - continue processing even if customer upsert fails
     return null;
   }
+};
+
+const createSalesforceConnection = async (): Promise<any> => {
+  const username = process.env.SALESFORCE_USERNAME;
+  const password = process.env.SALESFORCE_PASSWORD;
+  const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
+  const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
+
+  if (!username || !password) {
+    throw new Error('Salesforce credentials are not configured.');
+  }
+
+  const connection = new jsforce.Connection({ loginUrl });
+  await connection.login(username, `${password}${securityToken}`);
+  return connection;
 };
 
 const processPayments = async (
@@ -547,7 +721,7 @@ const processPayments = async (
         let contactId: string | null = null;
         if (stripeCustomer && !stripeCustomer.deleted) {
           try {
-            const customerUpsertResult = await upsertStripeCustomerToSalesforce(
+            const customerUpsertResult = await findOrCreateContactInSalesforce(
               salesforce,
               stripeCustomer,
               transactionName,
@@ -555,7 +729,7 @@ const processPayments = async (
             );
             contactId = customerUpsertResult?.id ?? null;
           } catch (error) {
-            context.log('[StripeTrueUp] Failed to upsert customer to Salesforce', {
+            context.log('[StripeTrueUp] Failed to find/create contact in Salesforce', {
               customerId: stripeCustomer.id,
               error: error instanceof Error ? error.message : String(error),
             });
@@ -750,7 +924,7 @@ const processRefunds = async (
             context.log
           );
           const transactionName = getTransactionNameFromMetadata(chargeFragment);
-          const customerUpsertResult = await upsertStripeCustomerToSalesforce(
+          const customerUpsertResult = await findOrCreateContactInSalesforce(
             salesforce,
             stripeCustomer,
             transactionName,
