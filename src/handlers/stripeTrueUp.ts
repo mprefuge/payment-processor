@@ -147,6 +147,7 @@ const createStripeServices = (): StripeServices => {
 };
 
 let defaultSalesforceSvcPromise: Promise<SalesforceSvc> | null = null;
+let salesforceConnection: any = null;
 
 const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   return async (): Promise<SalesforceSvc> => {
@@ -161,9 +162,9 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
           throw new Error('Salesforce credentials are not configured.');
         }
 
-        const connection = new jsforce.Connection({ loginUrl });
-        await connection.login(username, `${password}${securityToken}`);
-        return createSalesforceSvc({ connection });
+        salesforceConnection = new jsforce.Connection({ loginUrl });
+        await salesforceConnection.login(username, `${password}${securityToken}`);
+        return createSalesforceSvc({ connection: salesforceConnection });
       })();
     }
 
@@ -220,6 +221,7 @@ const setDependencies = (overrides: DependencyOverrides = {}): void => {
 
 const resetDependencies = (): void => {
   defaultSalesforceSvcPromise = null;
+  salesforceConnection = null;
   dependencies = createDefaultDependencies();
 };
 
@@ -420,11 +422,24 @@ const findOrCreateContactInSalesforce = async (
     lastName = customerName;
   }
 
+  logger('[StripeTrueUp] Starting contact find/create process', {
+    customerId: stripeCustomer.id,
+    customerName,
+    firstName,
+    lastName,
+    email: stripeCustomer.email,
+  });
+
   try {
-    // Get the jsforce connection from the SalesforceSvc
-    // We need to access the internal connection to run SOQL queries
-    const connection = (salesforceSvc as any).__connection || 
-                       (await createSalesforceConnection());
+    // Get the jsforce connection - use the global one or create a new one
+    const connection = salesforceConnection || (await createSalesforceConnection());
+
+    if (!connection) {
+      logger('[StripeTrueUp] No Salesforce connection available');
+      return null;
+    }
+
+    logger('[StripeTrueUp] Salesforce connection established');
 
     // Step 1: Search for existing contact using SOQL
     const whereConditions: string[] = [];
@@ -459,13 +474,16 @@ const findOrCreateContactInSalesforce = async (
                      ORDER BY CreatedDate DESC 
                      LIMIT 10`;
 
-      logger('[StripeTrueUp] Searching for existing contact', { 
-        customerId: stripeCustomer.id,
-        email: stripeCustomer.email,
-        name: customerName 
+      logger('[StripeTrueUp] Executing SOQL query', { 
+        query,
+        whereConditions,
       });
 
       const result = await connection.query(query);
+
+      logger('[StripeTrueUp] SOQL query completed', {
+        recordCount: result.records?.length || 0,
+      });
 
       if (result.records && result.records.length > 0) {
         // Priority matching:
@@ -511,6 +529,8 @@ const findOrCreateContactInSalesforce = async (
           });
         }
       }
+    } else {
+      logger('[StripeTrueUp] No search conditions available, will create new contact');
     }
 
     // Step 2: Update existing contact or create new one
