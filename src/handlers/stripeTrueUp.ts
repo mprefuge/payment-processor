@@ -388,9 +388,9 @@ const upsertStripeCustomerToSalesforce = async (
   customer: Stripe.Customer | Stripe.DeletedCustomer | null,
   transactionName: string | null,
   logger: (...args: unknown[]) => void
-): Promise<void> => {
+): Promise<{ id: string } | null> => {
   if (!customer || customer.deleted) {
-    return;
+    return null;
   }
 
   const stripeCustomer = customer as Stripe.Customer;
@@ -402,7 +402,7 @@ const upsertStripeCustomerToSalesforce = async (
   }
 
   try {
-    await salesforce.upsertCustomerByStripeId({
+    const result = await salesforce.upsertCustomerByStripeId({
       stripe_customer_id__c: stripeCustomer.id,
       Name: customerName,
       Email: stripeCustomer.email || null,
@@ -413,13 +413,17 @@ const upsertStripeCustomerToSalesforce = async (
     logger('[StripeTrueUp] Upserted customer to Salesforce', {
       customerId: stripeCustomer.id,
       customerName,
+      contactId: result?.id,
     });
+    
+    return result?.id ? { id: result.id } : null;
   } catch (error) {
     logger('[StripeTrueUp] Failed to upsert customer to Salesforce', {
       customerId: stripeCustomer.id,
       error: error instanceof Error ? error.message : String(error),
     });
     // Don't throw - continue processing even if customer upsert fails
+    return null;
   }
 };
 
@@ -513,18 +517,7 @@ const processPayments = async (
 
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
-        const transaction = mapStripeToTransaction({
-          paymentIntent: null,
-          charge: charge as Stripe.Charge,
-          balanceTransaction,
-        });
-
-        const upsertResult = await salesforce.upsertTransactionByExternalId(
-          transaction,
-          'stripe_charge_id__c'
-        );
-        summary.salesforceUpdates += 1;
-
+        
         const stripeCustomer = await resolveCustomerForCharge(
           stripe,
           charge as Stripe.Charge,
@@ -534,13 +527,48 @@ const processPayments = async (
         // Get transaction name from charge metadata to use as customer category
         const transactionName = getTransactionNameFromMetadata(charge as Stripe.Charge);
         
-        // Upsert customer to Salesforce with transaction name as category
-        await upsertStripeCustomerToSalesforce(
-          salesforce,
-          stripeCustomer,
-          transactionName,
-          context.log
+        // Upsert customer to Salesforce first to get the Contact ID
+        let contactId: string | null = null;
+        if (stripeCustomer && !stripeCustomer.deleted) {
+          try {
+            const customerUpsertResult = await upsertStripeCustomerToSalesforce(
+              salesforce,
+              stripeCustomer,
+              transactionName,
+              context.log
+            );
+            contactId = customerUpsertResult?.id ?? null;
+          } catch (error) {
+            context.log('[StripeTrueUp] Failed to upsert customer to Salesforce', {
+              customerId: stripeCustomer.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        // Build transaction with contact link if we have a contact ID
+        const transaction = mapStripeToTransaction({
+          paymentIntent: null,
+          charge: charge as Stripe.Charge,
+          balanceTransaction,
+        });
+
+        if (contactId) {
+          transaction.contact__c = contactId;
+        }
+
+        const upsertResult = await salesforce.upsertTransactionByExternalId(
+          transaction,
+          'stripe_charge_id__c'
         );
+        summary.salesforceUpdates += 1;
+
+        // Create a minimal checkout session object with metadata for QBO customer naming
+        const chargeMetadata = (charge as Stripe.Charge).metadata as Record<string, unknown> | null | undefined;
+        const checkoutSessionStub = chargeMetadata ? {
+          id: `stub_${charge.id}`,
+          metadata: chargeMetadata,
+        } as Partial<Stripe.Checkout.Session> : undefined;
 
         const posting = await dependencies.accounting.postChargeToQbo({
           gross: Math.abs(balanceTransaction.amount ?? 0),
@@ -553,6 +581,7 @@ const processPayments = async (
             charge: charge as Stripe.Charge,
             paymentIntent: null,
             customer: stripeCustomer,
+            checkoutSession: checkoutSessionStub as Stripe.Checkout.Session | undefined,
           },
         });
         summary.qboPosts += 1;
@@ -694,6 +723,26 @@ const processRefunds = async (
           }
         }
 
+        // Upsert customer first to get the Contact ID
+        // Note: Customer sync for refunds is for Salesforce only
+        // QBO refunds are posted as journal entries without customer association
+        let contactId: string | null = null;
+        if (chargeFragment && chargeFragment.customer) {
+          const stripeCustomer = await resolveCustomerForCharge(
+            stripe,
+            chargeFragment,
+            context.log
+          );
+          const transactionName = getTransactionNameFromMetadata(chargeFragment);
+          const customerUpsertResult = await upsertStripeCustomerToSalesforce(
+            salesforce,
+            stripeCustomer,
+            transactionName,
+            context.log
+          );
+          contactId = customerUpsertResult?.id ?? null;
+        }
+
         const transaction: TransactionUpsertDTO = mapStripeToTransaction({
           paymentIntent: null,
           charge: chargeFragment ?? null,
@@ -704,27 +753,15 @@ const processRefunds = async (
           transaction.parent_transaction__c = parentId;
         }
 
+        if (contactId) {
+          transaction.contact__c = contactId;
+        }
+
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
           'stripe_refund_id__c'
         );
         summary.salesforceUpdates += 1;
-
-        // Upsert customer if charge has customer info
-        if (chargeFragment && chargeFragment.customer) {
-          const stripeCustomer = await resolveCustomerForCharge(
-            stripe,
-            chargeFragment,
-            context.log
-          );
-          const transactionName = getTransactionNameFromMetadata(chargeFragment);
-          await upsertStripeCustomerToSalesforce(
-            salesforce,
-            stripeCustomer,
-            transactionName,
-            context.log
-          );
-        }
 
         const posting = await dependencies.accounting.postRefundToQbo({
           amount: Math.abs(balanceTransaction.amount ?? 0),
