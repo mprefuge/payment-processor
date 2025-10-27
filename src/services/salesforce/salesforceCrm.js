@@ -617,6 +617,17 @@ class SalesforceCrmService extends BaseCrmService {
       throw new Error('External ID field is required for transaction upsert');
     }
 
+    // Validate required fields before upserting
+    if (transactionData.Status__c == null || transactionData.Amount_Gross__c == null) {
+      logger.warn('[SalesforceCrm] Skipping transaction upsert due to missing required fields', {
+        externalIdField,
+        status: transactionData.Status__c,
+        amountGross: transactionData.Amount_Gross__c,
+        transactionData,
+      });
+      return null;
+    }
+
     try {
       const result = await this.conn
         .sobject('Transaction__c')
