@@ -394,32 +394,158 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       }
     }
 
-    const contactRecord: Record<string, any> = {
-      Stripe_Customer_Id__c: stripeCustomerId,
-      LastName: lastName || name, // Salesforce Contact requires LastName
-    };
-
-    if (firstName) {
-      contactRecord.FirstName = firstName;
+    // Build SOQL query to search for existing contact
+    const whereConditions: string[] = [];
+    
+    // Search by Stripe Customer ID
+    if (stripeCustomerId) {
+      const escapedId = stripeCustomerId.replace(/'/g, "\\'");
+      whereConditions.push(`Stripe_Customer_Id__c = '${escapedId}'`);
     }
-
-    // Add optional fields if provided
+    
+    // Search by email
     if (dto.Email && dto.Email.trim()) {
-      contactRecord.Email = dto.Email.trim();
+      const escapedEmail = dto.Email.trim().replace(/'/g, "\\'");
+      whereConditions.push(`Email = '${escapedEmail}'`);
+    }
+    
+    // Search by name combination
+    if (firstName && lastName) {
+      const escapedFirst = firstName.replace(/'/g, "\\'");
+      const escapedLast = lastName.replace(/'/g, "\\'");
+      whereConditions.push(
+        `(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`
+      );
     }
 
-    // Upsert using Stripe_Customer_Id__c as external ID
-    const [result] = toArray(
-      await connection.upsert('Contact', [contactRecord], 'Stripe_Customer_Id__c', {
-        allOrNone: false,
-      })
-    );
+    let existingContact: any = null;
 
-    if (!result.success) {
-      const message =
-        collectErrorMessages([result]) ||
-        `Failed to upsert contact with Stripe Customer ID ${stripeCustomerId}.`;
-      throw new Error(message);
+    if (whereConditions.length > 0) {
+      const query = `SELECT Id, FirstName, LastName, Email, Stripe_Customer_Id__c 
+                     FROM Contact 
+                     WHERE ${whereConditions.join(' OR ')} 
+                     ORDER BY CreatedDate DESC 
+                     LIMIT 10`;
+
+      const queryResult = await connection.query(query);
+
+      if (queryResult.records && queryResult.records.length > 0) {
+        // Priority matching:
+        // 1. Exact Stripe Customer ID match
+        const stripeIdMatch = queryResult.records.find(
+          (c: any) => c.Stripe_Customer_Id__c === stripeCustomerId
+        );
+
+        if (stripeIdMatch) {
+          existingContact = stripeIdMatch;
+        } else if (firstName && lastName) {
+          // 2. Name match (both first and last name)
+          const nameMatch = queryResult.records.find((c: any) => {
+            const firstNameMatch =
+              c.FirstName &&
+              firstName &&
+              c.FirstName.toLowerCase() === firstName.toLowerCase();
+            const lastNameMatch =
+              c.LastName &&
+              lastName &&
+              c.LastName.toLowerCase() === lastName.toLowerCase();
+            return firstNameMatch && lastNameMatch;
+          });
+
+          if (nameMatch) {
+            existingContact = nameMatch;
+          }
+        } else {
+          // 3. Use first result (email match)
+          existingContact = queryResult.records[0];
+        }
+      }
+    }
+
+    let result: UpsertResult;
+
+    if (existingContact) {
+      // Update existing contact
+      const updateFields: Record<string, any> = {
+        Id: existingContact.Id,
+      };
+
+      // Update Stripe Customer ID if not set
+      if (!existingContact.Stripe_Customer_Id__c && stripeCustomerId) {
+        updateFields.Stripe_Customer_Id__c = stripeCustomerId;
+      }
+
+      // Update email if provided and different
+      if (dto.Email && dto.Email.trim() && dto.Email.trim() !== existingContact.Email) {
+        updateFields.Email = dto.Email.trim();
+      }
+
+      // Update name if provided and different
+      if (firstName && firstName !== existingContact.FirstName) {
+        updateFields.FirstName = firstName;
+      }
+      if (lastName && lastName !== existingContact.LastName) {
+        updateFields.LastName = lastName;
+      }
+
+      // Only update if there are changes beyond the Id
+      if (Object.keys(updateFields).length > 1) {
+        const updateResult = await connection.sobject('Contact').update(updateFields as any);
+        
+        const saveResult = Array.isArray(updateResult) ? updateResult[0] : updateResult;
+        
+        if (!saveResult.success) {
+          const message = collectErrorMessages([saveResult]) || 
+            `Failed to update contact ${existingContact.Id}.`;
+          throw new Error(message);
+        }
+        
+        result = {
+          id: saveResult.id,
+          success: true,
+          created: false,
+          errors: [],
+        };
+      } else {
+        // No changes needed, return existing contact as success
+        result = {
+          id: existingContact.Id,
+          success: true,
+          created: false,
+          errors: [],
+        };
+      }
+    } else {
+      // Create new contact
+      const contactRecord: Record<string, any> = {
+        Stripe_Customer_Id__c: stripeCustomerId,
+        LastName: lastName || name,
+      };
+
+      if (firstName) {
+        contactRecord.FirstName = firstName;
+      }
+
+      if (dto.Email && dto.Email.trim()) {
+        contactRecord.Email = dto.Email.trim();
+      }
+
+      const createResult = await connection.sobject('Contact').create(contactRecord);
+      
+      const saveResult = Array.isArray(createResult) ? createResult[0] : createResult;
+
+      if (!saveResult.success) {
+        const message = collectErrorMessages([saveResult]) ||
+          `Failed to create contact with Stripe Customer ID ${stripeCustomerId}.`;
+        throw new Error(message);
+      }
+
+      result = {
+        id: saveResult.id,
+        success: true,
+        created: true,
+        errors: [],
+      };
     }
 
     return result;
