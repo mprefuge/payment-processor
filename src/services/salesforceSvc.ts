@@ -199,11 +199,19 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
   const resolveExistingTransactionId = async (
     field: TransactionExternalIdField,
-    value: string
+    value: string,
+    recordTypeId?: string
   ): Promise<string | null> => {
     const apiField = resolveExternalIdField(field);
     const escapedValue = escapeForSoqlLiteral(value);
-    const soql = `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}' LIMIT 1`;
+    let soql = `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}'`;
+
+    if (recordTypeId) {
+      const escapedRecordTypeId = escapeForSoqlLiteral(recordTypeId);
+      soql += ` AND RecordTypeId = '${escapedRecordTypeId}'`;
+    }
+
+    soql += ' LIMIT 1';
 
     const result = await connection.query<TransactionLookupRecord>(soql);
     const records = toLookupRecords(result);
@@ -256,9 +264,10 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       );
 
       if (duplicateError) {
-        const fallbackId = await resolveExistingTransactionId(key, normalizedExternalId);
+        const fallbackId = await resolveExistingTransactionId(key, normalizedExternalId, recordTypeId);
 
         if (fallbackId) {
+          // Update existing transaction of the same type
           const fallbackRecords = [
             sanitizeTransactionRecord({
               ...dto,
@@ -282,6 +291,35 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
           }
 
           return fallbackResult;
+        } else {
+          // No existing transaction with same external ID and record type,
+          // but external ID is used by a different record type.
+          // Create new record without external ID to avoid conflict.
+          const newRecord = sanitizeTransactionRecord({
+            ...dto,
+            RecordTypeId: recordTypeId,
+            // Don't set the external ID field to avoid uniqueness conflict
+            [key]: undefined,
+          });
+
+          const [insertResult] = toArray(
+            await connection.sobject(TRANSACTION_OBJECT).create(newRecord, {
+              allOrNone: true,
+            })
+          );
+
+          if (!insertResult.success) {
+            const insertMessage =
+              collectErrorMessages([insertResult]) ||
+              `Failed to create transaction with ${key}=${normalizedExternalId}.`;
+            throw new Error(insertMessage);
+          }
+
+          // Convert create result to upsert result format
+          return {
+            ...insertResult,
+            created: true,
+          };
         }
       }
 

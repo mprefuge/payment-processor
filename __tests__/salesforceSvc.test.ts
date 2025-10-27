@@ -205,7 +205,7 @@ describe('createSalesforceSvc', () => {
     const result = await service.upsertTransactionByExternalId(dto, 'stripe_charge_id__c');
 
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' LIMIT 1"
+      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' AND RecordTypeId = 'a1' LIMIT 1"
     );
 
     expect(upsert).toHaveBeenCalledTimes(2);
