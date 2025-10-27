@@ -944,7 +944,7 @@ const processPayments = async (
         const stripeCustomer = await resolveCustomerForCharge(
           stripe,
           charge as Stripe.Charge,
-          context.log
+          (...args: unknown[]) => context.log(...args)
         );
 
         context.log('[StripeTrueUp] Retrieved customer from Stripe', {
@@ -1020,7 +1020,7 @@ const processPayments = async (
             productName = await getProductNameFromCharge(
               stripe,
               chargeObj,
-              context.log
+              (...args: unknown[]) => context.log(...args)
             );
           } catch (error) {
             context.log('[StripeTrueUp] Error getting product name', {
@@ -1261,7 +1261,7 @@ const processRefunds = async (
           const stripeCustomer = await resolveCustomerForCharge(
             stripe,
             chargeFragment,
-            context.log
+            (...args: unknown[]) => context.log(...args)
           );
           
           context.log('[StripeTrueUp] Retrieved customer for refund', {
@@ -1331,7 +1331,7 @@ const processRefunds = async (
             productName = await getProductNameFromCharge(
               stripe,
               chargeFragment,
-              context.log
+              (...args: unknown[]) => context.log(...args)
             );
           } catch (error) {
             context.log('[StripeTrueUp] Error getting product name for refund', {
