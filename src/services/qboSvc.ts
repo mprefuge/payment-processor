@@ -2147,13 +2147,14 @@ const checkForPayoutDeposit = async (
     const formattedDate = normalizeDate(date);
     const amountDollars = centsToDollars(amount);
     
-    // Query for deposits with the same date and amount
-    const queryString = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' AND TotalAmt = ${amountDollars} MAXRESULTS 1`;
+    // Query for deposits with the same date, then check amount in code
+    // QuickBooks query language has limitations with decimal comparisons
+    const queryString = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
     
-    logger.debug('[QBO] Checking for existing payout deposit by date and amount', { 
+    logger.debug('[QBO] Checking for existing payout deposit by date', { 
       payoutId, 
       date: formattedDate, 
-      amount: amountDollars 
+      amount: amountDollars
     });
     
     const result = await query<{
@@ -2162,17 +2163,21 @@ const checkForPayoutDeposit = async (
 
     const deposits = result?.QueryResponse?.Deposit;
     if (deposits && deposits.length > 0) {
-      // Return the first matching deposit (should be unique by date+amount)
-      const matchingDeposit = deposits[0];
+      // Find deposits with matching amount
+      const matchingDeposit = deposits.find(deposit => 
+        deposit.TotalAmt === amountDollars
+      );
       
-      logger.info('[QBO] Found existing deposit for payout by date and amount check', { 
-        payoutId, 
-        existingId: matchingDeposit.Id,
-        docNumber: matchingDeposit.DocNumber,
-        date: matchingDeposit.TxnDate,
-        amount: matchingDeposit.TotalAmt
-      });
-      return matchingDeposit.Id;
+      if (matchingDeposit) {
+        logger.info('[QBO] Found existing deposit for payout by date and amount check', { 
+          payoutId, 
+          existingId: matchingDeposit.Id,
+          docNumber: matchingDeposit.DocNumber,
+          date: matchingDeposit.TxnDate,
+          amount: matchingDeposit.TotalAmt
+        });
+        return matchingDeposit.Id;
+      }
     }
 
     logger.debug('[QBO] No existing payout deposit found by date and amount check', { payoutId, date: formattedDate, amount: amountDollars });
