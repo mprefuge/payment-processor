@@ -37,6 +37,7 @@ describe('payoutSyncTrigger', () => {
     const payout = {
       id: 'po_123',
       amount: 2500,
+      status: 'paid',
       arrival_date: Math.floor(Date.now() / 1000),
     };
 
@@ -122,6 +123,7 @@ describe('payoutSyncTrigger', () => {
     const payout = {
       id: 'po_999',
       amount: 1500,
+      status: 'paid',
       arrival_date: Math.floor(Date.now() / 1000),
     };
 
@@ -167,5 +169,131 @@ describe('payoutSyncTrigger', () => {
     expect(result.status).toBe(200);
     expect(result.jsonBody.summary.processed).toBe(0);
     expect(result.jsonBody.summary.skipped).toBe(1);
+  });
+
+  it('skips payouts with zero amount', async () => {
+    const payout = {
+      id: 'po_zero',
+      amount: 0,
+      status: 'paid',
+      arrival_date: Math.floor(Date.now() / 1000),
+    };
+
+    const payoutsList = vi.fn().mockResolvedValue({
+      data: [payout],
+      has_more: false,
+    });
+
+    const balanceTransactionsList = vi.fn().mockResolvedValue({
+      data: [{ id: 'bt_1' }],
+      has_more: false,
+    });
+
+    const processedStore = {
+      isProcessed: vi.fn().mockResolvedValue(false),
+      markProcessed: vi.fn(),
+    };
+
+    const buildBankDeposit = vi.fn();
+    const postBankDeposit = vi.fn();
+    const linkPayoutOnTransactions = vi.fn();
+
+    internals.setDependencies({
+      stripe: {
+        payouts: { list: payoutsList },
+        balanceTransactions: { list: balanceTransactionsList },
+      },
+      accounting: { buildBankDeposit, postBankDeposit },
+      salesforce: { linkPayoutOnTransactions },
+      processedStore,
+      lookbackDays: 7,
+      now: () => Date.now(),
+    });
+
+    const { context } = createContext();
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
+
+    const result = await handler(req, context);
+
+    expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_zero');
+    expect(balanceTransactionsList).toHaveBeenCalledTimes(1);
+    expect(buildBankDeposit).not.toHaveBeenCalled();
+    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
+    expect(processedStore.markProcessed).not.toHaveBeenCalled();
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary.processed).toBe(0);
+    expect(result.jsonBody.summary.skipped).toBe(1);
+    expect(result.jsonBody.skipped).toEqual([
+      {
+        status: 'skipped',
+        payoutId: 'po_zero',
+        reason: 'zero_amount',
+      },
+    ]);
+  });
+
+  it('skips payouts with blank status', async () => {
+    const payout = {
+      id: 'po_blank',
+      amount: 1000,
+      status: '',
+      arrival_date: Math.floor(Date.now() / 1000),
+    };
+
+    const payoutsList = vi.fn().mockResolvedValue({
+      data: [payout],
+      has_more: false,
+    });
+
+    const balanceTransactionsList = vi.fn().mockResolvedValue({
+      data: [{ id: 'bt_1' }],
+      has_more: false,
+    });
+
+    const processedStore = {
+      isProcessed: vi.fn().mockResolvedValue(false),
+      markProcessed: vi.fn(),
+    };
+
+    const buildBankDeposit = vi.fn();
+    const postBankDeposit = vi.fn();
+    const linkPayoutOnTransactions = vi.fn();
+
+    internals.setDependencies({
+      stripe: {
+        payouts: { list: payoutsList },
+        balanceTransactions: { list: balanceTransactionsList },
+      },
+      accounting: { buildBankDeposit, postBankDeposit },
+      salesforce: { linkPayoutOnTransactions },
+      processedStore,
+      lookbackDays: 7,
+      now: () => Date.now(),
+    });
+
+    const { context } = createContext();
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
+
+    const result = await handler(req, context);
+
+    expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_blank');
+    expect(balanceTransactionsList).toHaveBeenCalledTimes(1);
+    expect(buildBankDeposit).not.toHaveBeenCalled();
+    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
+    expect(processedStore.markProcessed).not.toHaveBeenCalled();
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary.processed).toBe(0);
+    expect(result.jsonBody.summary.skipped).toBe(1);
+    expect(result.jsonBody.skipped).toEqual([
+      {
+        status: 'skipped',
+        payoutId: 'po_blank',
+        reason: 'blank_status',
+      },
+    ]);
   });
 });

@@ -264,6 +264,23 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   const amountCents = safeAmount(payout.amount);
   const date = toDateFromStripeTimestamp(payout.arrival_date || payout.created);
 
+  // Hygiene check: skip processing if amount is zero or status is blank
+  if (amountCents === 0) {
+    console.log('[payoutSyncTrigger] Skipping payout with zero amount', {
+      payoutId: payout.id,
+      amount: payout.amount,
+    });
+    return { status: 'skipped', payoutId: payout.id, reason: 'zero_amount' };
+  }
+
+  if (!payout.status || typeof payout.status !== 'string' || payout.status.trim() === '') {
+    console.log('[payoutSyncTrigger] Skipping payout with blank status', {
+      payoutId: payout.id,
+      status: payout.status,
+    });
+    return { status: 'skipped', payoutId: payout.id, reason: 'blank_status' };
+  }
+
   const bankDeposit = accounting.buildBankDeposit({
     docNumber,
     amountCents,
