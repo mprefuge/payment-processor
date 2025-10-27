@@ -436,7 +436,19 @@ describe('stripeWebhook', () => {
         },
       },
       invoices: {
-        retrieve: vi.fn(),
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'in_456',
+          lines: {
+            data: [
+              {
+                price: {
+                  product: 'prod_test',
+                  nickname: 'Test Product'
+                }
+              }
+            ]
+          }
+        }),
       },
     };
 
@@ -489,7 +501,7 @@ describe('stripeWebhook', () => {
       { overrideId: 'sf_pending_sub' },
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
-    expect(stripeClient.invoices.retrieve).not.toHaveBeenCalled();
+    expect(stripeClient.invoices.retrieve).toHaveBeenCalledWith('in_456');
     expect(store.markProcessed).toHaveBeenCalledWith('evt_invoice');
     expect(result.status).toBe(200);
   });

@@ -14,8 +14,10 @@ import {
   resolveStripeCustomer,
   timestampToDate,
   timestampToIsoString,
+  getProductNameFromCharge,
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
+import { loadConfig, normalizeTransactionCategory, generateTransactionName } from '../../config/contactMatching';
 
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
   if (input === null || input === undefined) {
@@ -334,6 +336,53 @@ const processSuccessfulPaymentIntent = async ({
     willUpdate: !!overrideId,
     currentStatus: transaction.status__c,
   });
+
+  // Generate transaction name if not already set
+  if (!transaction.Name) {
+    const config = loadConfig();
+    
+    // Try to get product name from charge
+    let productName: string | null = null;
+    if (charge) {
+      try {
+        productName = await getProductNameFromCharge(stripe, charge, (...args: unknown[]) => context.log(...args));
+      } catch (error) {
+        context.log('[StripeWebhook] Error getting product name from charge', {
+          chargeId: charge.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    
+    // Use product name as category, or default
+    const category = productName || config.transaction.defaultCategory;
+    const normalizedCategory = normalizeTransactionCategory(category, config);
+    
+    const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
+                                transaction.transaction_type__c === 'refund' ? 'Refund' : 
+                                transaction.transaction_type__c === 'dispute' ? 'Dispute' :
+                                transaction.transaction_type__c === 'payout' ? 'Payout' :
+                                'Transaction';
+    
+    const transactionName = generateTransactionName(normalizedCategory, config, {
+      amount: transaction.amount_gross__c ? `$${transaction.amount_gross__c.toFixed(2)}` : undefined,
+      date: new Date().toLocaleDateString(),
+      id: paymentIntent.id,
+      transactionType: transactionTypeName,
+    });
+    
+    if (transactionName) {
+      transaction.Name = transactionName;
+    }
+    
+    context.log('[StripeWebhook] Generated transaction name', {
+      paymentIntentId: paymentIntent.id,
+      category,
+      normalizedCategory,
+      transactionTypeName,
+      transactionName,
+    });
+  }
 
   // Validate required fields before upserting
   if (
