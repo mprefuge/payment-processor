@@ -616,7 +616,11 @@ export const handlePayoutEvent = async (
 
       try {
         // Validate required fields before upserting
-        if (payoutTransaction.status__c == null || payoutTransaction.amount_gross__c == null) {
+        if (
+          payoutTransaction.status__c == null ||
+          (payoutTransaction as any).status__c === '' ||
+          payoutTransaction.amount_gross__c == null
+        ) {
           context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
             payoutId: payout.id,
             status: payoutTransaction.status__c,
@@ -717,7 +721,11 @@ export const handlePayoutEvent = async (
 
       try {
         // Validate required fields before upserting
-        if (payoutTransaction.status__c == null || payoutTransaction.amount_gross__c == null) {
+        if (
+          payoutTransaction.status__c == null ||
+          (payoutTransaction as any).status__c === '' ||
+          payoutTransaction.amount_gross__c == null
+        ) {
           context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
             payoutId: payout.id,
             status: payoutTransaction.status__c,
@@ -817,7 +825,11 @@ export const handlePayoutEvent = async (
 
       try {
         // Validate required fields before upserting
-        if (payoutTransaction.status__c == null || payoutTransaction.amount_gross__c == null) {
+        if (
+          payoutTransaction.status__c == null ||
+          (payoutTransaction as any).status__c === '' ||
+          payoutTransaction.amount_gross__c == null
+        ) {
           context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
             payoutId: payout.id,
             status: payoutTransaction.status__c,

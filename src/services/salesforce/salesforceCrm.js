@@ -584,6 +584,21 @@ class SalesforceCrmService extends BaseCrmService {
         transactionRecord.Session_ID__c = sessionId;
       }
 
+      // Validate required fields before creating
+      if (
+        transactionRecord.Status__c == null ||
+        transactionRecord.Status__c === '' ||
+        transactionRecord.Amount__c == null
+      ) {
+        logger.warn('[SalesforceCrm] Skipping transaction creation due to missing required fields', {
+          contactId,
+          status: transactionRecord.Status__c,
+          amount: transactionRecord.Amount__c,
+          transactionData,
+        });
+        return null;
+      }
+
       const result = await this.conn.sobject('Transaction__c').create(transactionRecord);
 
       if (result.success) {
@@ -618,7 +633,11 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     // Validate required fields before upserting
-    if (transactionData.Status__c == null || transactionData.Amount_Gross__c == null) {
+    if (
+      transactionData.Status__c == null ||
+      transactionData.Status__c === '' ||
+      transactionData.Amount_Gross__c == null
+    ) {
       logger.warn('[SalesforceCrm] Skipping transaction upsert due to missing required fields', {
         externalIdField,
         status: transactionData.Status__c,

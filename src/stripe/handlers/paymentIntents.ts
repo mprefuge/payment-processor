@@ -336,7 +336,11 @@ const processSuccessfulPaymentIntent = async ({
   });
 
   // Validate required fields before upserting
-  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+  if (
+    transaction.status__c == null ||
+    (transaction as any).status__c === '' ||
+    transaction.amount_gross__c == null
+  ) {
     context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
       paymentIntentId: paymentIntent.id,
       status: transaction.status__c,
@@ -451,7 +455,11 @@ export const updatePaymentIntentStatus = async (
   });
 
   // Validate required fields before upserting
-  if (payload.status__c == null || payload.amount_gross__c == null) {
+  if (
+    payload.status__c == null ||
+    (payload as any).status__c === '' ||
+    payload.amount_gross__c == null
+  ) {
     context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
       paymentIntentId: paymentIntent.id,
       status: payload.status__c,

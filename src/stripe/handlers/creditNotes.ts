@@ -409,7 +409,11 @@ export const handleCreditNoteEvent = async (
   });
 
   // Validate required fields before upserting
-  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+  if (
+    transaction.status__c == null ||
+    (transaction as any).status__c === '' ||
+    transaction.amount_gross__c == null
+  ) {
     context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
       creditNoteId: creditNote.id,
       status: transaction.status__c,
