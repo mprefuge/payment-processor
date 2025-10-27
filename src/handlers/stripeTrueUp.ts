@@ -790,18 +790,39 @@ const processPayments = async (
         // Generate transaction name
         const config = loadConfig();
         const metadata = (charge as Stripe.Charge).metadata || {};
+        
+        context.log('[StripeTrueUp] Charge metadata for transaction naming', {
+          chargeId: charge.id,
+          metadata: metadata,
+          hasCategory: !!(metadata.category || metadata.Category),
+          hasTransactionType: !!(metadata.transactionType || metadata.TransactionType),
+        });
+        
         const category = metadata.category || metadata.Category || config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
-        const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
-                                    transaction.transaction_type__c === 'refund' ? 'Refund' : 
-                                    transaction.transaction_type__c === 'dispute' ? 'Dispute' :
-                                    transaction.transaction_type__c === 'payout' ? 'Payout' :
-                                    'Transaction';
+        
+        // Get transaction type from metadata if available, otherwise use derived type
+        const metadataTransactionType = metadata.transactionType || metadata.TransactionType;
+        const transactionTypeName = metadataTransactionType || 
+                                    (transaction.transaction_type__c === 'charge' ? 'Payment' : 
+                                     transaction.transaction_type__c === 'refund' ? 'Refund' : 
+                                     transaction.transaction_type__c === 'dispute' ? 'Dispute' :
+                                     transaction.transaction_type__c === 'payout' ? 'Payout' :
+                                     'Transaction');
+        
         const transactionName = generateTransactionName(normalizedCategory, config, {
           amount: transaction.amount_gross__c ? `$${transaction.amount_gross__c.toFixed(2)}` : undefined,
           date: new Date().toLocaleDateString(),
           id: charge.id,
           transactionType: transactionTypeName,
+        });
+        
+        context.log('[StripeTrueUp] Generated transaction name', {
+          chargeId: charge.id,
+          category,
+          normalizedCategory,
+          transactionTypeName,
+          transactionName,
         });
         
         if (transactionName) {
@@ -1053,18 +1074,39 @@ const processRefunds = async (
         // Generate transaction name
         const config = loadConfig();
         const metadata = chargeFragment?.metadata || {};
+        
+        context.log('[StripeTrueUp] Refund charge metadata for transaction naming', {
+          refundId: refund.id,
+          metadata: metadata,
+          hasCategory: !!(metadata.category || metadata.Category),
+          hasTransactionType: !!(metadata.transactionType || metadata.TransactionType),
+        });
+        
         const category = metadata.category || metadata.Category || config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
-        const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
-                                    transaction.transaction_type__c === 'refund' ? 'Refund' : 
-                                    transaction.transaction_type__c === 'dispute' ? 'Dispute' :
-                                    transaction.transaction_type__c === 'payout' ? 'Payout' :
-                                    'Transaction';
+        
+        // Get transaction type from metadata if available, otherwise use derived type
+        const metadataTransactionType = metadata.transactionType || metadata.TransactionType;
+        const transactionTypeName = metadataTransactionType ||
+                                    (transaction.transaction_type__c === 'charge' ? 'Payment' : 
+                                     transaction.transaction_type__c === 'refund' ? 'Refund' : 
+                                     transaction.transaction_type__c === 'dispute' ? 'Dispute' :
+                                     transaction.transaction_type__c === 'payout' ? 'Payout' :
+                                     'Transaction');
+        
         const transactionName = generateTransactionName(normalizedCategory, config, {
           amount: transaction.amount_gross__c ? `$${Math.abs(transaction.amount_gross__c).toFixed(2)}` : undefined,
           date: new Date().toLocaleDateString(),
           id: refund.id,
           transactionType: transactionTypeName,
+        });
+        
+        context.log('[StripeTrueUp] Generated refund transaction name', {
+          refundId: refund.id,
+          category,
+          normalizedCategory,
+          transactionTypeName,
+          transactionName,
         });
         
         if (transactionName) {
