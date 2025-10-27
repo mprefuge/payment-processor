@@ -1081,6 +1081,18 @@ const processPayments = async (
           hasContact: !!transaction.contact__c,
         });
 
+        // Validate required fields before upserting
+        if (!transaction.status__c || !transaction.amount_gross__c) {
+          context.log('[StripeTrueUp] Skipping transaction upsert due to missing required fields', {
+            chargeId: charge.id,
+            status: transaction.status__c,
+            amountGross: transaction.amount_gross__c,
+            transaction,
+          });
+          summary.skipped += 1;
+          continue;
+        }
+
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
           'stripe_charge_id__c'
@@ -1094,8 +1106,20 @@ const processPayments = async (
           metadata: chargeMetadata,
         } as Partial<Stripe.Checkout.Session> : undefined;
 
+        const grossAmount = Math.abs(balanceTransaction.amount ?? 0);
+        
+        // Validate gross amount before QBO posting
+        if (grossAmount === 0) {
+          context.log('[StripeTrueUp] Skipping QBO charge posting due to zero gross amount', {
+            chargeId: charge.id,
+            balanceTransactionAmount: balanceTransaction.amount,
+          });
+          summary.skipped += 1;
+          continue;
+        }
+
         const posting = await dependencies.accounting.postChargeToQbo({
-          gross: Math.abs(balanceTransaction.amount ?? 0),
+          gross: grossAmount,
           fee: Math.abs(balanceTransaction.fee ?? 0),
           memo: `Stripe charge ${charge.id}`,
           date: timestampToDate(
@@ -1396,14 +1420,38 @@ const processRefunds = async (
           hasContact: !!transaction.contact__c,
         });
 
+        // Validate required fields before upserting
+        if (!transaction.status__c || !transaction.amount_gross__c) {
+          context.log('[StripeTrueUp] Skipping refund transaction upsert due to missing required fields', {
+            refundId: refund.id,
+            status: transaction.status__c,
+            amountGross: transaction.amount_gross__c,
+            transaction,
+          });
+          summary.skipped += 1;
+          continue;
+        }
+
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
           'stripe_refund_id__c'
         );
         summary.salesforceUpdates += 1;
 
+        const refundAmount = Math.abs(balanceTransaction.amount ?? 0);
+        
+        // Validate refund amount before QBO posting
+        if (refundAmount === 0) {
+          context.log('[StripeTrueUp] Skipping QBO refund posting due to zero refund amount', {
+            refundId: refund.id,
+            balanceTransactionAmount: balanceTransaction.amount,
+          });
+          summary.skipped += 1;
+          continue;
+        }
+
         const posting = await dependencies.accounting.postRefundToQbo({
-          amount: Math.abs(balanceTransaction.amount ?? 0),
+          amount: refundAmount,
           memo: `Stripe refund ${refund.id}`,
           date: timestampToDate(
             balanceTransaction.created ?? balanceTransaction.available_on ?? null
@@ -1561,6 +1609,18 @@ const processPayouts = async (
 
         // Upsert payout transaction in Salesforce
         try {
+          // Validate required fields before upserting
+          if (!payoutTransaction.status__c || !payoutTransaction.amount_gross__c) {
+            context.log('[StripeTrueUp] Skipping payout transaction upsert due to missing required fields', {
+              payoutId: payout.id,
+              status: payoutTransaction.status__c,
+              amountGross: payoutTransaction.amount_gross__c,
+              payoutTransaction,
+            });
+            summary.skipped += 1;
+            continue;
+          }
+
           await salesforce.upsertTransactionByExternalId(
             payoutTransaction,
             'stripe_payout_id__c'

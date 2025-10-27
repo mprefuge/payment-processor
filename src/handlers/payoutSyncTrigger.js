@@ -77,6 +77,10 @@ const validateBalanceTransaction = (transaction) => {
     return { isValid: false, reason: 'missing_type' };
   }
 
+  if (!transaction.status || typeof transaction.status !== 'string') {
+    return { isValid: false, reason: 'missing_status' };
+  }
+
   return { isValid: true };
 };
 
@@ -331,7 +335,16 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   const amountCents = safeAmount(payout.amount);
   const date = toDateFromStripeTimestamp(payout.arrival_date || payout.created);
 
-  // Hygiene check: skip processing if amount is zero or status is blank
+  // Hygiene check: skip processing if required fields are missing
+  if (!payout.arrival_date || typeof payout.arrival_date !== 'number' || payout.arrival_date <= 0) {
+    console.log('[payoutSyncTrigger] Skipping payout with missing or invalid arrival_date', {
+      payoutId: payout.id,
+      arrival_date: payout.arrival_date,
+      payout,
+    });
+    return { status: 'skipped', payoutId: payout.id, reason: 'missing_arrival_date' };
+  }
+
   if (amountCents === 0) {
     console.log('[payoutSyncTrigger] Skipping payout with zero amount', {
       payoutId: payout.id,

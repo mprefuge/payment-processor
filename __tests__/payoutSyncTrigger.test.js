@@ -48,8 +48,8 @@ describe('payoutSyncTrigger', () => {
 
     const balanceTransactionsList = vi.fn().mockResolvedValue({
       data: [
-        { id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge' },
-        { id: 'bt_2', amount: 1500, currency: 'usd', type: 'charge' }
+        { id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge', status: 'available' },
+        { id: 'bt_2', amount: 1500, currency: 'usd', type: 'charge', status: 'available' }
       ],
       has_more: false,
     });
@@ -188,7 +188,7 @@ describe('payoutSyncTrigger', () => {
     });
 
     const balanceTransactionsList = vi.fn().mockResolvedValue({
-      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge' }],
+      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge', status: 'available' }],
       has_more: false,
     });
 
@@ -251,7 +251,7 @@ describe('payoutSyncTrigger', () => {
     });
 
     const balanceTransactionsList = vi.fn().mockResolvedValue({
-      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge' }],
+      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge', status: 'available' }],
       has_more: false,
     });
 
@@ -396,5 +396,68 @@ describe('payoutSyncTrigger', () => {
     expect(result.jsonBody.summary.skipped).toBe(3);
     expect(result.jsonBody.skipped).toHaveLength(3);
     expect(result.jsonBody.skipped.every(item => item.reason === 'missing_payout_id')).toBe(true);
+  });
+
+  it('skips payouts with missing arrival_date', async () => {
+    const payout = {
+      id: 'po_no_arrival',
+      amount: 1000,
+      status: 'paid',
+      // arrival_date is missing
+    };
+
+    const payoutsList = vi.fn().mockResolvedValue({
+      data: [payout],
+      has_more: false,
+    });
+
+    const balanceTransactionsList = vi.fn().mockResolvedValue({
+      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge', status: 'available' }],
+      has_more: false,
+    });
+
+    const processedStore = {
+      isProcessed: vi.fn().mockResolvedValue(false),
+      markProcessed: vi.fn(),
+    };
+
+    const buildBankDeposit = vi.fn();
+    const postBankDeposit = vi.fn();
+    const linkPayoutOnTransactions = vi.fn();
+
+    internals.setDependencies({
+      stripe: {
+        payouts: { list: payoutsList },
+        balanceTransactions: { list: balanceTransactionsList },
+      },
+      accounting: { buildBankDeposit, postBankDeposit },
+      salesforce: { linkPayoutOnTransactions },
+      processedStore,
+      lookbackDays: 7,
+      now: () => Date.now(),
+    });
+
+    const { context } = createContext();
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
+
+    const result = await handler(req, context);
+
+    expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_no_arrival');
+    expect(balanceTransactionsList).toHaveBeenCalledTimes(1);
+    expect(buildBankDeposit).not.toHaveBeenCalled();
+    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
+    expect(processedStore.markProcessed).not.toHaveBeenCalled();
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary.processed).toBe(0);
+    expect(result.jsonBody.summary.skipped).toBe(1);
+    expect(result.jsonBody.skipped).toEqual([
+      {
+        status: 'skipped',
+        payoutId: 'po_no_arrival',
+        reason: 'missing_arrival_date',
+      },
+    ]);
   });
 });
