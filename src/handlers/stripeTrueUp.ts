@@ -1519,13 +1519,66 @@ const processPayouts = async (
 
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
-        // Only fetch balance transactions for automatic payouts
+        
+        // Fetch balance transactions for automatic payouts
         // Manual payouts don't support balance transaction filtering
-        if (typeof salesforce.linkPayoutOnTransactions === 'function' && payout.automatic) {
-          const balanceTransactions = await dependencies.fetchers.payoutBalance(stripe, payout.id, {
-            logger: context.log,
-          });
+        let balanceTransactions: any[] = [];
+        if (payout.automatic) {
+          try {
+            balanceTransactions = await dependencies.fetchers.payoutBalance(stripe, payout.id, {
+              logger: context.log,
+            });
+          } catch (error) {
+            context.log('[StripeTrueUp] Could not fetch balance transactions for automatic payout', {
+              payoutId: payout.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
 
+        // Build payout transaction for Salesforce
+        const transactionName = 'Payout';
+        const payoutAmount = Math.abs(payout.amount ?? 0);
+        
+        const payoutTransaction = {
+          Name: transactionName,
+          transaction_type__c: 'payout' as const,
+          status__c: 'paid' as const,
+          stripe_payout_id__c: payout.id,
+          stripe_balance_transaction_id__c: payout.balance_transaction || payout.id,
+          amount_gross__c: payoutAmount / 100,
+          amount_fee__c: 0,
+          amount_net__c: payoutAmount / 100,
+          currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
+          memo__c: `Stripe Payout ${payout.id} (${payout.automatic ? 'automatic' : 'manual'})`,
+          received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+          posted_to_qbo__c: false,
+          qbo_doc_type__c: null,
+          qbo_doc_id__c: null,
+          qbo_posted_at__c: null,
+          posting_error__c: null,
+        };
+
+        // Upsert payout transaction in Salesforce
+        try {
+          await salesforce.upsertTransactionByExternalId(
+            payoutTransaction,
+            'stripe_payout_id__c'
+          );
+          context.log('[StripeTrueUp] Upserted payout transaction in Salesforce', {
+            payoutId: payout.id,
+            transactionName,
+            amount: payoutTransaction.amount_net__c,
+          });
+        } catch (error) {
+          context.log('[StripeTrueUp] Failed to upsert payout transaction in Salesforce', {
+            payoutId: payout.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        // Link balance transactions if available
+        if (balanceTransactions.length > 0 && typeof salesforce.linkPayoutOnTransactions === 'function') {
           const ids = balanceTransactions
             .map((txn) => txn?.id)
             .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
@@ -1534,18 +1587,42 @@ const processPayouts = async (
             const results = await salesforce.linkPayoutOnTransactions(payout.id, ids);
             summary.salesforceUpdates += results.length;
           }
-        } else if (!payout.automatic) {
-          context.log('[StripeTrueUp] Skipping balance transaction fetch for manual payout', {
-            payoutId: payout.id,
-          });
         }
 
+        // Post to QuickBooks
         const posting = await dependencies.accounting.postPayoutToQbo({
-          amount: Math.abs(payout.amount ?? 0),
+          amount: payoutAmount,
           memo: `Stripe payout ${payout.id}`,
           date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
         });
         summary.qboPosts += 1;
+
+        // Mark Salesforce transaction as posted to QBO
+        if (posting && posting.qboId) {
+          try {
+            const payoutTxnId = await salesforce.findTransactionIdByExternalId(
+              'stripe_payout_id__c',
+              payout.id
+            );
+
+            if (payoutTxnId) {
+              await salesforce.markPostedToQbo(payoutTxnId, {
+                id: posting.qboId,
+                type: posting.type || 'bank-deposit',
+              });
+              context.log('[StripeTrueUp] Marked payout transaction as posted to QBO', {
+                payoutId: payout.id,
+                salesforceId: payoutTxnId,
+                qboDocId: posting.qboId,
+              });
+            }
+          } catch (error) {
+            context.log('[StripeTrueUp] Failed to mark payout as posted to QBO in Salesforce', {
+              payoutId: payout.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
 
         await dependencies.idempotencyStore.markProcessed(key);
       }
