@@ -2130,7 +2130,7 @@ const checkForDuplicate = async (
 
 /**
  * Check if a bank deposit already exists for a given Stripe payout ID.
- * Searches the PrivateNote field for deposits containing the payout ID.
+ * Searches by DocNumber which contains the payout ID, then confirms with PrivateNote.
  * @param payoutId The Stripe payout ID (e.g., "po_1234567890")
  * @param options Optional request options
  * @returns The existing deposit ID if found, null otherwise
@@ -2140,31 +2140,36 @@ const checkForPayoutDeposit = async (
   options?: PostOptions
 ): Promise<string | null> => {
   try {
-    // Escape single quotes in payout ID
-    const escapedPayoutId = payoutId.replace(/'/g, "\\'");
+    // Extract the unique part from payout ID (e.g., "po_1SKTfrBS5xFjv3JBMmyUqmWj" -> "1SKTfrBS5xFjv3JBMmyUqmWj")
+    const payoutIdPart = payoutId.startsWith('po_') ? payoutId.slice(3) : payoutId;
+    // Escape single quotes for SQL query
+    const escapedPayoutIdPart = payoutIdPart.replace(/'/g, "\\'");
     
-    // Query for deposits with this payout ID in the PrivateNote
-    // Note: QuickBooks doesn't support LIKE with wildcards in all cases,
-    // so we search for exact payout ID match
-    const queryString = `SELECT Id, PrivateNote FROM Deposit WHERE PrivateNote LIKE '%${escapedPayoutId}%' MAXRESULTS 5`;
+    // Query for deposits with DocNumber containing the payout ID part
+    // DocNumber format is "PO-{date}-{payoutIdPart}", so we search for deposits with this pattern
+    const queryString = `SELECT Id, DocNumber, PrivateNote FROM Deposit WHERE DocNumber LIKE '%${escapedPayoutIdPart}%' MAXRESULTS 10`;
     
-    logger.debug('[QBO] Checking for existing payout deposit', { payoutId, queryString });
+    logger.debug('[QBO] Checking for existing payout deposit', { payoutId, payoutIdPart });
     
     const result = await query<{
-      QueryResponse: { Deposit?: Array<{ Id: string; PrivateNote?: string }> };
+      QueryResponse: { Deposit?: Array<{ Id: string; DocNumber?: string; PrivateNote?: string }> };
     }>(queryString, options);
 
     const deposits = result?.QueryResponse?.Deposit;
     if (deposits && deposits.length > 0) {
-      // Verify the payout ID is actually in the PrivateNote (not just a substring match)
-      const matchingDeposit = deposits.find(deposit => 
-        deposit.PrivateNote && deposit.PrivateNote.includes(payoutId)
-      );
+      // Confirm the match by checking if PrivateNote contains the full payout ID
+      // or if DocNumber contains the payout ID part
+      const matchingDeposit = deposits.find(deposit => {
+        const docNumberMatch = deposit.DocNumber && deposit.DocNumber.includes(payoutIdPart);
+        const privateNoteMatch = deposit.PrivateNote && deposit.PrivateNote.includes(payoutId);
+        return docNumberMatch || privateNoteMatch;
+      });
       
       if (matchingDeposit) {
         logger.info('[QBO] Found existing deposit for payout', { 
           payoutId, 
           existingId: matchingDeposit.Id,
+          docNumber: matchingDeposit.DocNumber,
           privateNote: matchingDeposit.PrivateNote
         });
         return matchingDeposit.Id;
