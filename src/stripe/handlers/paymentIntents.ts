@@ -335,6 +335,17 @@ const processSuccessfulPaymentIntent = async ({
     currentStatus: transaction.status__c,
   });
 
+  // Validate required fields before upserting
+  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      paymentIntentId: paymentIntent.id,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return;
+  }
+
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
     'stripe_payment_intent_id__c',
@@ -438,6 +449,17 @@ export const updatePaymentIntentStatus = async (
     dunningRequired: options?.dunningRequired ?? null,
     lastError,
   });
+
+  // Validate required fields before upserting
+  if (payload.status__c == null || payload.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      paymentIntentId: paymentIntent.id,
+      status: payload.status__c,
+      amountGross: payload.amount_gross__c,
+      payload,
+    });
+    return;
+  }
 
   await salesforce.upsertTransactionByExternalId(payload, 'stripe_payment_intent_id__c');
 };

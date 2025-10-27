@@ -104,6 +104,17 @@ export const handleDisputeClosed = async (
     chargeId,
   });
 
+  // Validate required fields before upserting
+  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      disputeId: dispute.id,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return;
+  }
+
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,
     'stripe_dispute_id__c'

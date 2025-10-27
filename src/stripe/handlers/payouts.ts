@@ -615,6 +615,17 @@ export const handlePayoutEvent = async (
       );
 
       try {
+        // Validate required fields before upserting
+        if (payoutTransaction.status__c == null || payoutTransaction.amount_gross__c == null) {
+          context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+            payoutId: payout.id,
+            status: payoutTransaction.status__c,
+            amountGross: payoutTransaction.amount_gross__c,
+            payoutTransaction,
+          });
+          return;
+        }
+
         await salesforce.upsertTransactionByExternalId(
           payoutTransaction,
           'stripe_payout_id__c'
@@ -705,6 +716,17 @@ export const handlePayoutEvent = async (
       );
 
       try {
+        // Validate required fields before upserting
+        if (payoutTransaction.status__c == null || payoutTransaction.amount_gross__c == null) {
+          context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+            payoutId: payout.id,
+            status: payoutTransaction.status__c,
+            amountGross: payoutTransaction.amount_gross__c,
+            payoutTransaction,
+          });
+          return;
+        }
+
         await salesforce.upsertTransactionByExternalId(
           payoutTransaction,
           'stripe_payout_id__c'
@@ -794,6 +816,17 @@ export const handlePayoutEvent = async (
       );
 
       try {
+        // Validate required fields before upserting
+        if (payoutTransaction.status__c == null || payoutTransaction.amount_gross__c == null) {
+          context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+            payoutId: payout.id,
+            status: payoutTransaction.status__c,
+            amountGross: payoutTransaction.amount_gross__c,
+            payoutTransaction,
+          });
+          return;
+        }
+
         await salesforce.upsertTransactionByExternalId(
           payoutTransaction,
           'stripe_payout_id__c'

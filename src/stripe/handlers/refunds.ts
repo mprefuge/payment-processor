@@ -350,6 +350,17 @@ const updateChargeTransaction = async (
     posted_to_qbo__c: false,
   };
 
+  // Validate required fields before upserting
+  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      chargeId,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return;
+  }
+
   await salesforce.upsertTransactionByExternalId(
     transaction,
     'stripe_charge_id__c',
@@ -834,6 +845,17 @@ const upsertSalesforceTransaction = async (
   context.log('[StripeWebhook] Upserting refund transaction', {
     refundId: refund.id,
   });
+
+  // Validate required fields before upserting
+  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      refundId: refund.id,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return { upsertResult: null, parentId };
+  }
 
   const upsertResult = await salesforce.upsertTransactionByExternalId(
     transaction,

@@ -94,6 +94,17 @@ export const handleInvoicePaidNoPI = async (
     memo,
   });
 
+  // Validate required fields before upserting
+  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      invoiceId: invoice.id,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return;
+  }
+
   await salesforce.upsertTransactionByExternalId(transaction, 'stripe_subscription_id__c');
 };
 

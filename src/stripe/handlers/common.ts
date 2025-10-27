@@ -117,6 +117,17 @@ export const handleCheckoutSessionCompleted = async (
     sessionId: session.id,
   });
 
+  // Validate required fields before upserting
+  if (transaction.status__c == null || transaction.amount_gross__c == null) {
+    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+      sessionId: session.id,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return;
+  }
+
   await salesforce.upsertTransactionByExternalId(transaction, 'stripe_checkout_session_id__c');
 };
 
