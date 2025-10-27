@@ -927,23 +927,57 @@ const processPayments = async (
               });
 
               // Add contact as campaign member if contact is available
-              if (transaction.contact__c && typeof transaction.contact__c === 'string' && transaction.contact__c.trim().length > 0) {
+              let contactId = transaction.contact__c;
+              
+              // If contact ID is not available from metadata, try to resolve from Stripe customer ID
+              if (!contactId && transaction.stripe_customer_id__c) {
+                try {
+                  context.log('[StripeTrueUp] Resolving contact from Stripe customer ID', {
+                    stripeCustomerId: transaction.stripe_customer_id__c,
+                  });
+                  
+                  // Search for contact by Stripe customer ID
+                  const contacts = await crm.searchContact({
+                    stripeCustomerId: transaction.stripe_customer_id__c,
+                  });
+                  
+                  if (contacts && contacts.length > 0) {
+                    contactId = contacts[0].Id;
+                    context.log('[StripeTrueUp] Resolved contact from Stripe customer ID', {
+                      stripeCustomerId: transaction.stripe_customer_id__c,
+                      contactId,
+                    });
+                  } else {
+                    context.log('[StripeTrueUp] No contact found for Stripe customer ID', {
+                      stripeCustomerId: transaction.stripe_customer_id__c,
+                    });
+                  }
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : 'Unknown error';
+                  context.log('[StripeTrueUp] Failed to resolve contact from Stripe customer ID', {
+                    stripeCustomerId: transaction.stripe_customer_id__c,
+                    error: message,
+                  });
+                }
+              }
+              
+              if (contactId && typeof contactId === 'string' && contactId.trim().length > 0) {
                 try {
                   context.log('[StripeTrueUp] Adding contact as campaign member', {
                     campaignId,
-                    contactId: transaction.contact__c,
+                    contactId,
                   });
-                  const memberResult = await crm.addCampaignMember(campaignId, transaction.contact__c);
+                  const memberResult = await crm.addCampaignMember(campaignId, contactId);
                   if (memberResult.isNew) {
                     context.log('[StripeTrueUp] Contact added as new campaign member', {
                       campaignId,
-                      contactId: transaction.contact__c,
+                      contactId,
                       campaignMemberId: memberResult.id,
                     });
                   } else {
                     context.log('[StripeTrueUp] Contact is already a campaign member', {
                       campaignId,
-                      contactId: transaction.contact__c,
+                      contactId,
                       campaignMemberId: memberResult.id,
                     });
                   }
@@ -951,7 +985,7 @@ const processPayments = async (
                   const message = error instanceof Error ? error.message : 'Unknown error';
                   context.log('[StripeTrueUp] Failed to add contact as campaign member', {
                     campaignId,
-                    contactId: transaction.contact__c,
+                    contactId,
                     error: message,
                   });
                 }
