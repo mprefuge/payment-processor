@@ -734,12 +734,30 @@ const processPayments = async (
           context.log
         );
 
+        context.log('[StripeTrueUp] Retrieved customer from Stripe', {
+          chargeId: charge.id,
+          customerId: stripeCustomer?.id,
+          customerExists: !!stripeCustomer,
+          customerDeleted: stripeCustomer?.deleted,
+        });
+
         // Get transaction name from charge metadata to use as customer category
         const transactionName = getTransactionNameFromMetadata(charge as Stripe.Charge);
+        
+        context.log('[StripeTrueUp] Extracted transaction name from metadata', {
+          transactionName,
+          metadata: charge.metadata,
+        });
         
         // Upsert customer to Salesforce first to get the Contact ID
         let contactId: string | null = null;
         if (stripeCustomer && !stripeCustomer.deleted) {
+          context.log('[StripeTrueUp] Calling findOrCreateContactInSalesforce', {
+            customerId: stripeCustomer.id,
+            customerName: (stripeCustomer as Stripe.Customer).name,
+            customerEmail: (stripeCustomer as Stripe.Customer).email,
+          });
+          
           try {
             const customerUpsertResult = await findOrCreateContactInSalesforce(
               salesforce,
@@ -748,12 +766,22 @@ const processPayments = async (
               context.log
             );
             contactId = customerUpsertResult?.id ?? null;
+            
+            context.log('[StripeTrueUp] Contact find/create completed', {
+              contactId,
+              success: !!contactId,
+            });
           } catch (error) {
             context.log('[StripeTrueUp] Failed to find/create contact in Salesforce', {
               customerId: stripeCustomer.id,
               error: error instanceof Error ? error.message : String(error),
+              stack: error instanceof Error ? error.stack : undefined,
             });
           }
+        } else {
+          context.log('[StripeTrueUp] Skipping contact creation', {
+            reason: !stripeCustomer ? 'no customer' : 'customer deleted',
+          });
         }
 
         // Build transaction with contact link if we have a contact ID
@@ -765,7 +793,21 @@ const processPayments = async (
 
         if (contactId) {
           transaction.contact__c = contactId;
+          context.log('[StripeTrueUp] Associated contact with transaction', {
+            contactId,
+            transactionStripeChargeId: transaction.stripe_charge_id__c,
+          });
+        } else {
+          context.log('[StripeTrueUp] No contact ID to associate with transaction', {
+            transactionStripeChargeId: transaction.stripe_charge_id__c,
+          });
         }
+
+        context.log('[StripeTrueUp] Upserting transaction to Salesforce', {
+          chargeId: charge.id,
+          contactId: transaction.contact__c,
+          hasContact: !!transaction.contact__c,
+        });
 
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
@@ -938,12 +980,26 @@ const processRefunds = async (
         // QBO refunds are posted as journal entries without customer association
         let contactId: string | null = null;
         if (chargeFragment && chargeFragment.customer) {
+          context.log('[StripeTrueUp] Processing refund customer', {
+            refundId: refund.id,
+            chargeId: chargeFragment.id,
+            customerId: extractStripeId(chargeFragment.customer),
+          });
+          
           const stripeCustomer = await resolveCustomerForCharge(
             stripe,
             chargeFragment,
             context.log
           );
+          
+          context.log('[StripeTrueUp] Retrieved customer for refund', {
+            refundId: refund.id,
+            customerId: stripeCustomer?.id,
+            customerExists: !!stripeCustomer,
+          });
+          
           const transactionName = getTransactionNameFromMetadata(chargeFragment);
+          
           const customerUpsertResult = await findOrCreateContactInSalesforce(
             salesforce,
             stripeCustomer,
@@ -951,6 +1007,17 @@ const processRefunds = async (
             context.log
           );
           contactId = customerUpsertResult?.id ?? null;
+          
+          context.log('[StripeTrueUp] Contact find/create completed for refund', {
+            refundId: refund.id,
+            contactId,
+            success: !!contactId,
+          });
+        } else {
+          context.log('[StripeTrueUp] Skipping contact creation for refund', {
+            refundId: refund.id,
+            reason: !chargeFragment ? 'no charge' : 'no customer on charge',
+          });
         }
 
         const transaction: TransactionUpsertDTO = mapStripeToTransaction({
@@ -965,7 +1032,21 @@ const processRefunds = async (
 
         if (contactId) {
           transaction.contact__c = contactId;
+          context.log('[StripeTrueUp] Associated contact with refund transaction', {
+            contactId,
+            refundId: refund.id,
+          });
+        } else {
+          context.log('[StripeTrueUp] No contact ID to associate with refund transaction', {
+            refundId: refund.id,
+          });
         }
+
+        context.log('[StripeTrueUp] Upserting refund transaction to Salesforce', {
+          refundId: refund.id,
+          contactId: transaction.contact__c,
+          hasContact: !!transaction.contact__c,
+        });
 
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
