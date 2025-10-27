@@ -1519,28 +1519,25 @@ const processPayouts = async (
 
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
-        if (typeof salesforce.linkPayoutOnTransactions === 'function') {
-          try {
-            const balanceTransactions = await dependencies.fetchers.payoutBalance(stripe, payout.id, {
-              logger: context.log,
-            });
+        // Only fetch balance transactions for automatic payouts
+        // Manual payouts don't support balance transaction filtering
+        if (typeof salesforce.linkPayoutOnTransactions === 'function' && payout.automatic) {
+          const balanceTransactions = await dependencies.fetchers.payoutBalance(stripe, payout.id, {
+            logger: context.log,
+          });
 
-            const ids = balanceTransactions
-              .map((txn) => txn?.id)
-              .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+          const ids = balanceTransactions
+            .map((txn) => txn?.id)
+            .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
 
-            if (ids.length > 0) {
-              const results = await salesforce.linkPayoutOnTransactions(payout.id, ids);
-              summary.salesforceUpdates += results.length;
-            }
-          } catch (balanceError) {
-            // Balance transactions may not be available for manual payouts
-            // Log the error but continue processing with transaction name "Payout"
-            context.log('[StripeTrueUp] Could not fetch balance transactions for payout (likely manual payout), continuing without them', {
-              payoutId: payout.id,
-              error: balanceError instanceof Error ? balanceError.message : String(balanceError),
-            });
+          if (ids.length > 0) {
+            const results = await salesforce.linkPayoutOnTransactions(payout.id, ids);
+            summary.salesforceUpdates += results.length;
           }
+        } else if (!payout.automatic) {
+          context.log('[StripeTrueUp] Skipping balance transaction fetch for manual payout', {
+            payoutId: payout.id,
+          });
         }
 
         const posting = await dependencies.accounting.postPayoutToQbo({
