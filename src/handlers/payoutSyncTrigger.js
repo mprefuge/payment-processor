@@ -56,6 +56,49 @@ const uniqueIds = (items) => {
   return ids;
 };
 
+const validateBalanceTransaction = (transaction) => {
+  if (!transaction || typeof transaction !== 'object') {
+    return { isValid: false, reason: 'invalid_transaction_object' };
+  }
+
+  if (!transaction.id || typeof transaction.id !== 'string') {
+    return { isValid: false, reason: 'missing_transaction_id' };
+  }
+
+  if (typeof transaction.amount !== 'number' || !Number.isFinite(transaction.amount)) {
+    return { isValid: false, reason: 'invalid_amount' };
+  }
+
+  if (!transaction.currency || typeof transaction.currency !== 'string') {
+    return { isValid: false, reason: 'missing_currency' };
+  }
+
+  if (!transaction.type || typeof transaction.type !== 'string') {
+    return { isValid: false, reason: 'missing_type' };
+  }
+
+  return { isValid: true };
+};
+
+const filterValidTransactions = (transactions) => {
+  const validTransactions = [];
+  const invalidTransactions = [];
+
+  for (const transaction of transactions) {
+    const validation = validateBalanceTransaction(transaction);
+    if (validation.isValid) {
+      validTransactions.push(transaction);
+    } else {
+      invalidTransactions.push({
+        transaction,
+        reason: validation.reason,
+      });
+    }
+  }
+
+  return { validTransactions, invalidTransactions };
+};
+
 const collectStripePages = async (listFn, initialParams) => {
   const results = [];
   let params = { ...initialParams };
@@ -252,6 +295,17 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
     throw new Error('Processed store is not configured correctly.');
   }
 
+  // Validate required fields
+  if (!payout || typeof payout !== 'object') {
+    console.log('[payoutSyncTrigger] Skipping invalid payout object', { payout });
+    return { status: 'skipped', payoutId: null, reason: 'invalid_payout_object' };
+  }
+
+  if (!payout.id || typeof payout.id !== 'string') {
+    console.log('[payoutSyncTrigger] Skipping payout with missing or invalid id', { payout });
+    return { status: 'skipped', payoutId: null, reason: 'missing_payout_id' };
+  }
+
   const payoutKey = `po_${payout.id}`;
 
   if (await processedStore.isProcessed(payoutKey)) {
@@ -259,6 +313,19 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   }
 
   const transactions = await fetchBalanceTransactionsForPayout(stripe, payout.id);
+  
+  // Validate and filter balance transactions
+  const { validTransactions, invalidTransactions } = filterValidTransactions(transactions);
+  
+  if (invalidTransactions.length > 0) {
+    console.log('[payoutSyncTrigger] Found invalid balance transactions for payout', {
+      payoutId: payout.id,
+      validCount: validTransactions.length,
+      invalidCount: invalidTransactions.length,
+      invalidTransactions,
+    });
+  }
+  
   const memo = `payout_${payout.id}`;
   const docNumber = createDocNumber(payout.id);
   const amountCents = safeAmount(payout.amount);
@@ -269,6 +336,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
     console.log('[payoutSyncTrigger] Skipping payout with zero amount', {
       payoutId: payout.id,
       amount: payout.amount,
+      payout,
     });
     return { status: 'skipped', payoutId: payout.id, reason: 'zero_amount' };
   }
@@ -277,6 +345,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
     console.log('[payoutSyncTrigger] Skipping payout with blank status', {
       payoutId: payout.id,
       status: payout.status,
+      payout,
     });
     return { status: 'skipped', payoutId: payout.id, reason: 'blank_status' };
   }
@@ -291,7 +360,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   const qboResult = await accounting.postBankDeposit(bankDeposit);
 
   if (salesforce && typeof salesforce.linkPayoutOnTransactions === 'function') {
-    const balanceTransactionIds = uniqueIds(transactions);
+    const balanceTransactionIds = uniqueIds(validTransactions);
     if (balanceTransactionIds.length > 0) {
       await salesforce.linkPayoutOnTransactions(payout.id, balanceTransactionIds);
     }
@@ -302,7 +371,8 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   console.log('[payoutSyncTrigger] Processed payout', {
     payoutId: payout.id,
     bankDepositId: qboResult?.id || null,
-    balanceTransactionCount: Array.isArray(transactions) ? transactions.length : 0,
+    balanceTransactionCount: validTransactions.length,
+    invalidTransactionCount: invalidTransactions.length,
   });
 
   return {

@@ -47,7 +47,10 @@ describe('payoutSyncTrigger', () => {
     });
 
     const balanceTransactionsList = vi.fn().mockResolvedValue({
-      data: [{ id: 'bt_1' }, { id: 'bt_2' }],
+      data: [
+        { id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge' },
+        { id: 'bt_2', amount: 1500, currency: 'usd', type: 'charge' }
+      ],
       has_more: false,
     });
 
@@ -185,7 +188,7 @@ describe('payoutSyncTrigger', () => {
     });
 
     const balanceTransactionsList = vi.fn().mockResolvedValue({
-      data: [{ id: 'bt_1' }],
+      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge' }],
       has_more: false,
     });
 
@@ -248,7 +251,7 @@ describe('payoutSyncTrigger', () => {
     });
 
     const balanceTransactionsList = vi.fn().mockResolvedValue({
-      data: [{ id: 'bt_1' }],
+      data: [{ id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge' }],
       has_more: false,
     });
 
@@ -295,5 +298,103 @@ describe('payoutSyncTrigger', () => {
         reason: 'blank_status',
       },
     ]);
+  });
+
+  it('skips invalid payout objects', async () => {
+    const payoutsList = vi.fn().mockResolvedValue({
+      data: [null, undefined, 'invalid'],
+      has_more: false,
+    });
+
+    const balanceTransactionsList = vi.fn();
+    const processedStore = {
+      isProcessed: vi.fn(),
+      markProcessed: vi.fn(),
+    };
+
+    const buildBankDeposit = vi.fn();
+    const postBankDeposit = vi.fn();
+    const linkPayoutOnTransactions = vi.fn();
+
+    internals.setDependencies({
+      stripe: {
+        payouts: { list: payoutsList },
+        balanceTransactions: { list: balanceTransactionsList },
+      },
+      accounting: { buildBankDeposit, postBankDeposit },
+      salesforce: { linkPayoutOnTransactions },
+      processedStore,
+      lookbackDays: 7,
+      now: () => Date.now(),
+    });
+
+    const { context } = createContext();
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
+
+    const result = await handler(req, context);
+
+    expect(processedStore.isProcessed).not.toHaveBeenCalled();
+    expect(balanceTransactionsList).not.toHaveBeenCalled();
+    expect(buildBankDeposit).not.toHaveBeenCalled();
+    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
+    expect(processedStore.markProcessed).not.toHaveBeenCalled();
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary.processed).toBe(0);
+    expect(result.jsonBody.summary.skipped).toBe(3);
+    expect(result.jsonBody.skipped).toHaveLength(3);
+    expect(result.jsonBody.skipped.every(item => item.reason === 'invalid_payout_object')).toBe(true);
+  });
+
+  it('skips payouts with missing or invalid id', async () => {
+    const payoutsList = vi.fn().mockResolvedValue({
+      data: [
+        { amount: 1000, status: 'paid' }, // missing id
+        { id: null, amount: 1000, status: 'paid' }, // null id
+        { id: 123, amount: 1000, status: 'paid' }, // number id
+      ],
+      has_more: false,
+    });
+
+    const balanceTransactionsList = vi.fn();
+    const processedStore = {
+      isProcessed: vi.fn(),
+      markProcessed: vi.fn(),
+    };
+
+    const buildBankDeposit = vi.fn();
+    const postBankDeposit = vi.fn();
+    const linkPayoutOnTransactions = vi.fn();
+
+    internals.setDependencies({
+      stripe: {
+        payouts: { list: payoutsList },
+        balanceTransactions: { list: balanceTransactionsList },
+      },
+      accounting: { buildBankDeposit, postBankDeposit },
+      salesforce: { linkPayoutOnTransactions },
+      processedStore,
+      lookbackDays: 7,
+      now: () => Date.now(),
+    });
+
+    const { context } = createContext();
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
+
+    const result = await handler(req, context);
+
+    expect(processedStore.isProcessed).not.toHaveBeenCalled();
+    expect(balanceTransactionsList).not.toHaveBeenCalled();
+    expect(buildBankDeposit).not.toHaveBeenCalled();
+    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
+    expect(processedStore.markProcessed).not.toHaveBeenCalled();
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.summary.processed).toBe(0);
+    expect(result.jsonBody.summary.skipped).toBe(3);
+    expect(result.jsonBody.skipped).toHaveLength(3);
+    expect(result.jsonBody.skipped.every(item => item.reason === 'missing_payout_id')).toBe(true);
   });
 });
