@@ -374,64 +374,178 @@ const resolveCustomerForCharge = async (
   }
 };
 
-const getProductNameFromPaymentIntent = async (
+const getProductNameFromCharge = async (
   stripe: Stripe,
-  paymentIntent: Stripe.PaymentIntent | string | null | undefined,
+  charge: Stripe.Charge,
   logger: (...args: unknown[]) => void
 ): Promise<string | null> => {
-  if (!paymentIntent) {
-    return null;
-  }
-
   try {
-    // If it's a string, fetch the payment intent
-    let pi: Stripe.PaymentIntent;
-    if (typeof paymentIntent === 'string') {
-      pi = await stripe.paymentIntents.retrieve(paymentIntent, {
-        expand: ['latest_charge.invoice.lines.data.price.product'],
-      });
-    } else {
-      pi = paymentIntent;
-    }
+    // If we have a payment intent, try to get product from there
+    if (charge.payment_intent) {
+      let pi: Stripe.PaymentIntent;
+      if (typeof charge.payment_intent === 'string') {
+        pi = await stripe.paymentIntents.retrieve(charge.payment_intent);
+      } else {
+        pi = charge.payment_intent;
+      }
 
-    // Check if we have line items in the invoice
-    const latestCharge = pi.latest_charge as Stripe.Charge | null;
-    if (latestCharge && latestCharge.invoice) {
-      const invoice = latestCharge.invoice as Stripe.Invoice;
-      if (invoice.lines && invoice.lines.data && invoice.lines.data.length > 0) {
-        const firstLine = invoice.lines.data[0];
-        if (firstLine.price && firstLine.price.product) {
-          const product = firstLine.price.product as Stripe.Product;
-          if (typeof product === 'object' && product.name) {
-            logger('[StripeTrueUp] Found product name from payment intent invoice', {
+      logger('[StripeTrueUp] Analyzing payment intent for product name', {
+        paymentIntentId: pi.id,
+        // @ts-ignore - checking for payment_details
+        hasPaymentDetails: !!(pi as any).payment_details,
+        // @ts-ignore
+        payment_details: (pi as any).payment_details,
+        hasMetadata: !!pi.metadata,
+        metadata: pi.metadata,
+      });
+
+      // Check payment_details.order_reference (primary location per schema)
+      const paymentDetails = (pi as any).payment_details;
+      if (paymentDetails && paymentDetails.order_reference) {
+        const orderRef = paymentDetails.order_reference;
+        logger('[StripeTrueUp] Found order_reference in payment_details', {
+          paymentIntentId: pi.id,
+          orderRef,
+        });
+
+        if (typeof orderRef === 'string') {
+          try {
+            const product = await stripe.products.retrieve(orderRef);
+            if (product.name) {
+              logger('[StripeTrueUp] Found product name from payment_details.order_reference', {
+                paymentIntentId: pi.id,
+                productId: product.id,
+                productName: product.name,
+              });
+              return product.name;
+            }
+          } catch (error) {
+            logger('[StripeTrueUp] Failed to retrieve product from payment_details.order_reference', {
               paymentIntentId: pi.id,
-              productId: product.id,
-              productName: product.name,
+              orderRef,
+              error: error instanceof Error ? error.message : String(error),
             });
-            return product.name;
+          }
+        }
+      }
+
+      // Check payment intent metadata for order_reference (fallback)
+      if (pi.metadata) {
+        const orderRef = pi.metadata.order_reference;
+        const productRef = pi.metadata.product;
+
+        // Try order_reference
+        if (orderRef && typeof orderRef === 'string') {
+          try {
+            const product = await stripe.products.retrieve(orderRef);
+            if (product.name) {
+              logger('[StripeTrueUp] Found product name from payment intent metadata.order_reference', {
+                paymentIntentId: pi.id,
+                productId: product.id,
+                productName: product.name,
+              });
+              return product.name;
+            }
+          } catch (error) {
+            logger('[StripeTrueUp] Failed to retrieve product from PI metadata.order_reference', {
+              paymentIntentId: pi.id,
+              orderRef,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        // Try product
+        if (productRef && typeof productRef === 'string') {
+          try {
+            const product = await stripe.products.retrieve(productRef);
+            if (product.name) {
+              logger('[StripeTrueUp] Found product name from payment intent metadata.product', {
+                paymentIntentId: pi.id,
+                productId: product.id,
+                productName: product.name,
+              });
+              return product.name;
+            }
+          } catch (error) {
+            logger('[StripeTrueUp] Failed to retrieve product from PI metadata.product', {
+              paymentIntentId: pi.id,
+              productRef,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      // Check if we have line items in the invoice
+      const latestCharge = pi.latest_charge as Stripe.Charge | null;
+      if (latestCharge && latestCharge.invoice) {
+        const invoice = latestCharge.invoice as Stripe.Invoice;
+        if (invoice.lines && invoice.lines.data && invoice.lines.data.length > 0) {
+          const firstLine = invoice.lines.data[0];
+          if (firstLine.price && firstLine.price.product) {
+            const product = firstLine.price.product as Stripe.Product;
+            if (typeof product === 'object' && product.name) {
+              logger('[StripeTrueUp] Found product name from payment intent invoice', {
+                paymentIntentId: pi.id,
+                productId: product.id,
+                productName: product.name,
+              });
+              return product.name;
+            }
           }
         }
       }
     }
 
-    // Check metadata for product reference
-    if (pi.metadata) {
-      const productId = pi.metadata.product || pi.metadata.product_id;
-      if (productId && typeof productId === 'string') {
+    // Check charge metadata for order_reference or product (fallback if no payment intent)
+    if (charge.metadata) {
+      const orderRef = charge.metadata.order_reference;
+      const productRef = charge.metadata.product;
+      
+      logger('[StripeTrueUp] Checking charge metadata for product', {
+        chargeId: charge.id,
+        orderRef,
+        productRef,
+      });
+
+      // Try order_reference first
+      if (orderRef && typeof orderRef === 'string') {
         try {
-          const product = await stripe.products.retrieve(productId);
+          const product = await stripe.products.retrieve(orderRef);
           if (product.name) {
-            logger('[StripeTrueUp] Found product name from payment intent metadata', {
-              paymentIntentId: pi.id,
+            logger('[StripeTrueUp] Found product name from charge metadata.order_reference', {
+              chargeId: charge.id,
               productId: product.id,
               productName: product.name,
             });
             return product.name;
           }
         } catch (error) {
-          logger('[StripeTrueUp] Failed to retrieve product from metadata', {
-            paymentIntentId: pi.id,
-            productId,
+          logger('[StripeTrueUp] Failed to retrieve product from charge metadata.order_reference', {
+            chargeId: charge.id,
+            orderRef,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      // Try product metadata
+      if (productRef && typeof productRef === 'string') {
+        try {
+          const product = await stripe.products.retrieve(productRef);
+          if (product.name) {
+            logger('[StripeTrueUp] Found product name from charge metadata.product', {
+              chargeId: charge.id,
+              productId: product.id,
+              productName: product.name,
+            });
+            return product.name;
+          }
+        } catch (error) {
+          logger('[StripeTrueUp] Failed to retrieve product from charge metadata.product', {
+            chargeId: charge.id,
+            productRef,
             error: error instanceof Error ? error.message : String(error),
           });
         }
@@ -440,8 +554,8 @@ const getProductNameFromPaymentIntent = async (
 
     return null;
   } catch (error) {
-    logger('[StripeTrueUp] Failed to get product name from payment intent', {
-      paymentIntentId: typeof paymentIntent === 'string' ? paymentIntent : paymentIntent?.id,
+    logger('[StripeTrueUp] Failed to get product name from charge', {
+      chargeId: charge.id,
       error: error instanceof Error ? error.message : String(error),
     });
     return null;
@@ -879,9 +993,9 @@ const processPayments = async (
         // Try to get product name from payment intent first
         let productName: string | null = null;
         if ((charge as Stripe.Charge).payment_intent) {
-          productName = await getProductNameFromPaymentIntent(
+          productName = await getProductNameFromCharge(
             stripe,
-            (charge as Stripe.Charge).payment_intent,
+            charge as Stripe.Charge,
             context.log
           );
         }
@@ -1178,9 +1292,9 @@ const processRefunds = async (
         // Try to get product name from payment intent first
         let productName: string | null = null;
         if (chargeFragment?.payment_intent) {
-          productName = await getProductNameFromPaymentIntent(
+          productName = await getProductNameFromCharge(
             stripe,
-            chargeFragment.payment_intent,
+            chargeFragment,
             context.log
           );
         }
