@@ -1574,6 +1574,35 @@ const configuredRefundAccountName = (() => {
   return null;
 })();
 
+// Helper function to get account configuration by name
+const getAccountConfig = (accountName: string): { accountType: string; accountSubType: string } | null => {
+  const normalizedName = accountName.trim().toLowerCase();
+  
+  // Check each configured account
+  const accountMappings = [
+    { name: env.quickBooks.accounts.stripeClearing, config: env.accounting.accounts.types.stripeClearing },
+    { name: env.quickBooks.accounts.operatingBank, config: env.accounting.accounts.types.operatingBank },
+    { name: env.quickBooks.accounts.revenue, config: env.accounting.accounts.types.revenue },
+    { name: env.quickBooks.accounts.fees, config: env.accounting.accounts.types.fees },
+    { name: env.quickBooks.accounts.refunds, config: env.accounting.accounts.types.refunds },
+    { name: env.quickBooks.accounts.disputeLosses, config: env.accounting.accounts.types.disputeLosses },
+  ];
+
+  for (const mapping of accountMappings) {
+    try {
+      const parsed = parseReferenceInput(mapping.name, 'account');
+      const lookupName = parsed.lookupName || parsed.reference.name || parsed.reference.value;
+      if (lookupName && lookupName.trim().toLowerCase() === normalizedName) {
+        return mapping.config;
+      }
+    } catch {
+      // Ignore parsing errors
+    }
+  }
+
+  return null;
+};
+
 const lookupAccountIdByName = async (
   name: string,
   context: QuickBooksRequestContext
@@ -1643,22 +1672,19 @@ const maybeCreateConfiguredAccount = async (
   name: string,
   context: QuickBooksRequestContext
 ): Promise<string | null> => {
-  if (!env.accounting.refundAccount.autoCreate) {
+  if (!env.accounting.accounts.autoCreate) {
     return null;
   }
 
-  if (!configuredRefundAccountName) {
-    return null;
-  }
-
-  if (configuredRefundAccountName.toLowerCase() !== name.trim().toLowerCase()) {
+  const accountConfig = getAccountConfig(name);
+  if (!accountConfig) {
     return null;
   }
 
   const payload: Record<string, unknown> = {
-    Name: configuredRefundAccountName,
-    AccountType: env.accounting.refundAccount.accountType,
-    AccountSubType: env.accounting.refundAccount.accountSubType,
+    Name: name.trim(),
+    AccountType: accountConfig.accountType,
+    AccountSubType: accountConfig.accountSubType,
     Description: 'Auto-created by Stripe webhook integration',
   };
 
@@ -1680,7 +1706,7 @@ const maybeCreateConfiguredAccount = async (
     }
 
     throw new Error(
-      `Failed to auto-create QuickBooks account "${configuredRefundAccountName}" (status ${
+      `Failed to auto-create QuickBooks account "${name}" (status ${
         response.status
       }): ${errorText ?? response.statusText}`
     );

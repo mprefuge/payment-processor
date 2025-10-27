@@ -39,10 +39,16 @@ export interface EnvConfig {
     postingStrategy: AccountingPostingStrategy;
     syncEnabled: boolean;
     defaultSalesItem: string;
-    refundAccount: {
+    accounts: {
       autoCreate: boolean;
-      accountType: string;
-      accountSubType: string;
+      types: {
+        stripeClearing: { accountType: string; accountSubType: string; };
+        operatingBank: { accountType: string; accountSubType: string; };
+        revenue: { accountType: string; accountSubType: string; };
+        fees: { accountType: string; accountSubType: string; };
+        refunds: { accountType: string; accountSubType: string; };
+        disputeLosses: { accountType: string; accountSubType: string; };
+      };
     };
   };
   appInsights?: {
@@ -283,23 +289,66 @@ function loadEnv(): EnvConfig {
       defaultValue: 'Stripe Transaction',
     }) ?? 'Stripe Transaction';
 
-  const autoCreateRefundAccountRaw = resolveEnv('ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT', {
+  const autoCreateAccountsRaw = resolveEnv('ACCOUNTING_AUTOCREATE_ACCOUNTS', {
     defaultValue: 'true',
   });
-  const autoCreateRefundAccount = parseBoolean(
-    'ACCOUNTING_AUTOCREATE_REFUND_ACCOUNT',
-    autoCreateRefundAccountRaw,
+  const autoCreateAccounts = parseBoolean(
+    'ACCOUNTING_AUTOCREATE_ACCOUNTS',
+    autoCreateAccountsRaw,
     true
   );
 
-  const refundAccountType =
-    resolveEnv('ACCOUNTING_REFUND_ACCOUNT_TYPE', {
-      defaultValue: 'Expense',
-    }) ?? 'Expense';
-  const refundAccountSubType =
-    resolveEnv('ACCOUNTING_REFUND_ACCOUNT_SUBTYPE', {
-      defaultValue: 'OtherMiscellaneousExpense',
-    }) ?? 'OtherMiscellaneousExpense';
+  // Account type configurations
+  const accountTypes = {
+    stripeClearing: {
+      accountType: resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_TYPE', {
+        defaultValue: 'Bank',
+      }) ?? 'Bank',
+      accountSubType: resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_SUBTYPE', {
+        defaultValue: 'CashOnHand',
+      }) ?? 'CashOnHand',
+    },
+    operatingBank: {
+      accountType: resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_TYPE', {
+        defaultValue: 'Bank',
+      }) ?? 'Bank',
+      accountSubType: resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_SUBTYPE', {
+        defaultValue: 'Checking',
+      }) ?? 'Checking',
+    },
+    revenue: {
+      accountType: resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_TYPE', {
+        defaultValue: 'Income',
+      }) ?? 'Income',
+      accountSubType: resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_SUBTYPE', {
+        defaultValue: 'ServiceFeeIncome',
+      }) ?? 'ServiceFeeIncome',
+    },
+    fees: {
+      accountType: resolveEnv('ACCOUNTING_FEES_ACCOUNT_TYPE', {
+        defaultValue: 'Expense',
+      }) ?? 'Expense',
+      accountSubType: resolveEnv('ACCOUNTING_FEES_ACCOUNT_SUBTYPE', {
+        defaultValue: 'OtherMiscellaneousExpense',
+      }) ?? 'OtherMiscellaneousExpense',
+    },
+    refunds: {
+      accountType: resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_TYPE', {
+        defaultValue: 'Expense',
+      }) ?? 'Expense',
+      accountSubType: resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_SUBTYPE', {
+        defaultValue: 'OtherMiscellaneousExpense',
+      }) ?? 'OtherMiscellaneousExpense',
+    },
+    disputeLosses: {
+      accountType: resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_TYPE', {
+        defaultValue: 'Expense',
+      }) ?? 'Expense',
+      accountSubType: resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_SUBTYPE', {
+        defaultValue: 'OtherMiscellaneousExpense',
+      }) ?? 'OtherMiscellaneousExpense',
+    },
+  };
 
   if (syncEnabled) {
     if (!quickBooks.realmId) {
@@ -360,10 +409,9 @@ function loadEnv(): EnvConfig {
         : 'je-transfer') as AccountingPostingStrategy,
       syncEnabled,
       defaultSalesItem,
-      refundAccount: {
-        autoCreate: autoCreateRefundAccount,
-        accountType: refundAccountType,
-        accountSubType: refundAccountSubType,
+      accounts: {
+        autoCreate: autoCreateAccounts,
+        types: accountTypes,
       },
     },
     appInsights: appInsightsInstrumentationKey

@@ -25,10 +25,16 @@ const baseEnv = {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
     defaultSalesItem: 'Stripe Transaction',
-    refundAccount: {
+    accounts: {
       autoCreate: true,
-      accountType: 'Expense',
-      accountSubType: 'OtherMiscellaneousExpense',
+      types: {
+        stripeClearing: { accountType: 'Bank', accountSubType: 'CashOnHand' },
+        operatingBank: { accountType: 'Bank', accountSubType: 'Checking' },
+        revenue: { accountType: 'Income', accountSubType: 'ServiceFeeIncome' },
+        fees: { accountType: 'Expense', accountSubType: 'OtherMiscellaneousExpense' },
+        refunds: { accountType: 'Expense', accountSubType: 'OtherMiscellaneousExpense' },
+        disputeLosses: { accountType: 'Expense', accountSubType: 'OtherMiscellaneousExpense' },
+      },
     },
   },
 } as any;
@@ -440,7 +446,8 @@ describe('postChargeToQbo', () => {
     expect(result).toEqual({ qboId: 'sr-3', type: 'sales-receipt' });
     expect(fetcher).toHaveBeenCalledTimes(6); // Customer lookup, get, update, item lookup, duplicate check, sales receipt
 
-    const [emailLookup, customerGet, customerUpdate, itemLookup, duplicateCheck, salesReceiptPost] = requests;
+    const [emailLookup, customerGet, customerUpdate, itemLookup, duplicateCheck, salesReceiptPost] =
+      requests;
 
     expect(emailLookup.url).toContain('/query?query=');
     expect(customerGet.url).toContain('/customer/');
@@ -695,7 +702,7 @@ describe('postChargeToQbo', () => {
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} }, // Customer lookup
-      { QueryResponse: {} }, // Item lookup  
+      { QueryResponse: {} }, // Item lookup
       { Customer: { Id: 'cust-3', DisplayName: 'Donor Example' } }, // Customer create
       {
         QueryResponse: {
@@ -813,6 +820,7 @@ describe('postChargeToQbo', () => {
   });
 
   it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
+    baseEnv.accounting.accounts.autoCreate = false;
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
     const { fetcher } = createFetchMock(
       { QueryResponse: {} }, // Customer search
