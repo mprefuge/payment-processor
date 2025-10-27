@@ -304,21 +304,26 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     if (normalizedIds.length === 0) {
       return [];
     }
-    const records = normalizedIds.map((balanceTransactionId) =>
-      sanitizeTransactionRecord({
-        stripe_balance_transaction_id__c: balanceTransactionId,
-        stripe_payout_id__c: normalizedPayoutId,
-      })
-    );
+
+    // Query for existing transactions to avoid creating incomplete records
+    const existingQuery = `SELECT Id, Stripe_Balance_Transaction_Id__c FROM ${TRANSACTION_OBJECT} WHERE Stripe_Balance_Transaction_Id__c IN ('${normalizedIds.join("','")}')`;
+    const existingRecords = toLookupRecords(await connection.query(existingQuery));
+
+    if (existingRecords.length === 0) {
+      // No existing transactions to link
+      return [];
+    }
+
+    // Only update existing transactions
+    const records = existingRecords.map((existing) => ({
+      Id: (existing as any).Id,
+      Stripe_Payout_Id__c: normalizedPayoutId,
+    }));
+
     const results = toArray(
-      await connection.upsert(
-        TRANSACTION_OBJECT,
-        records,
-        resolveExternalIdField('stripe_balance_transaction_id__c'),
-        {
-          allOrNone: true,
-        }
-      )
+      await connection.upsert(TRANSACTION_OBJECT, records, 'Id', {
+        allOrNone: true,
+      })
     );
     const failures = results.filter((result) => !result.success);
     if (failures.length > 0) {

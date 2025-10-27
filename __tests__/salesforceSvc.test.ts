@@ -121,6 +121,15 @@ describe('createSalesforceSvc', () => {
   it('normalizes payout linkage upserts to Salesforce API names', async () => {
     const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+    // Mock existing transaction records
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('Stripe_Balance_Transaction_Id__c IN')) {
+        return Promise.resolve({
+          records: [{ Id: 'existing_txn_1', Stripe_Balance_Transaction_Id__c: 'bt_1' }]
+        });
+      }
+      return Promise.resolve({ records: [] });
+    });
 
     const service: SalesforceSvc = createSalesforceSvc({
       connection: { upsert, sobject, query } as unknown as Connection,
@@ -132,11 +141,11 @@ describe('createSalesforceSvc', () => {
       'Transaction__c',
       [
         expect.objectContaining({
-          Stripe_Balance_Transaction_Id__c: 'bt_1',
+          Id: 'existing_txn_1',
           Stripe_Payout_Id__c: 'po_123',
         }),
       ],
-      TRANSACTION_FIELD_API_NAMES.stripe_balance_transaction_id__c,
+      'Id',
       { allOrNone: true }
     );
   });

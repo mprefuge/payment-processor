@@ -568,7 +568,7 @@ class SalesforceCrmService extends BaseCrmService {
         Name:
           name || description || `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`, // Add Name field
         Contact__c: contactId, // Assuming custom lookup field
-        Amount__c: amount / 100, // Convert cents to dollars
+        Amount_Gross__c: amount / 100, // Convert cents to dollars
         Currency__c: currency,
         Payment_Method__c: paymentMethod,
         Transaction_ID__c: transactionId,
@@ -586,14 +586,14 @@ class SalesforceCrmService extends BaseCrmService {
 
       // Validate required fields before creating
       if (
-        transactionRecord.Status__c == null ||
-        transactionRecord.Status__c === '' ||
-        transactionRecord.Amount__c == null
+        status == null ||
+        status === '' ||
+        amount == null
       ) {
         logger.warn('[SalesforceCrm] Skipping transaction creation due to missing required fields', {
           contactId,
-          status: transactionRecord.Status__c,
-          amount: transactionRecord.Amount__c,
+          status,
+          amount,
           transactionData,
         });
         return null;
@@ -692,6 +692,21 @@ class SalesforceCrmService extends BaseCrmService {
       sessionId, // New field for checkout session ID
       status = 'Completed',
     } = transactionData;
+
+    // Validate required fields before creating
+    if (
+      status == null ||
+      status === '' ||
+      amount == null
+    ) {
+      logger.warn('[SalesforceCrm] Skipping opportunity creation due to missing required fields', {
+        contactId,
+        status,
+        amount,
+        transactionData,
+      });
+      return null;
+    }
 
     // Map status to Opportunity StageName
     let stageName = 'Closed Won';
