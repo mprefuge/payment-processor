@@ -413,3 +413,37 @@ export const getProductNameFromCharge = async (
     return null;
   }
 };
+
+export const getFrequencyFromSubscription = async (
+  stripe: Stripe,
+  subscriptionId: string,
+  logger: (...args: unknown[]) => void
+): Promise<string | null> => {
+  try {
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    
+    if (subscription.items?.data && subscription.items.data.length > 0) {
+      const firstItem = subscription.items.data[0];
+      if (firstItem.price?.recurring?.interval) {
+        const interval = firstItem.price.recurring.interval;
+        logger('[getFrequencyFromSubscription] Found frequency from subscription', {
+          subscriptionId,
+          interval,
+        });
+        return interval;
+      }
+    }
+    
+    logger('[getFrequencyFromSubscription] No frequency found in subscription', {
+      subscriptionId,
+      hasItems: !!subscription.items?.data?.length,
+    });
+    return null;
+  } catch (error) {
+    logger('[getFrequencyFromSubscription] Failed to retrieve subscription for frequency', {
+      subscriptionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};

@@ -20,6 +20,7 @@ import {
   timestampToDate,
   timestampToIsoString,
   getProductNameFromCharge,
+  getFrequencyFromSubscription,
 } from '../stripe/utils';
 
 // Import types only, not the actual implementations (to avoid env.ts loading)
@@ -790,6 +791,39 @@ const processPayments = async (
           charge: chargeObj,
           balanceTransaction,
         });
+
+        // Extract frequency from subscription if charge has invoice and no frequency is set
+        if (!transaction.frequency__c && chargeObj.invoice) {
+          try {
+            // Get invoice to find subscription
+            const invoice = await stripe.invoices.retrieve(chargeObj.invoice as string);
+            if (invoice.subscription) {
+              const subscriptionId = typeof invoice.subscription === 'string' 
+                ? invoice.subscription 
+                : invoice.subscription.id;
+              
+              if (subscriptionId) {
+                const frequency = await getFrequencyFromSubscription(stripe, subscriptionId, (...args: unknown[]) => context.log(...args));
+                if (frequency) {
+                  transaction.frequency__c = frequency;
+                  context.log('[StripeTrueUp] Set frequency from subscription for charge', {
+                    chargeId: charge.id,
+                    invoiceId: chargeObj.invoice,
+                    subscriptionId,
+                    frequency,
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error getting frequency from subscription';
+            context.log('[StripeTrueUp] Failed to get frequency from subscription for charge', {
+              chargeId: charge.id,
+              invoiceId: chargeObj.invoice,
+              error: message,
+            });
+          }
+        }
 
         // Generate transaction name
         const config = loadConfig();

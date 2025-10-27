@@ -15,6 +15,7 @@ import {
   timestampToDate,
   timestampToIsoString,
   getProductNameFromCharge,
+  getFrequencyFromSubscription,
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
 import { loadConfig, normalizeTransactionCategory, generateTransactionName } from '../../config/contactMatching';
@@ -213,6 +214,28 @@ const processSuccessfulPaymentIntent = async ({
 
   if (subscriptionId && !transaction.stripe_subscription_id__c) {
     transaction.stripe_subscription_id__c = subscriptionId;
+  }
+
+  // Extract frequency from subscription if not already set in metadata
+  if (subscriptionId && !transaction.frequency__c) {
+    try {
+      const frequency = await getFrequencyFromSubscription(stripe, subscriptionId, (...args: unknown[]) => context.log(...args));
+      if (frequency) {
+        transaction.frequency__c = frequency;
+        context.log('[StripeWebhook] Set frequency from subscription', {
+          paymentIntentId: paymentIntent.id,
+          subscriptionId,
+          frequency,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error getting frequency from subscription';
+      context.log('[StripeWebhook] Failed to get frequency from subscription', {
+        paymentIntentId: paymentIntent.id,
+        subscriptionId,
+        error: message,
+      });
+    }
   }
 
   if (resolvedInvoice && (resolvedInvoice.status === 'paid' || resolvedInvoice.paid === true)) {
