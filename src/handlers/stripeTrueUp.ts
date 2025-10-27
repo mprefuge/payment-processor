@@ -1594,6 +1594,7 @@ const processPayouts = async (
           amount: payoutAmount,
           memo: `Stripe payout ${payout.id}`,
           date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
+          payoutId: payout.id, // Include payout ID for duplicate detection
         });
         summary.qboPosts += 1;
 

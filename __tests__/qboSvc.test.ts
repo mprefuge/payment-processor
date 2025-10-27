@@ -244,6 +244,7 @@ describe('postChargeToQbo', () => {
   it('posts sales receipt to clearing account and creates fee journal entry when using sales receipt strategy', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(
+      { QueryResponse: { SalesReceipt: [] } }, // Duplicate check for sales receipt
       { QueryResponse: {} },
       { QueryResponse: {} },
       { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } },
@@ -253,6 +254,7 @@ describe('postChargeToQbo', () => {
         },
       },
       { SalesReceipt: { Id: 'sr-1' } },
+      { QueryResponse: { JournalEntry: [] } }, // Duplicate check for fee journal entry
       { JournalEntry: { Id: 'fee-je-1' } }
     );
     const { postChargeToQbo } = await importQboSvc();
@@ -267,9 +269,9 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-1', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(fetcher).toHaveBeenCalledTimes(8); // Updated from 6 to account for 2 duplicate checks
 
-    const [emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
+    const [duplicateCheckSalesReceipt, emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
     expect(emailLookupRequest.url).toContain('/query?query=');
     expect(nameLookupRequest.url).toContain('/query?query=');
     expect(customerCreateRequest.url).toContain('/customer');

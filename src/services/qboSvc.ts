@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import type Stripe from 'stripe';
 
 import env from '../config/env';
+import { logger } from '../lib/logger';
 import tokenManager from './qbo/qboTokenManager';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
@@ -2072,6 +2073,116 @@ const markItemReferencesForRetry = (references: ItemRefWithMetadata[]): boolean 
   return marked;
 };
 
+/**
+ * Check if a document with the given DocNumber already exists in QuickBooks.
+ * @param entity The type of document to check
+ * @param docNumber The document number to search for
+ * @param options Optional request options
+ * @returns The existing document ID if found, null otherwise
+ */
+const checkForDuplicate = async (
+  entity: QuickBooksDocType,
+  docNumber: string,
+  options?: PostOptions
+): Promise<string | null> => {
+  try {
+    const entityName =
+      entity === 'sales-receipt'
+        ? 'SalesReceipt'
+        : entity === 'journal-entry'
+          ? 'JournalEntry'
+          : 'Deposit';
+
+    // Query QuickBooks for existing document with this DocNumber
+    const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
+    
+    logger.debug('[QBO] Checking for duplicate', { entity, docNumber, queryString });
+    
+    const result = await query<{
+      QueryResponse: { [key: string]: Array<{ Id: string }> };
+    }>(queryString, options);
+
+    const items = result?.QueryResponse?.[entityName];
+    if (items && items.length > 0) {
+      logger.info('[QBO] Duplicate document found', { 
+        entity, 
+        docNumber, 
+        existingId: items[0].Id,
+        count: items.length 
+      });
+      return items[0].Id;
+    }
+
+    logger.debug('[QBO] No duplicate found', { entity, docNumber });
+    return null;
+  } catch (error) {
+    // If query fails, log the error but don't block the operation
+    // Better to risk a duplicate than to fail the transaction
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.warn('[QBO] Duplicate check failed, proceeding with post', { 
+      entity, 
+      docNumber, 
+      error: errorMessage 
+    });
+    return null;
+  }
+};
+
+/**
+ * Check if a bank deposit already exists for a given Stripe payout ID.
+ * Searches the PrivateNote field for deposits containing the payout ID.
+ * @param payoutId The Stripe payout ID (e.g., "po_1234567890")
+ * @param options Optional request options
+ * @returns The existing deposit ID if found, null otherwise
+ */
+const checkForPayoutDeposit = async (
+  payoutId: string,
+  options?: PostOptions
+): Promise<string | null> => {
+  try {
+    // Escape single quotes in payout ID
+    const escapedPayoutId = payoutId.replace(/'/g, "\\'");
+    
+    // Query for deposits with this payout ID in the PrivateNote
+    // Note: QuickBooks doesn't support LIKE with wildcards in all cases,
+    // so we search for exact payout ID match
+    const queryString = `SELECT Id, PrivateNote FROM Deposit WHERE PrivateNote LIKE '%${escapedPayoutId}%' MAXRESULTS 5`;
+    
+    logger.debug('[QBO] Checking for existing payout deposit', { payoutId, queryString });
+    
+    const result = await query<{
+      QueryResponse: { Deposit?: Array<{ Id: string; PrivateNote?: string }> };
+    }>(queryString, options);
+
+    const deposits = result?.QueryResponse?.Deposit;
+    if (deposits && deposits.length > 0) {
+      // Verify the payout ID is actually in the PrivateNote (not just a substring match)
+      const matchingDeposit = deposits.find(deposit => 
+        deposit.PrivateNote && deposit.PrivateNote.includes(payoutId)
+      );
+      
+      if (matchingDeposit) {
+        logger.info('[QBO] Found existing deposit for payout', { 
+          payoutId, 
+          existingId: matchingDeposit.Id,
+          privateNote: matchingDeposit.PrivateNote
+        });
+        return matchingDeposit.Id;
+      }
+    }
+
+    logger.debug('[QBO] No existing payout deposit found', { payoutId });
+    return null;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.warn('[QBO] Payout deposit check failed', { 
+      payoutId, 
+      error: errorMessage 
+    });
+    return null;
+  }
+};
+
 const postToQbo = async <T extends QuickBooksDocType>(
   entity: T,
   payload: T extends 'sales-receipt'
@@ -2081,6 +2192,24 @@ const postToQbo = async <T extends QuickBooksDocType>(
       : QuickBooksBankDeposit,
   options?: PostOptions
 ): Promise<PostResult> => {
+  // Extract DocNumber from payload for duplicate checking
+  const docNumber = (payload as { DocNumber?: string }).DocNumber;
+  
+  // Check for duplicate before posting
+  if (docNumber) {
+    const existingId = await checkForDuplicate(entity, docNumber, options);
+    if (existingId) {
+      logger.info('[QBO] Returning existing document instead of creating duplicate', { 
+        entity, 
+        docNumber, 
+        existingId 
+      });
+      return { id: existingId, type: entity, raw: { duplicate: true, existingId } };
+    }
+  } else {
+    logger.warn('[QBO] No DocNumber in payload, skipping duplicate check', { entity });
+  }
+
   const url = buildQboUrl(
     entity === 'sales-receipt'
       ? 'salesreceipt'
@@ -2109,6 +2238,39 @@ const postToQbo = async <T extends QuickBooksDocType>(
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    
+    // Check for duplicate document number error from QuickBooks
+    if (
+      response.status === 400 &&
+      errorText &&
+      (/Duplicate Document Number/i.test(errorText) || /DocNumber.*already exists/i.test(errorText))
+    ) {
+      logger.warn('[QBO] QuickBooks rejected duplicate DocNumber', { 
+        entity, 
+        docNumber,
+        error: errorText 
+      });
+      
+      // Try to find the existing document
+      if (docNumber) {
+        const existingId = await checkForDuplicate(entity, docNumber, options);
+        if (existingId) {
+          logger.info('[QBO] Found existing document after duplicate error', { 
+            entity, 
+            docNumber, 
+            existingId 
+          });
+          return { id: existingId, type: entity, raw: { duplicate: true, existingId, recoveredFromError: true } };
+        }
+      }
+      
+      // If we can't find the duplicate, throw a more informative error
+      throw new Error(
+        `QuickBooks rejected duplicate DocNumber ${docNumber ?? 'unknown'} for ${entity}, but could not locate existing document. ` +
+        `Original error: ${errorText ?? response.statusText}`
+      );
+    }
+    
     const retryTargets = errorText ? parseInvalidReferenceTargets(errorText) : null;
 
     const accountsMarked = retryTargets?.accounts
@@ -2344,6 +2506,7 @@ interface PostPayoutToQboInput {
   amount: number;
   memo?: string;
   date: Date;
+  payoutId?: string;
   options?: PostOptions;
 }
 
@@ -2351,6 +2514,7 @@ export const postPayoutToQbo = async ({
   amount,
   memo,
   date,
+  payoutId,
   options,
 }: PostPayoutToQboInput): Promise<PostChargeToQboResult> => {
   const payoutAmount = ensurePositiveAmount(amount, 'Payout amount');
@@ -2359,7 +2523,27 @@ export const postPayoutToQbo = async ({
     throw new Error('Payout amount must be greater than zero.');
   }
 
-  const docNumber = buildDocNumber('PO', date, payoutAmount);
+  // If we have a payout ID, check for existing deposits containing this payout ID
+  if (payoutId) {
+    try {
+      const existingDepositId = await checkForPayoutDeposit(payoutId, options);
+      if (existingDepositId) {
+        logger.info('[QBO] Found existing deposit for payout', { 
+          payoutId, 
+          existingId: existingDepositId 
+        });
+        return { qboId: existingDepositId, type: 'bank-deposit' };
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.warn('[QBO] Failed to check for existing payout deposit, proceeding with post', { 
+        payoutId, 
+        error: errorMessage 
+      });
+    }
+  }
+
+  const docNumber = buildDocNumber('PO', date, payoutAmount, payoutId);
   const deposit = buildBankDeposit({
     docNumber,
     amountCents: payoutAmount,

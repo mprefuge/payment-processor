@@ -258,6 +258,7 @@ const createPayoutAdapter = (): PayoutAccountingAdapter => ({
       amount: amountCents,
       memo: input.memo,
       date: input.txnDate,
+      payoutId: input.payout?.id, // Include payout ID for duplicate detection
     });
 
     return { id: result.qboId, type: result.type };
