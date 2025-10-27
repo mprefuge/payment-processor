@@ -1206,9 +1206,18 @@ const buildDocNumber = (
 ): string => {
   // If a charge ID is provided, use it for uniqueness instead of amount
   if (chargeId) {
+    const formattedDate = normalizeDate(date).replace(/-/g, '');
+
+    // Special handling for payout IDs - prioritize including the payout ID
+    if (chargeId.startsWith('po_')) {
+      // For payouts, use format: PO-{last10chars of payoutId}
+      // This gives us PO-XXXXXXXXXX (13 chars) leaving room for uniqueness
+      const payoutIdPart = chargeId.slice(-10); // Last 10 chars of full payout ID
+      return `${prefix}-${payoutIdPart}`.slice(0, DOC_NUMBER_MAX_LENGTH);
+    }
+
     // Extract the unique part from charge ID (e.g., "ch_3ABC123" -> "3ABC123")
     const chargeIdPart = chargeId.startsWith('ch_') ? chargeId.slice(3) : chargeId;
-    const formattedDate = normalizeDate(date).replace(/-/g, '');
     const suffix = `${formattedDate}-${chargeIdPart}`;
     const maxPrefixLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - suffix.length - 1);
     const safePrefix = prefix.slice(0, maxPrefixLength);
@@ -2140,43 +2149,40 @@ const checkForPayoutDeposit = async (
   options?: PostOptions
 ): Promise<string | null> => {
   try {
-    // Extract the unique part from payout ID (e.g., "po_1SKTfrBS5xFjv3JBMmyUqmWj" -> "1SKTfrBS5xFjv3JBMmyUqmWj")
-    const payoutIdPart = payoutId.startsWith('po_') ? payoutId.slice(3) : payoutId;
+    // For payout DocNumbers, we use the last 10 characters of the payout ID
+    const payoutIdPart = payoutId.slice(-10);
     // Escape single quotes for SQL query
     const escapedPayoutIdPart = payoutIdPart.replace(/'/g, "\\'");
     
     // Query for deposits with DocNumber containing the payout ID part
-    // DocNumber format is "PO-{date}-{payoutIdPart}", so we search for deposits with this pattern
-    const queryString = `SELECT Id, DocNumber, PrivateNote FROM Deposit WHERE DocNumber LIKE '%${escapedPayoutIdPart}%' MAXRESULTS 10`;
+    // DocNumber format is "PO-{last10chars of payoutId}", so we search for deposits with this pattern
+    const queryString = `SELECT Id, DocNumber FROM Deposit WHERE DocNumber LIKE '%${escapedPayoutIdPart}%' MAXRESULTS 10`;
     
-    logger.debug('[QBO] Checking for existing payout deposit', { payoutId, payoutIdPart });
+    logger.debug('[QBO] Checking for existing payout deposit by DocNumber', { payoutId, payoutIdPart });
     
     const result = await query<{
-      QueryResponse: { Deposit?: Array<{ Id: string; DocNumber?: string; PrivateNote?: string }> };
+      QueryResponse: { Deposit?: Array<{ Id: string; DocNumber?: string }> };
     }>(queryString, options);
 
     const deposits = result?.QueryResponse?.Deposit;
     if (deposits && deposits.length > 0) {
-      // Confirm the match by checking if PrivateNote contains the full payout ID
-      // or if DocNumber contains the payout ID part
+      // Confirm the match by checking if DocNumber contains the payout ID part
       const matchingDeposit = deposits.find(deposit => {
         const docNumberMatch = deposit.DocNumber && deposit.DocNumber.includes(payoutIdPart);
-        const privateNoteMatch = deposit.PrivateNote && deposit.PrivateNote.includes(payoutId);
-        return docNumberMatch || privateNoteMatch;
+        return docNumberMatch;
       });
       
       if (matchingDeposit) {
-        logger.info('[QBO] Found existing deposit for payout', { 
+        logger.info('[QBO] Found existing deposit for payout by DocNumber check', { 
           payoutId, 
           existingId: matchingDeposit.Id,
-          docNumber: matchingDeposit.DocNumber,
-          privateNote: matchingDeposit.PrivateNote
+          docNumber: matchingDeposit.DocNumber
         });
         return matchingDeposit.Id;
       }
     }
 
-    logger.debug('[QBO] No existing payout deposit found', { payoutId });
+    logger.debug('[QBO] No existing payout deposit found by DocNumber check', { payoutId });
     return null;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
