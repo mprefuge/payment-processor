@@ -389,7 +389,7 @@ const findOrCreateContactInSalesforce = async (
   salesforceSvc: SalesforceSvc,
   customer: Stripe.Customer | Stripe.DeletedCustomer | null,
   transactionName: string | null,
-  log: (message: string, ...args: unknown[]) => void
+  contextLog: typeof console.log
 ): Promise<{ id: string } | null> => {
   if (!customer || customer.deleted) {
     return null;
@@ -422,7 +422,7 @@ const findOrCreateContactInSalesforce = async (
     lastName = customerName;
   }
 
-  log('[StripeTrueUp] Starting contact find/create process', {
+  contextLog('[StripeTrueUp] Starting contact find/create process', {
     customerId: stripeCustomer.id,
     customerName,
     firstName,
@@ -435,11 +435,11 @@ const findOrCreateContactInSalesforce = async (
     const connection = salesforceConnection || (await createSalesforceConnection());
 
     if (!connection) {
-      log('[StripeTrueUp] No Salesforce connection available');
+      contextLog('[StripeTrueUp] No Salesforce connection available');
       return null;
     }
 
-    log('[StripeTrueUp] Salesforce connection established');
+    contextLog('[StripeTrueUp] Salesforce connection established');
 
     // Step 1: Search for existing contact using SOQL
     const whereConditions: string[] = [];
@@ -474,14 +474,14 @@ const findOrCreateContactInSalesforce = async (
                      ORDER BY CreatedDate DESC 
                      LIMIT 10`;
 
-      log('[StripeTrueUp] Executing SOQL query', { 
+      contextLog('[StripeTrueUp] Executing SOQL query', { 
         query,
         whereConditions,
       });
 
       const result = await connection.query(query);
 
-      log('[StripeTrueUp] SOQL query completed', {
+      contextLog('[StripeTrueUp] SOQL query completed', {
         recordCount: result.records?.length || 0,
       });
 
@@ -494,7 +494,7 @@ const findOrCreateContactInSalesforce = async (
 
         if (stripeIdMatch) {
           existingContact = stripeIdMatch;
-          log('[StripeTrueUp] Found contact by Stripe Customer ID', {
+          contextLog('[StripeTrueUp] Found contact by Stripe Customer ID', {
             contactId: existingContact.Id,
             stripeCustomerId: stripeCustomer.id,
           });
@@ -514,7 +514,7 @@ const findOrCreateContactInSalesforce = async (
 
           if (nameMatch) {
             existingContact = nameMatch;
-            log('[StripeTrueUp] Found contact by name match', {
+            contextLog('[StripeTrueUp] Found contact by name match', {
               contactId: existingContact.Id,
               firstName,
               lastName,
@@ -523,14 +523,14 @@ const findOrCreateContactInSalesforce = async (
         } else {
           // 3. Use first result (email match)
           existingContact = result.records[0];
-          log('[StripeTrueUp] Found contact by email', {
+          contextLog('[StripeTrueUp] Found contact by email', {
             contactId: existingContact.Id,
             email: stripeCustomer.email,
           });
         }
       }
     } else {
-      log('[StripeTrueUp] No search conditions available, will create new contact');
+      contextLog('[StripeTrueUp] No search conditions available, will create new contact');
     }
 
     // Step 2: Update existing contact or create new one
@@ -543,7 +543,7 @@ const findOrCreateContactInSalesforce = async (
       // Update Stripe Customer ID if not set
       if (!existingContact.Stripe_Customer_Id__c && stripeCustomer.id) {
         updateFields.Stripe_Customer_Id__c = stripeCustomer.id;
-        log('[StripeTrueUp] Adding Stripe Customer ID to existing contact', {
+        contextLog('[StripeTrueUp] Adding Stripe Customer ID to existing contact', {
           contactId: existingContact.Id,
           stripeCustomerId: stripeCustomer.id,
         });
@@ -567,12 +567,12 @@ const findOrCreateContactInSalesforce = async (
         const updateResult = await connection.sobject('Contact').update(updateFields);
         
         if (!updateResult.success) {
-          log('[StripeTrueUp] Failed to update contact', {
+          contextLog('[StripeTrueUp] Failed to update contact', {
             contactId: existingContact.Id,
             errors: updateResult.errors,
           });
         } else {
-          log('[StripeTrueUp] Updated existing contact', {
+          contextLog('[StripeTrueUp] Updated existing contact', {
             contactId: existingContact.Id,
             updatedFields: Object.keys(updateFields).filter(k => k !== 'Id'),
           });
@@ -589,7 +589,7 @@ const findOrCreateContactInSalesforce = async (
         Stripe_Customer_Id__c: stripeCustomer.id,
       };
 
-      log('[StripeTrueUp] Creating new contact', {
+      contextLog('[StripeTrueUp] Creating new contact', {
         stripeCustomerId: stripeCustomer.id,
         firstName,
         lastName,
@@ -599,13 +599,13 @@ const findOrCreateContactInSalesforce = async (
       const createResult = await connection.sobject('Contact').create(contactRecord);
 
       if (!createResult.success) {
-        log('[StripeTrueUp] Failed to create contact', {
+        contextLog('[StripeTrueUp] Failed to create contact', {
           errors: createResult.errors,
         });
         return null;
       }
 
-      log('[StripeTrueUp] Created new contact', {
+      contextLog('[StripeTrueUp] Created new contact', {
         contactId: createResult.id,
         stripeCustomerId: stripeCustomer.id,
       });
@@ -613,7 +613,7 @@ const findOrCreateContactInSalesforce = async (
       return { id: createResult.id };
     }
   } catch (error) {
-    log('[StripeTrueUp] Failed to find/create contact in Salesforce', {
+    contextLog('[StripeTrueUp] Failed to find/create contact in Salesforce', {
       customerId: stripeCustomer.id,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -752,27 +752,26 @@ const processPayments = async (
         // Upsert customer to Salesforce first to get the Contact ID
         let contactId: string | null = null;
         if (stripeCustomer && !stripeCustomer.deleted) {
-          context.log('[StripeTrueUp] Calling findOrCreateContactInSalesforce', {
+          context.log('[StripeTrueUp] Calling upsertCustomerByStripeId', {
             customerId: stripeCustomer.id,
             customerName: (stripeCustomer as Stripe.Customer).name,
             customerEmail: (stripeCustomer as Stripe.Customer).email,
           });
           
           try {
-            const customerUpsertResult = await findOrCreateContactInSalesforce(
-              salesforce,
-              stripeCustomer,
-              transactionName,
-              context.log
-            );
+            const customerUpsertResult = await salesforce.upsertCustomerByStripeId({
+              stripe_customer_id__c: stripeCustomer.id,
+              Name: (stripeCustomer as Stripe.Customer).name || (stripeCustomer as Stripe.Customer).email || `Customer ${stripeCustomer.id}`,
+              Email: (stripeCustomer as Stripe.Customer).email || null,
+            });
             contactId = customerUpsertResult?.id ?? null;
             
-            context.log('[StripeTrueUp] Contact find/create completed', {
+            context.log('[StripeTrueUp] Contact upsert completed', {
               contactId,
               success: !!contactId,
             });
           } catch (error) {
-            context.log('[StripeTrueUp] Failed to find/create contact in Salesforce', {
+            context.log('[StripeTrueUp] Failed to upsert contact in Salesforce', {
               customerId: stripeCustomer.id,
               error: error instanceof Error ? error.message : String(error),
               stack: error instanceof Error ? error.stack : undefined,
@@ -998,21 +997,28 @@ const processRefunds = async (
             customerExists: !!stripeCustomer,
           });
           
-          const transactionName = getTransactionNameFromMetadata(chargeFragment);
-          
-          const customerUpsertResult = await findOrCreateContactInSalesforce(
-            salesforce,
-            stripeCustomer,
-            transactionName,
-            context.log
-          );
-          contactId = customerUpsertResult?.id ?? null;
-          
-          context.log('[StripeTrueUp] Contact find/create completed for refund', {
-            refundId: refund.id,
-            contactId,
-            success: !!contactId,
-          });
+          if (stripeCustomer && !stripeCustomer.deleted) {
+            try {
+              const customerUpsertResult = await salesforce.upsertCustomerByStripeId({
+                stripe_customer_id__c: stripeCustomer.id,
+                Name: (stripeCustomer as Stripe.Customer).name || (stripeCustomer as Stripe.Customer).email || `Customer ${stripeCustomer.id}`,
+                Email: (stripeCustomer as Stripe.Customer).email || null,
+              });
+              contactId = customerUpsertResult?.id ?? null;
+              
+              context.log('[StripeTrueUp] Contact upsert completed for refund', {
+                refundId: refund.id,
+                contactId,
+                success: !!contactId,
+              });
+            } catch (error) {
+              context.log('[StripeTrueUp] Failed to upsert contact for refund', {
+                refundId: refund.id,
+                customerId: stripeCustomer.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
         } else {
           context.log('[StripeTrueUp] Skipping contact creation for refund', {
             refundId: refund.id,
