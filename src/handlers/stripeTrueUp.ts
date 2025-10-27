@@ -18,6 +18,11 @@ import {
   normalizeSince,
 } from '../services/qbo/stripe/fetchStripe';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
+import { 
+  loadConfig, 
+  normalizeTransactionCategory, 
+  generateTransactionName 
+} from '../config/contactMatching';
 
 // Import types only, not the actual implementations (to avoid env.ts loading)
 import type { PostChargeToQboResult } from '../services/qboSvc';
@@ -741,14 +746,6 @@ const processPayments = async (
           customerDeleted: stripeCustomer?.deleted,
         });
 
-        // Get transaction name from charge metadata to use as customer category
-        const transactionName = getTransactionNameFromMetadata(charge as Stripe.Charge);
-        
-        context.log('[StripeTrueUp] Extracted transaction name from metadata', {
-          transactionName,
-          metadata: charge.metadata,
-        });
-        
         // Upsert customer to Salesforce first to get the Contact ID
         let contactId: string | null = null;
         if (stripeCustomer && !stripeCustomer.deleted) {
@@ -789,6 +786,27 @@ const processPayments = async (
           charge: charge as Stripe.Charge,
           balanceTransaction,
         });
+
+        // Generate transaction name
+        const config = loadConfig();
+        const metadata = (charge as Stripe.Charge).metadata || {};
+        const category = metadata.category || metadata.Category || config.transaction.defaultCategory;
+        const normalizedCategory = normalizeTransactionCategory(category, config);
+        const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
+                                    transaction.transaction_type__c === 'refund' ? 'Refund' : 
+                                    transaction.transaction_type__c === 'dispute' ? 'Dispute' :
+                                    transaction.transaction_type__c === 'payout' ? 'Payout' :
+                                    'Transaction';
+        const transactionName = generateTransactionName(normalizedCategory, config, {
+          amount: transaction.amount_gross__c ? `$${transaction.amount_gross__c.toFixed(2)}` : undefined,
+          date: new Date().toLocaleDateString(),
+          id: charge.id,
+          transactionType: transactionTypeName,
+        });
+        
+        if (transactionName) {
+          transaction.Name = transactionName;
+        }
 
         if (contactId) {
           transaction.contact__c = contactId;
@@ -1031,6 +1049,27 @@ const processRefunds = async (
           charge: chargeFragment ?? null,
           balanceTransaction,
         });
+
+        // Generate transaction name
+        const config = loadConfig();
+        const metadata = chargeFragment?.metadata || {};
+        const category = metadata.category || metadata.Category || config.transaction.defaultCategory;
+        const normalizedCategory = normalizeTransactionCategory(category, config);
+        const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
+                                    transaction.transaction_type__c === 'refund' ? 'Refund' : 
+                                    transaction.transaction_type__c === 'dispute' ? 'Dispute' :
+                                    transaction.transaction_type__c === 'payout' ? 'Payout' :
+                                    'Transaction';
+        const transactionName = generateTransactionName(normalizedCategory, config, {
+          amount: transaction.amount_gross__c ? `$${Math.abs(transaction.amount_gross__c).toFixed(2)}` : undefined,
+          date: new Date().toLocaleDateString(),
+          id: refund.id,
+          transactionType: transactionTypeName,
+        });
+        
+        if (transactionName) {
+          transaction.Name = transactionName;
+        }
 
         if (parentId) {
           transaction.parent_transaction__c = parentId;
