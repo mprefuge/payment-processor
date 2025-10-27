@@ -553,7 +553,7 @@ export const mapStripeToTransaction = (
   const transactionCandidate: TransactionUpsertDTO = {
     transaction_type__c: deriveTransactionType(charge, balanceTransaction),
     status__c: deriveStatus(paymentIntent, charge),
-    stripe_payment_intent_id__c: paymentIntent?.id ?? null,
+    stripe_payment_intent_id__c: paymentIntent?.id ?? normalizeStripeId(charge?.payment_intent) ?? null,
     stripe_charge_id__c: charge?.id ?? null,
     stripe_balance_transaction_id__c: extractBalanceTransactionId(charge, balanceTransaction),
     stripe_refund_id__c: extractRefundId(charge),

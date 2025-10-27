@@ -989,35 +989,46 @@ const processPayments = async (
         }
 
         // Build transaction with contact link if we have a contact ID
+        const chargeObj = charge as Stripe.Charge;
+        const paymentIntentId = typeof chargeObj.payment_intent === 'string' 
+          ? chargeObj.payment_intent 
+          : chargeObj.payment_intent?.id;
+        
         const transaction = mapStripeToTransaction({
-          paymentIntent: (charge as Stripe.Charge).payment_intent 
-            ? (typeof (charge as Stripe.Charge).payment_intent === 'string' 
-              ? null 
-              : (charge as Stripe.Charge).payment_intent as Stripe.PaymentIntent)
-            : null,
-          charge: charge as Stripe.Charge,
+          paymentIntent: null, // We'll get the ID from the charge itself in the mapping
+          charge: chargeObj,
           balanceTransaction,
         });
 
         // Generate transaction name
         const config = loadConfig();
-        const metadata = (charge as Stripe.Charge).metadata || {};
+        const metadata = chargeObj.metadata || {};
         
         context.log('[StripeTrueUp] Charge metadata for transaction naming', {
           chargeId: charge.id,
           metadata: metadata,
           hasCategory: !!(metadata.category || metadata.Category),
           hasTransactionType: !!(metadata.transactionType || metadata.TransactionType),
+          hasPaymentIntent: !!paymentIntentId,
+          paymentIntentId: paymentIntentId,
         });
         
         // Try to get product name from payment intent first
         let productName: string | null = null;
-        if ((charge as Stripe.Charge).payment_intent) {
-          productName = await getProductNameFromCharge(
-            stripe,
-            charge as Stripe.Charge,
-            context.log
-          );
+        if (paymentIntentId) {
+          try {
+            productName = await getProductNameFromCharge(
+              stripe,
+              chargeObj,
+              context.log
+            );
+          } catch (error) {
+            context.log('[StripeTrueUp] Error getting product name', {
+              chargeId: charge.id,
+              error: error instanceof Error ? error.message : String(error),
+              stack: error instanceof Error ? error.stack : undefined,
+            });
+          }
         }
         
         // Use product name, then metadata, then default
@@ -1288,12 +1299,14 @@ const processRefunds = async (
           });
         }
 
+        const paymentIntentIdRefund = chargeFragment?.payment_intent 
+          ? (typeof chargeFragment.payment_intent === 'string' 
+            ? chargeFragment.payment_intent 
+            : chargeFragment.payment_intent?.id)
+          : null;
+
         const transaction: TransactionUpsertDTO = mapStripeToTransaction({
-          paymentIntent: chargeFragment?.payment_intent 
-            ? (typeof chargeFragment.payment_intent === 'string' 
-              ? null 
-              : chargeFragment.payment_intent as Stripe.PaymentIntent)
-            : null,
+          paymentIntent: null,
           charge: chargeFragment ?? null,
           balanceTransaction,
         });
@@ -1307,16 +1320,26 @@ const processRefunds = async (
           metadata: metadata,
           hasCategory: !!(metadata.category || metadata.Category),
           hasTransactionType: !!(metadata.transactionType || metadata.TransactionType),
+          hasPaymentIntent: !!paymentIntentIdRefund,
+          paymentIntentId: paymentIntentIdRefund,
         });
         
         // Try to get product name from payment intent first
         let productName: string | null = null;
-        if (chargeFragment?.payment_intent) {
-          productName = await getProductNameFromCharge(
-            stripe,
-            chargeFragment,
-            context.log
-          );
+        if (paymentIntentIdRefund && chargeFragment) {
+          try {
+            productName = await getProductNameFromCharge(
+              stripe,
+              chargeFragment,
+              context.log
+            );
+          } catch (error) {
+            context.log('[StripeTrueUp] Error getting product name for refund', {
+              refundId: refund.id,
+              error: error instanceof Error ? error.message : String(error),
+              stack: error instanceof Error ? error.stack : undefined,
+            });
+          }
         }
         
         // Use product name, then metadata, then default
