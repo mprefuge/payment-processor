@@ -167,6 +167,37 @@ const processSuccessfulPaymentIntent = async ({
             campaignName: maybeCampaign,
             campaignId,
           });
+
+          // Add contact as campaign member if contact is available
+          if (transaction.contact__c && typeof transaction.contact__c === 'string' && transaction.contact__c.trim().length > 0) {
+            try {
+              context.log('[StripeWebhook] Adding contact as campaign member', {
+                campaignId,
+                contactId: transaction.contact__c,
+              });
+              const memberResult = await crm.addCampaignMember(campaignId, transaction.contact__c);
+              if (memberResult.isNew) {
+                context.log('[StripeWebhook] Contact added as new campaign member', {
+                  campaignId,
+                  contactId: transaction.contact__c,
+                  campaignMemberId: memberResult.id,
+                });
+              } else {
+                context.log('[StripeWebhook] Contact is already a campaign member', {
+                  campaignId,
+                  contactId: transaction.contact__c,
+                  campaignMemberId: memberResult.id,
+                });
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : 'Unknown error';
+              context.log('[StripeWebhook] Failed to add contact as campaign member', {
+                campaignId,
+                contactId: transaction.contact__c,
+                error: message,
+              });
+            }
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -380,6 +411,63 @@ const processSuccessfulPaymentIntent = async ({
     // Use product name as category, or default
     const category = productName || config.transaction.defaultCategory;
     const normalizedCategory = normalizeTransactionCategory(category, config);
+    
+    // Associate category with campaign if no campaign is already set
+    if (!transaction.campaign__c && productName) {
+      try {
+        context.log('[StripeWebhook] Associating category with campaign', {
+          category: productName,
+          paymentIntentId: paymentIntent.id,
+        });
+        const crm = await deps.getCrmSvc();
+        const campaignId = await crm.findOrCreateCampaign(productName);
+        if (campaignId && typeof campaignId === 'string' && campaignId.trim().length > 0) {
+          transaction.campaign__c = campaignId;
+          context.log('[StripeWebhook] Category associated with campaign', {
+            category: productName,
+            campaignId,
+            paymentIntentId: paymentIntent.id,
+          });
+
+          // Add contact as campaign member if contact is available
+          if (transaction.contact__c && typeof transaction.contact__c === 'string' && transaction.contact__c.trim().length > 0) {
+            try {
+              context.log('[StripeWebhook] Adding contact as campaign member', {
+                campaignId,
+                contactId: transaction.contact__c,
+              });
+              const memberResult = await crm.addCampaignMember(campaignId, transaction.contact__c);
+              if (memberResult.isNew) {
+                context.log('[StripeWebhook] Contact added as new campaign member', {
+                  campaignId,
+                  contactId: transaction.contact__c,
+                  campaignMemberId: memberResult.id,
+                });
+              } else {
+                context.log('[StripeWebhook] Contact is already a campaign member', {
+                  campaignId,
+                  contactId: transaction.contact__c,
+                  campaignMemberId: memberResult.id,
+                });
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : 'Unknown error';
+              context.log('[StripeWebhook] Failed to add contact as campaign member', {
+                campaignId,
+                contactId: transaction.contact__c,
+                error: message,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        context.log(
+          '[StripeWebhook] Failed to associate category with campaign; continuing without campaign',
+          { category: productName, error: message, paymentIntentId: paymentIntent.id }
+        );
+      }
+    }
     
     const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
                                 transaction.transaction_type__c === 'refund' ? 'Refund' : 

@@ -189,6 +189,55 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   };
 };
 
+let defaultCrmSvcPromise: Promise<any> | null = null;
+
+const createCrmGetter = (): (() => Promise<any>) => {
+  return async (): Promise<any> => {
+    if (!defaultCrmSvcPromise) {
+      defaultCrmSvcPromise = (async () => {
+        try {
+          const CrmFactory = require('../services/salesforce/crmFactory');
+          const username = process.env.SALESFORCE_USERNAME;
+          const password = process.env.SALESFORCE_PASSWORD;
+          const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
+          const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
+
+          if (!username || !password) {
+            throw new Error('Salesforce CRM credentials are not configured.');
+          }
+
+          const crmConfig = {
+            username,
+            password,
+            securityToken,
+            loginUrl,
+          };
+
+          const validation = CrmFactory.validateConfig('salesforce', crmConfig);
+          if (!validation.isValid) {
+            throw new Error(`Invalid CRM configuration: ${validation.error}`);
+          }
+
+          return CrmFactory.createCrmService('salesforce', crmConfig);
+        } catch (error) {
+          defaultCrmSvcPromise = null;
+          const message = error instanceof Error ? error.message : 'Unknown CRM initialization error';
+          console.error('[StripeTrueUp] CRM initialization failed:', message);
+          
+          // Return disabled service on error
+          return {
+            async findOrCreateCampaign(name: string): Promise<string> {
+              return `701000000000000_${name}`;
+            },
+          };
+        }
+      })();
+    }
+
+    return defaultCrmSvcPromise;
+  };
+};
+
 const createDefaultDependencies = (): Dependencies => ({
   stripe: createStripeServices(),
   fetchers: {
@@ -859,6 +908,63 @@ const processPayments = async (
         // Use product name, then metadata, then default
         const category = productName || metadata.category || metadata.Category || config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
+        
+        // Associate category with campaign if no campaign is already set
+        if (!transaction.campaign__c && productName) {
+          try {
+            context.log('[StripeTrueUp] Associating category with campaign', {
+              category: productName,
+              chargeId: charge.id,
+            });
+            const crm = await createCrmGetter()();
+            const campaignId = await crm.findOrCreateCampaign(productName);
+            if (campaignId && typeof campaignId === 'string' && campaignId.trim().length > 0) {
+              transaction.campaign__c = campaignId;
+              context.log('[StripeTrueUp] Category associated with campaign', {
+                category: productName,
+                campaignId,
+                chargeId: charge.id,
+              });
+
+              // Add contact as campaign member if contact is available
+              if (transaction.contact__c && typeof transaction.contact__c === 'string' && transaction.contact__c.trim().length > 0) {
+                try {
+                  context.log('[StripeTrueUp] Adding contact as campaign member', {
+                    campaignId,
+                    contactId: transaction.contact__c,
+                  });
+                  const memberResult = await crm.addCampaignMember(campaignId, transaction.contact__c);
+                  if (memberResult.isNew) {
+                    context.log('[StripeTrueUp] Contact added as new campaign member', {
+                      campaignId,
+                      contactId: transaction.contact__c,
+                      campaignMemberId: memberResult.id,
+                    });
+                  } else {
+                    context.log('[StripeTrueUp] Contact is already a campaign member', {
+                      campaignId,
+                      contactId: transaction.contact__c,
+                      campaignMemberId: memberResult.id,
+                    });
+                  }
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : 'Unknown error';
+                  context.log('[StripeTrueUp] Failed to add contact as campaign member', {
+                    campaignId,
+                    contactId: transaction.contact__c,
+                    error: message,
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            context.log(
+              '[StripeTrueUp] Failed to associate category with campaign; continuing without campaign',
+              { category: productName, error: message, chargeId: charge.id }
+            );
+          }
+        }
         
         // Get transaction type from metadata if available, otherwise use derived type
         const metadataTransactionType = metadata.transactionType || metadata.TransactionType;
