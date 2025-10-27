@@ -1206,18 +1206,9 @@ const buildDocNumber = (
 ): string => {
   // If a charge ID is provided, use it for uniqueness instead of amount
   if (chargeId) {
-    const formattedDate = normalizeDate(date).replace(/-/g, '');
-
-    // Special handling for payout IDs - prioritize including the payout ID
-    if (chargeId.startsWith('po_')) {
-      // For payouts, use format: PO-{last10chars of payoutId}
-      // This gives us PO-XXXXXXXXXX (13 chars) leaving room for uniqueness
-      const payoutIdPart = chargeId.slice(-10); // Last 10 chars of full payout ID
-      return `${prefix}-${payoutIdPart}`.slice(0, DOC_NUMBER_MAX_LENGTH);
-    }
-
     // Extract the unique part from charge ID (e.g., "ch_3ABC123" -> "3ABC123")
     const chargeIdPart = chargeId.startsWith('ch_') ? chargeId.slice(3) : chargeId;
+    const formattedDate = normalizeDate(date).replace(/-/g, '');
     const suffix = `${formattedDate}-${chargeIdPart}`;
     const maxPrefixLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - suffix.length - 1);
     const safePrefix = prefix.slice(0, maxPrefixLength);
@@ -2138,51 +2129,53 @@ const checkForDuplicate = async (
 };
 
 /**
- * Check if a bank deposit already exists for a given Stripe payout ID.
- * Searches by DocNumber which contains the payout ID, then confirms with PrivateNote.
- * @param payoutId The Stripe payout ID (e.g., "po_1234567890")
+ * Check if a bank deposit already exists for a given Stripe payout.
+ * Searches by date and amount to find identical deposits.
+ * @param payoutId The Stripe payout ID (for logging purposes)
+ * @param date The transaction date
+ * @param amount The payout amount in cents
  * @param options Optional request options
  * @returns The existing deposit ID if found, null otherwise
  */
 const checkForPayoutDeposit = async (
   payoutId: string,
+  date: Date,
+  amount: number,
   options?: PostOptions
 ): Promise<string | null> => {
   try {
-    // For payout DocNumbers, we use the last 10 characters of the payout ID
-    const payoutIdPart = payoutId.slice(-10);
-    // Escape single quotes for SQL query
-    const escapedPayoutIdPart = payoutIdPart.replace(/'/g, "\\'");
+    const formattedDate = normalizeDate(date);
+    const amountDollars = centsToDollars(amount);
     
-    // Query for deposits with DocNumber containing the payout ID part
-    // DocNumber format is "PO-{last10chars of payoutId}", so we search for deposits with this pattern
-    const queryString = `SELECT Id, DocNumber FROM Deposit WHERE DocNumber LIKE '%${escapedPayoutIdPart}%' MAXRESULTS 10`;
+    // Query for deposits with the same date and amount
+    const queryString = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' AND TotalAmt = ${amountDollars} MAXRESULTS 1`;
     
-    logger.debug('[QBO] Checking for existing payout deposit by DocNumber', { payoutId, payoutIdPart });
+    logger.debug('[QBO] Checking for existing payout deposit by date and amount', { 
+      payoutId, 
+      date: formattedDate, 
+      amount: amountDollars 
+    });
     
     const result = await query<{
-      QueryResponse: { Deposit?: Array<{ Id: string; DocNumber?: string }> };
+      QueryResponse: { Deposit?: Array<{ Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number }> };
     }>(queryString, options);
 
     const deposits = result?.QueryResponse?.Deposit;
     if (deposits && deposits.length > 0) {
-      // Confirm the match by checking if DocNumber contains the payout ID part
-      const matchingDeposit = deposits.find(deposit => {
-        const docNumberMatch = deposit.DocNumber && deposit.DocNumber.includes(payoutIdPart);
-        return docNumberMatch;
-      });
+      // Return the first matching deposit (should be unique by date+amount)
+      const matchingDeposit = deposits[0];
       
-      if (matchingDeposit) {
-        logger.info('[QBO] Found existing deposit for payout by DocNumber check', { 
-          payoutId, 
-          existingId: matchingDeposit.Id,
-          docNumber: matchingDeposit.DocNumber
-        });
-        return matchingDeposit.Id;
-      }
+      logger.info('[QBO] Found existing deposit for payout by date and amount check', { 
+        payoutId, 
+        existingId: matchingDeposit.Id,
+        docNumber: matchingDeposit.DocNumber,
+        date: matchingDeposit.TxnDate,
+        amount: matchingDeposit.TotalAmt
+      });
+      return matchingDeposit.Id;
     }
 
-    logger.debug('[QBO] No existing payout deposit found by DocNumber check', { payoutId });
+    logger.debug('[QBO] No existing payout deposit found by date and amount check', { payoutId, date: formattedDate, amount: amountDollars });
     return null;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2534,10 +2527,10 @@ export const postPayoutToQbo = async ({
     throw new Error('Payout amount must be greater than zero.');
   }
 
-  // If we have a payout ID, check for existing deposits containing this payout ID
+  // If we have a payout ID, check for existing deposits with same date and amount
   if (payoutId) {
     try {
-      const existingDepositId = await checkForPayoutDeposit(payoutId, options);
+      const existingDepositId = await checkForPayoutDeposit(payoutId, date, payoutAmount, options);
       if (existingDepositId) {
         logger.info('[QBO] Found existing deposit for payout', { 
           payoutId, 
