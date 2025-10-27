@@ -374,6 +374,80 @@ const resolveCustomerForCharge = async (
   }
 };
 
+const getProductNameFromPaymentIntent = async (
+  stripe: Stripe,
+  paymentIntent: Stripe.PaymentIntent | string | null | undefined,
+  logger: (...args: unknown[]) => void
+): Promise<string | null> => {
+  if (!paymentIntent) {
+    return null;
+  }
+
+  try {
+    // If it's a string, fetch the payment intent
+    let pi: Stripe.PaymentIntent;
+    if (typeof paymentIntent === 'string') {
+      pi = await stripe.paymentIntents.retrieve(paymentIntent, {
+        expand: ['latest_charge.invoice.lines.data.price.product'],
+      });
+    } else {
+      pi = paymentIntent;
+    }
+
+    // Check if we have line items in the invoice
+    const latestCharge = pi.latest_charge as Stripe.Charge | null;
+    if (latestCharge && latestCharge.invoice) {
+      const invoice = latestCharge.invoice as Stripe.Invoice;
+      if (invoice.lines && invoice.lines.data && invoice.lines.data.length > 0) {
+        const firstLine = invoice.lines.data[0];
+        if (firstLine.price && firstLine.price.product) {
+          const product = firstLine.price.product as Stripe.Product;
+          if (typeof product === 'object' && product.name) {
+            logger('[StripeTrueUp] Found product name from payment intent invoice', {
+              paymentIntentId: pi.id,
+              productId: product.id,
+              productName: product.name,
+            });
+            return product.name;
+          }
+        }
+      }
+    }
+
+    // Check metadata for product reference
+    if (pi.metadata) {
+      const productId = pi.metadata.product || pi.metadata.product_id;
+      if (productId && typeof productId === 'string') {
+        try {
+          const product = await stripe.products.retrieve(productId);
+          if (product.name) {
+            logger('[StripeTrueUp] Found product name from payment intent metadata', {
+              paymentIntentId: pi.id,
+              productId: product.id,
+              productName: product.name,
+            });
+            return product.name;
+          }
+        } catch (error) {
+          logger('[StripeTrueUp] Failed to retrieve product from metadata', {
+            paymentIntentId: pi.id,
+            productId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    return null;
+  } catch (error) {
+    logger('[StripeTrueUp] Failed to get product name from payment intent', {
+      paymentIntentId: typeof paymentIntent === 'string' ? paymentIntent : paymentIntent?.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
+
 const getTransactionNameFromMetadata = (charge: Stripe.Charge): string | null => {
   const metadata = charge.metadata as Record<string, unknown> | null | undefined;
   if (!metadata || typeof metadata !== 'object') {
@@ -782,7 +856,11 @@ const processPayments = async (
 
         // Build transaction with contact link if we have a contact ID
         const transaction = mapStripeToTransaction({
-          paymentIntent: null,
+          paymentIntent: (charge as Stripe.Charge).payment_intent 
+            ? (typeof (charge as Stripe.Charge).payment_intent === 'string' 
+              ? null 
+              : (charge as Stripe.Charge).payment_intent as Stripe.PaymentIntent)
+            : null,
           charge: charge as Stripe.Charge,
           balanceTransaction,
         });
@@ -798,7 +876,18 @@ const processPayments = async (
           hasTransactionType: !!(metadata.transactionType || metadata.TransactionType),
         });
         
-        const category = metadata.category || metadata.Category || config.transaction.defaultCategory;
+        // Try to get product name from payment intent first
+        let productName: string | null = null;
+        if ((charge as Stripe.Charge).payment_intent) {
+          productName = await getProductNameFromPaymentIntent(
+            stripe,
+            (charge as Stripe.Charge).payment_intent,
+            context.log
+          );
+        }
+        
+        // Use product name, then metadata, then default
+        const category = productName || metadata.category || metadata.Category || config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
         
         // Get transaction type from metadata if available, otherwise use derived type
@@ -1066,7 +1155,11 @@ const processRefunds = async (
         }
 
         const transaction: TransactionUpsertDTO = mapStripeToTransaction({
-          paymentIntent: null,
+          paymentIntent: chargeFragment?.payment_intent 
+            ? (typeof chargeFragment.payment_intent === 'string' 
+              ? null 
+              : chargeFragment.payment_intent as Stripe.PaymentIntent)
+            : null,
           charge: chargeFragment ?? null,
           balanceTransaction,
         });
@@ -1082,7 +1175,18 @@ const processRefunds = async (
           hasTransactionType: !!(metadata.transactionType || metadata.TransactionType),
         });
         
-        const category = metadata.category || metadata.Category || config.transaction.defaultCategory;
+        // Try to get product name from payment intent first
+        let productName: string | null = null;
+        if (chargeFragment?.payment_intent) {
+          productName = await getProductNameFromPaymentIntent(
+            stripe,
+            chargeFragment.payment_intent,
+            context.log
+          );
+        }
+        
+        // Use product name, then metadata, then default
+        const category = productName || metadata.category || metadata.Category || config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
         
         // Get transaction type from metadata if available, otherwise use derived type

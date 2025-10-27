@@ -119,7 +119,7 @@ function buildChargeFetcher(stripe) {
   return createListFetcher({
     listFn: stripe.charges.list.bind(stripe.charges),
     baseParams: {
-      expand: ['data.customer', 'data.balance_transaction'],
+      expand: ['data.customer', 'data.balance_transaction', 'data.payment_intent'],
     },
   });
 }
