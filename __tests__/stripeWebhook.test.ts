@@ -244,6 +244,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_checkout_session_id__c',
       'cs_test',
+      'General',
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -326,7 +327,7 @@ describe('stripeWebhook', () => {
       markPostedToQbo: vi.fn().mockResolvedValue(undefined),
       findTransactionIdByExternalId: vi
         .fn()
-        .mockImplementation(async (field: string) =>
+        .mockImplementation(async (field: string, value: string, recordType?: string) =>
           field === 'stripe_subscription_id__c' ? 'sf_subscription' : null,
         ),
     };
@@ -352,6 +353,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       'sub_123',
+      'General',
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -490,6 +492,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       'sub_999',
+      'General',
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({

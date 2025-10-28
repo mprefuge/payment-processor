@@ -370,7 +370,8 @@ const processSuccessfulPaymentIntent = async ({
     try {
       overrideId = await salesforce.findTransactionIdByExternalId(
         'stripe_payment_intent_id__c',
-        paymentIntent.id
+        paymentIntent.id,
+        'General'
       );
       if (overrideId) {
         context.log('[StripeWebhook] Found existing transaction by payment intent ID', {
@@ -399,7 +400,8 @@ const processSuccessfulPaymentIntent = async ({
     try {
       overrideId = await salesforce.findTransactionIdByExternalId(
         'stripe_subscription_id__c',
-        subscriptionId
+        subscriptionId,
+        'General'
       );
       if (overrideId) {
         context.log('[StripeWebhook] Found existing transaction by subscription ID', {

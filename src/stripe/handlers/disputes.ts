@@ -70,7 +70,7 @@ export const handleDisputeClosed = async (
   const primaryBalanceTransaction = lossTransactions[0] || balanceTransactions[0] || null;
 
   const parentId = chargeId
-    ? await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', chargeId)
+    ? await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', chargeId, 'General')
     : null;
 
   const transaction: TransactionUpsertDTO = {
