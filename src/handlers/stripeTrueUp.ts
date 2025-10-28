@@ -757,7 +757,8 @@ const processPayments = async (
         const salesforce = await ensureSalesforce();
         const existingId = await salesforce.findTransactionIdByExternalId(
           'stripe_charge_id__c',
-          charge.id
+          charge.id,
+          'General'
         );
         if (existingId) {
           context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
@@ -1182,7 +1183,8 @@ const processRefunds = async (
         const salesforce = await ensureSalesforce();
         const existingId = await salesforce.findTransactionIdByExternalId(
           'stripe_refund_id__c',
-          refund.id
+          refund.id,
+          'General'
         );
         if (existingId) {
           context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
@@ -1215,7 +1217,8 @@ const processRefunds = async (
         if (chargeId && typeof salesforce.findTransactionIdByExternalId === 'function') {
           parentId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
-            chargeId
+            chargeId,
+            'General'
           );
         }
 
@@ -1497,11 +1500,12 @@ const processPayouts = async (
       if (resubmit) {
         // In resubmit mode, check if any transactions already have this payout linked
         const salesforce = await ensureSalesforce();
-        // Query for any transaction with this payout ID
+        // Query for any payout-type transaction with this payout ID
         try {
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_payout_id__c',
-            payout.id
+            payout.id,
+            'Payout'
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping payout already linked in Salesforce', {
@@ -1628,7 +1632,8 @@ const processPayouts = async (
           try {
             const payoutTxnId = await salesforce.findTransactionIdByExternalId(
               'stripe_payout_id__c',
-              payout.id
+              payout.id,
+              'Payout'
             );
 
             if (payoutTxnId) {

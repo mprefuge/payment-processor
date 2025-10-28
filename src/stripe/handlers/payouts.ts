@@ -778,7 +778,8 @@ export const handlePayoutEvent = async (
       try {
         const payoutTxnId = await salesforce.findTransactionIdByExternalId(
           'stripe_payout_id__c',
-          payout.id
+          payout.id,
+          'Payout'
         );
 
         if (payoutTxnId) {

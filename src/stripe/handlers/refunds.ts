@@ -834,7 +834,8 @@ const upsertSalesforceTransaction = async (
     try {
       parentId = await salesforce.findTransactionIdByExternalId(
         'stripe_charge_id__c',
-        stripeContext.charge.id
+        stripeContext.charge.id,
+        'General'
       );
     } catch (error) {
       context.log('[StripeWebhook] Failed to locate parent transaction for refund', {

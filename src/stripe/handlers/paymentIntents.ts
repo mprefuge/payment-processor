@@ -324,7 +324,8 @@ const processSuccessfulPaymentIntent = async ({
     try {
       overrideId = await salesforce.findTransactionIdByExternalId(
         'stripe_checkout_session_id__c',
-        checkoutSession.id
+        checkoutSession.id,
+        'General'
       );
       if (overrideId) {
         context.log('[StripeWebhook] Found existing transaction by checkout session ID', {
@@ -347,7 +348,7 @@ const processSuccessfulPaymentIntent = async ({
   // If not found by checkout session, search by charge ID
   if (!overrideId && charge?.id) {
     try {
-      overrideId = await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', charge.id);
+      overrideId = await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', charge.id, 'General');
       if (overrideId) {
         context.log('[StripeWebhook] Found existing transaction by charge ID', {
           chargeId: charge.id,

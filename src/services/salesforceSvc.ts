@@ -91,7 +91,8 @@ export interface SalesforceSvc {
   markPostedToQbo: (salesforceId: string, doc: QuickBooksDocumentReference) => Promise<void>;
   findTransactionIdByExternalId: (
     key: TransactionExternalIdField,
-    value: string
+    value: string,
+    recordTypeName?: string
   ) => Promise<string | null>;
   upsertCustomerByStripeId: (dto: CustomerUpsertDTO) => Promise<UpsertResult>;
 }
@@ -403,13 +404,21 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
   const findTransactionIdByExternalId = async (
     key: TransactionExternalIdField,
-    value: string
+    value: string,
+    recordTypeName?: string
   ): Promise<string | null> => {
     const normalizedKey = ensureNonEmpty(key, 'External ID field');
     const normalizedValue = ensureNonEmpty(value, 'External ID value');
+    
+    let recordTypeId: string | undefined;
+    if (recordTypeName) {
+      recordTypeId = await resolveRecordTypeId(recordTypeName);
+    }
+    
     return resolveExistingTransactionId(
       normalizedKey as TransactionExternalIdField,
-      normalizedValue
+      normalizedValue,
+      recordTypeId
     );
   };
 
