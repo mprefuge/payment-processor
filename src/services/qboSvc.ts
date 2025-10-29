@@ -143,7 +143,6 @@ interface BuildSalesReceiptInput {
   amountCents: number;
   memo?: string;
   date: string | Date;
-  revenueAccountName?: string;
   revenueItemName: string;
   depositAccountName?: string;
   customer?: SalesReceiptCustomerDetails | null;
@@ -1248,7 +1247,6 @@ export const buildSalesReceipt = ({
   amountCents,
   memo,
   date,
-  revenueAccountName = env.quickBooks.accounts.revenue,
   revenueItemName,
   depositAccountName = env.quickBooks.accounts.stripeClearing,
   customer = null,
@@ -1282,7 +1280,6 @@ export const buildSalesReceipt = ({
     Description: lineDescription,
     SalesItemLineDetail: {
       ItemRef: createItemRef(itemReference),
-      ItemAccountRef: createAccountRef(revenueAccountName),
     },
   });
 
@@ -1294,7 +1291,6 @@ export const buildSalesReceipt = ({
       Description: 'Processing Fee Coverage',
       SalesItemLineDetail: {
         ItemRef: createItemRef(itemReference),
-        ItemAccountRef: createAccountRef(revenueAccountName),
       },
     });
   }
@@ -2506,7 +2502,6 @@ export const postChargeToQbo = async ({
       amountCents: grossAmount,
       memo: normalizedMemo,
       date,
-      revenueAccountName: revenueAccountRef.value,
       revenueItemName: revenueItemPayload,
       depositAccountName: depositAccountRef.value,
       customer: receiptCustomer,
