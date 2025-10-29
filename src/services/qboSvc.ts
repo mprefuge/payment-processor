@@ -2664,6 +2664,145 @@ export const ensureItem = async (
   return ensureSalesReceiptItem(itemName, context);
 };
 
+export const ensureCustomer = async (
+  customerName: string,
+  email?: string,
+  options?: PostOptions
+): Promise<QuickBooksReference> => {
+  const context = await createRequestContext(options);
+
+  // First, try to find existing customer by name
+  try {
+    const queryResult = await context.request(
+      `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
+        `SELECT Id, DisplayName FROM Customer WHERE DisplayName = '${customerName.replace(/'/g, "\\'")}'`
+      )}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      }
+    );
+
+    const data = await queryResult.json();
+    if (data.QueryResponse?.Customer?.length > 0) {
+      const customer = data.QueryResponse.Customer[0];
+      return {
+        value: customer.Id,
+        name: customer.DisplayName,
+      };
+    }
+  } catch (error) {
+    logger.warn('Failed to query for existing customer, will attempt to create', {
+      customerName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // Customer doesn't exist, create it
+  const customerData = {
+    Name: customerName,
+    ...(email && {
+      PrimaryEmailAddr: {
+        Address: email,
+      },
+    }),
+  };
+
+  const response = await context.request(
+    `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/customer`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(customerData),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to create customer: ${response.status} ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  return {
+    value: result.Customer.Id,
+    name: result.Customer.DisplayName || customerName,
+  };
+};
+
+export const ensureAccount = async (
+  accountName: string,
+  accountType?: string,
+  options?: PostOptions
+): Promise<QuickBooksReference> => {
+  const context = await createRequestContext(options);
+
+  // First, try to find existing account by name
+  try {
+    const queryResult = await context.request(
+      `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
+        `SELECT Id, Name FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`
+      )}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      }
+    );
+
+    const data = await queryResult.json();
+    if (data.QueryResponse?.Account?.length > 0) {
+      const account = data.QueryResponse.Account[0];
+      return {
+        value: account.Id,
+        name: account.Name,
+      };
+    }
+  } catch (error) {
+    logger.warn('Failed to query for existing account, will attempt to create', {
+      accountName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  // Account doesn't exist, create it (if accountType is provided)
+  if (!accountType) {
+    throw new Error(`Account "${accountName}" does not exist and no account type provided for creation`);
+  }
+
+  const accountData = {
+    Name: accountName,
+    AccountType: accountType,
+    AccountSubType: 'OtherMiscellaneousIncome', // Default subtype
+  };
+
+  const response = await context.request(
+    `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/account`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(accountData),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to create account: ${response.status} ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  return {
+    value: result.Account.Id,
+    name: result.Account.Name || accountName,
+  };
+};
+
 export const query = async <T = unknown>(query: string, options?: PostOptions): Promise<T> => {
   const trimmedQuery = query?.trim();
   if (!trimmedQuery) {
@@ -2720,5 +2859,7 @@ export default {
   postDisputeToQbo,
   postPayoutToQbo,
   ensureItem,
+  ensureCustomer,
+  ensureAccount,
   query,
 };

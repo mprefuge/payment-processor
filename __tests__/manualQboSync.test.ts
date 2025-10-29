@@ -9,6 +9,10 @@ vi.mock('../dist/services/qboSvc.js', () => ({
   postSalesReceipt: vi.fn(),
   postJournalEntry: vi.fn(),
   postBankDeposit: vi.fn(),
+  ensureItem: vi.fn(),
+  ensureCustomer: vi.fn(),
+  ensureAccount: vi.fn(),
+  query: vi.fn(),
 }));
 
 describe('manualQboSync', () => {
@@ -16,6 +20,10 @@ describe('manualQboSync', () => {
   let mockPostSalesReceipt: any;
   let mockPostJournalEntry: any;
   let mockPostBankDeposit: any;
+  let mockEnsureItem: any;
+  let mockEnsureCustomer: any;
+  let mockEnsureAccount: any;
+  let mockQuery: any;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -32,6 +40,16 @@ describe('manualQboSync', () => {
     mockPostSalesReceipt = qboSvc.postSalesReceipt;
     mockPostJournalEntry = qboSvc.postJournalEntry;
     mockPostBankDeposit = qboSvc.postBankDeposit;
+    mockEnsureItem = qboSvc.ensureItem;
+    mockEnsureCustomer = qboSvc.ensureCustomer;
+    mockEnsureAccount = qboSvc.ensureAccount;
+    mockQuery = qboSvc.query;
+
+    // Set up default mock implementations
+    mockEnsureItem.mockResolvedValue({ value: '456', name: 'Service' });
+    mockEnsureCustomer.mockResolvedValue({ value: '789', name: 'Customer' });
+    mockEnsureAccount.mockResolvedValue({ value: '123', name: 'Checking' });
+    mockQuery.mockResolvedValue({ QueryResponse: {} }); // No duplicates by default
 
     // Dynamically import the handler after mocking
     const handlerModule = await import('../dist/handlers/manualQboSync.js');
@@ -55,15 +73,14 @@ describe('manualQboSync', () => {
       json: vi.fn().mockResolvedValue({
         type: 'sales-receipt',
         data: {
-          DocNumber: 'SR-001',
           TxnDate: '2024-01-01',
-          DepositToAccountRef: { value: '123', name: 'Checking' }, // Valid QB Account ID
+          DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
           Line: [{
             Amount: 100.00,
             DetailType: 'SalesItemLineDetail',
             SalesItemLineDetail: {
-              ItemRef: { value: '456', name: 'Service' }, // Valid QB Item ID
-              ItemAccountRef: { value: '789', name: 'Income' } // Valid QB Account ID
+              ItemRef: { name: 'Service' }, // Will be resolved automatically
+              ItemAccountRef: { name: 'Income' } // Will be resolved automatically
             }
           }]
         }
@@ -85,14 +102,13 @@ describe('manualQboSync', () => {
       json: vi.fn().mockResolvedValue({
         type: 'journal-entry',
         data: {
-          DocNumber: 'JE-001',
           TxnDate: '2024-01-01',
           Line: [{
             Amount: 50.00,
             DetailType: 'JournalEntryLineDetail',
             JournalEntryLineDetail: {
               PostingType: 'Debit',
-              AccountRef: { value: '123', name: 'Checking' } // Valid QB Account ID
+              AccountRef: { name: 'Checking' } // Will be resolved automatically
             }
           }]
         }
@@ -113,14 +129,13 @@ describe('manualQboSync', () => {
       json: vi.fn().mockResolvedValue({
         type: 'bank-deposit',
         data: {
-          DocNumber: 'BD-001',
           TxnDate: '2024-01-01',
-          DepositToAccountRef: { value: '123', name: 'Checking' }, // Valid QB Account ID
+          DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
           Line: [{
             Amount: 200.00,
             DetailType: 'DepositLineDetail',
             DepositLineDetail: {
-              AccountRef: { value: '456', name: 'Undeposited Funds' } // Valid QB Account ID
+              AccountRef: { name: 'Undeposited Funds' } // Will be resolved automatically
             }
           }]
         }
@@ -156,9 +171,8 @@ describe('manualQboSync', () => {
       json: vi.fn().mockResolvedValue({
         type: 'sales-receipt',
         data: {
-          DocNumber: 'SR-001',
           TxnDate: '2024-01-01',
-          DepositToAccountRef: { value: '123', name: 'Checking' }, // Valid QB Account ID
+          DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
           Line: []
         }
       })
