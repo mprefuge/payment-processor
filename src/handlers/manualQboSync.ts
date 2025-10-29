@@ -107,6 +107,8 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
       hasQueryResponse: !!result.QueryResponse,
       hasSalesReceipt: !!result.QueryResponse?.SalesReceipt,
       salesReceiptCount: result.QueryResponse?.SalesReceipt?.length || 0,
+      rawResultKeys: result ? Object.keys(result) : [],
+      rawResult: JSON.stringify(result),
     });
     
     const salesReceipts = result.QueryResponse?.SalesReceipt;
