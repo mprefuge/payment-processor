@@ -502,6 +502,11 @@ const validateAndPost = async (
     // Clean the payload to remove any null/undefined values
     const cleanedData = cleanPayload(dataWithDocNumber);
 
+    // Add CurrencyRef for bank deposits (required for multi-currency companies)
+    if (type === 'bank-deposit') {
+      cleanedData.CurrencyRef = { value: 'USD', name: 'United States Dollar' };
+    }
+
     logger.info(`Using DocNumber: ${docNumber} for ${type}`, {
       type,
       docNumber,

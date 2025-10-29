@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
-import appInsights, { type TelemetryClient, KnownSeverityLevel } from 'applicationinsights';
+import * as appInsights from 'applicationinsights';
+import type { TelemetryClient } from 'applicationinsights';
 
 export interface Logger {
   log: (...args: unknown[]) => void;
@@ -44,6 +45,12 @@ function initializeTelemetry(): TelemetryClient | undefined {
   }
 
   try {
+    if (typeof appInsights.setup !== 'function') {
+      baseConsole.warn('Application Insights SDK is unavailable; telemetry disabled');
+      telemetryClient = undefined;
+      return undefined;
+    }
+
     appInsights
       .setup(key)
       .setAutoCollectConsole(false)
@@ -201,16 +208,16 @@ function ensureCorrelationId(args: unknown[], context?: Record<string, unknown>)
   return correlationId;
 }
 
-function mapSeverity(level: LogLevel): KnownSeverityLevel {
+function mapSeverity(level: LogLevel): appInsights.KnownSeverityLevel {
   switch (level) {
     case 'error':
-      return KnownSeverityLevel.Error;
+      return appInsights.KnownSeverityLevel.Error;
     case 'warn':
-      return KnownSeverityLevel.Warning;
+      return appInsights.KnownSeverityLevel.Warning;
     case 'debug':
-      return KnownSeverityLevel.Verbose;
+      return appInsights.KnownSeverityLevel.Verbose;
     default:
-      return KnownSeverityLevel.Information;
+      return appInsights.KnownSeverityLevel.Information;
   }
 }
 
