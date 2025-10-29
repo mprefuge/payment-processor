@@ -139,16 +139,21 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
 };
 
 // Recursively resolve ItemRef, CustomerRef, AccountRef, and other reference types in the document data
-const resolveItemReferences = async (data: any, context: InvocationContext): Promise<any> => {
+const resolveItemReferences = async (
+  data: any, 
+  context: InvocationContext,
+  rootData?: any  // Root document for accessing BillEmail, etc.
+): Promise<any> => {
   if (!data || typeof data !== 'object') {
     return data;
   }
 
   if (Array.isArray(data)) {
-    return Promise.all(data.map(item => resolveItemReferences(item, context)));
+    return Promise.all(data.map(item => resolveItemReferences(item, context, rootData || data)));
   }
 
   const resolved = { ...data };
+  const root = rootData || data;  // Use root data if provided, otherwise current data is root
 
   // Handle any Ref field that has a name but no value
   for (const [key, value] of Object.entries(resolved)) {
@@ -162,10 +167,10 @@ const resolveItemReferences = async (data: any, context: InvocationContext): Pro
             const itemResult = await ensureItem(refValue.name);
             resolvedRef = { value: itemResult.value, name: itemResult.name || refValue.name };
           } else if (key === 'CustomerRef') {
-            // For customer refs, also check for email
+            // For customer refs, check for email at root document level
             let email: string | undefined;
-            if (resolved.BillEmail?.Address) {
-              email = resolved.BillEmail.Address;
+            if (root.BillEmail?.Address) {
+              email = root.BillEmail.Address;
             }
             const customerResult = await ensureCustomer(refValue.name, email);
             resolvedRef = { value: customerResult.value, name: customerResult.name || refValue.name };
@@ -220,7 +225,7 @@ const resolveItemReferences = async (data: any, context: InvocationContext): Pro
   // Recursively process all other properties
   for (const [key, value] of Object.entries(resolved)) {
     if (!key.endsWith('Ref')) {
-      resolved[key] = await resolveItemReferences(value, context);
+      resolved[key] = await resolveItemReferences(value, context, root);
     }
   }
 

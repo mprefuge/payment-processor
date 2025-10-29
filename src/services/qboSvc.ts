@@ -251,6 +251,9 @@ const ensurePositiveAmount = (value: number, label: string): number => {
 };
 
 const centsToDollars = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    throw new Error(`Invalid amount value: ${value}. Must be a finite number.`);
+  }
   return Math.round(value) / 100;
 };
 
