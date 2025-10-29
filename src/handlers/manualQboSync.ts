@@ -181,22 +181,19 @@ const buildBankDepositFromSalesReceipts = async (
     const amount = salesReceipt.TotalAmt || 0;
     totalAmount += amount;
 
-    // Create a deposit line referencing the sales receipt
-    // When using LinkedTxn, QuickBooks derives the account from the linked transaction
-    // So we may not need AccountRef in DepositLineDetail
+    // Create a deposit line for this sales receipt amount
+    // Since the sales receipt is in Undeposited Funds, we create a deposit line
+    // that moves that amount from Undeposited Funds to the target bank account
+    // We don't use LinkedTxn because the sales receipt deposit account can't be changed
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
-      DepositLineDetail: {},
-      LinkedTxn: [
-        {
-          TxnId: salesReceipt.Id,
-          TxnType: 'SalesReceipt',
-        },
-      ],
+      DepositLineDetail: {
+        AccountRef: { name: 'Undeposited Funds' }, // Where money is coming FROM
+      },
     };
 
-    // Add description with the DocNumber for reference
+    // Add description with the DocNumber and customer for reference
     const docNumber = salesReceipt.DocNumber || salesReceiptId;
     if (salesReceipt.CustomerRef?.name) {
       depositLine.Description = `${salesReceipt.CustomerRef.name} - ${docNumber}`;
