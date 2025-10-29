@@ -2656,6 +2656,14 @@ export const postDisputeToQbo = async ({
   return { qboId: result.id, type: 'journal-entry' };
 };
 
+export const ensureItem = async (
+  itemName: string,
+  options?: PostOptions
+): Promise<QuickBooksReference> => {
+  const context = await createRequestContext(options);
+  return ensureSalesReceiptItem(itemName, context);
+};
+
 export const query = async <T = unknown>(query: string, options?: PostOptions): Promise<T> => {
   const trimmedQuery = query?.trim();
   if (!trimmedQuery) {
@@ -2679,7 +2687,24 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
   }
 
   const data = (await response.json().catch(() => undefined)) ?? {};
-  return data as T;
+  const queryResponse =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).QueryResponse as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!queryResponse) {
+    return data as T;
+  }
+
+  const values = Object.values(queryResponse).find(
+    (value): value is unknown[] => Array.isArray(value) && value.length > 0
+  );
+
+  if (!values) {
+    return [] as T;
+  }
+
+  return values as T;
 };
 
 export default {
@@ -2694,5 +2719,6 @@ export default {
   postRefundToQbo,
   postDisputeToQbo,
   postPayoutToQbo,
+  ensureItem,
   query,
 };

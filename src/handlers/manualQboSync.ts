@@ -4,6 +4,7 @@ import {
   postSalesReceipt,
   postJournalEntry,
   postBankDeposit,
+  ensureItem,
   type QuickBooksSalesReceipt,
   type QuickBooksJournalEntry,
   type QuickBooksBankDeposit,
@@ -26,23 +27,73 @@ interface ManualSyncResponse {
   error?: string;
 }
 
+const resolveItemReferences = async (data: any, context: InvocationContext): Promise<any> => {
+  if (!data || typeof data !== 'object') {
+    return data;
+  }
+
+  if (Array.isArray(data)) {
+    return Promise.all(data.map(item => resolveItemReferences(item, context)));
+  }
+
+  const resolved = { ...data };
+
+  // Check if this object has an ItemRef property
+  if (resolved.ItemRef && typeof resolved.ItemRef === 'object') {
+    const itemRef = resolved.ItemRef;
+    if (itemRef.value && typeof itemRef.value === 'string') {
+      try {
+        // Try to ensure the item exists
+        const ensuredItem = await ensureItem(itemRef.name || itemRef.value);
+        resolved.ItemRef = {
+          value: ensuredItem.value,
+          name: ensuredItem.name,
+        };
+        logger.info(`Resolved item reference: ${itemRef.value} -> ${ensuredItem.value}`, {
+          originalValue: itemRef.value,
+          resolvedValue: ensuredItem.value,
+          invocationId: context.invocationId,
+        });
+      } catch (error) {
+        logger.warn(`Failed to resolve item reference: ${itemRef.value}`, {
+          error: error instanceof Error ? error.message : String(error),
+          invocationId: context.invocationId,
+        });
+        // Keep the original reference if resolution fails
+      }
+    }
+  }
+
+  // Recursively process all other properties
+  for (const [key, value] of Object.entries(resolved)) {
+    if (key !== 'ItemRef') { // Avoid infinite recursion
+      resolved[key] = await resolveItemReferences(value, context);
+    }
+  }
+
+  return resolved;
+};
+
 const validateAndPost = async (
   type: QuickBooksDocType,
   data: any,
   context: InvocationContext
 ): Promise<ManualSyncResponse> => {
   try {
+    // Resolve item references before posting
+    const resolvedData = await resolveItemReferences(data, context);
+
     let result;
 
     switch (type) {
       case 'sales-receipt':
-        result = await postSalesReceipt(data as QuickBooksSalesReceipt);
+        result = await postSalesReceipt(resolvedData as QuickBooksSalesReceipt);
         break;
       case 'journal-entry':
-        result = await postJournalEntry(data as QuickBooksJournalEntry);
+        result = await postJournalEntry(resolvedData as QuickBooksJournalEntry);
         break;
       case 'bank-deposit':
-        result = await postBankDeposit(data as QuickBooksBankDeposit);
+        result = await postBankDeposit(resolvedData as QuickBooksBankDeposit);
         break;
       default:
         throw new Error(`Unsupported QuickBooks document type: ${type}`);

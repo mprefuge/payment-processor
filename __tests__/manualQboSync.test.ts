@@ -57,13 +57,13 @@ describe('manualQboSync', () => {
         data: {
           DocNumber: 'SR-001',
           TxnDate: '2024-01-01',
-          DepositToAccountRef: { value: '1', name: 'Checking' },
+          DepositToAccountRef: { value: '123', name: 'Checking' }, // Valid QB Account ID
           Line: [{
             Amount: 100.00,
             DetailType: 'SalesItemLineDetail',
             SalesItemLineDetail: {
-              ItemRef: { value: '1', name: 'Service' },
-              ItemAccountRef: { value: '2', name: 'Income' }
+              ItemRef: { value: '456', name: 'Service' }, // Valid QB Item ID
+              ItemAccountRef: { value: '789', name: 'Income' } // Valid QB Account ID
             }
           }]
         }
@@ -92,7 +92,7 @@ describe('manualQboSync', () => {
             DetailType: 'JournalEntryLineDetail',
             JournalEntryLineDetail: {
               PostingType: 'Debit',
-              AccountRef: { value: '1', name: 'Checking' }
+              AccountRef: { value: '123', name: 'Checking' } // Valid QB Account ID
             }
           }]
         }
@@ -115,12 +115,12 @@ describe('manualQboSync', () => {
         data: {
           DocNumber: 'BD-001',
           TxnDate: '2024-01-01',
-          DepositToAccountRef: { value: '1', name: 'Checking' },
+          DepositToAccountRef: { value: '123', name: 'Checking' }, // Valid QB Account ID
           Line: [{
             Amount: 200.00,
             DetailType: 'DepositLineDetail',
             DepositLineDetail: {
-              AccountRef: { value: '2', name: 'Undeposited Funds' }
+              AccountRef: { value: '456', name: 'Undeposited Funds' } // Valid QB Account ID
             }
           }]
         }
@@ -158,7 +158,7 @@ describe('manualQboSync', () => {
         data: {
           DocNumber: 'SR-001',
           TxnDate: '2024-01-01',
-          DepositToAccountRef: { value: '1', name: 'Checking' },
+          DepositToAccountRef: { value: '123', name: 'Checking' }, // Valid QB Account ID
           Line: []
         }
       })
