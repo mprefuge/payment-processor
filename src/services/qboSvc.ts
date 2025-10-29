@@ -2890,14 +2890,15 @@ export const ensureAccount = async (
         expectedType: accountType,
       });
       
-      // Warn if the account type doesn't match expected type
+      // If account type is specified and doesn't match, throw an error
       if (accountType && account.AccountType !== accountType) {
-        logger.warn('Account type mismatch', {
+        const errorMsg = `Account "${accountName}" exists but is type "${account.AccountType}". For this operation, a "${accountType}" account is required. Please use a different account or create a new one with the correct type.`;
+        logger.error('Account type mismatch - operation cannot proceed', {
           accountName,
           foundType: account.AccountType,
           expectedType: accountType,
-          message: `Account "${accountName}" exists but is type "${account.AccountType}", expected "${accountType}". Using existing account anyway.`,
         });
+        throw new Error(errorMsg);
       }
       
       return {
@@ -2917,10 +2918,38 @@ export const ensureAccount = async (
     throw new Error(`Account "${accountName}" does not exist and no account type provided for creation`);
   }
 
+  // Determine the correct AccountSubType based on AccountType
+  let accountSubType: string;
+  switch (accountType) {
+    case 'Bank':
+      accountSubType = 'CashOnHand'; // Or 'Checking', 'Savings', etc.
+      break;
+    case 'Other Current Asset':
+      accountSubType = 'OtherCurrentAssets';
+      break;
+    case 'Income':
+      accountSubType = 'SalesOfProductIncome';
+      break;
+    case 'Expense':
+      accountSubType = 'OtherMiscellaneousServiceCost';
+      break;
+    case 'Other Current Liability':
+      accountSubType = 'OtherCurrentLiabilities';
+      break;
+    default:
+      accountSubType = 'OtherCurrentAssets'; // Safe default
+  }
+
+  logger.info('Creating new account', {
+    accountName,
+    accountType,
+    accountSubType,
+  });
+
   const accountData = {
     Name: accountName,
     AccountType: accountType,
-    AccountSubType: 'OtherMiscellaneousIncome', // Default subtype
+    AccountSubType: accountSubType,
   };
 
   const response = await context.request(
@@ -2936,10 +2965,24 @@ export const ensureAccount = async (
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to create account: ${response.status} ${response.statusText}`);
+    const errorText = await response.text();
+    logger.error('Failed to create account', {
+      accountName,
+      accountType,
+      accountSubType,
+      status: response.status,
+      error: errorText,
+    });
+    throw new Error(`Failed to create account: ${response.status} ${response.statusText} - ${errorText}`);
   }
 
   const result = await response.json();
+  logger.info('Successfully created new account', {
+    accountName,
+    accountId: result.Account.Id,
+    accountType,
+    accountSubType,
+  });
   return {
     value: result.Account.Id,
     name: result.Account.Name || accountName,
