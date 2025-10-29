@@ -82,6 +82,62 @@ const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promi
   }
 };
 
+// Validate that required references are resolved
+const validateRequiredReferences = (data: any, type: QuickBooksDocType): void => {
+  if (type === 'sales-receipt') {
+    if (!data.DepositToAccountRef?.value) {
+      throw new Error('DepositToAccountRef is required and must be resolved to a valid account ID');
+    }
+    if (!data.Line || !Array.isArray(data.Line)) {
+      throw new Error('Line array is required');
+    }
+    for (let i = 0; i < data.Line.length; i++) {
+      const line = data.Line[i];
+      if (line.DetailType === 'SalesItemLineDetail') {
+        if (!line.SalesItemLineDetail?.ItemRef?.value) {
+          throw new Error(`Line ${i + 1}: ItemRef is required and must be resolved to a valid item ID`);
+        }
+        if (line.Amount == null || typeof line.Amount !== 'number' || line.Amount <= 0) {
+          throw new Error(`Line ${i + 1}: Amount must be a positive number`);
+        }
+      }
+    }
+  } else if (type === 'journal-entry') {
+    if (!data.Line || !Array.isArray(data.Line)) {
+      throw new Error('Line array is required');
+    }
+    for (let i = 0; i < data.Line.length; i++) {
+      const line = data.Line[i];
+      if (line.DetailType === 'JournalEntryLineDetail') {
+        if (!line.JournalEntryLineDetail?.AccountRef?.value) {
+          throw new Error(`Line ${i + 1}: AccountRef is required and must be resolved to a valid account ID`);
+        }
+        if (line.Amount == null || typeof line.Amount !== 'number' || line.Amount <= 0) {
+          throw new Error(`Line ${i + 1}: Amount must be a positive number`);
+        }
+      }
+    }
+  } else if (type === 'bank-deposit') {
+    if (!data.DepositToAccountRef?.value) {
+      throw new Error('DepositToAccountRef is required and must be resolved to a valid account ID');
+    }
+    if (!data.Line || !Array.isArray(data.Line)) {
+      throw new Error('Line array is required');
+    }
+    for (let i = 0; i < data.Line.length; i++) {
+      const line = data.Line[i];
+      if (line.DetailType === 'DepositLineDetail') {
+        if (!line.DepositLineDetail?.AccountRef?.value) {
+          throw new Error(`Line ${i + 1}: AccountRef is required and must be resolved to a valid account ID`);
+        }
+        if (line.Amount == null || typeof line.Amount !== 'number' || line.Amount <= 0) {
+          throw new Error(`Line ${i + 1}: Amount must be a positive number`);
+        }
+      }
+    }
+  }
+};
+
 // Recursively resolve ItemRef, CustomerRef, AccountRef, and other reference types in the document data
 const resolveItemReferences = async (data: any, context: InvocationContext): Promise<any> => {
   if (!data || typeof data !== 'object') {
@@ -143,9 +199,8 @@ const resolveItemReferences = async (data: any, context: InvocationContext): Pro
               invocationId: context.invocationId,
             });
           } else {
-            // Remove unresolved references to avoid null values
-            delete resolved[key];
-            logger.warn(`Removed unresolved ${key} for "${refValue.name}"`, {
+            // Leave unresolved references as-is for validation
+            logger.warn(`Could not resolve ${key} for "${refValue.name}"`, {
               refType: key,
               refName: refValue.name,
               invocationId: context.invocationId,
@@ -158,8 +213,7 @@ const resolveItemReferences = async (data: any, context: InvocationContext): Pro
             error: error instanceof Error ? error.message : String(error),
             invocationId: context.invocationId,
           });
-          // Remove failed references to avoid null values
-          delete resolved[key];
+          // Leave failed references as-is for validation
         }
       }
     }
@@ -183,6 +237,9 @@ const validateAndPost = async (
   try {
     // Resolve item references before posting
     const resolvedData = await resolveItemReferences(data, context);
+
+    // Validate required references and amounts
+    validateRequiredReferences(type, resolvedData);
 
     // Calculate total and generate DocNumber
     const total = calculateTotal(resolvedData);
