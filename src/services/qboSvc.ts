@@ -2868,7 +2868,7 @@ export const ensureAccount = async (
   try {
     const queryResult = await context.request(
       `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
-        `SELECT Id, Name, AccountType FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`
+        `SELECT Id, Name, AccountType, AccountSubType, Active, CurrencyRef, Classification FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`
       )}`,
       {
         method: 'GET',
@@ -2887,8 +2887,38 @@ export const ensureAccount = async (
         accountName,
         accountId: account.Id,
         accountType: account.AccountType,
+        accountSubType: account.AccountSubType,
+        active: account.Active,
+        currencyRef: account.CurrencyRef,
+        classification: account.Classification,
         expectedType: accountType,
       });
+      
+      // Check if account is active
+      if (account.Active === false) {
+        const errorMsg = `Account "${accountName}" exists but is inactive. Please activate the account in QuickBooks or use a different account.`;
+        logger.error('Account is inactive - operation cannot proceed', {
+          accountName,
+          accountId: account.Id,
+          accountType: account.AccountType,
+        });
+        throw new Error(errorMsg);
+      }
+      
+      // For bank accounts, check if the subtype is appropriate for deposits
+      if (accountType === 'Bank' && account.AccountType === 'Bank') {
+        const validBankSubTypes = ['Checking', 'Savings', 'MoneyMarket'];
+        if (!validBankSubTypes.includes(account.AccountSubType)) {
+          const errorMsg = `Account "${accountName}" is a bank account but has subtype "${account.AccountSubType}". For deposit operations, the account must have a subtype of Checking, Savings, or MoneyMarket. Please use a different bank account or update the account subtype in QuickBooks.`;
+          logger.error('Bank account has invalid subtype for deposits', {
+            accountName,
+            accountId: account.Id,
+            accountSubType: account.AccountSubType,
+            validSubTypes: validBankSubTypes,
+          });
+          throw new Error(errorMsg);
+        }
+      }
       
       // If account type is specified and doesn't match, throw an error
       if (accountType && account.AccountType !== accountType) {
@@ -2922,7 +2952,7 @@ export const ensureAccount = async (
   let accountSubType: string;
   switch (accountType) {
     case 'Bank':
-      accountSubType = 'CashOnHand'; // Or 'Checking', 'Savings', etc.
+      accountSubType = 'Checking'; // Default to Checking for bank accounts
       break;
     case 'Other Current Asset':
       accountSubType = 'OtherCurrentAssets';
@@ -2950,6 +2980,7 @@ export const ensureAccount = async (
     Name: accountName,
     AccountType: accountType,
     AccountSubType: accountSubType,
+    Active: true,
   };
 
   const response = await context.request(
