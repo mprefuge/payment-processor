@@ -182,7 +182,8 @@ const buildBankDepositFromSalesReceipts = async (
     totalAmount += amount;
 
     // Create a deposit line referencing the sales receipt
-    // In QuickBooks, deposit lines link to the original transaction
+    // In QuickBooks, LinkedTxn automatically associates the deposit with the original transaction
+    // No need for explicit Entity - QuickBooks derives it from the LinkedTxn
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
@@ -196,14 +197,6 @@ const buildBankDepositFromSalesReceipts = async (
         },
       ],
     };
-
-    // Add Entity reference if customer exists (required when linking transactions)
-    if (salesReceipt.CustomerRef) {
-      depositLine.DepositLineDetail.Entity = {
-        Type: 'Customer',
-        EntityRef: salesReceipt.CustomerRef,
-      };
-    }
 
     // Add description with the DocNumber for reference
     const docNumber = salesReceipt.DocNumber || salesReceiptId;
