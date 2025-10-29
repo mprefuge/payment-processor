@@ -95,13 +95,33 @@ const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promi
 const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> => {
   try {
     const queryStr = `SELECT * FROM SalesReceipt WHERE Id = '${salesReceiptId.replace(/'/g, "\\'")}'`;
+    logger.info('Querying QuickBooks for sales receipt', {
+      salesReceiptId,
+      query: queryStr,
+    });
+    
     const result = await query<{ QueryResponse: any }>(queryStr);
+    
+    logger.info('QuickBooks query response', {
+      salesReceiptId,
+      hasQueryResponse: !!result.QueryResponse,
+      hasSalesReceipt: !!result.QueryResponse?.SalesReceipt,
+      salesReceiptCount: result.QueryResponse?.SalesReceipt?.length || 0,
+    });
     
     const salesReceipts = result.QueryResponse?.SalesReceipt;
     if (salesReceipts && salesReceipts.length > 0) {
+      logger.info('Found sales receipt in QuickBooks', {
+        salesReceiptId,
+        docNumber: salesReceipts[0].DocNumber,
+        totalAmt: salesReceipts[0].TotalAmt,
+      });
       return salesReceipts[0];
     }
     
+    logger.warn('Sales receipt not found in QuickBooks', {
+      salesReceiptId,
+    });
     return null;
   } catch (error) {
     logger.error(`Failed to retrieve sales receipt with ID ${salesReceiptId}`, {
