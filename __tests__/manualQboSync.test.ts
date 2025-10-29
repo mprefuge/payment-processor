@@ -149,21 +149,21 @@ describe('manualQboSync', () => {
     expect(response.jsonBody.error).toContain('QuickBooks');
   });
 
-  it.skip('successfully syncs a bank deposit with DocNumbers', async () => {
+  it.skip('successfully syncs a bank deposit with SalesReceiptIds', async () => {
     // TODO: This test needs proper mocking setup for the query function
-    // The feature is implemented and working correctly (see logs showing DocNumbers processing),
+    // The feature is implemented and working correctly (see logs showing SalesReceiptIds processing),
     // but the mocking in the test environment isn't intercepting the query() calls properly.
     // This should be tested in an integration test with a real QBO sandbox environment.
     
     // Reset mocks to ensure clean state
     vi.clearAllMocks();
     
-    // Mock the query function to return sales receipts for each DocNumber lookup
+    // Mock the query function to return sales receipts for each ID lookup
     mockQuery
       .mockResolvedValueOnce({
         QueryResponse: {
           SalesReceipt: [{
-            Id: '123',
+            Id: '1820',
             DocNumber: 'MAN-20251029-15000',
             TotalAmt: 150.00,
             DepositToAccountRef: { name: 'Undeposited Funds', value: '35' },
@@ -174,7 +174,7 @@ describe('manualQboSync', () => {
       .mockResolvedValueOnce({
         QueryResponse: {
           SalesReceipt: [{
-            Id: '124',
+            Id: '1819',
             DocNumber: 'MAN-20251028-150',
             TotalAmt: 1.50,
             DepositToAccountRef: { name: 'Undeposited Funds', value: '35' },
@@ -201,9 +201,9 @@ describe('manualQboSync', () => {
         data: {
           TxnDate: '2024-01-02',
           DepositToAccountRef: { name: 'Operating Bank' },
-          DocNumbers: [
-            'MAN-20251029-15000',
-            'MAN-20251028-150'
+          SalesReceiptIds: [
+            '1820',
+            '1819'
           ]
         }
       })
@@ -221,9 +221,9 @@ describe('manualQboSync', () => {
     const depositCall = mockPostBankDeposit.mock.calls[0][0];
     expect(depositCall.Line).toHaveLength(2);
     expect(depositCall.Line[0].Amount).toBe(150.00);
-    expect(depositCall.Line[0].LinkedTxn[0].TxnId).toBe('123');
+    expect(depositCall.Line[0].LinkedTxn[0].TxnId).toBe('1820');
     expect(depositCall.Line[1].Amount).toBe(1.50);
-    expect(depositCall.Line[1].LinkedTxn[0].TxnId).toBe('124');
+    expect(depositCall.Line[1].LinkedTxn[0].TxnId).toBe('1819');
   });
 
   it('returns 400 for invalid request body', async () => {

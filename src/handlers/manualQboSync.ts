@@ -23,12 +23,12 @@ const ManualSyncRequestSchema = z.object({
 
 type ManualSyncRequest = z.infer<typeof ManualSyncRequestSchema>;
 
-// Extended data type for bank deposits with DocNumbers
+// Extended data type for bank deposits with SalesReceiptIds
 interface BankDepositData {
   DepositToAccountRef?: { name?: string; value?: string };
   TxnDate?: string;
-  DocNumbers?: string[]; // Array of sales receipt DocNumbers to include in deposit
-  Line?: any[]; // Optional manual line items (if DocNumbers not provided)
+  SalesReceiptIds?: string[]; // Array of sales receipt IDs to include in deposit
+  Line?: any[]; // Optional manual line items (if SalesReceiptIds not provided)
   PrivateNote?: string;
 }
 
@@ -91,10 +91,10 @@ const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promi
   }
 };
 
-// Retrieve sales receipt from QBO by DocNumber
-const getSalesReceiptByDocNumber = async (docNumber: string): Promise<any | null> => {
+// Retrieve sales receipt from QBO by ID
+const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> => {
   try {
-    const queryStr = `SELECT * FROM SalesReceipt WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
+    const queryStr = `SELECT * FROM SalesReceipt WHERE Id = '${salesReceiptId.replace(/'/g, "\\'")}'`;
     const result = await query<{ QueryResponse: any }>(queryStr);
     
     const salesReceipts = result.QueryResponse?.SalesReceipt;
@@ -104,39 +104,39 @@ const getSalesReceiptByDocNumber = async (docNumber: string): Promise<any | null
     
     return null;
   } catch (error) {
-    logger.error(`Failed to retrieve sales receipt with DocNumber ${docNumber}`, {
+    logger.error(`Failed to retrieve sales receipt with ID ${salesReceiptId}`, {
       error: error instanceof Error ? error.message : String(error),
     });
-    throw new Error(`Could not retrieve sales receipt ${docNumber}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Could not retrieve sales receipt ${salesReceiptId}: ${error instanceof Error ? error.message : String(error)}`);
   }
 };
 
-// Build bank deposit lines from sales receipt DocNumbers
+// Build bank deposit lines from sales receipt IDs
 const buildBankDepositFromSalesReceipts = async (
-  docNumbers: string[],
+  salesReceiptIds: string[],
   context: InvocationContext
 ): Promise<{ lines: any[]; totalAmount: number }> => {
   const lines: any[] = [];
   let totalAmount = 0;
 
   logger.info('Building bank deposit from sales receipts', {
-    docNumbers,
-    count: docNumbers.length,
+    salesReceiptIds,
+    count: salesReceiptIds.length,
     invocationId: context.invocationId,
   });
 
-  for (const docNumber of docNumbers) {
-    const salesReceipt = await getSalesReceiptByDocNumber(docNumber);
+  for (const salesReceiptId of salesReceiptIds) {
+    const salesReceipt = await getSalesReceiptById(salesReceiptId);
     
     if (!salesReceipt) {
-      throw new Error(`Sales receipt with DocNumber ${docNumber} not found in QuickBooks`);
+      throw new Error(`Sales receipt with ID ${salesReceiptId} not found in QuickBooks`);
     }
 
     // Verify that the sales receipt is deposited to Undeposited Funds
     const depositToAccount = salesReceipt.DepositToAccountRef?.name;
     if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
-      logger.warn(`Sales receipt ${docNumber} is not in Undeposited Funds account`, {
-        docNumber,
+      logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
+        salesReceiptId,
         currentAccount: depositToAccount,
         invocationId: context.invocationId,
       });
@@ -163,6 +163,7 @@ const buildBankDepositFromSalesReceipts = async (
     };
 
     // Add description with the DocNumber for reference
+    const docNumber = salesReceipt.DocNumber || salesReceiptId;
     if (salesReceipt.CustomerRef?.name) {
       depositLine.Description = `${salesReceipt.CustomerRef.name} - ${docNumber}`;
     } else {
@@ -172,9 +173,9 @@ const buildBankDepositFromSalesReceipts = async (
     lines.push(depositLine);
 
     logger.info(`Added sales receipt to deposit`, {
+      salesReceiptId,
       docNumber,
       amount,
-      salesReceiptId: salesReceipt.Id,
       invocationId: context.invocationId,
     });
   }
@@ -388,28 +389,28 @@ const validateAndPost = async (
       hasBillEmail: !!data.BillEmail,
       billEmailAddress: data.BillEmail?.Address,
       customerRefName: data.CustomerRef?.name,
-      hasDocNumbers: !!(data.DocNumbers && Array.isArray(data.DocNumbers)),
-      docNumbersCount: data.DocNumbers?.length,
+      hasSalesReceiptIds: !!(data.SalesReceiptIds && Array.isArray(data.SalesReceiptIds)),
+      salesReceiptIdsCount: data.SalesReceiptIds?.length,
       invocationId: context.invocationId,
     });
 
     let resolvedData = data;
     
-    // Special handling for bank-deposit with DocNumbers
-    if (type === 'bank-deposit' && data.DocNumbers && Array.isArray(data.DocNumbers)) {
-      logger.info('Processing bank deposit with DocNumbers', {
-        docNumbers: data.DocNumbers,
-        count: data.DocNumbers.length,
+    // Special handling for bank-deposit with SalesReceiptIds
+    if (type === 'bank-deposit' && data.SalesReceiptIds && Array.isArray(data.SalesReceiptIds)) {
+      logger.info('Processing bank deposit with SalesReceiptIds', {
+        salesReceiptIds: data.SalesReceiptIds,
+        count: data.SalesReceiptIds.length,
         invocationId: context.invocationId,
       });
 
-      // Validate DocNumbers array is not empty
-      if (data.DocNumbers.length === 0) {
-        throw new Error('DocNumbers array cannot be empty for bank deposits');
+      // Validate SalesReceiptIds array is not empty
+      if (data.SalesReceiptIds.length === 0) {
+        throw new Error('SalesReceiptIds array cannot be empty for bank deposits');
       }
 
       // Build deposit lines from sales receipts
-      const { lines, totalAmount } = await buildBankDepositFromSalesReceipts(data.DocNumbers, context);
+      const { lines, totalAmount } = await buildBankDepositFromSalesReceipts(data.SalesReceiptIds, context);
 
       // Construct the deposit data with the built lines
       resolvedData = {
@@ -417,8 +418,8 @@ const validateAndPost = async (
         Line: lines,
       };
 
-      // Remove DocNumbers from the final payload (it's not a QBO field)
-      delete resolvedData.DocNumbers;
+      // Remove SalesReceiptIds from the final payload (it's not a QBO field)
+      delete resolvedData.SalesReceiptIds;
 
       logger.info('Bank deposit constructed from sales receipts', {
         lineCount: lines.length,
