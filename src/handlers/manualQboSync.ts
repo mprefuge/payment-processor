@@ -172,8 +172,22 @@ const resolveItemReferences = async (
             if (root.BillEmail?.Address) {
               email = root.BillEmail.Address;
             }
+            
+            context.log(`Resolving CustomerRef`, {
+              name: refValue.name,
+              email,
+              hasRootBillEmail: !!root.BillEmail,
+              rootBillEmailAddress: root.BillEmail?.Address,
+            });
+            
             const customerResult = await ensureCustomer(refValue.name, email);
             resolvedRef = { value: customerResult.value, name: customerResult.name || refValue.name };
+            
+            context.log(`CustomerRef resolved`, {
+              name: refValue.name,
+              resolvedValue: customerResult.value,
+              resolvedName: customerResult.name,
+            });
           } else if (key === 'AccountRef' || key.endsWith('AccountRef')) {
             // For accounts, use ensureAccount which will create if it doesn't exist
             // We need to determine the account type based on context
@@ -238,8 +252,24 @@ const validateAndPost = async (
   context: InvocationContext
 ): Promise<ManualSyncResponse> => {
   try {
+    logger.info(`Starting ${type} validation and resolution`, {
+      type,
+      hasCustomerRef: !!data.CustomerRef,
+      hasBillEmail: !!data.BillEmail,
+      billEmailAddress: data.BillEmail?.Address,
+      customerRefName: data.CustomerRef?.name,
+      invocationId: context.invocationId,
+    });
+
     // Resolve item references before posting
     const resolvedData = await resolveItemReferences(data, context);
+
+    logger.info(`References resolved for ${type}`, {
+      type,
+      customerRefValue: resolvedData.CustomerRef?.value,
+      customerRefName: resolvedData.CustomerRef?.name,
+      invocationId: context.invocationId,
+    });
 
     // Validate required references and amounts
     validateRequiredReferences(type, resolvedData);

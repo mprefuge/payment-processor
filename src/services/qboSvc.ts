@@ -2748,7 +2748,43 @@ export const ensureCustomer = async (
 ): Promise<QuickBooksReference> => {
   const context = await createRequestContext(options);
 
-  // First, try to find existing customer by name
+  // If email is provided, try to find customer by email first
+  if (email) {
+    try {
+      const emailQuery = `SELECT Id, DisplayName FROM Customer WHERE PrimaryEmailAddr = '${email.replace(/'/g, "\\'")}'`;
+      const queryResult = await context.request(
+        `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(emailQuery)}`,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      const data = await queryResult.json();
+      if (data.QueryResponse?.Customer?.length > 0) {
+        const customer = data.QueryResponse.Customer[0];
+        logger.info('Found existing customer by email', {
+          customerName,
+          email,
+          customerId: customer.Id,
+        });
+        return {
+          value: customer.Id,
+          name: customer.DisplayName,
+        };
+      }
+    } catch (error) {
+      logger.warn('Failed to query for customer by email, will try by name', {
+        customerName,
+        email,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // Try to find existing customer by name
   try {
     const queryResult = await context.request(
       `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
@@ -2765,6 +2801,10 @@ export const ensureCustomer = async (
     const data = await queryResult.json();
     if (data.QueryResponse?.Customer?.length > 0) {
       const customer = data.QueryResponse.Customer[0];
+      logger.info('Found existing customer by name', {
+        customerName,
+        customerId: customer.Id,
+      });
       return {
         value: customer.Id,
         name: customer.DisplayName,
@@ -2778,8 +2818,9 @@ export const ensureCustomer = async (
   }
 
   // Customer doesn't exist, create it
+  logger.info('Creating new customer', { customerName, email });
   const customerData = {
-    Name: customerName,
+    DisplayName: customerName,
     ...(email && {
       PrimaryEmailAddr: {
         Address: email,
@@ -2800,10 +2841,16 @@ export const ensureCustomer = async (
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to create customer: ${response.status} ${response.statusText}`);
+    const errorText = await response.text();
+    throw new Error(`Failed to create customer: ${response.status} ${response.statusText} - ${errorText}`);
   }
 
   const result = await response.json();
+  logger.info('Created new customer', {
+    customerName,
+    email,
+    customerId: result.Customer.Id,
+  });
   return {
     value: result.Customer.Id,
     name: result.Customer.DisplayName || customerName,
