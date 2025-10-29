@@ -1274,8 +1274,13 @@ export const buildSalesReceipt = ({
   const lines: QuickBooksSalesReceiptLine[] = [];
 
   // Main line item (base amount if cover fees exist, otherwise full amount)
+  const mainAmount = centsToDollars(baseAmount > 0 ? baseAmount : amount);
+  if (!Number.isFinite(mainAmount)) {
+    throw new Error(`Invalid amount calculated for sales receipt: ${mainAmount} (from ${baseAmount > 0 ? baseAmount : amount} cents)`);
+  }
+  
   lines.push({
-    Amount: centsToDollars(baseAmount > 0 ? baseAmount : amount),
+    Amount: mainAmount,
     DetailType: 'SalesItemLineDetail',
     Description: lineDescription,
     SalesItemLineDetail: {
@@ -1285,8 +1290,13 @@ export const buildSalesReceipt = ({
 
   // Add separate line for cover fees if applicable
   if (coverFees > 0) {
+    const coverFeesAmount = centsToDollars(coverFees);
+    if (!Number.isFinite(coverFeesAmount)) {
+      throw new Error(`Invalid cover fees amount calculated for sales receipt: ${coverFeesAmount} (from ${coverFees} cents)`);
+    }
+    
     lines.push({
-      Amount: centsToDollars(coverFees),
+      Amount: coverFeesAmount,
       DetailType: 'SalesItemLineDetail',
       Description: 'Processing Fee Coverage',
       SalesItemLineDetail: {
@@ -1303,11 +1313,14 @@ export const buildSalesReceipt = ({
     Line: lines,
   };
 
-  if (customer?.ref?.value) {
-    receipt.CustomerRef = {
+  if (customer?.ref?.value && customer.ref.value.trim()) {
+    const customerRef: QuickBooksReference = {
       value: customer.ref.value,
-      name: customer.ref.name,
     };
+    if (customer.ref.name && customer.ref.name.trim()) {
+      customerRef.name = customer.ref.name;
+    }
+    receipt.CustomerRef = customerRef;
   }
 
   const customerEmail = normalizeEmail(customer?.email ?? null);
@@ -2290,6 +2303,13 @@ const postToQbo = async <T extends QuickBooksDocType>(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
+  });
+
+  // Log the payload being sent to QuickBooks for debugging
+  logger.info('[QBO] Sending payload to QuickBooks', {
+    entity,
+    docNumber,
+    payload: JSON.stringify(payload, null, 2)
   });
 
   const executePost = () => context.request(url, buildRequestInit());
