@@ -181,15 +181,19 @@ const buildBankDepositFromSalesReceipts = async (
     const amount = salesReceipt.TotalAmt || 0;
     totalAmount += amount;
 
-    // Create a deposit line for this sales receipt amount
-    // Since the sales receipt is in Undeposited Funds, we create a deposit line
-    // that moves that amount from Undeposited Funds to the target bank account
-    // We don't use LinkedTxn because the sales receipt deposit account can't be changed
+    // Create a deposit line referencing the sales receipt
+    // The LinkedTxn must be inside DepositLineDetail, and TxnType must be set at the detail level
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
       DepositLineDetail: {
-        AccountRef: { name: 'Undeposited Funds' }, // Where money is coming FROM
+        TxnType: 'SalesReceipt',
+        LinkedTxn: [
+          {
+            TxnId: salesReceipt.Id,
+            TxnType: 'SalesReceipt',
+          },
+        ],
       },
     };
 
