@@ -82,7 +82,7 @@ const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promi
   }
 };
 
-// Recursively resolve ItemRef, CustomerRef, and AccountRef references in the document data
+// Recursively resolve ItemRef, CustomerRef, AccountRef, and other reference types in the document data
 const resolveItemReferences = async (data: any, context: InvocationContext): Promise<any> => {
   if (!data || typeof data !== 'object') {
     return data;
@@ -94,104 +94,80 @@ const resolveItemReferences = async (data: any, context: InvocationContext): Pro
 
   const resolved = { ...data };
 
-  // Handle ItemRef
-  if (resolved.ItemRef && typeof resolved.ItemRef === 'object') {
-    const itemRef = resolved.ItemRef;
-    if (itemRef.name && typeof itemRef.name === 'string') {
-      try {
-        const ensuredItem = await ensureItem(itemRef.name);
-        resolved.ItemRef = {
-          value: ensuredItem.value,
-          name: ensuredItem.name,
-        };
-        logger.info(`Resolved ItemRef for "${itemRef.name}" to ID: ${ensuredItem.value}`, {
-          originalName: itemRef.name,
-          resolvedId: ensuredItem.value,
-          invocationId: context.invocationId,
-        });
-      } catch (error) {
-        logger.warn(`Failed to resolve item reference: ${itemRef.name}`, {
-          error: error instanceof Error ? error.message : String(error),
-          invocationId: context.invocationId,
-        });
-        // Keep the original reference if resolution fails
-      }
-    }
-  }
+  // Handle any Ref field that has a name but no value
+  for (const [key, value] of Object.entries(resolved)) {
+    if (key.endsWith('Ref') && value && typeof value === 'object' && 'name' in value && 'value' in value) {
+      const refValue = value as { name: string; value?: string };
+      if (refValue.name && !refValue.value) {
+        try {
+          let resolvedRef: { value: string; name: string } | null = null;
 
-  // Handle CustomerRef
-  if (resolved.CustomerRef && typeof resolved.CustomerRef === 'object') {
-    const customerRef = resolved.CustomerRef;
-    if (customerRef.name && typeof customerRef.name === 'string') {
-      try {
-        // Extract email from BillEmail if available
-        let email: string | undefined;
-        if (resolved.BillEmail?.Address) {
-          email = resolved.BillEmail.Address;
-        }
+          if (key === 'ItemRef') {
+            const itemResult = await ensureItem(refValue.name);
+            resolvedRef = { value: itemResult.value, name: itemResult.name || refValue.name };
+          } else if (key === 'CustomerRef') {
+            // For customer refs, also check for email
+            let email: string | undefined;
+            if (resolved.BillEmail?.Address) {
+              email = resolved.BillEmail.Address;
+            }
+            const customerResult = await ensureCustomer(refValue.name, email);
+            resolvedRef = { value: customerResult.value, name: customerResult.name || refValue.name };
+          } else if (key === 'AccountRef' || key.endsWith('AccountRef')) {
+            // For accounts, try to query first
+            const queryResult = await query<{ QueryResponse: { Account?: any[] } }>(
+              `SELECT Id, Name FROM Account WHERE Name = '${refValue.name.replace(/'/g, "\\'")}'`
+            );
 
-        const ensuredCustomer = await ensureCustomer(customerRef.name, email);
-        resolved.CustomerRef = {
-          value: ensuredCustomer.value,
-          name: ensuredCustomer.name,
-        };
-        logger.info(`Resolved CustomerRef for "${customerRef.name}" to ID: ${ensuredCustomer.value}`, {
-          originalName: customerRef.name,
-          resolvedId: ensuredCustomer.value,
-          invocationId: context.invocationId,
-        });
-      } catch (error) {
-        logger.warn(`Failed to resolve customer reference: ${customerRef.name}`, {
-          error: error instanceof Error ? error.message : String(error),
-          invocationId: context.invocationId,
-        });
-        // Keep the original reference if resolution fails
-      }
-    }
-  }
+            if (queryResult.QueryResponse?.Account && queryResult.QueryResponse.Account.length > 0) {
+              const account = queryResult.QueryResponse.Account[0];
+              resolvedRef = {
+                value: account.Id,
+                name: account.Name,
+              };
+            } else {
+              logger.warn(`Account "${refValue.name}" not found for ${key}`, {
+                refType: key,
+                accountName: refValue.name,
+                invocationId: context.invocationId,
+              });
+            }
+          }
 
-  // Handle AccountRef
-  if (resolved.AccountRef && typeof resolved.AccountRef === 'object') {
-    const accountRef = resolved.AccountRef;
-    if (accountRef.name && typeof accountRef.name === 'string') {
-      try {
-        // For accounts, we don't auto-create them unless we have a type
-        // This is more conservative since account creation requires specific types
-        const queryResult = await query<{ QueryResponse: { Account?: any[] } }>(
-          `SELECT Id, Name FROM Account WHERE Name = '${accountRef.name.replace(/'/g, "\\'")}'`
-        );
-
-        if (queryResult.QueryResponse?.Account && queryResult.QueryResponse.Account.length > 0) {
-          const account = queryResult.QueryResponse.Account[0];
-          resolved.AccountRef = {
-            value: account.Id,
-            name: account.Name,
-          };
-          logger.info(`Resolved AccountRef for "${accountRef.name}" to ID: ${account.Id}`, {
-            originalName: accountRef.name,
-            resolvedId: account.Id,
+          if (resolvedRef) {
+            resolved[key] = resolvedRef;
+            logger.info(`Resolved ${key} for "${refValue.name}" to ID: ${resolvedRef.value}`, {
+              refType: key,
+              originalName: refValue.name,
+              resolvedId: resolvedRef.value,
+              invocationId: context.invocationId,
+            });
+          } else {
+            // Remove unresolved references to avoid null values
+            delete resolved[key];
+            logger.warn(`Removed unresolved ${key} for "${refValue.name}"`, {
+              refType: key,
+              refName: refValue.name,
+              invocationId: context.invocationId,
+            });
+          }
+        } catch (error) {
+          logger.warn(`Failed to resolve ${key}: ${refValue.name}`, {
+            refType: key,
+            refName: refValue.name,
+            error: error instanceof Error ? error.message : String(error),
             invocationId: context.invocationId,
           });
-        } else {
-          logger.warn(`Account "${accountRef.name}" not found and will not be auto-created`, {
-            accountName: accountRef.name,
-            invocationId: context.invocationId,
-          });
-          // Keep the original reference - let it fail later if the account doesn't exist
+          // Remove failed references to avoid null values
+          delete resolved[key];
         }
-      } catch (error) {
-        logger.warn(`Failed to resolve account reference: ${accountRef.name}`, {
-          error: error instanceof Error ? error.message : String(error),
-          invocationId: context.invocationId,
-        });
-        // Keep the original reference if resolution fails
       }
     }
   }
 
   // Recursively process all other properties
   for (const [key, value] of Object.entries(resolved)) {
-    if (key !== 'ItemRef' && key !== 'CustomerRef' && key !== 'AccountRef') {
+    if (!key.endsWith('Ref')) {
       resolved[key] = await resolveItemReferences(value, context);
     }
   }
