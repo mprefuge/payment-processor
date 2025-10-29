@@ -39,6 +39,13 @@ interface ManualSyncResponse {
   error?: string;
 }
 
+interface QuickBooksAccount {
+  Id: string;
+  Name?: string;
+  AccountType?: string;
+  AccountSubType?: string;
+}
+
 // Calculate total amount from document lines
 const calculateTotal = (data: any): number => {
   if (!data.Line || !Array.isArray(data.Line)) {
@@ -146,6 +153,57 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
   }
 };
 
+const getAccountIdByName = async (accountName: string, context: InvocationContext): Promise<string | null> => {
+  try {
+    const queryStr = `SELECT Id, Name, AccountType, AccountSubType FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`;
+    logger.info('Querying QuickBooks for account', {
+      accountName,
+      query: queryStr,
+      invocationId: context.invocationId,
+    });
+
+    const result = await query<any>(queryStr);
+
+    if (Array.isArray(result) && result.length > 0) {
+      const account = result[0] as QuickBooksAccount;
+      logger.info('Found account by name', {
+        accountName,
+        accountId: account.Id,
+        accountType: account.AccountType,
+        accountSubType: account.AccountSubType,
+        invocationId: context.invocationId,
+      });
+      return account.Id;
+    }
+
+    const accounts = (result as { QueryResponse?: { Account?: QuickBooksAccount[] } })?.QueryResponse?.Account;
+    if (accounts && accounts.length > 0) {
+      const account = accounts[0];
+      logger.info('Found account by name (QueryResponse format)', {
+        accountName,
+        accountId: account.Id,
+        accountType: account.AccountType,
+        accountSubType: account.AccountSubType,
+        invocationId: context.invocationId,
+      });
+      return account.Id;
+    }
+
+    logger.warn('Account not found by name', {
+      accountName,
+      invocationId: context.invocationId,
+    });
+    return null;
+  } catch (error) {
+    logger.error('Failed to query account by name', {
+      accountName,
+      error: error instanceof Error ? error.message : String(error),
+      invocationId: context.invocationId,
+    });
+    return null;
+  }
+};
+
 // Build bank deposit lines from sales receipt IDs
 const buildBankDepositFromSalesReceipts = async (
   salesReceiptIds: string[],
@@ -182,19 +240,19 @@ const buildBankDepositFromSalesReceipts = async (
     totalAmount += amount;
 
     // Create a deposit line referencing the sales receipt
-    // LinkedTxn should be at the line level, and DepositLineDetail should reference Undeposited Funds
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
       DepositLineDetail: {
         AccountRef: { name: 'Undeposited Funds' },
+        TxnType: 'SalesReceipt',
+        LinkedTxn: [
+          {
+            TxnId: salesReceipt.Id,
+            TxnType: 'SalesReceipt',
+          },
+        ],
       },
-      LinkedTxn: [
-        {
-          TxnId: salesReceipt.Id,
-          TxnType: 'SalesReceipt',
-        },
-      ],
     };
 
     // Add description with the DocNumber and customer for reference
@@ -269,8 +327,19 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
     for (let i = 0; i < data.Line.length; i++) {
       const line = data.Line[i];
       if (line.DetailType === 'DepositLineDetail') {
-        if (!line.DepositLineDetail?.AccountRef?.value) {
-          throw new Error(`Line ${i + 1}: AccountRef is required and must be resolved to a valid account ID`);
+        const detail = line.DepositLineDetail;
+        if (detail?.AccountRef && !detail.AccountRef.value) {
+          throw new Error(`Line ${i + 1}: AccountRef must include a valid account ID when provided`);
+        }
+        if (!line.DepositLineDetail?.TxnType) {
+          throw new Error(`Line ${i + 1}: TxnType is required for deposit lines`);
+        }
+        if (
+          !line.DepositLineDetail?.LinkedTxn ||
+          !Array.isArray(line.DepositLineDetail.LinkedTxn) ||
+          line.DepositLineDetail.LinkedTxn.length === 0
+        ) {
+          throw new Error(`Line ${i + 1}: LinkedTxn array is required for deposit lines`);
         }
         if (line.Amount == null || typeof line.Amount !== 'number' || line.Amount <= 0) {
           throw new Error(`Line ${i + 1}: Amount must be a positive number`);
@@ -362,6 +431,8 @@ const resolveItemReferences = async (
             // Infer account type from the reference key or parent context
             if (key === 'DepositToAccountRef') {
               accountType = 'Bank'; // Bank accounts for deposits
+            } else if (resolved.TxnType === 'SalesReceipt' || root?.TxnType === 'SalesReceipt') {
+              accountType = 'Other Current Asset'; // Linked sales receipts come from Undeposited Funds
             } else if (key === 'ItemAccountRef') {
               accountType = 'Income'; // Income accounts for items
             } else if (resolved.PostingType === 'Debit' || resolved.PostingType === 'Credit') {
@@ -460,6 +531,53 @@ const validateAndPost = async (
         lineCount: lines.length,
         totalAmount,
         invocationId: context.invocationId,
+      });
+    }
+
+    if (
+      type === 'bank-deposit' &&
+      resolvedData.DepositToAccountRef?.name &&
+      !resolvedData.DepositToAccountRef.value
+    ) {
+      const accountId = await getAccountIdByName(resolvedData.DepositToAccountRef.name, context);
+      if (accountId) {
+        resolvedData.DepositToAccountRef.value = accountId;
+      }
+    }
+
+    if (type === 'bank-deposit' && Array.isArray(resolvedData.Line)) {
+      resolvedData.Line = resolvedData.Line.map((line: any) => {
+        if (line?.DetailType !== 'DepositLineDetail') {
+          return line;
+        }
+
+        line.DepositLineDetail = line.DepositLineDetail ?? {};
+
+        if (!line.DepositLineDetail.AccountRef && line.AccountRef) {
+          line.DepositLineDetail.AccountRef = line.AccountRef;
+        }
+
+        if (!line.DepositLineDetail.LinkedTxn && Array.isArray(line.LinkedTxn)) {
+          line.DepositLineDetail.LinkedTxn = line.LinkedTxn;
+        }
+
+        if (!line.DepositLineDetail.TxnType) {
+          if (typeof line.TxnType === 'string') {
+            line.DepositLineDetail.TxnType = line.TxnType;
+          } else if (
+            Array.isArray(line.DepositLineDetail.LinkedTxn) &&
+            line.DepositLineDetail.LinkedTxn.length > 0 &&
+            typeof line.DepositLineDetail.LinkedTxn[0]?.TxnType === 'string'
+          ) {
+            line.DepositLineDetail.TxnType = line.DepositLineDetail.LinkedTxn[0].TxnType;
+          }
+        }
+
+        delete line.LinkedTxn;
+        delete line.TxnType;
+        delete line.AccountRef;
+
+        return line;
       });
     }
 

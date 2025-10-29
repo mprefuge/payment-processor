@@ -220,10 +220,10 @@ describe('manualQboSync', () => {
     // Verify the deposit was built with correct lines
     const depositCall = mockPostBankDeposit.mock.calls[0][0];
     expect(depositCall.Line).toHaveLength(2);
-    expect(depositCall.Line[0].Amount).toBe(150.00);
-    expect(depositCall.Line[0].LinkedTxn[0].TxnId).toBe('1820');
-    expect(depositCall.Line[1].Amount).toBe(1.50);
-    expect(depositCall.Line[1].LinkedTxn[0].TxnId).toBe('1819');
+  expect(depositCall.Line[0].Amount).toBe(150.00);
+  expect(depositCall.Line[0].DepositLineDetail.LinkedTxn[0].TxnId).toBe('1820');
+  expect(depositCall.Line[1].Amount).toBe(1.50);
+  expect(depositCall.Line[1].DepositLineDetail.LinkedTxn[0].TxnId).toBe('1819');
   });
 
   it('returns 400 for invalid request body', async () => {
