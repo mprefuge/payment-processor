@@ -182,14 +182,12 @@ const buildBankDepositFromSalesReceipts = async (
     totalAmount += amount;
 
     // Create a deposit line referencing the sales receipt
-    // In QuickBooks, LinkedTxn automatically associates the deposit with the original transaction
-    // No need for explicit Entity - QuickBooks derives it from the LinkedTxn
+    // When using LinkedTxn, QuickBooks derives the account from the linked transaction
+    // So we may not need AccountRef in DepositLineDetail
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
-      DepositLineDetail: {
-        AccountRef: salesReceipt.DepositToAccountRef || { name: 'Undeposited Funds' },
-      },
+      DepositLineDetail: {},
       LinkedTxn: [
         {
           TxnId: salesReceipt.Id,
