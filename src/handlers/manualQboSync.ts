@@ -241,9 +241,8 @@ const validateAndPost = async (
     // Validate required references and amounts
     validateRequiredReferences(type, resolvedData);
 
-    // Calculate total and generate DocNumber
-    const total = calculateTotal(resolvedData);
-    const docNumber = generateDocNumber(total);
+    // Use provided DocNumber or generate one if not provided
+    const docNumber = resolvedData.DocNumber || generateDocNumber(calculateTotal(resolvedData));
 
     // Check for duplicates
     const isDuplicate = await checkDuplicate(docNumber, type);
@@ -259,16 +258,16 @@ const validateAndPost = async (
       };
     }
 
-    // Add DocNumber to the document
+    // Ensure DocNumber is set (either user-provided or auto-generated)
     const dataWithDocNumber = {
       ...resolvedData,
       DocNumber: docNumber,
     };
 
-    logger.info(`Generated DocNumber: ${docNumber} for ${type} with total: ${total}`, {
+    logger.info(`Using DocNumber: ${docNumber} for ${type}`, {
       type,
       docNumber,
-      total,
+      userProvided: !!resolvedData.DocNumber,
       invocationId: context.invocationId,
     });
 
