@@ -9,6 +9,8 @@ const stripeWebhook = stripeWebhookModule.default || stripeWebhookModule;
 const payoutSyncTrigger = require('./handlers/payoutSyncTrigger');
 const stripeTrueUpModule = require('./handlers/stripeTrueUp');
 const stripeTrueUp = stripeTrueUpModule.default || stripeTrueUpModule;
+const manualQboSyncModule = require('./handlers/manualQboSync');
+const manualQboSync = manualQboSyncModule.default || manualQboSyncModule;
 
 // Register HTTP-triggered functions
 app.http('healthCheck', {
@@ -46,5 +48,12 @@ app.http('stripeTrueUp', {
   handler: stripeTrueUp,
 });
 
+app.http('manualQboSync', {
+  methods: ['POST'],
+  route: 'qbo/manual-sync',
+  authLevel: 'function',
+  handler: manualQboSync,
+});
+
 // Export for testing
-export { healthCheck, processTransaction, stripeWebhook, payoutSyncTrigger, stripeTrueUp };
+export { healthCheck, processTransaction, stripeWebhook, payoutSyncTrigger, stripeTrueUp, manualQboSync };
