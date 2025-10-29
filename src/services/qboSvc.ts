@@ -2868,7 +2868,7 @@ export const ensureAccount = async (
   try {
     const queryResult = await context.request(
       `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
-        `SELECT Id, Name FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`
+        `SELECT Id, Name, AccountType FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`
       )}`,
       {
         method: 'GET',
@@ -2881,6 +2881,25 @@ export const ensureAccount = async (
     const data = await queryResult.json();
     if (data.QueryResponse?.Account?.length > 0) {
       const account = data.QueryResponse.Account[0];
+      
+      // Log the account type for debugging
+      logger.info('Found existing account', {
+        accountName,
+        accountId: account.Id,
+        accountType: account.AccountType,
+        expectedType: accountType,
+      });
+      
+      // Warn if the account type doesn't match expected type
+      if (accountType && account.AccountType !== accountType) {
+        logger.warn('Account type mismatch', {
+          accountName,
+          foundType: account.AccountType,
+          expectedType: accountType,
+          message: `Account "${accountName}" exists but is type "${account.AccountType}", expected "${accountType}". Using existing account anyway.`,
+        });
+      }
+      
       return {
         value: account.Id,
         name: account.Name,
