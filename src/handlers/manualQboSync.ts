@@ -100,25 +100,38 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
       query: queryStr,
     });
     
-    const result = await query<{ QueryResponse: any }>(queryStr);
+    const result = await query<any>(queryStr);
     
     logger.info('QuickBooks query response', {
       salesReceiptId,
-      hasQueryResponse: !!result.QueryResponse,
-      hasSalesReceipt: !!result.QueryResponse?.SalesReceipt,
-      salesReceiptCount: result.QueryResponse?.SalesReceipt?.length || 0,
-      rawResultKeys: result ? Object.keys(result) : [],
-      rawResult: JSON.stringify(result),
+      isArray: Array.isArray(result),
+      resultLength: Array.isArray(result) ? result.length : 0,
+      hasQueryResponse: !!(result as any)?.QueryResponse,
     });
     
-    const salesReceipts = result.QueryResponse?.SalesReceipt;
-    if (salesReceipts && salesReceipts.length > 0) {
+    // Handle array response (query function returns array directly)
+    if (Array.isArray(result) && result.length > 0) {
+      const salesReceipt = result[0];
       logger.info('Found sales receipt in QuickBooks', {
         salesReceiptId,
-        docNumber: salesReceipts[0].DocNumber,
-        totalAmt: salesReceipts[0].TotalAmt,
+        docNumber: salesReceipt.DocNumber,
+        totalAmt: salesReceipt.TotalAmt,
+        depositToAccount: salesReceipt.DepositToAccountRef?.name,
       });
-      return salesReceipts[0];
+      return salesReceipt;
+    }
+    
+    // Handle QueryResponse wrapper (fallback for different query implementations)
+    if ((result as any)?.QueryResponse?.SalesReceipt) {
+      const salesReceipts = (result as any).QueryResponse.SalesReceipt;
+      if (salesReceipts.length > 0) {
+        logger.info('Found sales receipt in QuickBooks (QueryResponse format)', {
+          salesReceiptId,
+          docNumber: salesReceipts[0].DocNumber,
+          totalAmt: salesReceipts[0].TotalAmt,
+        });
+        return salesReceipts[0];
+      }
     }
     
     logger.warn('Sales receipt not found in QuickBooks', {
