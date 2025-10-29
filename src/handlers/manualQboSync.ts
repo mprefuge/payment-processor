@@ -182,12 +182,11 @@ const buildBankDepositFromSalesReceipts = async (
     totalAmount += amount;
 
     // Create a deposit line referencing the sales receipt
-    // The LinkedTxn must be inside DepositLineDetail, and TxnType must be set at the detail level
+    // The LinkedTxn must be inside DepositLineDetail
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
       DepositLineDetail: {
-        TxnType: 'SalesReceipt',
         LinkedTxn: [
           {
             TxnId: salesReceipt.Id,
