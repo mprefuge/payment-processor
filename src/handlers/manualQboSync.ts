@@ -23,6 +23,15 @@ const ManualSyncRequestSchema = z.object({
 
 type ManualSyncRequest = z.infer<typeof ManualSyncRequestSchema>;
 
+// Extended data type for bank deposits with DocNumbers
+interface BankDepositData {
+  DepositToAccountRef?: { name?: string; value?: string };
+  TxnDate?: string;
+  DocNumbers?: string[]; // Array of sales receipt DocNumbers to include in deposit
+  Line?: any[]; // Optional manual line items (if DocNumbers not provided)
+  PrivateNote?: string;
+}
+
 interface ManualSyncResponse {
   success: boolean;
   id?: string;
@@ -80,6 +89,103 @@ const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promi
     // If we can't check for duplicates, assume it's not a duplicate to avoid blocking
     return false;
   }
+};
+
+// Retrieve sales receipt from QBO by DocNumber
+const getSalesReceiptByDocNumber = async (docNumber: string): Promise<any | null> => {
+  try {
+    const queryStr = `SELECT * FROM SalesReceipt WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
+    const result = await query<{ QueryResponse: any }>(queryStr);
+    
+    const salesReceipts = result.QueryResponse?.SalesReceipt;
+    if (salesReceipts && salesReceipts.length > 0) {
+      return salesReceipts[0];
+    }
+    
+    return null;
+  } catch (error) {
+    logger.error(`Failed to retrieve sales receipt with DocNumber ${docNumber}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new Error(`Could not retrieve sales receipt ${docNumber}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
+// Build bank deposit lines from sales receipt DocNumbers
+const buildBankDepositFromSalesReceipts = async (
+  docNumbers: string[],
+  context: InvocationContext
+): Promise<{ lines: any[]; totalAmount: number }> => {
+  const lines: any[] = [];
+  let totalAmount = 0;
+
+  logger.info('Building bank deposit from sales receipts', {
+    docNumbers,
+    count: docNumbers.length,
+    invocationId: context.invocationId,
+  });
+
+  for (const docNumber of docNumbers) {
+    const salesReceipt = await getSalesReceiptByDocNumber(docNumber);
+    
+    if (!salesReceipt) {
+      throw new Error(`Sales receipt with DocNumber ${docNumber} not found in QuickBooks`);
+    }
+
+    // Verify that the sales receipt is deposited to Undeposited Funds
+    const depositToAccount = salesReceipt.DepositToAccountRef?.name;
+    if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
+      logger.warn(`Sales receipt ${docNumber} is not in Undeposited Funds account`, {
+        docNumber,
+        currentAccount: depositToAccount,
+        invocationId: context.invocationId,
+      });
+    }
+
+    // Get the total amount from the sales receipt
+    const amount = salesReceipt.TotalAmt || 0;
+    totalAmount += amount;
+
+    // Create a deposit line referencing the sales receipt
+    // In QuickBooks, deposit lines link to the original transaction
+    const depositLine: any = {
+      Amount: amount,
+      DetailType: 'DepositLineDetail',
+      DepositLineDetail: {
+        AccountRef: salesReceipt.DepositToAccountRef || { name: 'Undeposited Funds' },
+      },
+      LinkedTxn: [
+        {
+          TxnId: salesReceipt.Id,
+          TxnType: 'SalesReceipt',
+        },
+      ],
+    };
+
+    // Add description with the DocNumber for reference
+    if (salesReceipt.CustomerRef?.name) {
+      depositLine.Description = `${salesReceipt.CustomerRef.name} - ${docNumber}`;
+    } else {
+      depositLine.Description = docNumber;
+    }
+
+    lines.push(depositLine);
+
+    logger.info(`Added sales receipt to deposit`, {
+      docNumber,
+      amount,
+      salesReceiptId: salesReceipt.Id,
+      invocationId: context.invocationId,
+    });
+  }
+
+  logger.info('Bank deposit lines built successfully', {
+    lineCount: lines.length,
+    totalAmount,
+    invocationId: context.invocationId,
+  });
+
+  return { lines, totalAmount };
 };
 
 // Validate that required references are resolved
@@ -282,11 +388,47 @@ const validateAndPost = async (
       hasBillEmail: !!data.BillEmail,
       billEmailAddress: data.BillEmail?.Address,
       customerRefName: data.CustomerRef?.name,
+      hasDocNumbers: !!(data.DocNumbers && Array.isArray(data.DocNumbers)),
+      docNumbersCount: data.DocNumbers?.length,
       invocationId: context.invocationId,
     });
 
+    let resolvedData = data;
+    
+    // Special handling for bank-deposit with DocNumbers
+    if (type === 'bank-deposit' && data.DocNumbers && Array.isArray(data.DocNumbers)) {
+      logger.info('Processing bank deposit with DocNumbers', {
+        docNumbers: data.DocNumbers,
+        count: data.DocNumbers.length,
+        invocationId: context.invocationId,
+      });
+
+      // Validate DocNumbers array is not empty
+      if (data.DocNumbers.length === 0) {
+        throw new Error('DocNumbers array cannot be empty for bank deposits');
+      }
+
+      // Build deposit lines from sales receipts
+      const { lines, totalAmount } = await buildBankDepositFromSalesReceipts(data.DocNumbers, context);
+
+      // Construct the deposit data with the built lines
+      resolvedData = {
+        ...data,
+        Line: lines,
+      };
+
+      // Remove DocNumbers from the final payload (it's not a QBO field)
+      delete resolvedData.DocNumbers;
+
+      logger.info('Bank deposit constructed from sales receipts', {
+        lineCount: lines.length,
+        totalAmount,
+        invocationId: context.invocationId,
+      });
+    }
+
     // Resolve item references before posting
-    const resolvedData = await resolveItemReferences(data, context);
+    resolvedData = await resolveItemReferences(resolvedData, context);
 
     logger.info(`References resolved for ${type}`, {
       type,
