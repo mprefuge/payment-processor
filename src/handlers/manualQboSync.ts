@@ -138,6 +138,30 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
   }
 };
 
+// Remove null/undefined values from the object to avoid QuickBooks errors
+const cleanPayload = (obj: any): any => {
+  if (obj === null || obj === undefined) {
+    return undefined;
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj.map(cleanPayload).filter(item => item !== undefined);
+  }
+  
+  if (typeof obj === 'object') {
+    const cleaned: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      const cleanedValue = cleanPayload(value);
+      if (cleanedValue !== undefined && cleanedValue !== null) {
+        cleaned[key] = cleanedValue;
+      }
+    }
+    return cleaned;
+  }
+  
+  return obj;
+};
+
 // Recursively resolve ItemRef, CustomerRef, AccountRef, and other reference types in the document data
 const resolveItemReferences = async (
   data: any, 
@@ -297,6 +321,9 @@ const validateAndPost = async (
       DocNumber: docNumber,
     };
 
+    // Clean the payload to remove any null/undefined values
+    const cleanedData = cleanPayload(dataWithDocNumber);
+
     logger.info(`Using DocNumber: ${docNumber} for ${type}`, {
       type,
       docNumber,
@@ -304,17 +331,24 @@ const validateAndPost = async (
       invocationId: context.invocationId,
     });
 
+    // Log the complete payload before sending to QuickBooks
+    logger.info(`Complete payload for ${type} before posting`, {
+      type,
+      payload: JSON.stringify(cleanedData, null, 2),
+      invocationId: context.invocationId,
+    });
+
     let result;
 
     switch (type) {
       case 'sales-receipt':
-        result = await postSalesReceipt(dataWithDocNumber as QuickBooksSalesReceipt);
+        result = await postSalesReceipt(cleanedData as QuickBooksSalesReceipt);
         break;
       case 'journal-entry':
-        result = await postJournalEntry(dataWithDocNumber as QuickBooksJournalEntry);
+        result = await postJournalEntry(cleanedData as QuickBooksJournalEntry);
         break;
       case 'bank-deposit':
-        result = await postBankDeposit(dataWithDocNumber as QuickBooksBankDeposit);
+        result = await postBankDeposit(cleanedData as QuickBooksBankDeposit);
         break;
       default:
         throw new Error(`Unsupported QuickBooks document type: ${type}`);
