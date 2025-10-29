@@ -197,6 +197,14 @@ const buildBankDepositFromSalesReceipts = async (
       ],
     };
 
+    // Add Entity reference if customer exists (required when linking transactions)
+    if (salesReceipt.CustomerRef) {
+      depositLine.DepositLineDetail.Entity = {
+        Type: 'Customer',
+        EntityRef: salesReceipt.CustomerRef,
+      };
+    }
+
     // Add description with the DocNumber for reference
     const docNumber = salesReceipt.DocNumber || salesReceiptId;
     if (salesReceipt.CustomerRef?.name) {
