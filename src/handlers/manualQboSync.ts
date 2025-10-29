@@ -170,24 +170,22 @@ const resolveItemReferences = async (data: any, context: InvocationContext): Pro
             const customerResult = await ensureCustomer(refValue.name, email);
             resolvedRef = { value: customerResult.value, name: customerResult.name || refValue.name };
           } else if (key === 'AccountRef' || key.endsWith('AccountRef')) {
-            // For accounts, try to query first
-            const queryResult = await query<{ QueryResponse: { Account?: any[] } }>(
-              `SELECT Id, Name FROM Account WHERE Name = '${refValue.name.replace(/'/g, "\\'")}'`
-            );
-
-            if (queryResult.QueryResponse?.Account && queryResult.QueryResponse.Account.length > 0) {
-              const account = queryResult.QueryResponse.Account[0];
-              resolvedRef = {
-                value: account.Id,
-                name: account.Name,
-              };
-            } else {
-              logger.warn(`Account "${refValue.name}" not found for ${key}`, {
-                refType: key,
-                accountName: refValue.name,
-                invocationId: context.invocationId,
-              });
+            // For accounts, use ensureAccount which will create if it doesn't exist
+            // We need to determine the account type based on context
+            let accountType: string | undefined;
+            
+            // Infer account type from the reference key or parent context
+            if (key === 'DepositToAccountRef') {
+              accountType = 'Bank'; // Bank accounts for deposits
+            } else if (key === 'ItemAccountRef') {
+              accountType = 'Income'; // Income accounts for items
+            } else if (resolved.PostingType === 'Debit' || resolved.PostingType === 'Credit') {
+              // For journal entries, default to Other Current Assets (can be customized)
+              accountType = 'Other Current Asset';
             }
+            
+            const accountResult = await ensureAccount(refValue.name, accountType);
+            resolvedRef = { value: accountResult.value, name: accountResult.name || refValue.name };
           }
 
           if (resolvedRef) {
