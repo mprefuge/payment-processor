@@ -182,18 +182,19 @@ const buildBankDepositFromSalesReceipts = async (
     totalAmount += amount;
 
     // Create a deposit line referencing the sales receipt
-    // The LinkedTxn must be inside DepositLineDetail
+    // LinkedTxn should be at the line level, and DepositLineDetail should reference Undeposited Funds
     const depositLine: any = {
       Amount: amount,
       DetailType: 'DepositLineDetail',
       DepositLineDetail: {
-        LinkedTxn: [
-          {
-            TxnId: salesReceipt.Id,
-            TxnType: 'SalesReceipt',
-          },
-        ],
+        AccountRef: { name: 'Undeposited Funds' },
       },
+      LinkedTxn: [
+        {
+          TxnId: salesReceipt.Id,
+          TxnType: 'SalesReceipt',
+        },
+      ],
     };
 
     // Add description with the DocNumber and customer for reference

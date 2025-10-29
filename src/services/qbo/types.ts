@@ -109,6 +109,10 @@ export interface QuickBooksBankDepositLine {
     ClassRef?: QuickBooksReference;
     TaxCodeRef?: QuickBooksReference;
   };
+  LinkedTxn?: Array<{
+    TxnId: string;
+    TxnType: 'SalesReceipt' | 'Invoice' | 'Payment' | 'JournalEntry' | 'Transfer' | 'Deposit' | 'Check' | 'Expense' | 'CreditCardCharge' | 'Charge';
+  }>;
 }
 
 export interface QuickBooksBankDeposit {
