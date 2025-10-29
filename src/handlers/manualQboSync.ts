@@ -181,7 +181,7 @@ const resolveItemReferences = async (
 
   // Handle any Ref field that has a name but no value
   for (const [key, value] of Object.entries(resolved)) {
-    if (key.endsWith('Ref') && value && typeof value === 'object' && 'name' in value && 'value' in value) {
+    if (key.endsWith('Ref') && value && typeof value === 'object' && 'name' in value) {
       const refValue = value as { name: string; value?: string };
       if (refValue.name && !refValue.value) {
         try {
