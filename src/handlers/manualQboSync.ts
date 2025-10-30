@@ -527,18 +527,15 @@ const validateAndPost = async (
         throw new Error('Operating Bank account not found');
       }
 
-      // Get QBO credentials
-      const accessToken = process.env.QBO_ACCESS_TOKEN || '';
+      // Get QBO realm ID
       const realmId = process.env.QBO_COMPANY_ID || '';
-      
-      if (!accessToken || !realmId) {
-        throw new Error('QBO credentials not available');
+      if (!realmId) {
+        throw new Error('QBO_COMPANY_ID not configured');
       }
 
-      // Create deposit using the minimal schema
+      // Create deposit using the minimal schema (token will be auto-refreshed)
       const depositResult = await createQboDeposit({
         realmId,
-        accessToken,
         operatingBankId,
         salesReceiptId: salesReceipt.Id,
         amountDollars: salesReceipt.TotalAmt || 0,

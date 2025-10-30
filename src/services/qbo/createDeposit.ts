@@ -1,8 +1,8 @@
 import { logger } from '../../lib/logger';
+import tokenManager from './qboTokenManager';
 
 type CreateDepositParams = {
   realmId: string;
-  accessToken: string;
   operatingBankId: string; // e.g., "214"
   salesReceiptId: string;  // e.g., "1822"
   amountDollars: number;   // e.g., 150.00 (NOT 15000)
@@ -12,12 +12,14 @@ type CreateDepositParams = {
 export async function createQboDeposit(params: CreateDepositParams) {
   const {
     realmId,
-    accessToken,
     operatingBankId,
     salesReceiptId,
     amountDollars,
     txnDateISO,
   } = params;
+
+  // Get a valid access token (will refresh if needed)
+  const accessToken = await tokenManager.getValidAccessToken(fetch);
 
   // MINIMAL, known-good payload
   const payload = {
