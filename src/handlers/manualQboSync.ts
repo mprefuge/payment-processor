@@ -13,6 +13,7 @@ import {
   type QuickBooksBankDeposit,
 } from '../services/qboSvc';
 import { createQboDeposit } from '../services/qbo/createDeposit';
+import tokenManager from '../services/qbo/qboTokenManager';
 import { logger } from '../lib/logger';
 
 type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
@@ -533,13 +534,18 @@ const validateAndPost = async (
         throw new Error('QBO_COMPANY_ID not configured');
       }
 
-      // Create deposit using the minimal schema (token will be auto-refreshed)
+      // Get a valid access token
+      const accessToken = await tokenManager.getValidAccessToken(fetch);
+
+      // Create deposit using the minimal schema
       const depositResult = await createQboDeposit({
         realmId,
-        operatingBankId,
+        accessToken,
+        bankId: operatingBankId,
         salesReceiptId: salesReceipt.Id,
         amountDollars: salesReceipt.TotalAmt || 0,
-        txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10)
+        txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10),
+        env: process.env.QBO_ENVIRONMENT === 'production' ? 'prod' : 'sandbox'
       });
 
       logger.info('Bank deposit created successfully with minimal schema', {

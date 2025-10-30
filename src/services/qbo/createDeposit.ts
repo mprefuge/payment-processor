@@ -1,92 +1,100 @@
 import { logger } from '../../lib/logger';
-import tokenManager from './qboTokenManager';
 import axios from 'axios';
+
+type DepositBody = {
+  TxnDate: string;
+  DepositToAccountRef: { value: string };
+  Line: Array<{
+    Amount: number;
+    DetailType: "DepositLineDetail";
+    DepositLineDetail: {
+      LinkedTxn: Array<{ TxnId: string; TxnType?: "SalesReceipt"; TxnLineId?: string }>;
+    };
+    Description?: string;
+  }>;
+};
 
 type CreateDepositParams = {
   realmId: string;
-  operatingBankId: string; // e.g., "214"
-  salesReceiptId: string;  // e.g., "1822"
-  amountDollars: number;   // e.g., 150.00 (NOT 15000)
-  txnDateISO: string;      // e.g., "2025-10-30"
+  accessToken: string;
+  bankId: string;          // "214"
+  salesReceiptId: string;  // "1822"
+  amountDollars: number;   // e.g., 150.00 (NOT 15000 for $150)
+  txnDateISO: string;      // "2025-10-30"
+  env?: "prod" | "sandbox";
 };
 
-export async function createQboDeposit(params: CreateDepositParams) {
-  const {
-    realmId,
-    operatingBankId,
-    salesReceiptId,
-    amountDollars,
-    txnDateISO,
-  } = params;
+export async function createQboDeposit({
+  realmId,
+  accessToken,
+  bankId,
+  salesReceiptId,
+  amountDollars,
+  txnDateISO,
+  env = "sandbox", // "prod" or "sandbox"
+}: CreateDepositParams) {
 
-  // Get a valid access token (will refresh if needed)
-  const accessToken = await tokenManager.getValidAccessToken(fetch);
+  const base =
+    env === "sandbox"
+      ? "https://sandbox-quickbooks.api.intuit.com"
+      : "https://quickbooks.api.intuit.com";
 
-  // MINIMAL, known-good payload
-  const payload = {
+  const url = `${base}/v3/company/${realmId}/deposit?minorversion=75`;
+
+  // Build OBJECT
+  const payload: DepositBody = {
     TxnDate: txnDateISO,
-    DepositToAccountRef: { value: String(operatingBankId) },
+    DepositToAccountRef: { value: String(bankId) },
     Line: [
       {
-        Amount: Number(amountDollars.toFixed(2)), // dollars, not cents
+        Amount: Number((amountDollars / 100).toFixed(2)),
         DetailType: "DepositLineDetail",
         DepositLineDetail: {
-          LinkedTxn: [
-            { TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }
-          ]
-        }
-      }
-    ]
+          LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
+        },
+      },
+    ],
   };
 
-  // IMPORTANT: call JSON.stringify(payload) exactly once with fetch
-  const environment = process.env.QBO_ENVIRONMENT || 'sandbox';
-  const baseUrl =
-    environment === 'production'
-      ? 'https://quickbooks.api.intuit.com/v3/company'
-      : 'https://sandbox-quickbooks.api.intuit.com/v3/company';
-  
-  const url = `${baseUrl}/${realmId}/deposit?minorversion=75`;
+  // 🔒 HARD GUARD: if someone passed a string earlier, convert it back to object once
+  const bodyToSend: DepositBody =
+    typeof (payload as any) === "string"
+      ? JSON.parse(payload as unknown as string)
+      : payload;
 
-  logger.info("[createQboDeposit] Payload preview:", { preview: JSON.stringify(payload) });
+  // LOGGING: preview safely, but DO NOT send the preview string
+  logger.info("[createQboDeposit] Payload preview:", {
+    preview: JSON.stringify(bodyToSend),
+    typeofBody: typeof bodyToSend, // should be "object"
+  });
 
-  // Add a guard to catch accidental strings before send
-  let bodyToSend: any = payload;
-  if (typeof bodyToSend === "string") {
-    try { bodyToSend = JSON.parse(bodyToSend); } catch { /* leave as-is */ }
+  // 3) Add a runtime assertion to fail fast if it's still a string
+  if (typeof (bodyToSend as any) === "string" && (bodyToSend as unknown as string).trim().startsWith("{")) {
+    throw new Error("BUG: payload is a JSON string. Pass an object to axios.post, not a pre-stringified string.");
   }
 
-  try {
-    const response = await axios.post(
-      url,
-      bodyToSend, // <-- OBJECT, not a string
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json"
+  const res = await axios.post(url, bodyToSend, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    // Ensure no custom transformRequest re-stringifies strings
+    transformRequest: [
+      (data, headers) => {
+        if (typeof data === "string") {
+          // If someone upstream handed us a string, try to parse once
+          try { data = JSON.parse(data); } catch { /* leave as-is */ }
         }
-      }
-    );
+        return JSON.stringify(data);
+      },
+    ],
+    validateStatus: () => true,
+  });
 
-    logger.info('[createQboDeposit] Deposit created successfully', {
-      depositId: response.data?.Deposit?.Id,
-      status: response.status
-    });
-
-    return response.data; // QBO Deposit object
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      const status = error.response?.status || 500;
-      const responseData = error.response?.data || error.message;
-      const errorMessage = typeof responseData === "string" ? responseData : JSON.stringify(responseData);
-      logger.error('[createQboDeposit] QBO deposit failed', {
-        status,
-        response: errorMessage
-      });
-      throw new Error(`QBO deposit failed ${status}: ${errorMessage}`);
-    } else {
-      throw error;
-    }
+  if (res.status >= 400) {
+    throw new Error(`QBO deposit failed ${res.status}: ${typeof res.data === "string" ? res.data : JSON.stringify(res.data)}`);
   }
+
+  return res.data;
 }
