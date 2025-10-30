@@ -563,6 +563,11 @@ const validateAndPost = async (
       resolvedData.DepositToAccountRef = { value: resolvedData.DepositToAccountRef.value };
     }
 
+    // Ensure TxnDate is set for bank deposits
+    if (type === 'bank-deposit' && !resolvedData.TxnDate) {
+      resolvedData.TxnDate = new Date().toISOString().slice(0, 10);
+    }
+
     logger.info(`References resolved for ${type}`, {
       type,
       customerRefValue: resolvedData.CustomerRef?.value,
