@@ -5,7 +5,7 @@ type DepositBody = {
   TxnDate: string;
   DepositToAccountRef: { value: string };
   Line: Array<{
-    Amount: number;
+    Amount: string;
     DetailType: "DepositLineDetail";
     DepositLineDetail: {
       LinkedTxn: Array<{ TxnId: string; TxnType?: "SalesReceipt"; TxnLineId?: string }>;
@@ -47,10 +47,10 @@ export async function createQboDeposit({
     DepositToAccountRef: { value: String(bankId) },
     Line: [
       {
-        Amount: Number((amountDollars / 100).toFixed(2)),
+        Amount: (amountDollars / 100).toFixed(2),
         DetailType: "DepositLineDetail",
         DepositLineDetail: {
-          LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
+          LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt", TxnLineId: "0" }],
         },
       },
     ],
