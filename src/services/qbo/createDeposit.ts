@@ -8,7 +8,7 @@ type DepositBody = {
     Amount: string;
     DetailType: "DepositLineDetail";
     DepositLineDetail: {
-      AccountRef: { value: string };
+      AccountRef?: { value: string }; // Optional - only for non-linked deposits
     };
     LinkedTxn?: Array<{ TxnId: string; TxnType: "SalesReceipt" }>;
     Description?: string;
@@ -19,7 +19,6 @@ type CreateDepositParams = {
   realmId: string;
   accessToken: string;
   bankId: string;          // "214" - The bank account to deposit TO
-  undepositedFundsId: string; // The Undeposited Funds account ID
   salesReceiptId: string;  // "1822"
   amountDollars: number;   // e.g., 15000.00 for $15,000
   txnDateISO: string;      // "2025-10-30"
@@ -30,7 +29,6 @@ export async function createQboDeposit({
   realmId,
   accessToken,
   bankId,
-  undepositedFundsId,
   salesReceiptId,
   amountDollars,
   txnDateISO,
@@ -45,6 +43,8 @@ export async function createQboDeposit({
   const url = `${base}/v3/company/${realmId}/deposit?minorversion=75`;
 
   // Build OBJECT
+  // When linking to a sales receipt, we should NOT include AccountRef in DepositLineDetail
+  // The account information comes from the linked transaction itself
   const payload: DepositBody = {
     TxnDate: txnDateISO,
     DepositToAccountRef: { value: String(bankId) },
@@ -52,9 +52,7 @@ export async function createQboDeposit({
       {
         Amount: amountDollars.toFixed(2),
         DetailType: "DepositLineDetail",
-        DepositLineDetail: {
-          AccountRef: { value: String(undepositedFundsId) },
-        },
+        DepositLineDetail: {},  // Empty object when using LinkedTxn
         LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
       },
     ],
