@@ -45,13 +45,14 @@ export async function createQboDeposit({
   const url = `${base}/v3/company/${realmId}/deposit?minorversion=75`;
 
   // Build OBJECT
-  // When linking to a sales receipt via LinkedTxn, DepositLineDetail must still be present
-  // with an AccountRef pointing to the source account (Undeposited Funds)
+  // When linking to a sales receipt via LinkedTxn, DepositLineDetail must have a minimal structure
+  // Do NOT include AccountRef as it conflicts with LinkedTxn
   const line: any = {
     Amount: amountDollars.toFixed(2),
     DetailType: "DepositLineDetail",
     DepositLineDetail: {
-      AccountRef: { value: String(undepositedFundsId) }
+      // PaymentMethodRef might be needed as a minimal property
+      PaymentMethodRef: { value: "1" } // Default payment method
     },
     LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
   };
