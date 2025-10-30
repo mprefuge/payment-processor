@@ -7,7 +7,7 @@ type DepositBody = {
   Line: Array<{
     Amount: string;
     DetailType: "DepositLineDetail";
-    DepositLineDetail: {
+    DepositLineDetail?: {
       AccountRef?: { value: string }; // Optional - only for non-linked deposits
     };
     LinkedTxn?: Array<{ TxnId: string; TxnType: "SalesReceipt" }>;
@@ -43,19 +43,18 @@ export async function createQboDeposit({
   const url = `${base}/v3/company/${realmId}/deposit?minorversion=75`;
 
   // Build OBJECT
-  // When linking to a sales receipt, we should NOT include AccountRef in DepositLineDetail
+  // When linking to a sales receipt, we should NOT include DepositLineDetail
   // The account information comes from the linked transaction itself
+  const line: any = {
+    Amount: amountDollars.toFixed(2),
+    DetailType: "DepositLineDetail",
+    LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
+  };
+
   const payload: DepositBody = {
     TxnDate: txnDateISO,
     DepositToAccountRef: { value: String(bankId) },
-    Line: [
-      {
-        Amount: amountDollars.toFixed(2),
-        DetailType: "DepositLineDetail",
-        DepositLineDetail: {},  // Empty object when using LinkedTxn
-        LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
-      },
-    ],
+    Line: [line],
   };
 
   // 🔒 HARD GUARD: if someone passed a string earlier, convert it back to object once
