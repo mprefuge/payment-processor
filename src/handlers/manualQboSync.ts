@@ -12,6 +12,7 @@ import {
   type QuickBooksJournalEntry,
   type QuickBooksBankDeposit,
 } from '../services/qboSvc';
+import { createQboDeposit } from '../services/qbo/createDeposit';
 import { logger } from '../lib/logger';
 
 type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
@@ -490,7 +491,7 @@ const validateAndPost = async (
     
     // Special handling for bank-deposit with SalesReceiptIds
     if (type === 'bank-deposit' && data.SalesReceiptIds && Array.isArray(data.SalesReceiptIds)) {
-      logger.info('Processing bank deposit with SalesReceiptIds', {
+      logger.info('Processing bank deposit with SalesReceiptIds using minimal schema', {
         salesReceiptIds: data.SalesReceiptIds,
         count: data.SalesReceiptIds.length,
         invocationId: context.invocationId,
@@ -501,23 +502,61 @@ const validateAndPost = async (
         throw new Error('SalesReceiptIds array cannot be empty for bank deposits');
       }
 
-      // Build deposit lines from sales receipts
-      const { lines, totalAmount } = await buildBankDepositFromSalesReceipts(data.SalesReceiptIds, context);
+      // Get the first sales receipt ID (process one at a time)
+      const salesReceiptId = data.SalesReceiptIds[0];
+      
+      // Get the sales receipt details
+      const salesReceipt = await getSalesReceiptById(salesReceiptId);
+      if (!salesReceipt) {
+        throw new Error(`Sales receipt with ID ${salesReceiptId} not found in QuickBooks`);
+      }
 
-      // Construct the deposit data with the built lines
-      resolvedData = {
-        ...data,
-        Line: lines,
-      };
+      // Verify that the sales receipt is deposited to Undeposited Funds
+      const depositToAccount = salesReceipt.DepositToAccountRef?.name;
+      if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
+        logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
+          salesReceiptId,
+          currentAccount: depositToAccount,
+          invocationId: context.invocationId,
+        });
+      }
 
-      // Remove SalesReceiptIds from the final payload (it's not a QBO field)
-      delete resolvedData.SalesReceiptIds;
+      // Get the operating bank account ID
+      const operatingBankId = await getAccountIdByName('Operating Bank', context);
+      if (!operatingBankId) {
+        throw new Error('Operating Bank account not found');
+      }
 
-      logger.info('Bank deposit constructed from sales receipts', {
-        lineCount: lines.length,
-        totalAmount,
+      // Get QBO credentials
+      const accessToken = process.env.QBO_ACCESS_TOKEN || '';
+      const realmId = process.env.QBO_COMPANY_ID || '';
+      
+      if (!accessToken || !realmId) {
+        throw new Error('QBO credentials not available');
+      }
+
+      // Create deposit using the minimal schema
+      const depositResult = await createQboDeposit({
+        realmId,
+        accessToken,
+        operatingBankId,
+        salesReceiptId: salesReceipt.Id,
+        amountDollars: salesReceipt.TotalAmt || 0,
+        txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10)
+      });
+
+      logger.info('Bank deposit created successfully with minimal schema', {
+        depositId: depositResult.Deposit?.Id,
+        salesReceiptId,
         invocationId: context.invocationId,
       });
+
+      // Return success immediately
+      return {
+        success: true,
+        id: depositResult.Deposit?.Id,
+        type: 'bank-deposit'
+      };
     }
 
     if (
