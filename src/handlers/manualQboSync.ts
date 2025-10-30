@@ -253,19 +253,10 @@ const buildBankDepositFromSalesReceipts = async (
       },
     };
 
-    // Add description with the DocNumber and customer for reference
-    const docNumber = salesReceipt.DocNumber || salesReceiptId;
-    if (salesReceipt.CustomerRef?.name) {
-      depositLine.Description = `${salesReceipt.CustomerRef.name} - ${docNumber}`;
-    } else {
-      depositLine.Description = docNumber;
-    }
-
     lines.push(depositLine);
 
     logger.info(`Added sales receipt to deposit`, {
       salesReceiptId,
-      docNumber,
       amount,
       invocationId: context.invocationId,
     });
@@ -567,6 +558,11 @@ const validateAndPost = async (
     // Resolve item references before posting
     resolvedData = await resolveItemReferences(resolvedData, context);
 
+    // For bank deposits, strip name from DepositToAccountRef to match minimal schema
+    if (type === 'bank-deposit' && resolvedData.DepositToAccountRef?.value) {
+      resolvedData.DepositToAccountRef = { value: resolvedData.DepositToAccountRef.value };
+    }
+
     logger.info(`References resolved for ${type}`, {
       type,
       customerRefValue: resolvedData.CustomerRef?.value,
@@ -577,50 +573,8 @@ const validateAndPost = async (
     // Validate required references and amounts
     validateRequiredReferences(type, resolvedData);
 
-    // Use provided DocNumber or generate one if not provided
-    const docNumber = resolvedData.DocNumber || generateDocNumber(calculateTotal(resolvedData));
-
-    // Check for duplicates
-    const isDuplicate = await checkDuplicate(docNumber, type);
-    if (isDuplicate) {
-      logger.warn(`Duplicate ${type} detected with DocNumber: ${docNumber}`, {
-        type,
-        docNumber,
-        invocationId: context.invocationId,
-      });
-      return {
-        success: false,
-        error: `Document with DocNumber ${docNumber} already exists`,
-      };
-    }
-
-    // Ensure DocNumber is set (either user-provided or auto-generated)
-    const dataWithDocNumber = {
-      ...resolvedData,
-      DocNumber: docNumber,
-    };
-
     // Clean the payload to remove any null/undefined values
-    const cleanedData = cleanPayload(dataWithDocNumber);
-
-    // Add CurrencyRef for bank deposits (required for multi-currency companies)
-    if (type === 'bank-deposit') {
-      cleanedData.CurrencyRef = { value: 'USD', name: 'United States Dollar' };
-    }
-
-    logger.info(`Using DocNumber: ${docNumber} for ${type}`, {
-      type,
-      docNumber,
-      userProvided: !!resolvedData.DocNumber,
-      invocationId: context.invocationId,
-    });
-
-    // Log the complete payload before sending to QuickBooks
-    logger.info(`Complete payload for ${type} before posting`, {
-      type,
-      payload: JSON.stringify(cleanedData, null, 2),
-      invocationId: context.invocationId,
-    });
+    const cleanedData = cleanPayload(resolvedData);
 
     let result;
 
@@ -641,7 +595,6 @@ const validateAndPost = async (
     logger.info(`Successfully synced ${type} with ID: ${result.id}`, {
       type,
       id: result.id,
-      docNumber,
       invocationId: context.invocationId,
     });
 
