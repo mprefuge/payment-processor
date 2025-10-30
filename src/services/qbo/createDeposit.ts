@@ -8,8 +8,9 @@ type DepositBody = {
     Amount: string;
     DetailType: "DepositLineDetail";
     DepositLineDetail: {
-      LinkedTxn: Array<{ TxnId: string; TxnType?: "SalesReceipt" }>;
+      AccountRef: { value: string };
     };
+    LinkedTxn?: Array<{ TxnId: string; TxnType: "SalesReceipt" }>;
     Description?: string;
   }>;
 };
@@ -17,9 +18,10 @@ type DepositBody = {
 type CreateDepositParams = {
   realmId: string;
   accessToken: string;
-  bankId: string;          // "214"
+  bankId: string;          // "214" - The bank account to deposit TO
+  undepositedFundsId: string; // The Undeposited Funds account ID
   salesReceiptId: string;  // "1822"
-  amountDollars: number;   // e.g., 150.00 (NOT 15000 for $150)
+  amountDollars: number;   // e.g., 15000.00 for $15,000
   txnDateISO: string;      // "2025-10-30"
   env?: "prod" | "sandbox";
 };
@@ -28,6 +30,7 @@ export async function createQboDeposit({
   realmId,
   accessToken,
   bankId,
+  undepositedFundsId,
   salesReceiptId,
   amountDollars,
   txnDateISO,
@@ -50,8 +53,9 @@ export async function createQboDeposit({
         Amount: amountDollars.toFixed(2),
         DetailType: "DepositLineDetail",
         DepositLineDetail: {
-          LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
+          AccountRef: { value: String(undepositedFundsId) },
         },
+        LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
       },
     ],
   };

@@ -514,6 +514,12 @@ const validateAndPost = async (
 
       // Verify that the sales receipt is deposited to Undeposited Funds
       const depositToAccount = salesReceipt.DepositToAccountRef?.name;
+      const undepositedFundsId = salesReceipt.DepositToAccountRef?.value;
+      
+      if (!undepositedFundsId) {
+        throw new Error(`Sales receipt ${salesReceiptId} does not have a deposit account reference`);
+      }
+      
       if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
         logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
           salesReceiptId,
@@ -542,6 +548,7 @@ const validateAndPost = async (
         realmId,
         accessToken,
         bankId: operatingBankId,
+        undepositedFundsId,
         salesReceiptId: salesReceipt.Id,
         amountDollars: salesReceipt.TotalAmt || 0,
         txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10),
