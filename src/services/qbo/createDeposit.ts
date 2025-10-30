@@ -19,6 +19,7 @@ type CreateDepositParams = {
   realmId: string;
   accessToken: string;
   bankId: string;          // "214" - The bank account to deposit TO
+  undepositedFundsId: string; // The Undeposited Funds account ID (source account)
   salesReceiptId: string;  // "1822"
   amountDollars: number;   // e.g., 15000.00 for $15,000
   txnDateISO: string;      // "2025-10-30"
@@ -29,6 +30,7 @@ export async function createQboDeposit({
   realmId,
   accessToken,
   bankId,
+  undepositedFundsId,
   salesReceiptId,
   amountDollars,
   txnDateISO,
@@ -43,11 +45,14 @@ export async function createQboDeposit({
   const url = `${base}/v3/company/${realmId}/deposit?minorversion=75`;
 
   // Build OBJECT
-  // When linking to a sales receipt, we should NOT include DepositLineDetail
-  // The account information comes from the linked transaction itself
+  // When linking to a sales receipt via LinkedTxn, DepositLineDetail must still be present
+  // with an AccountRef pointing to the source account (Undeposited Funds)
   const line: any = {
     Amount: amountDollars.toFixed(2),
     DetailType: "DepositLineDetail",
+    DepositLineDetail: {
+      AccountRef: { value: String(undepositedFundsId) }
+    },
     LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: "SalesReceipt" }],
   };
 

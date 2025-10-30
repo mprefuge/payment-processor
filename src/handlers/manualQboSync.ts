@@ -514,6 +514,11 @@ const validateAndPost = async (
 
       // Verify that the sales receipt is deposited to Undeposited Funds
       const depositToAccount = salesReceipt.DepositToAccountRef?.name;
+      const undepositedFundsId = salesReceipt.DepositToAccountRef?.value;
+      
+      if (!undepositedFundsId) {
+        throw new Error(`Sales receipt ${salesReceiptId} does not have a deposit account reference`);
+      }
       
       if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
         logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
@@ -538,12 +543,13 @@ const validateAndPost = async (
       // Get a valid access token
       const accessToken = await tokenManager.getValidAccessToken(fetch);
 
-      // Create deposit using the minimal schema
-      // When linking to a sales receipt, QuickBooks gets the source account from the linked transaction
+      // Create deposit with LinkedTxn
+      // Both DepositLineDetail.AccountRef (source) and LinkedTxn are required
       const depositResult = await createQboDeposit({
         realmId,
         accessToken,
         bankId: operatingBankId,
+        undepositedFundsId,
         salesReceiptId: salesReceipt.Id,
         amountDollars: salesReceipt.TotalAmt || 0,
         txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10),
