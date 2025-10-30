@@ -39,9 +39,16 @@ export async function createQboDeposit(params: CreateDepositParams) {
   };
 
   // IMPORTANT: call JSON.stringify(payload) exactly once with fetch
-  const url = `https://quickbooks.api.intuit.com/v3/company/${realmId}/deposit?minorversion=75`;
+  const environment = process.env.QBO_ENVIRONMENT || 'sandbox';
+  const baseUrl =
+    environment === 'production'
+      ? 'https://quickbooks.api.intuit.com/v3/company'
+      : 'https://sandbox-quickbooks.api.intuit.com/v3/company';
+  
+  const url = `${baseUrl}/${realmId}/deposit?minorversion=75`;
 
   logger.info('[createQboDeposit] Sending deposit to QuickBooks', {
+    environment,
     url,
     payload: JSON.stringify(payload, null, 2)
   });
