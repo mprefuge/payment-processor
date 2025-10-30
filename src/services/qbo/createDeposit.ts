@@ -1,5 +1,6 @@
 import { logger } from '../../lib/logger';
 import tokenManager from './qboTokenManager';
+import axios from 'axios';
 
 type CreateDepositParams = {
   realmId: string;
@@ -47,45 +48,45 @@ export async function createQboDeposit(params: CreateDepositParams) {
   
   const url = `${baseUrl}/${realmId}/deposit?minorversion=75`;
 
-  logger.info('[createQboDeposit] Sending deposit to QuickBooks', {
-    environment,
-    url,
-    payload: JSON.stringify(payload, null, 2)
-  });
+  logger.info("[createQboDeposit] Payload preview:", { preview: JSON.stringify(payload) });
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      Accept: "application/json"
-    },
-    body: JSON.stringify(payload) // stringify exactly once
-  });
+  // Add a guard to catch accidental strings before send
+  let bodyToSend: any = payload;
+  if (typeof bodyToSend === "string") {
+    try { bodyToSend = JSON.parse(bodyToSend); } catch { /* leave as-is */ }
+  }
 
-  const responseText = await res.text();
-  let responseData;
-  
   try {
-    responseData = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    responseData = responseText;
-  }
+    const response = await axios.post(
+      url,
+      bodyToSend, // <-- OBJECT, not a string
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        }
+      }
+    );
 
-  if (res.status >= 400) {
-    // Bubble up the raw QBO fault to see the exact reason
-    const errorMessage = typeof responseData === "string" ? responseData : JSON.stringify(responseData);
-    logger.error('[createQboDeposit] QBO deposit failed', {
-      status: res.status,
-      response: errorMessage
+    logger.info('[createQboDeposit] Deposit created successfully', {
+      depositId: response.data?.Deposit?.Id,
+      status: response.status
     });
-    throw new Error(`QBO deposit failed ${res.status}: ${errorMessage}`);
+
+    return response.data; // QBO Deposit object
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status || 500;
+      const responseData = error.response?.data || error.message;
+      const errorMessage = typeof responseData === "string" ? responseData : JSON.stringify(responseData);
+      logger.error('[createQboDeposit] QBO deposit failed', {
+        status,
+        response: errorMessage
+      });
+      throw new Error(`QBO deposit failed ${status}: ${errorMessage}`);
+    } else {
+      throw error;
+    }
   }
-
-  logger.info('[createQboDeposit] Deposit created successfully', {
-    depositId: responseData?.Deposit?.Id,
-    status: res.status
-  });
-
-  return responseData; // QBO Deposit object
 }
