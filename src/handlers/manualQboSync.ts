@@ -244,8 +244,6 @@ const buildBankDepositFromSalesReceipts = async (
       Amount: amount,
       DetailType: 'DepositLineDetail',
       DepositLineDetail: {
-        AccountRef: { name: 'Undeposited Funds' },
-        TxnType: 'SalesReceipt',
         LinkedTxn: [
           {
             TxnId: salesReceipt.Id,
@@ -330,9 +328,6 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
         const detail = line.DepositLineDetail;
         if (detail?.AccountRef && !detail.AccountRef.value) {
           throw new Error(`Line ${i + 1}: AccountRef must include a valid account ID when provided`);
-        }
-        if (!line.DepositLineDetail?.TxnType) {
-          throw new Error(`Line ${i + 1}: TxnType is required for deposit lines`);
         }
         if (
           !line.DepositLineDetail?.LinkedTxn ||
@@ -559,18 +554,6 @@ const validateAndPost = async (
 
         if (!line.DepositLineDetail.LinkedTxn && Array.isArray(line.LinkedTxn)) {
           line.DepositLineDetail.LinkedTxn = line.LinkedTxn;
-        }
-
-        if (!line.DepositLineDetail.TxnType) {
-          if (typeof line.TxnType === 'string') {
-            line.DepositLineDetail.TxnType = line.TxnType;
-          } else if (
-            Array.isArray(line.DepositLineDetail.LinkedTxn) &&
-            line.DepositLineDetail.LinkedTxn.length > 0 &&
-            typeof line.DepositLineDetail.LinkedTxn[0]?.TxnType === 'string'
-          ) {
-            line.DepositLineDetail.TxnType = line.DepositLineDetail.LinkedTxn[0].TxnType;
-          }
         }
 
         delete line.LinkedTxn;
