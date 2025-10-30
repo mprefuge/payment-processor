@@ -537,19 +537,17 @@ const validateAndPost = async (
           return line;
         }
 
-        line.DepositLineDetail = line.DepositLineDetail ?? {};
+        // Ensure minimal schema structure for DepositLineDetail
+        const depositLineDetail: any = {
+          LinkedTxn: line.DepositLineDetail?.LinkedTxn || line.LinkedTxn || []
+        };
 
-        if (!line.DepositLineDetail.AccountRef && line.AccountRef) {
-          line.DepositLineDetail.AccountRef = line.AccountRef;
-        }
-
-        if (!line.DepositLineDetail.LinkedTxn && Array.isArray(line.LinkedTxn)) {
-          line.DepositLineDetail.LinkedTxn = line.LinkedTxn;
-        }
-
-        delete line.LinkedTxn;
-        delete line.TxnType;
-        delete line.AccountRef;
+        // Create clean line object with only required fields
+        line = {
+          Amount: line.Amount,
+          DetailType: 'DepositLineDetail',
+          DepositLineDetail: depositLineDetail
+        };
 
         return line;
       });
@@ -558,14 +556,19 @@ const validateAndPost = async (
     // Resolve item references before posting
     resolvedData = await resolveItemReferences(resolvedData, context);
 
-    // For bank deposits, strip name from DepositToAccountRef to match minimal schema
-    if (type === 'bank-deposit' && resolvedData.DepositToAccountRef?.value) {
-      resolvedData.DepositToAccountRef = { value: resolvedData.DepositToAccountRef.value };
-    }
+    // For bank deposits, ensure minimal schema structure
+    if (type === 'bank-deposit') {
+      // Ensure TxnDate is set
+      if (!resolvedData.TxnDate) {
+        resolvedData.TxnDate = new Date().toISOString().slice(0, 10);
+      }
 
-    // Ensure TxnDate is set for bank deposits
-    if (type === 'bank-deposit' && !resolvedData.TxnDate) {
-      resolvedData.TxnDate = new Date().toISOString().slice(0, 10);
+      // Create clean bank deposit object with only required fields
+      resolvedData = {
+        DepositToAccountRef: { value: resolvedData.DepositToAccountRef?.value },
+        TxnDate: resolvedData.TxnDate,
+        Line: resolvedData.Line
+      };
     }
 
     logger.info(`References resolved for ${type}`, {
