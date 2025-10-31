@@ -18,9 +18,209 @@ import { logger } from '../lib/logger';
 
 type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
 
+// Comprehensive schemas for all QuickBooks document types
+
+// Reference schema - can be just a name or a name + value
+const QuickBooksReferenceSchema = z.object({
+  name: z.string().optional(),
+  value: z.string().optional(),
+}).refine(data => data.name || data.value, {
+  message: "Either name or value must be provided for a reference"
+});
+
+// Email address schema
+const QuickBooksEmailAddressSchema = z.object({
+  Address: z.string().email(),
+});
+
+// Physical address schema
+const QuickBooksPhysicalAddressSchema = z.object({
+  Line1: z.string().optional(),
+  Line2: z.string().optional(),
+  Line3: z.string().optional(),
+  Line4: z.string().optional(),
+  City: z.string().optional(),
+  CountrySubDivisionCode: z.string().optional(), // State/Province
+  PostalCode: z.string().optional(),
+  Country: z.string().optional(),
+});
+
+// Sales Receipt Line Schema
+const SalesItemLineDetailSchema = z.object({
+  ItemRef: QuickBooksReferenceSchema,
+  ItemAccountRef: QuickBooksReferenceSchema.optional(),
+  TaxCodeRef: QuickBooksReferenceSchema.optional(),
+  Qty: z.number().optional(),
+  UnitPrice: z.number().optional(),
+  ServiceDate: z.string().optional(),
+  ClassRef: QuickBooksReferenceSchema.optional(),
+  TaxInclusiveAmt: z.number().optional(),
+  DiscountRate: z.number().optional(),
+  DiscountAmt: z.number().optional(),
+});
+
+const SalesReceiptLineSchema = z.object({
+  Id: z.string().optional(),
+  LineNum: z.number().optional(),
+  Amount: z.number(),
+  DetailType: z.literal('SalesItemLineDetail'),
+  Description: z.string().optional(),
+  SalesItemLineDetail: SalesItemLineDetailSchema,
+});
+
+// Sales Receipt Schema - comprehensive fields
+const SalesReceiptDataSchema = z.object({
+  DocNumber: z.string().optional(),
+  TxnDate: z.string().optional(),
+  PrivateNote: z.string().optional(),
+  CustomerMemo: z.object({
+    value: z.string(),
+  }).optional(),
+  DepositToAccountRef: QuickBooksReferenceSchema,
+  CustomerRef: QuickBooksReferenceSchema.optional(),
+  BillEmail: QuickBooksEmailAddressSchema.optional(),
+  BillAddr: QuickBooksPhysicalAddressSchema.optional(),
+  ShipAddr: QuickBooksPhysicalAddressSchema.optional(),
+  ShipDate: z.string().optional(),
+  ShipMethodRef: QuickBooksReferenceSchema.optional(),
+  ClassRef: QuickBooksReferenceSchema.optional(),
+  SalesTermRef: QuickBooksReferenceSchema.optional(),
+  DepartmentRef: QuickBooksReferenceSchema.optional(),
+  PaymentMethodRef: QuickBooksReferenceSchema.optional(),
+  PaymentRefNum: z.string().optional(),
+  CurrencyRef: QuickBooksReferenceSchema.optional(),
+  ExchangeRate: z.number().optional(),
+  GlobalTaxCalculation: z.enum(['TaxExcluded', 'TaxInclusive', 'NotApplicable']).optional(),
+  Line: z.array(SalesReceiptLineSchema),
+  TxnTaxDetail: z.object({
+    TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
+    TotalTax: z.number().optional(),
+    TaxLine: z.array(z.any()).optional(),
+  }).optional(),
+  CustomField: z.array(z.object({
+    DefinitionId: z.string(),
+    Name: z.string().optional(),
+    Type: z.string().optional(),
+    StringValue: z.string().optional(),
+  })).optional(),
+});
+
+// Journal Entry Line Schema
+const JournalEntryLineDetailSchema = z.object({
+  PostingType: z.enum(['Debit', 'Credit']),
+  AccountRef: QuickBooksReferenceSchema,
+  Entity: z.object({
+    EntityRef: QuickBooksReferenceSchema,
+    Type: z.enum(['Customer', 'Vendor', 'Employee', 'Other']).optional(),
+  }).optional(),
+  ClassRef: QuickBooksReferenceSchema.optional(),
+  DepartmentRef: QuickBooksReferenceSchema.optional(),
+  TaxCodeRef: QuickBooksReferenceSchema.optional(),
+  TaxApplicableOn: z.enum(['Sales', 'Purchase']).optional(),
+  TaxAmount: z.number().optional(),
+  BillableStatus: z.enum(['Billable', 'NotBillable', 'HasBeenBilled']).optional(),
+});
+
+const JournalEntryLineSchema = z.object({
+  Id: z.string().optional(),
+  LineNum: z.number().optional(),
+  Amount: z.number(),
+  DetailType: z.literal('JournalEntryLineDetail'),
+  Description: z.string().optional(),
+  JournalEntryLineDetail: JournalEntryLineDetailSchema,
+});
+
+// Journal Entry Schema - comprehensive fields
+const JournalEntryDataSchema = z.object({
+  DocNumber: z.string().optional(),
+  TxnDate: z.string().optional(),
+  PrivateNote: z.string().optional(),
+  Adjustment: z.boolean().optional(),
+  CurrencyRef: QuickBooksReferenceSchema.optional(),
+  ExchangeRate: z.number().optional(),
+  Line: z.array(JournalEntryLineSchema),
+  TxnTaxDetail: z.object({
+    TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
+    TotalTax: z.number().optional(),
+    TaxLine: z.array(z.any()).optional(),
+  }).optional(),
+});
+
+// Bank Deposit Line Schema
+const DepositLineDetailSchema = z.object({
+  AccountRef: QuickBooksReferenceSchema.optional(),
+  Entity: z.object({
+    EntityRef: QuickBooksReferenceSchema,
+    Type: z.enum(['Customer', 'Vendor', 'Employee', 'Other']).optional(),
+  }).optional(),
+  ClassRef: QuickBooksReferenceSchema.optional(),
+  CheckNum: z.string().optional(),
+  PaymentMethodRef: QuickBooksReferenceSchema.optional(),
+  TaxCodeRef: QuickBooksReferenceSchema.optional(),
+  TaxApplicableOn: z.enum(['Sales', 'Purchase']).optional(),
+  LinkedTxn: z.array(z.object({
+    TxnId: z.string(),
+    TxnType: z.string(),
+    TxnLineId: z.string().optional(),
+  })).optional(),
+});
+
+const BankDepositLineSchema = z.object({
+  Id: z.string().optional(),
+  LineNum: z.number().optional(),
+  Amount: z.number(),
+  DetailType: z.literal('DepositLineDetail'),
+  Description: z.string().optional(),
+  DepositLineDetail: DepositLineDetailSchema,
+  LinkedTxn: z.array(z.object({
+    TxnId: z.string(),
+    TxnType: z.string(),
+  })).optional(), // Allow at top level for backward compatibility
+});
+
+// Bank Deposit Schema - comprehensive fields
+const BankDepositDataSchema = z.object({
+  DocNumber: z.string().optional(),
+  TxnDate: z.string().optional(),
+  PrivateNote: z.string().optional(),
+  DepositToAccountRef: QuickBooksReferenceSchema,
+  CashBack: z.object({
+    AccountRef: QuickBooksReferenceSchema,
+    Amount: z.number(),
+    Memo: z.string().optional(),
+  }).optional(),
+  CurrencyRef: QuickBooksReferenceSchema.optional(),
+  ExchangeRate: z.number().optional(),
+  DepartmentRef: QuickBooksReferenceSchema.optional(),
+  Line: z.array(BankDepositLineSchema).optional(),
+  TxnTaxDetail: z.object({
+    TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
+    TotalTax: z.number().optional(),
+    TaxLine: z.array(z.any()).optional(),
+  }).optional(),
+  // Special field for simplified deposit creation from sales receipts
+  SalesReceiptIds: z.array(z.string()).optional(),
+});
+
+// Union type for all data schemas
+const ManualSyncDataSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('sales-receipt'),
+    data: SalesReceiptDataSchema,
+  }),
+  z.object({
+    type: z.literal('journal-entry'),
+    data: JournalEntryDataSchema,
+  }),
+  z.object({
+    type: z.literal('bank-deposit'),
+    data: BankDepositDataSchema,
+  }),
+]);
+
 const ManualSyncRequestSchema = z.object({
   type: z.enum(['sales-receipt', 'journal-entry', 'bank-deposit']),
-  data: z.record(z.any()), // Allow any object structure
+  data: z.union([SalesReceiptDataSchema, JournalEntryDataSchema, BankDepositDataSchema]),
 });
 
 type ManualSyncRequest = z.infer<typeof ManualSyncRequestSchema>;
@@ -640,7 +840,7 @@ const validateAndPost = async (
     });
 
     // Validate required references and amounts
-    validateRequiredReferences(type, resolvedData);
+    validateRequiredReferences(resolvedData, type);
 
     // Clean the payload to remove any null/undefined values
     const cleanedData = cleanPayload(resolvedData);
