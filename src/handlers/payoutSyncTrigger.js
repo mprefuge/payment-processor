@@ -317,10 +317,10 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   }
 
   const transactions = await fetchBalanceTransactionsForPayout(stripe, payout.id);
-  
+
   // Validate and filter balance transactions
   const { validTransactions, invalidTransactions } = filterValidTransactions(transactions);
-  
+
   if (invalidTransactions.length > 0) {
     console.log('[payoutSyncTrigger] Found invalid balance transactions for payout', {
       payoutId: payout.id,
@@ -329,7 +329,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
       invalidTransactions,
     });
   }
-  
+
   const memo = `payout_${payout.id}`;
   const docNumber = createDocNumber(payout.id);
   const amountCents = safeAmount(payout.amount);

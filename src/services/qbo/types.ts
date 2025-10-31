@@ -111,7 +111,17 @@ export interface QuickBooksBankDepositLine {
   };
   LinkedTxn?: Array<{
     TxnId: string;
-    TxnType: 'SalesReceipt' | 'Invoice' | 'Payment' | 'JournalEntry' | 'Transfer' | 'Deposit' | 'Check' | 'Expense' | 'CreditCardCharge' | 'Charge';
+    TxnType:
+      | 'SalesReceipt'
+      | 'Invoice'
+      | 'Payment'
+      | 'JournalEntry'
+      | 'Transfer'
+      | 'Deposit'
+      | 'Check'
+      | 'Expense'
+      | 'CreditCardCharge'
+      | 'Charge';
   }>;
 }
 

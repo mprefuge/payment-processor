@@ -210,9 +210,10 @@ const createCrmGetter = (): (() => Promise<any>) => {
           return CrmFactory.createCrmService('salesforce', crmConfig);
         } catch (error) {
           defaultCrmSvcPromise = null;
-          const message = error instanceof Error ? error.message : 'Unknown CRM initialization error';
+          const message =
+            error instanceof Error ? error.message : 'Unknown CRM initialization error';
           logger.error('[StripeWebhook] CRM initialization failed:', message);
-          
+
           // Return disabled service on error
           return {
             async findOrCreateCampaign(name: string): Promise<string> {

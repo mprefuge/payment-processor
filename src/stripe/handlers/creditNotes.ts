@@ -390,7 +390,11 @@ export const handleCreditNoteEvent = async (
   const invoiceId = normalizeStripeId(invoice?.id) || normalizeStripeId(creditNote.invoice);
   if (invoiceId) {
     try {
-      parentId = await salesforce.findTransactionIdByExternalId('stripe_invoice_id__c', invoiceId, 'General');
+      parentId = await salesforce.findTransactionIdByExternalId(
+        'stripe_invoice_id__c',
+        invoiceId,
+        'General'
+      );
     } catch (error) {
       context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {
         creditNoteId: creditNote.id,

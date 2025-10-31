@@ -56,4 +56,11 @@ app.http('manualQboSync', {
 });
 
 // Export for testing
-export { healthCheck, processTransaction, stripeWebhook, payoutSyncTrigger, stripeTrueUp, manualQboSync };
+export {
+  healthCheck,
+  processTransaction,
+  stripeWebhook,
+  payoutSyncTrigger,
+  stripeTrueUp,
+  manualQboSync,
+};

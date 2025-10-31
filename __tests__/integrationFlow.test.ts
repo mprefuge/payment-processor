@@ -1,9 +1,9 @@
 /**
  * Integration Test: Complete Payment Flow
- * 
+ *
  * Tests the entire flow from checkout session creation through webhook processing
  * to Salesforce transaction creation and QuickBooks posting.
- * 
+ *
  * This test verifies:
  * 1. Checkout session is created in Stripe
  * 2. Webhook processes payment_intent.succeeded event
@@ -51,9 +51,9 @@ describe('Integration: Complete Payment Flow', () => {
 
   beforeEach(() => {
     vi.resetModules();
-    
+
     // Reset created objects
-    Object.keys(createdObjects).forEach(key => {
+    Object.keys(createdObjects).forEach((key) => {
       (createdObjects as any)[key] = null;
     });
 
@@ -147,7 +147,7 @@ describe('Integration: Complete Payment Flow', () => {
     const txBody = JSON.parse(txResponse.body);
     expect(txBody.url).toBe(mockCheckoutSession.url);
     expect(txBody.id).toBe(mockCheckoutSession.id);
-    
+
     // Verify Stripe customer was created
     expect(mockStripeClient.customers.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -357,7 +357,7 @@ describe('Integration: Complete Payment Flow', () => {
       stripe_payment_intent_id__c: 'pi_test123',
       stripe_charge_id__c: 'ch_test123',
       stripe_checkout_session_id__c: expect.stringContaining('cs_test'),
-      amount_gross__c: 50.00, // Converted to dollars
+      amount_gross__c: 50.0, // Converted to dollars
       amount_net__c: 48.25,
       amount_fee__c: 1.75,
       transaction_type__c: 'charge',
@@ -366,7 +366,9 @@ describe('Integration: Complete Payment Flow', () => {
     });
 
     expect(salesforceTransactionId).toBeTruthy();
-    console.log(`✅ STEP 3 PASSED: Salesforce Transaction created with ID: ${salesforceTransactionId}`);
+    console.log(
+      `✅ STEP 3 PASSED: Salesforce Transaction created with ID: ${salesforceTransactionId}`
+    );
 
     // ============================================================
     // ASSERTION 4: QuickBooks Sales Receipt Created
@@ -399,7 +401,7 @@ describe('Integration: Complete Payment Flow', () => {
     // ============================================================
     // Test Idempotency Protection
     // ============================================================
-    
+
     // Create a stateful in-memory idempotency store
     const processedKeys = new Set<string>();
     const statefulIdempotencyStore = {
@@ -413,7 +415,7 @@ describe('Integration: Complete Payment Flow', () => {
 
     // Set environment variable to enable idempotency
     process.env.DISABLE_AZURE_TABLES = '0';
-    
+
     const mockCustomer = {
       id: 'cus_idempotency_test',
       email: 'idempotency@example.com',

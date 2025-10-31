@@ -354,16 +354,18 @@ const buildDepositInput = async (
     });
 
     const payoutAmount = toCents(payout.amount);
-    
+
     // Create a simple deposit line with just the payout amount
-    const lines: PayoutDepositLineInput[] = [{
-      type: 'charge',
-      currency: typeof payout.currency === 'string' ? payout.currency.toLowerCase() : 'usd',
-      amountCents: payoutAmount,
-      description: `Payout ${payout.id}${payout.automatic === false ? ' (Manual)' : ''}`,
-      memo: `Stripe payout without transaction details`,
-      references: [],
-    }];
+    const lines: PayoutDepositLineInput[] = [
+      {
+        type: 'charge',
+        currency: typeof payout.currency === 'string' ? payout.currency.toLowerCase() : 'usd',
+        amountCents: payoutAmount,
+        description: `Payout ${payout.id}${payout.automatic === false ? ' (Manual)' : ''}`,
+        memo: `Stripe payout without transaction details`,
+        references: [],
+      },
+    ];
 
     return {
       stripeEventId: eventId,
@@ -448,7 +450,7 @@ const getBankName = async (
         return `Bank ****${dest.last4}`;
       }
     }
-    
+
     // If destination is just an ID string, we can't easily fetch it without knowing the account
     // For standard Stripe accounts, the destination is on the connected account side
     // So we'll just use a generic name with the last 4 of the payout ID
@@ -462,7 +464,7 @@ const getBankName = async (
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  
+
   return '';
 };
 
@@ -475,26 +477,36 @@ const buildPayoutTransaction = async (
 ) => {
   const bankName = await getBankName(stripe, payout, logger);
   const transactionName = bankName ? `Payout - ${bankName}` : 'Payout';
-  
+
   if (!depositInput) {
     // For created/updated events or manual payouts without transactions
     return {
       Name: transactionName,
       transaction_type__c: 'payout' as 'payout',
-      status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
+      status__c: (payout.status === 'paid'
+        ? 'paid'
+        : payout.status === 'failed'
+          ? 'failed'
+          : 'pending') as 'paid' | 'failed' | 'pending',
       stripe_payout_id__c: payout.id,
       stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
-      amount_gross__c: (toCents(payout.amount) / 100),
+      amount_gross__c: toCents(payout.amount) / 100,
       amount_fee__c: 0,
-      amount_net__c: (toCents(payout.amount) / 100),
-      currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
+      amount_net__c: toCents(payout.amount) / 100,
+      currency_iso_code__c: (typeof payout.currency === 'string'
+        ? payout.currency
+        : 'usd'
+      ).toUpperCase(),
       memo__c: `Stripe Payout ${payout.id} - ${eventType.replace('payout.', '')} (${payout.automatic ? 'automatic' : 'manual'})`,
       received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
       posted_to_qbo__c: false,
       qbo_doc_type__c: null,
       qbo_doc_id__c: null,
       qbo_posted_at__c: null,
-      posting_error__c: eventType === 'payout.paid' && !depositInput ? 'Manual payout without balance transaction history' : null,
+      posting_error__c:
+        eventType === 'payout.paid' && !depositInput
+          ? 'Manual payout without balance transaction history'
+          : null,
     };
   }
 
@@ -540,7 +552,11 @@ const buildPayoutTransaction = async (
   return {
     Name: transactionName,
     transaction_type__c: 'payout' as 'payout',
-    status__c: (payout.status === 'paid' ? 'paid' : payout.status === 'failed' ? 'failed' : 'pending') as 'paid' | 'failed' | 'pending',
+    status__c: (payout.status === 'paid'
+      ? 'paid'
+      : payout.status === 'failed'
+        ? 'failed'
+        : 'pending') as 'paid' | 'failed' | 'pending',
     stripe_payout_id__c: payout.id,
     stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction),
     amount_gross__c: grossAmount / 100,
@@ -621,19 +637,19 @@ export const handlePayoutEvent = async (
           (payoutTransaction as any).status__c === '' ||
           payoutTransaction.amount_gross__c == null
         ) {
-          context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-            payoutId: payout.id,
-            status: payoutTransaction.status__c,
-            amountGross: payoutTransaction.amount_gross__c,
-            payoutTransaction,
-          });
+          context.log(
+            '[StripeWebhook] Skipping transaction upsert due to missing required fields',
+            {
+              payoutId: payout.id,
+              status: payoutTransaction.status__c,
+              amountGross: payoutTransaction.amount_gross__c,
+              payoutTransaction,
+            }
+          );
           return;
         }
 
-        await salesforce.upsertTransactionByExternalId(
-          payoutTransaction,
-          'stripe_payout_id__c'
-        );
+        await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
         context.log('[StripeWebhook] Tracked payout in Salesforce', {
           payoutId: payout.id,
           eventType,
@@ -670,7 +686,7 @@ export const handlePayoutEvent = async (
         payoutId: payout.id,
         error: errorMessage,
       });
-      
+
       // If error mentions manual payouts, log more detail
       if (errorMessage.includes('manual')) {
         context.log('[StripeWebhook] Error indicates manual payout without transaction history', {
@@ -708,7 +724,7 @@ export const handlePayoutEvent = async (
 
     // Build deposit input - will create simple deposit for manual payouts
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
-    
+
     // Build and upsert payout transaction in Salesforce with idempotency lock
     await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
       const payoutTransaction = await buildPayoutTransaction(
@@ -726,19 +742,19 @@ export const handlePayoutEvent = async (
           (payoutTransaction as any).status__c === '' ||
           payoutTransaction.amount_gross__c == null
         ) {
-          context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-            payoutId: payout.id,
-            status: payoutTransaction.status__c,
-            amountGross: payoutTransaction.amount_gross__c,
-            payoutTransaction,
-          });
+          context.log(
+            '[StripeWebhook] Skipping transaction upsert due to missing required fields',
+            {
+              payoutId: payout.id,
+              status: payoutTransaction.status__c,
+              amountGross: payoutTransaction.amount_gross__c,
+              payoutTransaction,
+            }
+          );
           return;
         }
 
-        await salesforce.upsertTransactionByExternalId(
-          payoutTransaction,
-          'stripe_payout_id__c'
-        );
+        await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
         context.log('[StripeWebhook] Upserted payout transaction in Salesforce', {
           payoutId: payout.id,
           eventType,
@@ -813,7 +829,7 @@ export const handlePayoutEvent = async (
 
   if (eventType === 'payout.failed' || eventType === 'payout.canceled') {
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
-    
+
     // Upsert payout transaction in Salesforce with failed/canceled status with idempotency lock
     await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
       const payoutTransaction = await buildPayoutTransaction(
@@ -831,19 +847,19 @@ export const handlePayoutEvent = async (
           (payoutTransaction as any).status__c === '' ||
           payoutTransaction.amount_gross__c == null
         ) {
-          context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-            payoutId: payout.id,
-            status: payoutTransaction.status__c,
-            amountGross: payoutTransaction.amount_gross__c,
-            payoutTransaction,
-          });
+          context.log(
+            '[StripeWebhook] Skipping transaction upsert due to missing required fields',
+            {
+              payoutId: payout.id,
+              status: payoutTransaction.status__c,
+              amountGross: payoutTransaction.amount_gross__c,
+              payoutTransaction,
+            }
+          );
           return;
         }
 
-        await salesforce.upsertTransactionByExternalId(
-          payoutTransaction,
-          'stripe_payout_id__c'
-        );
+        await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
         context.log('[StripeWebhook] Updated payout transaction status in Salesforce', {
           payoutId: payout.id,
           eventType,

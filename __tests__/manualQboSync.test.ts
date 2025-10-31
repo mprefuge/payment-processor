@@ -75,16 +75,18 @@ describe('manualQboSync', () => {
         data: {
           TxnDate: '2024-01-01',
           DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
-          Line: [{
-            Amount: 100.00,
-            DetailType: 'SalesItemLineDetail',
-            SalesItemLineDetail: {
-              ItemRef: { name: 'Service' }, // Will be resolved automatically
-              ItemAccountRef: { name: 'Income' } // Will be resolved automatically
-            }
-          }]
-        }
-      })
+          Line: [
+            {
+              Amount: 100.0,
+              DetailType: 'SalesItemLineDetail',
+              SalesItemLineDetail: {
+                ItemRef: { name: 'Service' }, // Will be resolved automatically
+                ItemAccountRef: { name: 'Income' }, // Will be resolved automatically
+              },
+            },
+          ],
+        },
+      }),
     };
 
     const response = await handler.default(req, context);
@@ -103,16 +105,18 @@ describe('manualQboSync', () => {
         type: 'journal-entry',
         data: {
           TxnDate: '2024-01-01',
-          Line: [{
-            Amount: 50.00,
-            DetailType: 'JournalEntryLineDetail',
-            JournalEntryLineDetail: {
-              PostingType: 'Debit',
-              AccountRef: { name: 'Checking' } // Will be resolved automatically
-            }
-          }]
-        }
-      })
+          Line: [
+            {
+              Amount: 50.0,
+              DetailType: 'JournalEntryLineDetail',
+              JournalEntryLineDetail: {
+                PostingType: 'Debit',
+                AccountRef: { name: 'Checking' }, // Will be resolved automatically
+              },
+            },
+          ],
+        },
+      }),
     };
 
     const response = await handler.default(req, context);
@@ -131,15 +135,17 @@ describe('manualQboSync', () => {
         data: {
           TxnDate: '2024-01-01',
           DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
-          Line: [{
-            Amount: 200.00,
-            DetailType: 'DepositLineDetail',
-            DepositLineDetail: {
-              AccountRef: { name: 'Undeposited Funds' } // Will be resolved automatically
-            }
-          }]
-        }
-      })
+          Line: [
+            {
+              Amount: 200.0,
+              DetailType: 'DepositLineDetail',
+              DepositLineDetail: {
+                AccountRef: { name: 'Undeposited Funds' }, // Will be resolved automatically
+              },
+            },
+          ],
+        },
+      }),
     };
 
     const response = await handler.default(req, context);
@@ -154,44 +160,48 @@ describe('manualQboSync', () => {
     // The feature is implemented and working correctly (see logs showing SalesReceiptIds processing),
     // but the mocking in the test environment isn't intercepting the query() calls properly.
     // This should be tested in an integration test with a real QBO sandbox environment.
-    
+
     // Reset mocks to ensure clean state
     vi.clearAllMocks();
-    
+
     // Mock the query function to return sales receipts for each ID lookup
     mockQuery
       .mockResolvedValueOnce({
         QueryResponse: {
-          SalesReceipt: [{
-            Id: '1820',
-            DocNumber: 'MAN-20251029-15000',
-            TotalAmt: 150.00,
-            DepositToAccountRef: { name: 'Undeposited Funds', value: '35' },
-            CustomerRef: { name: 'John Doe', value: '789' }
-          }]
-        }
+          SalesReceipt: [
+            {
+              Id: '1820',
+              DocNumber: 'MAN-20251029-15000',
+              TotalAmt: 150.0,
+              DepositToAccountRef: { name: 'Undeposited Funds', value: '35' },
+              CustomerRef: { name: 'John Doe', value: '789' },
+            },
+          ],
+        },
       })
       .mockResolvedValueOnce({
         QueryResponse: {
-          SalesReceipt: [{
-            Id: '1819',
-            DocNumber: 'MAN-20251028-150',
-            TotalAmt: 1.50,
-            DepositToAccountRef: { name: 'Undeposited Funds', value: '35' },
-            CustomerRef: { name: 'Jane Smith', value: '790' }
-          }]
-        }
+          SalesReceipt: [
+            {
+              Id: '1819',
+              DocNumber: 'MAN-20251028-150',
+              TotalAmt: 1.5,
+              DepositToAccountRef: { name: 'Undeposited Funds', value: '35' },
+              CustomerRef: { name: 'Jane Smith', value: '790' },
+            },
+          ],
+        },
       })
       .mockResolvedValueOnce({
-        QueryResponse: {} // No duplicate deposit found
+        QueryResponse: {}, // No duplicate deposit found
       });
 
     mockEnsureAccount.mockResolvedValue({ value: '100', name: 'Operating Bank' });
-    
+
     mockPostBankDeposit.mockResolvedValue({
       id: '999',
       type: 'bank-deposit',
-      raw: {}
+      raw: {},
     });
 
     const { context } = createContext();
@@ -201,12 +211,9 @@ describe('manualQboSync', () => {
         data: {
           TxnDate: '2024-01-02',
           DepositToAccountRef: { name: 'Operating Bank' },
-          SalesReceiptIds: [
-            '1820',
-            '1819'
-          ]
-        }
-      })
+          SalesReceiptIds: ['1820', '1819'],
+        },
+      }),
     };
 
     const response = await handler.default(req, context);
@@ -216,14 +223,14 @@ describe('manualQboSync', () => {
     expect(response.jsonBody.success).toBe(true);
     expect(response.jsonBody.id).toBe('999');
     expect(mockPostBankDeposit).toHaveBeenCalled();
-    
+
     // Verify the deposit was built with correct lines
     const depositCall = mockPostBankDeposit.mock.calls[0][0];
     expect(depositCall.Line).toHaveLength(2);
-  expect(depositCall.Line[0].Amount).toBe(150.00);
-  expect(depositCall.Line[0].DepositLineDetail.LinkedTxn[0].TxnId).toBe('1820');
-  expect(depositCall.Line[1].Amount).toBe(1.50);
-  expect(depositCall.Line[1].DepositLineDetail.LinkedTxn[0].TxnId).toBe('1819');
+    expect(depositCall.Line[0].Amount).toBe(150.0);
+    expect(depositCall.Line[0].DepositLineDetail.LinkedTxn[0].TxnId).toBe('1820');
+    expect(depositCall.Line[1].Amount).toBe(1.5);
+    expect(depositCall.Line[1].DepositLineDetail.LinkedTxn[0].TxnId).toBe('1819');
   });
 
   it('returns 400 for invalid request body', async () => {
@@ -231,8 +238,8 @@ describe('manualQboSync', () => {
     const req = {
       json: vi.fn().mockResolvedValue({
         type: 'invalid-type',
-        data: {}
-      })
+        data: {},
+      }),
     };
 
     const response = await handler.default(req, context);
@@ -250,9 +257,9 @@ describe('manualQboSync', () => {
         data: {
           TxnDate: '2024-01-01',
           DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
-          Line: []
-        }
-      })
+          Line: [],
+        },
+      }),
     };
 
     const response = await handler.default(req, context);
@@ -265,7 +272,7 @@ describe('manualQboSync', () => {
   it('returns 500 for unexpected errors', async () => {
     const { context } = createContext();
     const req = {
-      json: vi.fn().mockRejectedValue(new Error('Invalid JSON'))
+      json: vi.fn().mockRejectedValue(new Error('Invalid JSON')),
     };
 
     const response = await handler.default(req, context);

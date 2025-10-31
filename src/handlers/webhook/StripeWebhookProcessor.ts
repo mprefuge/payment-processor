@@ -118,7 +118,10 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     if (req.body && typeof req.body === 'object') {
       try {
         const result = JSON.stringify(req.body);
-        logger.warn('[StripeWebhook] WARNING: Using stringified parsed body:', result.substring(0, 100));
+        logger.warn(
+          '[StripeWebhook] WARNING: Using stringified parsed body:',
+          result.substring(0, 100)
+        );
         return result;
       } catch (error) {
         return '';

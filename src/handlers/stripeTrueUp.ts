@@ -7,7 +7,10 @@ let env: any = { stripe: { secret: '' } };
 try {
   env = require('../config/env').default;
 } catch (error) {
-  console.warn('[StripeTrueUp] env.ts failed to load, will use environment variables directly:', error);
+  console.warn(
+    '[StripeTrueUp] env.ts failed to load, will use environment variables directly:',
+    error
+  );
 }
 
 import {
@@ -33,10 +36,10 @@ import {
   type QuickBooksDocumentReference,
 } from '../services/salesforceSvc';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
-import { 
-  loadConfig, 
-  normalizeTransactionCategory, 
-  generateTransactionName 
+import {
+  loadConfig,
+  normalizeTransactionCategory,
+  generateTransactionName,
 } from '../config/contactMatching';
 import {
   fetchStripeChargesSince,
@@ -221,9 +224,10 @@ const createCrmGetter = (): (() => Promise<any>) => {
           return CrmFactory.createCrmService('salesforce', crmConfig);
         } catch (error) {
           defaultCrmSvcPromise = null;
-          const message = error instanceof Error ? error.message : 'Unknown CRM initialization error';
+          const message =
+            error instanceof Error ? error.message : 'Unknown CRM initialization error';
           console.error('[StripeTrueUp] CRM initialization failed:', message);
-          
+
           // Return disabled service on error
           return {
             async findOrCreateCampaign(name: string): Promise<string> {
@@ -421,8 +425,6 @@ const resolveCustomerForCharge = async (
   }
 };
 
-
-
 const getTransactionNameFromMetadata = (charge: Stripe.Charge): string | null => {
   const metadata = charge.metadata as Record<string, unknown> | null | undefined;
   if (!metadata || typeof metadata !== 'object') {
@@ -450,7 +452,7 @@ const findOrCreateContactInSalesforce = async (
   }
 
   const stripeCustomer = customer as Stripe.Customer;
-  
+
   // Use transaction name as customer category/name, fallback to customer name or email
   let customerName = transactionName;
   if (!customerName) {
@@ -460,7 +462,7 @@ const findOrCreateContactInSalesforce = async (
   // Parse name into first and last name
   let firstName: string | null = null;
   let lastName: string | null = null;
-  
+
   if (stripeCustomer.name) {
     const nameParts = stripeCustomer.name.trim().split(/\s+/);
     if (nameParts.length === 1) {
@@ -514,9 +516,7 @@ const findOrCreateContactInSalesforce = async (
     if (firstName && lastName) {
       const escapedFirst = firstName.replace(/'/g, "\\'");
       const escapedLast = lastName.replace(/'/g, "\\'");
-      whereConditions.push(
-        `(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`
-      );
+      whereConditions.push(`(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`);
     }
 
     let existingContact: any = null;
@@ -528,7 +528,7 @@ const findOrCreateContactInSalesforce = async (
                      ORDER BY CreatedDate DESC 
                      LIMIT 10`;
 
-      contextLog('[StripeTrueUp] Executing SOQL query', { 
+      contextLog('[StripeTrueUp] Executing SOQL query', {
         query,
         whereConditions,
       });
@@ -556,13 +556,9 @@ const findOrCreateContactInSalesforce = async (
           // 2. Name match (to prevent updating wrong contact)
           const nameMatch = result.records.find((c: any) => {
             const firstNameMatch =
-              c.FirstName &&
-              firstName &&
-              c.FirstName.toLowerCase() === firstName.toLowerCase();
+              c.FirstName && firstName && c.FirstName.toLowerCase() === firstName.toLowerCase();
             const lastNameMatch =
-              c.LastName &&
-              lastName &&
-              c.LastName.toLowerCase() === lastName.toLowerCase();
+              c.LastName && lastName && c.LastName.toLowerCase() === lastName.toLowerCase();
             return firstNameMatch && lastNameMatch;
           });
 
@@ -619,7 +615,7 @@ const findOrCreateContactInSalesforce = async (
       // Only update if there are changes beyond the Id
       if (Object.keys(updateFields).length > 1) {
         const updateResult = await connection.sobject('Contact').update(updateFields);
-        
+
         if (!updateResult.success) {
           contextLog('[StripeTrueUp] Failed to update contact', {
             contactId: existingContact.Id,
@@ -628,7 +624,7 @@ const findOrCreateContactInSalesforce = async (
         } else {
           contextLog('[StripeTrueUp] Updated existing contact', {
             contactId: existingContact.Id,
-            updatedFields: Object.keys(updateFields).filter(k => k !== 'Id'),
+            updatedFields: Object.keys(updateFields).filter((k) => k !== 'Id'),
           });
         }
       }
@@ -749,7 +745,7 @@ const processPayments = async (
       }
 
       const key = `bt_${balanceTransaction.id}`;
-      
+
       // Check if already processed
       let shouldSkip = false;
       if (resubmit) {
@@ -774,7 +770,7 @@ const processPayments = async (
           shouldSkip = true;
         }
       }
-      
+
       if (shouldSkip) {
         summary.skipped += 1;
         continue;
@@ -782,7 +778,7 @@ const processPayments = async (
 
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
-        
+
         const stripeCustomer = await resolveCustomerForCharge(
           stripe,
           charge as Stripe.Charge,
@@ -804,15 +800,18 @@ const processPayments = async (
             customerName: (stripeCustomer as Stripe.Customer).name,
             customerEmail: (stripeCustomer as Stripe.Customer).email,
           });
-          
+
           try {
             const customerUpsertResult = await salesforce.upsertCustomerByStripeId({
               stripe_customer_id__c: stripeCustomer.id,
-              Name: (stripeCustomer as Stripe.Customer).name || (stripeCustomer as Stripe.Customer).email || `Customer ${stripeCustomer.id}`,
+              Name:
+                (stripeCustomer as Stripe.Customer).name ||
+                (stripeCustomer as Stripe.Customer).email ||
+                `Customer ${stripeCustomer.id}`,
               Email: (stripeCustomer as Stripe.Customer).email || null,
             });
             contactId = customerUpsertResult?.id ?? null;
-            
+
             context.log('[StripeTrueUp] Contact upsert completed', {
               contactId,
               success: !!contactId,
@@ -832,10 +831,11 @@ const processPayments = async (
 
         // Build transaction with contact link if we have a contact ID
         const chargeObj = charge as Stripe.Charge;
-        const paymentIntentId = typeof chargeObj.payment_intent === 'string' 
-          ? chargeObj.payment_intent 
-          : chargeObj.payment_intent?.id;
-        
+        const paymentIntentId =
+          typeof chargeObj.payment_intent === 'string'
+            ? chargeObj.payment_intent
+            : chargeObj.payment_intent?.id;
+
         const transaction = mapStripeToTransaction({
           paymentIntent: null, // We'll get the ID from the charge itself in the mapping
           charge: chargeObj,
@@ -848,12 +848,17 @@ const processPayments = async (
             // Get invoice to find subscription
             const invoice = await stripe.invoices.retrieve(chargeObj.invoice as string);
             if (invoice.subscription) {
-              const subscriptionId = typeof invoice.subscription === 'string' 
-                ? invoice.subscription 
-                : invoice.subscription.id;
-              
+              const subscriptionId =
+                typeof invoice.subscription === 'string'
+                  ? invoice.subscription
+                  : invoice.subscription.id;
+
               if (subscriptionId) {
-                const frequency = await getFrequencyFromSubscription(stripe, subscriptionId, (...args: unknown[]) => context.log(...args));
+                const frequency = await getFrequencyFromSubscription(
+                  stripe,
+                  subscriptionId,
+                  (...args: unknown[]) => context.log(...args)
+                );
                 if (frequency) {
                   transaction.frequency__c = frequency;
                   context.log('[StripeTrueUp] Set frequency from subscription for charge', {
@@ -866,7 +871,10 @@ const processPayments = async (
               }
             }
           } catch (error) {
-            const message = error instanceof Error ? error.message : 'Unknown error getting frequency from subscription';
+            const message =
+              error instanceof Error
+                ? error.message
+                : 'Unknown error getting frequency from subscription';
             context.log('[StripeTrueUp] Failed to get frequency from subscription for charge', {
               chargeId: charge.id,
               invoiceId: chargeObj.invoice,
@@ -878,7 +886,7 @@ const processPayments = async (
         // Generate transaction name
         const config = loadConfig();
         const metadata = chargeObj.metadata || {};
-        
+
         context.log('[StripeTrueUp] Charge metadata for transaction naming', {
           chargeId: charge.id,
           metadata: metadata,
@@ -887,15 +895,13 @@ const processPayments = async (
           hasPaymentIntent: !!paymentIntentId,
           paymentIntentId: paymentIntentId,
         });
-        
+
         // Try to get product name from payment intent first
         let productName: string | null = null;
         if (paymentIntentId) {
           try {
-            productName = await getProductNameFromCharge(
-              stripe,
-              chargeObj,
-              (...args: unknown[]) => context.log(...args)
+            productName = await getProductNameFromCharge(stripe, chargeObj, (...args: unknown[]) =>
+              context.log(...args)
             );
           } catch (error) {
             context.log('[StripeTrueUp] Error getting product name', {
@@ -905,11 +911,15 @@ const processPayments = async (
             });
           }
         }
-        
+
         // Use product name, then metadata, then default
-        const category = productName || metadata.category || metadata.Category || config.transaction.defaultCategory;
+        const category =
+          productName ||
+          metadata.category ||
+          metadata.Category ||
+          config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
-        
+
         // Associate category with campaign if no campaign is already set
         if (!transaction.campaign__c && productName) {
           try {
@@ -929,19 +939,19 @@ const processPayments = async (
 
               // Add contact as campaign member if contact is available
               let contactId = transaction.contact__c;
-              
+
               // If contact ID is not available from metadata, try to resolve from Stripe customer ID
               if (!contactId && transaction.stripe_customer_id__c) {
                 try {
                   context.log('[StripeTrueUp] Resolving contact from Stripe customer ID', {
                     stripeCustomerId: transaction.stripe_customer_id__c,
                   });
-                  
+
                   // Search for contact by Stripe customer ID
                   const contacts = await crm.searchContact({
                     stripeCustomerId: transaction.stripe_customer_id__c,
                   });
-                  
+
                   if (contacts && contacts.length > 0) {
                     contactId = contacts[0].Id;
                     context.log('[StripeTrueUp] Resolved contact from Stripe customer ID', {
@@ -961,7 +971,7 @@ const processPayments = async (
                   });
                 }
               }
-              
+
               if (contactId && typeof contactId === 'string' && contactId.trim().length > 0) {
                 try {
                   context.log('[StripeTrueUp] Adding contact as campaign member', {
@@ -1000,23 +1010,30 @@ const processPayments = async (
             );
           }
         }
-        
+
         // Get transaction type from metadata if available, otherwise use derived type
         const metadataTransactionType = metadata.transactionType || metadata.TransactionType;
-        const transactionTypeName = metadataTransactionType || 
-                                    (transaction.transaction_type__c === 'charge' ? 'Payment' : 
-                                     transaction.transaction_type__c === 'refund' ? 'Refund' : 
-                                     transaction.transaction_type__c === 'dispute' ? 'Dispute' :
-                                     transaction.transaction_type__c === 'payout' ? 'Payout' :
-                                     'Transaction');
-        
+        const transactionTypeName =
+          metadataTransactionType ||
+          (transaction.transaction_type__c === 'charge'
+            ? 'Payment'
+            : transaction.transaction_type__c === 'refund'
+              ? 'Refund'
+              : transaction.transaction_type__c === 'dispute'
+                ? 'Dispute'
+                : transaction.transaction_type__c === 'payout'
+                  ? 'Payout'
+                  : 'Transaction');
+
         const transactionName = generateTransactionName(normalizedCategory, config, {
-          amount: transaction.amount_gross__c ? `$${transaction.amount_gross__c.toFixed(2)}` : undefined,
+          amount: transaction.amount_gross__c
+            ? `$${transaction.amount_gross__c.toFixed(2)}`
+            : undefined,
           date: new Date().toLocaleDateString(),
           id: charge.id,
           transactionType: transactionTypeName,
         });
-        
+
         context.log('[StripeTrueUp] Generated transaction name', {
           chargeId: charge.id,
           category,
@@ -1024,7 +1041,7 @@ const processPayments = async (
           transactionTypeName,
           transactionName,
         });
-        
+
         if (transactionName) {
           transaction.Name = transactionName;
         }
@@ -1066,14 +1083,19 @@ const processPayments = async (
         summary.salesforceUpdates += 1;
 
         // Create a minimal checkout session object with metadata for QBO customer naming
-        const chargeMetadata = (charge as Stripe.Charge).metadata as Record<string, unknown> | null | undefined;
-        const checkoutSessionStub = chargeMetadata ? {
-          id: `stub_${charge.id}`,
-          metadata: chargeMetadata,
-        } as Partial<Stripe.Checkout.Session> : undefined;
+        const chargeMetadata = (charge as Stripe.Charge).metadata as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        const checkoutSessionStub = chargeMetadata
+          ? ({
+              id: `stub_${charge.id}`,
+              metadata: chargeMetadata,
+            } as Partial<Stripe.Checkout.Session>)
+          : undefined;
 
         const grossAmount = Math.abs(balanceTransaction.amount ?? 0);
-        
+
         // Validate gross amount before QBO posting
         if (grossAmount === 0) {
           context.log('[StripeTrueUp] Skipping QBO charge posting due to zero gross amount', {
@@ -1175,7 +1197,7 @@ const processRefunds = async (
       }
 
       const key = `bt_${balanceTransaction.id}`;
-      
+
       // Check if already processed
       let shouldSkip = false;
       if (resubmit) {
@@ -1200,7 +1222,7 @@ const processRefunds = async (
           shouldSkip = true;
         }
       }
-      
+
       if (shouldSkip) {
         summary.skipped += 1;
         continue;
@@ -1249,28 +1271,31 @@ const processRefunds = async (
             chargeId: chargeFragment.id,
             customerId: extractStripeId(chargeFragment.customer),
           });
-          
+
           const stripeCustomer = await resolveCustomerForCharge(
             stripe,
             chargeFragment,
             (...args: unknown[]) => context.log(...args)
           );
-          
+
           context.log('[StripeTrueUp] Retrieved customer for refund', {
             refundId: refund.id,
             customerId: stripeCustomer?.id,
             customerExists: !!stripeCustomer,
           });
-          
+
           if (stripeCustomer && !stripeCustomer.deleted) {
             try {
               const customerUpsertResult = await salesforce.upsertCustomerByStripeId({
                 stripe_customer_id__c: stripeCustomer.id,
-                Name: (stripeCustomer as Stripe.Customer).name || (stripeCustomer as Stripe.Customer).email || `Customer ${stripeCustomer.id}`,
+                Name:
+                  (stripeCustomer as Stripe.Customer).name ||
+                  (stripeCustomer as Stripe.Customer).email ||
+                  `Customer ${stripeCustomer.id}`,
                 Email: (stripeCustomer as Stripe.Customer).email || null,
               });
               contactId = customerUpsertResult?.id ?? null;
-              
+
               context.log('[StripeTrueUp] Contact upsert completed for refund', {
                 refundId: refund.id,
                 contactId,
@@ -1291,10 +1316,10 @@ const processRefunds = async (
           });
         }
 
-        const paymentIntentIdRefund = chargeFragment?.payment_intent 
-          ? (typeof chargeFragment.payment_intent === 'string' 
-            ? chargeFragment.payment_intent 
-            : chargeFragment.payment_intent?.id)
+        const paymentIntentIdRefund = chargeFragment?.payment_intent
+          ? typeof chargeFragment.payment_intent === 'string'
+            ? chargeFragment.payment_intent
+            : chargeFragment.payment_intent?.id
           : null;
 
         const transaction: TransactionUpsertDTO = mapStripeToTransaction({
@@ -1306,7 +1331,7 @@ const processRefunds = async (
         // Generate transaction name
         const config = loadConfig();
         const metadata = chargeFragment?.metadata || {};
-        
+
         context.log('[StripeTrueUp] Refund charge metadata for transaction naming', {
           refundId: refund.id,
           metadata: metadata,
@@ -1315,7 +1340,7 @@ const processRefunds = async (
           hasPaymentIntent: !!paymentIntentIdRefund,
           paymentIntentId: paymentIntentIdRefund,
         });
-        
+
         // Try to get product name from payment intent first
         let productName: string | null = null;
         if (paymentIntentIdRefund && chargeFragment) {
@@ -1333,27 +1358,38 @@ const processRefunds = async (
             });
           }
         }
-        
+
         // Use product name, then metadata, then default
-        const category = productName || metadata.category || metadata.Category || config.transaction.defaultCategory;
+        const category =
+          productName ||
+          metadata.category ||
+          metadata.Category ||
+          config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
-        
+
         // Get transaction type from metadata if available, otherwise use derived type
         const metadataTransactionType = metadata.transactionType || metadata.TransactionType;
-        const transactionTypeName = metadataTransactionType ||
-                                    (transaction.transaction_type__c === 'charge' ? 'Payment' : 
-                                     transaction.transaction_type__c === 'refund' ? 'Refund' : 
-                                     transaction.transaction_type__c === 'dispute' ? 'Dispute' :
-                                     transaction.transaction_type__c === 'payout' ? 'Payout' :
-                                     'Transaction');
-        
+        const transactionTypeName =
+          metadataTransactionType ||
+          (transaction.transaction_type__c === 'charge'
+            ? 'Payment'
+            : transaction.transaction_type__c === 'refund'
+              ? 'Refund'
+              : transaction.transaction_type__c === 'dispute'
+                ? 'Dispute'
+                : transaction.transaction_type__c === 'payout'
+                  ? 'Payout'
+                  : 'Transaction');
+
         const transactionName = generateTransactionName(normalizedCategory, config, {
-          amount: transaction.amount_gross__c ? `$${Math.abs(transaction.amount_gross__c).toFixed(2)}` : undefined,
+          amount: transaction.amount_gross__c
+            ? `$${Math.abs(transaction.amount_gross__c).toFixed(2)}`
+            : undefined,
           date: new Date().toLocaleDateString(),
           id: refund.id,
           transactionType: transactionTypeName,
         });
-        
+
         context.log('[StripeTrueUp] Generated refund transaction name', {
           refundId: refund.id,
           category,
@@ -1361,7 +1397,7 @@ const processRefunds = async (
           transactionTypeName,
           transactionName,
         });
-        
+
         if (transactionName) {
           transaction.Name = transactionName;
         }
@@ -1390,12 +1426,15 @@ const processRefunds = async (
 
         // Validate required fields before upserting
         if (!transaction.status__c || !transaction.amount_gross__c) {
-          context.log('[StripeTrueUp] Skipping refund transaction upsert due to missing required fields', {
-            refundId: refund.id,
-            status: transaction.status__c,
-            amountGross: transaction.amount_gross__c,
-            transaction,
-          });
+          context.log(
+            '[StripeTrueUp] Skipping refund transaction upsert due to missing required fields',
+            {
+              refundId: refund.id,
+              status: transaction.status__c,
+              amountGross: transaction.amount_gross__c,
+              transaction,
+            }
+          );
           summary.skipped += 1;
           continue;
         }
@@ -1407,7 +1446,7 @@ const processRefunds = async (
         summary.salesforceUpdates += 1;
 
         const refundAmount = Math.abs(balanceTransaction.amount ?? 0);
-        
+
         // Validate refund amount before QBO posting
         if (refundAmount === 0) {
           context.log('[StripeTrueUp] Skipping QBO refund posting due to zero refund amount', {
@@ -1494,7 +1533,7 @@ const processPayouts = async (
       }
 
       const key = `payout_${payout.id}`;
-      
+
       // Check if already processed
       let shouldSkip = false;
       if (resubmit) {
@@ -1528,7 +1567,7 @@ const processPayouts = async (
           shouldSkip = true;
         }
       }
-      
+
       if (shouldSkip) {
         summary.skipped += 1;
         continue;
@@ -1536,7 +1575,7 @@ const processPayouts = async (
 
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
-        
+
         // Fetch balance transactions for automatic payouts
         // Manual payouts don't support balance transaction filtering
         let balanceTransactions: any[] = [];
@@ -1546,17 +1585,20 @@ const processPayouts = async (
               logger: context.log,
             });
           } catch (error) {
-            context.log('[StripeTrueUp] Could not fetch balance transactions for automatic payout', {
-              payoutId: payout.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
+            context.log(
+              '[StripeTrueUp] Could not fetch balance transactions for automatic payout',
+              {
+                payoutId: payout.id,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            );
           }
         }
 
         // Build payout transaction for Salesforce
         const transactionName = 'Payout';
         const payoutAmount = Math.abs(payout.amount ?? 0);
-        
+
         const payoutTransaction = {
           Name: transactionName,
           transaction_type__c: 'payout' as const,
@@ -1566,9 +1608,14 @@ const processPayouts = async (
           amount_gross__c: payoutAmount / 100,
           amount_fee__c: 0,
           amount_net__c: payoutAmount / 100,
-          currency_iso_code__c: (typeof payout.currency === 'string' ? payout.currency : 'usd').toUpperCase(),
+          currency_iso_code__c: (typeof payout.currency === 'string'
+            ? payout.currency
+            : 'usd'
+          ).toUpperCase(),
           memo__c: `Stripe Payout ${payout.id} (${payout.automatic ? 'automatic' : 'manual'})`,
-          received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+          received_at__c: timestampToDate(
+            payout.arrival_date ?? payout.created ?? null
+          ).toISOString(),
           posted_to_qbo__c: false,
           qbo_doc_type__c: null,
           qbo_doc_id__c: null,
@@ -1580,20 +1627,20 @@ const processPayouts = async (
         try {
           // Validate required fields before upserting
           if (!payoutTransaction.status__c || !payoutTransaction.amount_gross__c) {
-            context.log('[StripeTrueUp] Skipping payout transaction upsert due to missing required fields', {
-              payoutId: payout.id,
-              status: payoutTransaction.status__c,
-              amountGross: payoutTransaction.amount_gross__c,
-              payoutTransaction,
-            });
+            context.log(
+              '[StripeTrueUp] Skipping payout transaction upsert due to missing required fields',
+              {
+                payoutId: payout.id,
+                status: payoutTransaction.status__c,
+                amountGross: payoutTransaction.amount_gross__c,
+                payoutTransaction,
+              }
+            );
             summary.skipped += 1;
             continue;
           }
 
-          await salesforce.upsertTransactionByExternalId(
-            payoutTransaction,
-            'stripe_payout_id__c'
-          );
+          await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
           context.log('[StripeTrueUp] Upserted payout transaction in Salesforce', {
             payoutId: payout.id,
             transactionName,
@@ -1607,7 +1654,10 @@ const processPayouts = async (
         }
 
         // Link balance transactions if available
-        if (balanceTransactions.length > 0 && typeof salesforce.linkPayoutOnTransactions === 'function') {
+        if (
+          balanceTransactions.length > 0 &&
+          typeof salesforce.linkPayoutOnTransactions === 'function'
+        ) {
           const ids = balanceTransactions
             .map((txn) => txn?.id)
             .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
@@ -1698,10 +1748,14 @@ const validateEnvironment = (): { valid: boolean; errors: string[] } => {
 
   // Check Salesforce credentials (optional but warn if missing)
   if (!process.env.SALESFORCE_USERNAME && !process.env.SF_USERNAME) {
-    errors.push('SALESFORCE_USERNAME or SF_USERNAME is not configured (Salesforce sync will be skipped)');
+    errors.push(
+      'SALESFORCE_USERNAME or SF_USERNAME is not configured (Salesforce sync will be skipped)'
+    );
   }
   if (!process.env.SALESFORCE_PASSWORD && !process.env.SF_PASSWORD) {
-    errors.push('SALESFORCE_PASSWORD or SF_PASSWORD is not configured (Salesforce sync will be skipped)');
+    errors.push(
+      'SALESFORCE_PASSWORD or SF_PASSWORD is not configured (Salesforce sync will be skipped)'
+    );
   }
 
   // Check QBO credentials (using the actual variable names from env.ts)
@@ -1732,37 +1786,25 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
     }
 
     const queryRaw = (req as unknown as { query?: unknown }).query;
-  let query: Record<string, string | undefined> = {};
+    let query: Record<string, string | undefined> = {};
 
-  if (queryRaw instanceof URLSearchParams) {
-    query = Object.fromEntries(queryRaw.entries());
-  } else if (queryRaw && typeof queryRaw === 'object') {
-    query = queryRaw as Record<string, string | undefined>;
-  }
-  const fromParam = query.from;
-  if (!fromParam) {
-    return respond(400, {
-      error: 'bad_request',
-      message: 'Query parameter "from" is required.',
-    });
-    return;
-  }
+    if (queryRaw instanceof URLSearchParams) {
+      query = Object.fromEntries(queryRaw.entries());
+    } else if (queryRaw && typeof queryRaw === 'object') {
+      query = queryRaw as Record<string, string | undefined>;
+    }
+    const fromParam = query.from;
+    if (!fromParam) {
+      return respond(400, {
+        error: 'bad_request',
+        message: 'Query parameter "from" is required.',
+      });
+      return;
+    }
 
-  let from: number;
-  try {
-    from = toEpochSeconds(fromParam);
-  } catch (error) {
-    return respond(400, {
-      error: 'bad_request',
-      message: error instanceof Error ? error.message : String(error),
-    });
-    return;
-  }
-
-  let to: number | null = null;
-  if (query.to) {
+    let from: number;
     try {
-      to = toEpochSeconds(query.to);
+      from = toEpochSeconds(fromParam);
     } catch (error) {
       return respond(400, {
         error: 'bad_request',
@@ -1771,27 +1813,39 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
       return;
     }
 
-    if (to < from) {
+    let to: number | null = null;
+    if (query.to) {
+      try {
+        to = toEpochSeconds(query.to);
+      } catch (error) {
+        return respond(400, {
+          error: 'bad_request',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+
+      if (to < from) {
+        return respond(400, {
+          error: 'bad_request',
+          message: 'The "to" parameter must be greater than or equal to "from".',
+        });
+        return;
+      }
+    }
+
+    const type = (query.type || 'payments').toLowerCase();
+    if (!['payments', 'refunds', 'payouts'].includes(type)) {
       return respond(400, {
         error: 'bad_request',
-        message: 'The "to" parameter must be greater than or equal to "from".',
+        message: 'Query parameter "type" must be one of payments, refunds, or payouts.',
       });
       return;
     }
-  }
 
-  const type = (query.type || 'payments').toLowerCase();
-  if (!['payments', 'refunds', 'payouts'].includes(type)) {
-    return respond(400, {
-      error: 'bad_request',
-      message: 'Query parameter "type" must be one of payments, refunds, or payouts.',
-    });
-    return;
-  }
-
-  const dryRun = parseBoolean(query.dryRun, false);
-  const resubmit = parseBoolean(query.resubmit, false);
-  const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
+    const dryRun = parseBoolean(query.dryRun, false);
+    const resubmit = parseBoolean(query.resubmit, false);
+    const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
     const stripe = dependencies.stripe.getClient(liveMode);
 

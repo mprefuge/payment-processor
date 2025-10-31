@@ -265,7 +265,11 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       );
 
       if (duplicateError) {
-        const fallbackId = await resolveExistingTransactionId(key, normalizedExternalId, recordTypeId);
+        const fallbackId = await resolveExistingTransactionId(
+          key,
+          normalizedExternalId,
+          recordTypeId
+        );
 
         if (fallbackId) {
           // Update existing transaction of the same type
@@ -409,12 +413,12 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   ): Promise<string | null> => {
     const normalizedKey = ensureNonEmpty(key, 'External ID field');
     const normalizedValue = ensureNonEmpty(value, 'External ID value');
-    
+
     let recordTypeId: string | undefined;
     if (recordTypeName) {
       recordTypeId = await resolveRecordTypeId(recordTypeName);
     }
-    
+
     return resolveExistingTransactionId(
       normalizedKey as TransactionExternalIdField,
       normalizedValue,
@@ -423,10 +427,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   };
 
   const upsertCustomerByStripeId = async (dto: CustomerUpsertDTO): Promise<UpsertResult> => {
-    const stripeCustomerId = ensureNonEmpty(
-      dto.stripe_customer_id__c,
-      'Stripe Customer ID'
-    );
+    const stripeCustomerId = ensureNonEmpty(dto.stripe_customer_id__c, 'Stripe Customer ID');
     const name = ensureNonEmpty(dto.Name, 'Customer Name');
 
     // Parse name into FirstName and LastName if not provided
@@ -448,26 +449,24 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
     // Build SOQL query to search for existing contact
     const whereConditions: string[] = [];
-    
+
     // Search by Stripe Customer ID
     if (stripeCustomerId) {
       const escapedId = stripeCustomerId.replace(/'/g, "\\'");
       whereConditions.push(`Stripe_Customer_Id__c = '${escapedId}'`);
     }
-    
+
     // Search by email
     if (dto.Email && dto.Email.trim()) {
       const escapedEmail = dto.Email.trim().replace(/'/g, "\\'");
       whereConditions.push(`Email = '${escapedEmail}'`);
     }
-    
+
     // Search by name combination
     if (firstName && lastName) {
       const escapedFirst = firstName.replace(/'/g, "\\'");
       const escapedLast = lastName.replace(/'/g, "\\'");
-      whereConditions.push(
-        `(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`
-      );
+      whereConditions.push(`(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`);
     }
 
     let existingContact: any = null;
@@ -494,13 +493,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
           // 2. Name match (both first and last name)
           const nameMatch = queryResult.records.find((c: any) => {
             const firstNameMatch =
-              c.FirstName &&
-              firstName &&
-              c.FirstName.toLowerCase() === firstName.toLowerCase();
+              c.FirstName && firstName && c.FirstName.toLowerCase() === firstName.toLowerCase();
             const lastNameMatch =
-              c.LastName &&
-              lastName &&
-              c.LastName.toLowerCase() === lastName.toLowerCase();
+              c.LastName && lastName && c.LastName.toLowerCase() === lastName.toLowerCase();
             return firstNameMatch && lastNameMatch;
           });
 
@@ -543,15 +538,15 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       // Only update if there are changes beyond the Id
       if (Object.keys(updateFields).length > 1) {
         const updateResult = await connection.sobject('Contact').update(updateFields as any);
-        
+
         const saveResult = Array.isArray(updateResult) ? updateResult[0] : updateResult;
-        
+
         if (!saveResult.success) {
-          const message = collectErrorMessages([saveResult]) || 
-            `Failed to update contact ${existingContact.Id}.`;
+          const message =
+            collectErrorMessages([saveResult]) || `Failed to update contact ${existingContact.Id}.`;
           throw new Error(message);
         }
-        
+
         result = {
           id: saveResult.id,
           success: true,
@@ -583,11 +578,12 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       }
 
       const createResult = await connection.sobject('Contact').create(contactRecord);
-      
+
       const saveResult = Array.isArray(createResult) ? createResult[0] : createResult;
 
       if (!saveResult.success) {
-        const message = collectErrorMessages([saveResult]) ||
+        const message =
+          collectErrorMessages([saveResult]) ||
           `Failed to create contact with Stripe Customer ID ${stripeCustomerId}.`;
         throw new Error(message);
       }

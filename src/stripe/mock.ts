@@ -45,31 +45,32 @@ export const createMockStripeServices = (): StripeServices => {
         has_more: false,
         url: '/v1/balance_transactions',
       }),
-      retrieve: async (id: string): Promise<Stripe.BalanceTransaction> => ({
-        id: id || 'txn_mock_test',
-        object: 'balance_transaction',
-        amount: 5000,
-        available_on: Math.floor(Date.now() / 1000) + 86400,
-        created: Math.floor(Date.now() / 1000),
-        currency: 'usd',
-        description: 'Mock balance transaction for testing',
-        exchange_rate: null,
-        fee: 175, // 3.5% Stripe fee
-        fee_details: [
-          {
-            amount: 175,
-            application: null,
-            currency: 'usd',
-            description: 'Stripe processing fees',
-            type: 'stripe_fee',
-          },
-        ],
-        net: 4825,
-        reporting_category: 'charge',
-        source: 'ch_mock_test',
-        status: 'available',
-        type: 'charge',
-      }) as Stripe.BalanceTransaction,
+      retrieve: async (id: string): Promise<Stripe.BalanceTransaction> =>
+        ({
+          id: id || 'txn_mock_test',
+          object: 'balance_transaction',
+          amount: 5000,
+          available_on: Math.floor(Date.now() / 1000) + 86400,
+          created: Math.floor(Date.now() / 1000),
+          currency: 'usd',
+          description: 'Mock balance transaction for testing',
+          exchange_rate: null,
+          fee: 175, // 3.5% Stripe fee
+          fee_details: [
+            {
+              amount: 175,
+              application: null,
+              currency: 'usd',
+              description: 'Stripe processing fees',
+              type: 'stripe_fee',
+            },
+          ],
+          net: 4825,
+          reporting_category: 'charge',
+          source: 'ch_mock_test',
+          status: 'available',
+          type: 'charge',
+        }) as Stripe.BalanceTransaction,
     },
     charges: {
       retrieve: async (): Promise<Stripe.Charge> =>

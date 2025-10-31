@@ -585,17 +585,16 @@ class SalesforceCrmService extends BaseCrmService {
       }
 
       // Validate required fields before creating
-      if (
-        status == null ||
-        status === '' ||
-        amount == null
-      ) {
-        logger.warn('[SalesforceCrm] Skipping transaction creation due to missing required fields', {
-          contactId,
-          status,
-          amount,
-          transactionData,
-        });
+      if (status == null || status === '' || amount == null) {
+        logger.warn(
+          '[SalesforceCrm] Skipping transaction creation due to missing required fields',
+          {
+            contactId,
+            status,
+            amount,
+            transactionData,
+          }
+        );
         return null;
       }
 
@@ -694,11 +693,7 @@ class SalesforceCrmService extends BaseCrmService {
     } = transactionData;
 
     // Validate required fields before creating
-    if (
-      status == null ||
-      status === '' ||
-      amount == null
-    ) {
+    if (status == null || status === '' || amount == null) {
       logger.warn('[SalesforceCrm] Skipping opportunity creation due to missing required fields', {
         contactId,
         status,

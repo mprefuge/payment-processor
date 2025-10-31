@@ -553,7 +553,8 @@ export const mapStripeToTransaction = (
   const transactionCandidate: TransactionUpsertDTO = {
     transaction_type__c: deriveTransactionType(charge, balanceTransaction),
     status__c: deriveStatus(paymentIntent, charge),
-    stripe_payment_intent_id__c: paymentIntent?.id ?? normalizeStripeId(charge?.payment_intent) ?? null,
+    stripe_payment_intent_id__c:
+      paymentIntent?.id ?? normalizeStripeId(charge?.payment_intent) ?? null,
     stripe_charge_id__c: charge?.id ?? null,
     stripe_balance_transaction_id__c: extractBalanceTransactionId(charge, balanceTransaction),
     stripe_refund_id__c: extractRefundId(charge),
@@ -614,12 +615,13 @@ export const mapStripeToTransaction = (
     payment_brand__c: derivePaymentBrand(charge),
     payment_last4__c: derivePaymentLast4(charge),
     received_at__c: deriveReceivedAt(paymentIntent, charge),
-    posted_to_qbo__c: parseMetadataBoolean(
-      combinedMetadata,
-      'posted_to_qbo__c',
-      'Posted_to_QBO__c',
-      'posted_to_qbo'
-    ) ?? false,
+    posted_to_qbo__c:
+      parseMetadataBoolean(
+        combinedMetadata,
+        'posted_to_qbo__c',
+        'Posted_to_QBO__c',
+        'posted_to_qbo'
+      ) ?? false,
     qbo_doc_type__c: parseMetadataString(
       combinedMetadata,
       'qbo_doc_type__c',

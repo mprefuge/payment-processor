@@ -87,8 +87,12 @@ const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promi
     }
 
     const result = await query<{ QueryResponse: any }>(queryStr);
-    const responseKey = type === 'sales-receipt' ? 'SalesReceipt' :
-                       type === 'journal-entry' ? 'JournalEntry' : 'Deposit';
+    const responseKey =
+      type === 'sales-receipt'
+        ? 'SalesReceipt'
+        : type === 'journal-entry'
+          ? 'JournalEntry'
+          : 'Deposit';
 
     return !!(result.QueryResponse?.[responseKey]?.length > 0);
   } catch (error) {
@@ -108,16 +112,16 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
       salesReceiptId,
       query: queryStr,
     });
-    
+
     const result = await query<any>(queryStr);
-    
+
     logger.info('QuickBooks query response', {
       salesReceiptId,
       isArray: Array.isArray(result),
       resultLength: Array.isArray(result) ? result.length : 0,
       hasQueryResponse: !!(result as any)?.QueryResponse,
     });
-    
+
     // Handle array response (query function returns array directly)
     if (Array.isArray(result) && result.length > 0) {
       const salesReceipt = result[0];
@@ -129,7 +133,7 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
       });
       return salesReceipt;
     }
-    
+
     // Handle QueryResponse wrapper (fallback for different query implementations)
     if ((result as any)?.QueryResponse?.SalesReceipt) {
       const salesReceipts = (result as any).QueryResponse.SalesReceipt;
@@ -142,7 +146,7 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
         return salesReceipts[0];
       }
     }
-    
+
     logger.warn('Sales receipt not found in QuickBooks', {
       salesReceiptId,
     });
@@ -151,11 +155,16 @@ const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> 
     logger.error(`Failed to retrieve sales receipt with ID ${salesReceiptId}`, {
       error: error instanceof Error ? error.message : String(error),
     });
-    throw new Error(`Could not retrieve sales receipt ${salesReceiptId}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Could not retrieve sales receipt ${salesReceiptId}: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 };
 
-const getAccountIdByName = async (accountName: string, context: InvocationContext): Promise<string | null> => {
+const getAccountIdByName = async (
+  accountName: string,
+  context: InvocationContext
+): Promise<string | null> => {
   try {
     const queryStr = `SELECT Id, Name, AccountType, AccountSubType FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`;
     logger.info('Querying QuickBooks for account', {
@@ -178,7 +187,8 @@ const getAccountIdByName = async (accountName: string, context: InvocationContex
       return account.Id;
     }
 
-    const accounts = (result as { QueryResponse?: { Account?: QuickBooksAccount[] } })?.QueryResponse?.Account;
+    const accounts = (result as { QueryResponse?: { Account?: QuickBooksAccount[] } })
+      ?.QueryResponse?.Account;
     if (accounts && accounts.length > 0) {
       const account = accounts[0];
       logger.info('Found account by name (QueryResponse format)', {
@@ -222,7 +232,7 @@ const buildBankDepositFromSalesReceipts = async (
 
   for (const salesReceiptId of salesReceiptIds) {
     const salesReceipt = await getSalesReceiptById(salesReceiptId);
-    
+
     if (!salesReceipt) {
       throw new Error(`Sales receipt with ID ${salesReceiptId} not found in QuickBooks`);
     }
@@ -286,7 +296,9 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
       const line = data.Line[i];
       if (line.DetailType === 'SalesItemLineDetail') {
         if (!line.SalesItemLineDetail?.ItemRef?.value) {
-          throw new Error(`Line ${i + 1}: ItemRef is required and must be resolved to a valid item ID`);
+          throw new Error(
+            `Line ${i + 1}: ItemRef is required and must be resolved to a valid item ID`
+          );
         }
         if (line.Amount == null || typeof line.Amount !== 'number' || line.Amount <= 0) {
           throw new Error(`Line ${i + 1}: Amount must be a positive number`);
@@ -301,7 +313,9 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
       const line = data.Line[i];
       if (line.DetailType === 'JournalEntryLineDetail') {
         if (!line.JournalEntryLineDetail?.AccountRef?.value) {
-          throw new Error(`Line ${i + 1}: AccountRef is required and must be resolved to a valid account ID`);
+          throw new Error(
+            `Line ${i + 1}: AccountRef is required and must be resolved to a valid account ID`
+          );
         }
         if (line.Amount == null || typeof line.Amount !== 'number' || line.Amount <= 0) {
           throw new Error(`Line ${i + 1}: Amount must be a positive number`);
@@ -320,7 +334,9 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
       if (line.DetailType === 'DepositLineDetail') {
         const detail = line.DepositLineDetail;
         if (detail?.AccountRef && !detail.AccountRef.value) {
-          throw new Error(`Line ${i + 1}: AccountRef must include a valid account ID when provided`);
+          throw new Error(
+            `Line ${i + 1}: AccountRef must include a valid account ID when provided`
+          );
         }
         if (
           !line.DepositLineDetail?.LinkedTxn ||
@@ -342,11 +358,11 @@ const cleanPayload = (obj: any): any => {
   if (obj === null || obj === undefined) {
     return undefined;
   }
-  
+
   if (Array.isArray(obj)) {
-    return obj.map(cleanPayload).filter(item => item !== undefined);
+    return obj.map(cleanPayload).filter((item) => item !== undefined);
   }
-  
+
   if (typeof obj === 'object') {
     const cleaned: any = {};
     for (const [key, value] of Object.entries(obj)) {
@@ -357,26 +373,26 @@ const cleanPayload = (obj: any): any => {
     }
     return cleaned;
   }
-  
+
   return obj;
 };
 
 // Recursively resolve ItemRef, CustomerRef, AccountRef, and other reference types in the document data
 const resolveItemReferences = async (
-  data: any, 
+  data: any,
   context: InvocationContext,
-  rootData?: any  // Root document for accessing BillEmail, etc.
+  rootData?: any // Root document for accessing BillEmail, etc.
 ): Promise<any> => {
   if (!data || typeof data !== 'object') {
     return data;
   }
 
   if (Array.isArray(data)) {
-    return Promise.all(data.map(item => resolveItemReferences(item, context, rootData || data)));
+    return Promise.all(data.map((item) => resolveItemReferences(item, context, rootData || data)));
   }
 
   const resolved = { ...data };
-  const root = rootData || data;  // Use root data if provided, otherwise current data is root
+  const root = rootData || data; // Use root data if provided, otherwise current data is root
 
   // Handle any Ref field that has a name but no value
   for (const [key, value] of Object.entries(resolved)) {
@@ -395,17 +411,20 @@ const resolveItemReferences = async (
             if (root.BillEmail?.Address) {
               email = root.BillEmail.Address;
             }
-            
+
             context.log(`Resolving CustomerRef`, {
               name: refValue.name,
               email,
               hasRootBillEmail: !!root.BillEmail,
               rootBillEmailAddress: root.BillEmail?.Address,
             });
-            
+
             const customerResult = await ensureCustomer(refValue.name, email);
-            resolvedRef = { value: customerResult.value, name: customerResult.name || refValue.name };
-            
+            resolvedRef = {
+              value: customerResult.value,
+              name: customerResult.name || refValue.name,
+            };
+
             context.log(`CustomerRef resolved`, {
               name: refValue.name,
               resolvedValue: customerResult.value,
@@ -415,7 +434,7 @@ const resolveItemReferences = async (
             // For accounts, use ensureAccount which will create if it doesn't exist
             // We need to determine the account type based on context
             let accountType: string | undefined;
-            
+
             // Infer account type from the reference key or parent context
             if (key === 'DepositToAccountRef') {
               accountType = 'Bank'; // Bank accounts for deposits
@@ -427,7 +446,7 @@ const resolveItemReferences = async (
               // For journal entries, default to Other Current Assets (can be customized)
               accountType = 'Other Current Asset';
             }
-            
+
             const accountResult = await ensureAccount(refValue.name, accountType);
             resolvedRef = { value: accountResult.value, name: accountResult.name || refValue.name };
           }
@@ -489,7 +508,7 @@ const validateAndPost = async (
     });
 
     let resolvedData = data;
-    
+
     // Special handling for bank-deposit with SalesReceiptIds
     if (type === 'bank-deposit' && data.SalesReceiptIds && Array.isArray(data.SalesReceiptIds)) {
       logger.info('Processing bank deposit with SalesReceiptIds using minimal schema', {
@@ -505,7 +524,7 @@ const validateAndPost = async (
 
       // Get the first sales receipt ID (process one at a time)
       const salesReceiptId = data.SalesReceiptIds[0];
-      
+
       // Get the sales receipt details
       const salesReceipt = await getSalesReceiptById(salesReceiptId);
       if (!salesReceipt) {
@@ -545,7 +564,7 @@ const validateAndPost = async (
         salesReceiptId: salesReceipt.Id,
         amountDollars: salesReceipt.TotalAmt || 0,
         txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10),
-        env: process.env.QBO_ENVIRONMENT === 'production' ? 'prod' : 'sandbox'
+        env: process.env.QBO_ENVIRONMENT === 'production' ? 'prod' : 'sandbox',
       });
 
       logger.info('Bank deposit created successfully with minimal schema', {
@@ -558,7 +577,7 @@ const validateAndPost = async (
       return {
         success: true,
         id: depositResult.Deposit?.Id,
-        type: 'bank-deposit'
+        type: 'bank-deposit',
       };
     }
 
@@ -581,14 +600,14 @@ const validateAndPost = async (
 
         // Ensure minimal schema structure for DepositLineDetail
         const depositLineDetail: any = {
-          LinkedTxn: line.DepositLineDetail?.LinkedTxn || line.LinkedTxn || []
+          LinkedTxn: line.DepositLineDetail?.LinkedTxn || line.LinkedTxn || [],
         };
 
         // Create clean line object with only required fields
         line = {
           Amount: line.Amount,
           DetailType: 'DepositLineDetail',
-          DepositLineDetail: depositLineDetail
+          DepositLineDetail: depositLineDetail,
         };
 
         return line;
@@ -609,7 +628,7 @@ const validateAndPost = async (
       resolvedData = {
         DepositToAccountRef: { value: resolvedData.DepositToAccountRef?.value },
         TxnDate: resolvedData.TxnDate,
-        Line: resolvedData.Line
+        Line: resolvedData.Line,
       };
     }
 

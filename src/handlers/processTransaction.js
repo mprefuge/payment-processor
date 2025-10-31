@@ -31,25 +31,28 @@ const createInMemoryStore = () => {
 };
 
 // Initialize idempotency store for transaction processing
-let idempotencyStore = process.env.DISABLE_AZURE_TABLES === '1'
+let idempotencyStore =
+  process.env.DISABLE_AZURE_TABLES === '1'
     ? createInMemoryStore()
     : new AzureIdempotencyStore({
         tableName: process.env.TRANSACTION_IDEMPOTENCY_TABLE || 'TransactionIdempotency',
         processedPartitionKey: 'checkout-sessions',
-    });
+      });
 
 const setIdempotencyStore = (store) => {
   idempotencyStore = store;
 };
 
 const resetIdempotencyStore = () => {
-  idempotencyStore = process.env.DISABLE_AZURE_TABLES === '1'
-    ? createInMemoryStore()
-    : new AzureIdempotencyStore({
-        tableName: process.env.TRANSACTION_IDEMPOTENCY_TABLE || 'TransactionIdempotency',
-        processedPartitionKey: 'checkout-sessions',
-      });
-};const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
+  idempotencyStore =
+    process.env.DISABLE_AZURE_TABLES === '1'
+      ? createInMemoryStore()
+      : new AzureIdempotencyStore({
+          tableName: process.env.TRANSACTION_IDEMPOTENCY_TABLE || 'TransactionIdempotency',
+          processedPartitionKey: 'checkout-sessions',
+        });
+};
+const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
 const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
 
 const defaultStripeClientFactory = (key) => new Stripe(key);
@@ -367,25 +370,25 @@ function sanitizeStripeMetadata(metadata) {
 /**
  * Calculate cover fees for a transaction
  * Supports multiple fee structures based on nonprofit status and payment method
- * 
+ *
  * Fee structures:
  * - Standard business, online domestic card: 2.9% + $0.30
  * - Standard business, in-person domestic card: 2.7% + $0.05
  * - Nonprofit (eligible), card donation: 2.2% + $0.30
  * - Nonprofit, Amex donation: 3.5% (no fixed fee)
  * - Nonprofit, ACH / bank debit: 0.8% (capped at $5.00)
- * 
+ *
  * @param {number} baseAmountCents - The base transaction amount in cents
  * @param {string} paymentMethod - Payment method: 'card', 'card_present', 'us_bank_account', 'amex'
  * @returns {number} The fee amount in cents
  */
 function calculateCoverFees(baseAmountCents, paymentMethod = 'card') {
   const isNonprofit = parseBooleanFlag(process.env.STRIPE_NONPROFIT_RATES);
-  
+
   let percentageFee;
   let fixedFee;
   let cap = null;
-  
+
   if (isNonprofit) {
     // Nonprofit rates
     switch (paymentMethod) {
@@ -425,14 +428,14 @@ function calculateCoverFees(baseAmountCents, paymentMethod = 'card') {
         break;
     }
   }
-  
+
   const totalFee = percentageFee + fixedFee;
-  
+
   // Apply cap if specified
   if (cap !== null && totalFee > cap) {
     return cap;
   }
-  
+
   return totalFee;
 }
 
@@ -790,14 +793,14 @@ const createPendingTransaction = async (context, session, contactId, transaction
 
     // Resolve campaign name to Salesforce ID if present in metadata
     let campaignId = null;
-    const campaignName = 
-      transactionData.metadata?.campaign__c || 
-      transactionData.metadata?.Campaign__c || 
+    const campaignName =
+      transactionData.metadata?.campaign__c ||
+      transactionData.metadata?.Campaign__c ||
       transactionData.metadata?.campaign;
 
     if (campaignName && typeof campaignName === 'string' && campaignName.trim().length > 0) {
       const trimmedName = campaignName.trim();
-      
+
       // Check if it's already a Salesforce ID (18-char starting with '701')
       if (trimmedName.match(/^701[a-zA-Z0-9]{15}$/)) {
         console.log('Campaign metadata is already a Salesforce ID', { campaignId: trimmedName });
@@ -1121,15 +1124,15 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
       const isNonprofit = parseBooleanFlag(process.env.STRIPE_NONPROFIT_RATES);
       logger.info(
         `Cover fees enabled: calculated fee for ${transactionData.paymentMethod} ` +
-        `(${isNonprofit ? 'nonprofit' : 'standard'} rates): ` +
-        `base amount ${transactionData.amount} cents, ` +
-        `cover fees ${coverFeesAmount} cents, ` +
-        `total ${transactionData.amount + coverFeesAmount} cents`
+          `(${isNonprofit ? 'nonprofit' : 'standard'} rates): ` +
+          `base amount ${transactionData.amount} cents, ` +
+          `cover fees ${coverFeesAmount} cents, ` +
+          `total ${transactionData.amount + coverFeesAmount} cents`
       );
     }
-    
+
     totalAmount = transactionData.amount + coverFeesAmount;
-    
+
     // Store the cover fees amount in cents for metadata
     transactionData.coverFeesAmount = coverFeesAmount;
   }
@@ -1204,14 +1207,14 @@ module.exports = async function (request, context) {
   let actualRequest = request;
   let actualContext = context;
   let isV3 = false;
-  
+
   // Detect v3 signature: first param has res/bindings, second has body
   if (request && typeof request === 'object' && ('res' in request || 'bindings' in request)) {
     actualContext = request;
     actualRequest = context;
     isV3 = true;
   }
-  
+
   // Helper to handle both v3 and v4 responses
   const sendResponse = (response) => {
     if (isV3) {
@@ -1240,13 +1243,16 @@ module.exports = async function (request, context) {
     if (actualRequest.headers) {
       if (typeof actualRequest.headers.get === 'function') {
         // v4 style
-        idempotencyKey = actualRequest.headers.get('idempotency-key') || actualRequest.headers.get('Idempotency-Key');
+        idempotencyKey =
+          actualRequest.headers.get('idempotency-key') ||
+          actualRequest.headers.get('Idempotency-Key');
       } else {
         // v3 style - headers is a plain object
-        idempotencyKey = actualRequest.headers['idempotency-key'] || actualRequest.headers['Idempotency-Key'];
+        idempotencyKey =
+          actualRequest.headers['idempotency-key'] || actualRequest.headers['Idempotency-Key'];
       }
     }
-    
+
     if (idempotencyKey && idempotencyStore) {
       const isProcessed = await idempotencyStore.isProcessed(idempotencyKey);
       if (isProcessed) {
@@ -1267,7 +1273,7 @@ module.exports = async function (request, context) {
 
     // Get request body - handle both v3 and v4
     let body;
-    
+
     // Debug: Log what we're receiving
     log('Request object type check', {
       hasBody: !!actualRequest.body,
@@ -1277,20 +1283,27 @@ module.exports = async function (request, context) {
       hasText: typeof actualRequest.text === 'function',
       isV3,
     });
-    
+
     // For v4, always try json() first even if body exists
     if (!isV3 && typeof actualRequest.json === 'function') {
       // v4 style - need to call json()
       body = await actualRequest.json();
       log('Using v4 style body (from json())', { bodyKeys: Object.keys(body) });
-    } else if (actualRequest.body && typeof actualRequest.body === 'object' && Object.keys(actualRequest.body).length > 0) {
+    } else if (
+      actualRequest.body &&
+      typeof actualRequest.body === 'object' &&
+      Object.keys(actualRequest.body).length > 0
+    ) {
       // v3 style - body is already parsed and has content
       body = actualRequest.body;
       log('Using v3 style body', { bodyKeys: Object.keys(body) });
     } else if (typeof actualRequest.text === 'function') {
       // v4 style fallback - try text() and parse
       const text = await actualRequest.text();
-      log('Got text from request', { textLength: text?.length, textPreview: text?.substring(0, 100) });
+      log('Got text from request', {
+        textLength: text?.length,
+        textPreview: text?.substring(0, 100),
+      });
       try {
         body = JSON.parse(text);
         log('Parsed JSON from text()', { bodyKeys: Object.keys(body) });
@@ -1298,7 +1311,7 @@ module.exports = async function (request, context) {
         log('Failed to parse JSON from text', { error: e.message });
       }
     }
-    
+
     if (!body || Object.keys(body).length === 0) {
       log('No request body provided or body is empty');
       return sendResponse({

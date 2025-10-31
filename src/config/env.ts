@@ -42,12 +42,12 @@ export interface EnvConfig {
     accounts: {
       autoCreate: boolean;
       types: {
-        stripeClearing: { accountType: string; accountSubType: string; };
-        operatingBank: { accountType: string; accountSubType: string; };
-        revenue: { accountType: string; accountSubType: string; };
-        fees: { accountType: string; accountSubType: string; };
-        refunds: { accountType: string; accountSubType: string; };
-        disputeLosses: { accountType: string; accountSubType: string; };
+        stripeClearing: { accountType: string; accountSubType: string };
+        operatingBank: { accountType: string; accountSubType: string };
+        revenue: { accountType: string; accountSubType: string };
+        fees: { accountType: string; accountSubType: string };
+        refunds: { accountType: string; accountSubType: string };
+        disputeLosses: { accountType: string; accountSubType: string };
       };
     };
   };
@@ -301,52 +301,64 @@ function loadEnv(): EnvConfig {
   // Account type configurations
   const accountTypes = {
     stripeClearing: {
-      accountType: resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_TYPE', {
-        defaultValue: 'Bank',
-      }) ?? 'Bank',
-      accountSubType: resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_SUBTYPE', {
-        defaultValue: 'CashOnHand',
-      }) ?? 'CashOnHand',
+      accountType:
+        resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_TYPE', {
+          defaultValue: 'Bank',
+        }) ?? 'Bank',
+      accountSubType:
+        resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_SUBTYPE', {
+          defaultValue: 'CashOnHand',
+        }) ?? 'CashOnHand',
     },
     operatingBank: {
-      accountType: resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_TYPE', {
-        defaultValue: 'Bank',
-      }) ?? 'Bank',
-      accountSubType: resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_SUBTYPE', {
-        defaultValue: 'Checking',
-      }) ?? 'Checking',
+      accountType:
+        resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_TYPE', {
+          defaultValue: 'Bank',
+        }) ?? 'Bank',
+      accountSubType:
+        resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_SUBTYPE', {
+          defaultValue: 'Checking',
+        }) ?? 'Checking',
     },
     revenue: {
-      accountType: resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_TYPE', {
-        defaultValue: 'Income',
-      }) ?? 'Income',
-      accountSubType: resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_SUBTYPE', {
-        defaultValue: 'ServiceFeeIncome',
-      }) ?? 'ServiceFeeIncome',
+      accountType:
+        resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_TYPE', {
+          defaultValue: 'Income',
+        }) ?? 'Income',
+      accountSubType:
+        resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_SUBTYPE', {
+          defaultValue: 'ServiceFeeIncome',
+        }) ?? 'ServiceFeeIncome',
     },
     fees: {
-      accountType: resolveEnv('ACCOUNTING_FEES_ACCOUNT_TYPE', {
-        defaultValue: 'Expense',
-      }) ?? 'Expense',
-      accountSubType: resolveEnv('ACCOUNTING_FEES_ACCOUNT_SUBTYPE', {
-        defaultValue: 'OtherMiscellaneousExpense',
-      }) ?? 'OtherMiscellaneousExpense',
+      accountType:
+        resolveEnv('ACCOUNTING_FEES_ACCOUNT_TYPE', {
+          defaultValue: 'Expense',
+        }) ?? 'Expense',
+      accountSubType:
+        resolveEnv('ACCOUNTING_FEES_ACCOUNT_SUBTYPE', {
+          defaultValue: 'OtherMiscellaneousExpense',
+        }) ?? 'OtherMiscellaneousExpense',
     },
     refunds: {
-      accountType: resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_TYPE', {
-        defaultValue: 'Expense',
-      }) ?? 'Expense',
-      accountSubType: resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_SUBTYPE', {
-        defaultValue: 'OtherMiscellaneousExpense',
-      }) ?? 'OtherMiscellaneousExpense',
+      accountType:
+        resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_TYPE', {
+          defaultValue: 'Expense',
+        }) ?? 'Expense',
+      accountSubType:
+        resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_SUBTYPE', {
+          defaultValue: 'OtherMiscellaneousExpense',
+        }) ?? 'OtherMiscellaneousExpense',
     },
     disputeLosses: {
-      accountType: resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_TYPE', {
-        defaultValue: 'Expense',
-      }) ?? 'Expense',
-      accountSubType: resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_SUBTYPE', {
-        defaultValue: 'OtherMiscellaneousExpense',
-      }) ?? 'OtherMiscellaneousExpense',
+      accountType:
+        resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_TYPE', {
+          defaultValue: 'Expense',
+        }) ?? 'Expense',
+      accountSubType:
+        resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_SUBTYPE', {
+          defaultValue: 'OtherMiscellaneousExpense',
+        }) ?? 'OtherMiscellaneousExpense',
     },
   };
 

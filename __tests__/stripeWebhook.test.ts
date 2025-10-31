@@ -161,7 +161,10 @@ describe('stripeWebhook', () => {
     expect(store.isProcessed).toHaveBeenCalledWith('evt_test');
     expect(store.markProcessed).not.toHaveBeenCalled();
     expect(result.status).toBe(200);
-    expect(result.jsonBody).toMatchObject({ duplicate: true, eventType: 'checkout.session.completed' });
+    expect(result.jsonBody).toMatchObject({
+      duplicate: true,
+      eventType: 'checkout.session.completed',
+    });
   });
 
   it('processes payment_intent.succeeded events and posts to accounting', async () => {
@@ -220,7 +223,9 @@ describe('stripeWebhook', () => {
       markPostedToQbo: vi.fn().mockResolvedValue(undefined),
       findTransactionIdByExternalId: vi
         .fn()
-        .mockImplementation(async (field: string) => (field === 'stripe_checkout_session_id__c' ? 'sf_existing' : null)),
+        .mockImplementation(async (field: string) =>
+          field === 'stripe_checkout_session_id__c' ? 'sf_existing' : null
+        ),
     };
 
     const stripe = {
@@ -244,7 +249,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_checkout_session_id__c',
       'cs_test',
-      'General',
+      'General'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -252,7 +257,7 @@ describe('stripeWebhook', () => {
         stripe_checkout_session_id__c: 'cs_test',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_existing' },
+      { overrideId: 'sf_existing' }
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -264,20 +269,21 @@ describe('stripeWebhook', () => {
           customer: expect.objectContaining({ id: 'cus_123' }),
           checkoutSession: expect.objectContaining({ id: 'cs_test' }),
         }),
-      }),
+      })
     );
     const chargePostingArgs = accounting.postChargeToQbo.mock.calls[0]?.[0];
     expect(chargePostingArgs?.date).toBeInstanceOf(Date);
-    expect(chargePostingArgs?.date?.toISOString()).toBe(
-      new Date(1_700_000_000_000).toISOString(),
-    );
+    expect(chargePostingArgs?.date?.toISOString()).toBe(new Date(1_700_000_000_000).toISOString());
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_1', {
       id: '123',
       type: 'journal-entry',
     });
     expect(store.markProcessed).toHaveBeenCalledWith('evt_test');
     expect(result.status).toBe(200);
-    expect(result.jsonBody).toMatchObject({ received: true, eventType: 'payment_intent.succeeded' });
+    expect(result.jsonBody).toMatchObject({
+      received: true,
+      eventType: 'payment_intent.succeeded',
+    });
   });
 
   it('locates pending subscription transactions by subscription id when available', async () => {
@@ -328,7 +334,7 @@ describe('stripeWebhook', () => {
       findTransactionIdByExternalId: vi
         .fn()
         .mockImplementation(async (field: string, value: string, recordType?: string) =>
-          field === 'stripe_subscription_id__c' ? 'sf_subscription' : null,
+          field === 'stripe_subscription_id__c' ? 'sf_subscription' : null
         ),
     };
 
@@ -353,7 +359,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       'sub_123',
-      'General',
+      'General'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -361,7 +367,7 @@ describe('stripeWebhook', () => {
         stripe_subscription_id__c: 'sub_123',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_subscription' },
+      { overrideId: 'sf_subscription' }
     );
   });
 
@@ -445,11 +451,11 @@ describe('stripeWebhook', () => {
               {
                 price: {
                   product: 'prod_test',
-                  nickname: 'Test Product'
-                }
-              }
-            ]
-          }
+                  nickname: 'Test Product',
+                },
+              },
+            ],
+          },
         }),
       },
     };
@@ -467,7 +473,7 @@ describe('stripeWebhook', () => {
       findTransactionIdByExternalId: vi
         .fn()
         .mockImplementation(async (field: string) =>
-          field === 'stripe_subscription_id__c' ? 'sf_pending_sub' : null,
+          field === 'stripe_subscription_id__c' ? 'sf_pending_sub' : null
         ),
     };
 
@@ -492,7 +498,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       'sub_999',
-      'General',
+      'General'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -501,7 +507,7 @@ describe('stripeWebhook', () => {
         stripe_subscription_id__c: 'sub_999',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_pending_sub' },
+      { overrideId: 'sf_pending_sub' }
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
     expect(stripeClient.invoices.retrieve).toHaveBeenCalledWith('in_456');
@@ -586,7 +592,7 @@ describe('stripeWebhook', () => {
       findTransactionIdByExternalId: vi
         .fn()
         .mockImplementation(async (field: string) =>
-          field === 'stripe_subscription_id__c' ? 'sf_sub' : null,
+          field === 'stripe_subscription_id__c' ? 'sf_sub' : null
         ),
     };
 
@@ -621,7 +627,7 @@ describe('stripeWebhook', () => {
         stripe_subscription_id__c: 'sub_paid',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_sub' },
+      { overrideId: 'sf_sub' }
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
     expect(store.markProcessed).toHaveBeenCalledWith('evt_invoice_paid');

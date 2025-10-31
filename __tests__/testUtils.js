@@ -42,7 +42,7 @@ const createHttpRequest = (options = {}) => {
 
   // Store body for async access
   let bodyData = body;
-  
+
   const request = {
     method,
     url,
@@ -51,13 +51,17 @@ const createHttpRequest = (options = {}) => {
     query: new URLSearchParams(),
     // v4 async methods
     json: async () => bodyData,
-    text: async () => typeof bodyData === 'string' ? bodyData : JSON.stringify(bodyData),
+    text: async () => (typeof bodyData === 'string' ? bodyData : JSON.stringify(bodyData)),
     arrayBuffer: async () => {
       const text = typeof bodyData === 'string' ? bodyData : JSON.stringify(bodyData);
       return new TextEncoder().encode(text).buffer;
     },
-    formData: async () => { throw new Error('FormData not implemented in test mock'); },
-    blob: async () => { throw new Error('Blob not implemented in test mock'); },
+    formData: async () => {
+      throw new Error('FormData not implemented in test mock');
+    },
+    blob: async () => {
+      throw new Error('Blob not implemented in test mock');
+    },
   };
 
   return request;
@@ -68,7 +72,7 @@ const createHttpRequest = (options = {}) => {
 // but when testing directly we need to do this ourselves
 const normalizeResponse = (response) => {
   if (!response) return response;
-  
+
   // If response has jsonBody, convert to body
   if (response.jsonBody && !response.body) {
     return {
@@ -76,7 +80,7 @@ const normalizeResponse = (response) => {
       body: JSON.stringify(response.jsonBody),
     };
   }
-  
+
   return response;
 };
 

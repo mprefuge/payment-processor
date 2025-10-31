@@ -188,7 +188,10 @@ export const getProductNameFromCharge = async (
         if (invoice.lines?.data && invoice.lines.data.length > 0) {
           const firstLine = invoice.lines.data[0];
           if (firstLine.price?.product) {
-            const productId = typeof firstLine.price.product === 'string' ? firstLine.price.product : firstLine.price.product.id;
+            const productId =
+              typeof firstLine.price.product === 'string'
+                ? firstLine.price.product
+                : firstLine.price.product.id;
             if (productId) {
               const product = await stripe.products.retrieve(productId);
               if (product?.name) {
@@ -234,10 +237,10 @@ export const getProductNameFromCharge = async (
 
       logger('[getProductNameFromCharge] Analyzing payment intent for product name', {
         paymentIntentId: pi?.id,
-        hasPaymentDetails: !!(pi?.payment_details),
+        hasPaymentDetails: !!pi?.payment_details,
         paymentDetailsKeys: pi?.payment_details ? Object.keys(pi.payment_details) : [],
         orderReference: pi?.payment_details?.order_reference,
-        hasMetadata: !!(pi?.metadata),
+        hasMetadata: !!pi?.metadata,
         metadataKeys: pi?.metadata ? Object.keys(pi.metadata) : [],
       });
 
@@ -254,19 +257,25 @@ export const getProductNameFromCharge = async (
           try {
             const product = await stripe.products.retrieve(orderRef);
             if (product?.name) {
-              logger('[getProductNameFromCharge] Found product name from payment_details.order_reference', {
-                paymentIntentId: pi.id,
-                productId: product.id,
-                productName: product.name,
-              });
+              logger(
+                '[getProductNameFromCharge] Found product name from payment_details.order_reference',
+                {
+                  paymentIntentId: pi.id,
+                  productId: product.id,
+                  productName: product.name,
+                }
+              );
               return product.name;
             }
           } catch (error) {
-            logger('[getProductNameFromCharge] Failed to retrieve product from payment_details.order_reference', {
-              paymentIntentId: pi.id,
-              orderRef,
-              error: error instanceof Error ? error.message : String(error),
-            });
+            logger(
+              '[getProductNameFromCharge] Failed to retrieve product from payment_details.order_reference',
+              {
+                paymentIntentId: pi.id,
+                orderRef,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            );
           }
         }
       }
@@ -281,19 +290,25 @@ export const getProductNameFromCharge = async (
           try {
             const product = await stripe.products.retrieve(orderRef);
             if (product?.name) {
-              logger('[getProductNameFromCharge] Found product name from payment intent metadata.order_reference', {
-                paymentIntentId: pi.id,
-                productId: product.id,
-                productName: product.name,
-              });
+              logger(
+                '[getProductNameFromCharge] Found product name from payment intent metadata.order_reference',
+                {
+                  paymentIntentId: pi.id,
+                  productId: product.id,
+                  productName: product.name,
+                }
+              );
               return product.name;
             }
           } catch (error) {
-            logger('[getProductNameFromCharge] Failed to retrieve product from PI metadata.order_reference', {
-              paymentIntentId: pi.id,
-              orderRef,
-              error: error instanceof Error ? error.message : String(error),
-            });
+            logger(
+              '[getProductNameFromCharge] Failed to retrieve product from PI metadata.order_reference',
+              {
+                paymentIntentId: pi.id,
+                orderRef,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            );
           }
         }
 
@@ -302,19 +317,25 @@ export const getProductNameFromCharge = async (
           try {
             const product = await stripe.products.retrieve(productRef);
             if (product?.name) {
-              logger('[getProductNameFromCharge] Found product name from payment intent metadata.product', {
-                paymentIntentId: pi.id,
-                productId: product.id,
-                productName: product.name,
-              });
+              logger(
+                '[getProductNameFromCharge] Found product name from payment intent metadata.product',
+                {
+                  paymentIntentId: pi.id,
+                  productId: product.id,
+                  productName: product.name,
+                }
+              );
               return product.name;
             }
           } catch (error) {
-            logger('[getProductNameFromCharge] Failed to retrieve product from PI metadata.product', {
-              paymentIntentId: pi.id,
-              productRef,
-              error: error instanceof Error ? error.message : String(error),
-            });
+            logger(
+              '[getProductNameFromCharge] Failed to retrieve product from PI metadata.product',
+              {
+                paymentIntentId: pi.id,
+                productRef,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            );
           }
         }
       }
@@ -330,11 +351,14 @@ export const getProductNameFromCharge = async (
             if (firstLine?.price?.product) {
               const product = firstLine.price.product;
               if (typeof product === 'object' && product.name) {
-                logger('[getProductNameFromCharge] Found product name from payment intent invoice', {
-                  paymentIntentId: pi.id,
-                  productId: product.id,
-                  productName: product.name,
-                });
+                logger(
+                  '[getProductNameFromCharge] Found product name from payment intent invoice',
+                  {
+                    paymentIntentId: pi.id,
+                    productId: product.id,
+                    productName: product.name,
+                  }
+                );
                 return product.name;
               }
             }
@@ -347,7 +371,7 @@ export const getProductNameFromCharge = async (
     if (charge.metadata) {
       const orderRef = charge.metadata.order_reference;
       const productRef = charge.metadata.product;
-      
+
       logger('[getProductNameFromCharge] Checking charge metadata for product', {
         chargeId: charge.id,
         orderRef,
@@ -359,19 +383,25 @@ export const getProductNameFromCharge = async (
         try {
           const product = await stripe.products.retrieve(orderRef);
           if (product?.name) {
-            logger('[getProductNameFromCharge] Found product name from charge metadata.order_reference', {
-              chargeId: charge.id,
-              productId: product.id,
-              productName: product.name,
-            });
+            logger(
+              '[getProductNameFromCharge] Found product name from charge metadata.order_reference',
+              {
+                chargeId: charge.id,
+                productId: product.id,
+                productName: product.name,
+              }
+            );
             return product.name;
           }
         } catch (error) {
-          logger('[getProductNameFromCharge] Failed to retrieve product from charge metadata.order_reference', {
-            chargeId: charge.id,
-            orderRef,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          logger(
+            '[getProductNameFromCharge] Failed to retrieve product from charge metadata.order_reference',
+            {
+              chargeId: charge.id,
+              orderRef,
+              error: error instanceof Error ? error.message : String(error),
+            }
+          );
         }
       }
 
@@ -388,11 +418,14 @@ export const getProductNameFromCharge = async (
             return product.name;
           }
         } catch (error) {
-          logger('[getProductNameFromCharge] Failed to retrieve product from charge metadata.product', {
-            chargeId: charge.id,
-            productRef,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          logger(
+            '[getProductNameFromCharge] Failed to retrieve product from charge metadata.product',
+            {
+              chargeId: charge.id,
+              productRef,
+              error: error instanceof Error ? error.message : String(error),
+            }
+          );
         }
       }
     }
@@ -421,7 +454,7 @@ export const getFrequencyFromSubscription = async (
 ): Promise<string | null> => {
   try {
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-    
+
     if (subscription.items?.data && subscription.items.data.length > 0) {
       const firstItem = subscription.items.data[0];
       if (firstItem.price?.recurring?.interval) {
@@ -433,7 +466,7 @@ export const getFrequencyFromSubscription = async (
         return interval;
       }
     }
-    
+
     logger('[getFrequencyFromSubscription] No frequency found in subscription', {
       subscriptionId,
       hasItems: !!subscription.items?.data?.length,

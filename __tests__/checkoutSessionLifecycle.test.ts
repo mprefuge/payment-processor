@@ -84,7 +84,10 @@ describe('checkout session lifecycle', () => {
 
     expect(upsertPending).toHaveBeenCalled();
     const upsertCall = upsertPending.mock.calls[0]?.[0] ?? {};
-    expect(upsertCall).toMatchObject({ Status__c: 'pending', Stripe_Checkout_Session_Id__c: 'cs_lifecycle' });
+    expect(upsertCall).toMatchObject({
+      Status__c: 'pending',
+      Stripe_Checkout_Session_Id__c: 'cs_lifecycle',
+    });
 
     // Simulate waiting one minute (fast-forward time)
     const wait = new Promise((resolve) => setTimeout(resolve, 60_000));
@@ -118,15 +121,43 @@ describe('checkout session lifecycle', () => {
 
     const stripeClient = {
       paymentIntents: { retrieve: vi.fn().mockResolvedValue(paymentIntent) },
-  balanceTransactions: { retrieve: vi.fn().mockResolvedValue({ id: 'bt_lifecycle', amount: 5000, fee: 150, net: 4850, currency: 'usd', created: Math.floor(Date.now() / 1000), type: 'charge' }) },
-      customers: { retrieve: vi.fn().mockResolvedValue({ id: 'cus_lifecycle', email: 'donor@example.com' }) },
-      checkout: { sessions: { list: vi.fn().mockResolvedValue({ data: [{ id: 'cs_lifecycle', payment_intent: 'pi_lifecycle' }] }) } },
+      balanceTransactions: {
+        retrieve: vi
+          .fn()
+          .mockResolvedValue({
+            id: 'bt_lifecycle',
+            amount: 5000,
+            fee: 150,
+            net: 4850,
+            currency: 'usd',
+            created: Math.floor(Date.now() / 1000),
+            type: 'charge',
+          }),
+      },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({ id: 'cus_lifecycle', email: 'donor@example.com' }),
+      },
+      checkout: {
+        sessions: {
+          list: vi
+            .fn()
+            .mockResolvedValue({ data: [{ id: 'cs_lifecycle', payment_intent: 'pi_lifecycle' }] }),
+        },
+      },
       invoices: { retrieve: vi.fn() },
       charges: { retrieve: vi.fn() },
     };
 
     const stripeDeps = {
-      verifyEvent: vi.fn(() => ({ id: 'evt_pi', type: 'payment_intent.succeeded', data: { object: paymentIntent }, livemode: false } as unknown as Stripe.Event)),
+      verifyEvent: vi.fn(
+        () =>
+          ({
+            id: 'evt_pi',
+            type: 'payment_intent.succeeded',
+            data: { object: paymentIntent },
+            livemode: false,
+          }) as unknown as Stripe.Event
+      ),
       getClient: vi.fn(() => stripeClient as unknown as Stripe),
     };
 
@@ -171,14 +202,22 @@ describe('checkout session lifecycle', () => {
       },
     };
 
-    const event = { id: 'evt_pi', type: 'payment_intent.succeeded', data: { object: paymentIntent }, livemode: false } as unknown as Stripe.Event;
+    const event = {
+      id: 'evt_pi',
+      type: 'payment_intent.succeeded',
+      data: { object: paymentIntent },
+      livemode: false,
+    } as unknown as Stripe.Event;
     await paymentIntentsHandlers.handlePaymentIntentSucceeded(context, event, deps);
 
     // Expect an upsert to set status to paid using payment_intent external id and override the existing SF record
     expect(upsertByExternal).toHaveBeenCalled();
     const upsertArgs = upsertByExternal.mock.calls[0];
     // First arg: payload, second: external id field, third: options
-    expect(upsertArgs[0]).toMatchObject({ status__c: 'paid', stripe_payment_intent_id__c: 'pi_lifecycle' });
+    expect(upsertArgs[0]).toMatchObject({
+      status__c: 'paid',
+      stripe_payment_intent_id__c: 'pi_lifecycle',
+    });
     expect(upsertArgs[1]).toBe('stripe_payment_intent_id__c');
     // If override provided, it should use the existing SF id
     // (paymentIntents handler passes { overrideId } when found by checkout session)

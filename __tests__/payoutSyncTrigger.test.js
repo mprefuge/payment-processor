@@ -49,7 +49,7 @@ describe('payoutSyncTrigger', () => {
     const balanceTransactionsList = vi.fn().mockResolvedValue({
       data: [
         { id: 'bt_1', amount: 1000, currency: 'usd', type: 'charge', status: 'available' },
-        { id: 'bt_2', amount: 1500, currency: 'usd', type: 'charge', status: 'available' }
+        { id: 'bt_2', amount: 1500, currency: 'usd', type: 'charge', status: 'available' },
       ],
       has_more: false,
     });
@@ -344,7 +344,9 @@ describe('payoutSyncTrigger', () => {
     expect(result.jsonBody.summary.processed).toBe(0);
     expect(result.jsonBody.summary.skipped).toBe(3);
     expect(result.jsonBody.skipped).toHaveLength(3);
-    expect(result.jsonBody.skipped.every(item => item.reason === 'invalid_payout_object')).toBe(true);
+    expect(result.jsonBody.skipped.every((item) => item.reason === 'invalid_payout_object')).toBe(
+      true
+    );
   });
 
   it('skips payouts with missing or invalid id', async () => {
@@ -395,7 +397,7 @@ describe('payoutSyncTrigger', () => {
     expect(result.jsonBody.summary.processed).toBe(0);
     expect(result.jsonBody.summary.skipped).toBe(3);
     expect(result.jsonBody.skipped).toHaveLength(3);
-    expect(result.jsonBody.skipped.every(item => item.reason === 'missing_payout_id')).toBe(true);
+    expect(result.jsonBody.skipped.every((item) => item.reason === 'missing_payout_id')).toBe(true);
   });
 
   it('skips payouts with missing arrival_date', async () => {

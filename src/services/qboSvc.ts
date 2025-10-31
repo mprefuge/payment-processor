@@ -440,8 +440,11 @@ const deriveSalesReceiptCustomer = (source: StripeCustomerContext): EnsureCustom
   // Extract customer category from charge or checkout session metadata
   // Use 'category' field which represents customer categorization, not 'transactionType' which is the item/product type
   const chargeMetadata = source.charge?.metadata as Record<string, unknown> | null | undefined;
-  const checkoutMetadata = source.checkoutSession?.metadata as Record<string, unknown> | null | undefined;
-  
+  const checkoutMetadata = source.checkoutSession?.metadata as
+    | Record<string, unknown>
+    | null
+    | undefined;
+
   const customerCategory =
     toTrimmed(chargeMetadata?.category as string | undefined) ||
     toTrimmed(chargeMetadata?.Category as string | undefined) ||
@@ -570,7 +573,7 @@ const getCoverFeesInfo = (
   // Check for cover_fees flag
   const coverFeesRaw = metadata.cover_fees || metadata.Cover_Fees__c || metadata.cover_fees__c;
   let enabled = false;
-  
+
   if (typeof coverFeesRaw === 'boolean') {
     enabled = coverFeesRaw;
   } else if (typeof coverFeesRaw === 'string') {
@@ -583,13 +586,11 @@ const getCoverFeesInfo = (
   }
 
   // Get cover fees amount
-  const amountRaw = 
-    metadata.cover_fees_amount || 
-    metadata.Cover_Fees_Amount__c || 
-    metadata.cover_fees_amount__c;
-  
+  const amountRaw =
+    metadata.cover_fees_amount || metadata.Cover_Fees_Amount__c || metadata.cover_fees_amount__c;
+
   let amountCents = 0;
-  
+
   if (typeof amountRaw === 'number') {
     // Assume it's in cents if it's a whole number, dollars if it has decimals
     amountCents = Math.round(amountRaw >= 100 ? amountRaw : amountRaw * 100);
@@ -1182,8 +1183,7 @@ const createAccountRef = (input: string): AccountRefWithMetadata => {
     // Look up the actual config string from environment
     const accounts = env.quickBooks.accounts as Record<string, string>;
     const accountKey = Object.keys(accounts).find(
-      key => accounts[key] === input || 
-             accounts[key].endsWith(`|${input}`)
+      (key) => accounts[key] === input || accounts[key].endsWith(`|${input}`)
     );
     if (accountKey) {
       actualInput = accounts[accountKey];
@@ -1279,9 +1279,11 @@ export const buildSalesReceipt = ({
   // Main line item (base amount if cover fees exist, otherwise full amount)
   const mainAmount = centsToDollars(baseAmount > 0 ? baseAmount : amount);
   if (!Number.isFinite(mainAmount)) {
-    throw new Error(`Invalid amount calculated for sales receipt: ${mainAmount} (from ${baseAmount > 0 ? baseAmount : amount} cents)`);
+    throw new Error(
+      `Invalid amount calculated for sales receipt: ${mainAmount} (from ${baseAmount > 0 ? baseAmount : amount} cents)`
+    );
   }
-  
+
   lines.push({
     Amount: mainAmount,
     DetailType: 'SalesItemLineDetail',
@@ -1295,9 +1297,11 @@ export const buildSalesReceipt = ({
   if (coverFees > 0) {
     const coverFeesAmount = centsToDollars(coverFees);
     if (!Number.isFinite(coverFeesAmount)) {
-      throw new Error(`Invalid cover fees amount calculated for sales receipt: ${coverFeesAmount} (from ${coverFees} cents)`);
+      throw new Error(
+        `Invalid cover fees amount calculated for sales receipt: ${coverFeesAmount} (from ${coverFees} cents)`
+      );
     }
-    
+
     lines.push({
       Amount: coverFeesAmount,
       DetailType: 'SalesItemLineDetail',
@@ -1611,17 +1615,28 @@ const configuredRefundAccountName = (() => {
 })();
 
 // Helper function to get account configuration by name
-const getAccountConfig = (accountName: string): { accountType: string; accountSubType: string } | null => {
+const getAccountConfig = (
+  accountName: string
+): { accountType: string; accountSubType: string } | null => {
   const normalizedName = accountName.trim().toLowerCase();
-  
+
   // Check each configured account
   const accountMappings = [
-    { name: env.quickBooks.accounts.stripeClearing, config: env.accounting.accounts.types.stripeClearing },
-    { name: env.quickBooks.accounts.operatingBank, config: env.accounting.accounts.types.operatingBank },
+    {
+      name: env.quickBooks.accounts.stripeClearing,
+      config: env.accounting.accounts.types.stripeClearing,
+    },
+    {
+      name: env.quickBooks.accounts.operatingBank,
+      config: env.accounting.accounts.types.operatingBank,
+    },
     { name: env.quickBooks.accounts.revenue, config: env.accounting.accounts.types.revenue },
     { name: env.quickBooks.accounts.fees, config: env.accounting.accounts.types.fees },
     { name: env.quickBooks.accounts.refunds, config: env.accounting.accounts.types.refunds },
-    { name: env.quickBooks.accounts.disputeLosses, config: env.accounting.accounts.types.disputeLosses },
+    {
+      name: env.quickBooks.accounts.disputeLosses,
+      config: env.accounting.accounts.types.disputeLosses,
+    },
   ];
 
   for (const mapping of accountMappings) {
@@ -2162,20 +2177,20 @@ const checkForDuplicate = async (
 
     // Query QuickBooks for existing document with this DocNumber
     const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
-    
+
     logger.debug('[QBO] Checking for duplicate', { entity, docNumber, queryString });
-    
+
     const result = await query<{
       QueryResponse: { [key: string]: Array<{ Id: string }> };
     }>(queryString, options);
 
     const items = result?.QueryResponse?.[entityName];
     if (items && items.length > 0) {
-      logger.info('[QBO] Duplicate document found', { 
-        entity, 
-        docNumber, 
+      logger.info('[QBO] Duplicate document found', {
+        entity,
+        docNumber,
         existingId: items[0].Id,
-        count: items.length 
+        count: items.length,
       });
       return items[0].Id;
     }
@@ -2186,10 +2201,10 @@ const checkForDuplicate = async (
     // If query fails, log the error but don't block the operation
     // Better to risk a duplicate than to fail the transaction
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.warn('[QBO] Duplicate check failed, proceeding with post', { 
-      entity, 
-      docNumber, 
-      error: errorMessage 
+    logger.warn('[QBO] Duplicate check failed, proceeding with post', {
+      entity,
+      docNumber,
+      error: errorMessage,
     });
     return null;
   }
@@ -2213,47 +2228,51 @@ const checkForPayoutDeposit = async (
   try {
     const formattedDate = normalizeDate(date);
     const amountDollars = centsToDollars(amount);
-    
+
     // Query for deposits with the same date, then check amount in code
     // QuickBooks query language has limitations with decimal comparisons
     const queryString = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
-    
-    logger.debug('[QBO] Checking for existing payout deposit by date', { 
-      payoutId, 
-      date: formattedDate, 
-      amount: amountDollars
+
+    logger.debug('[QBO] Checking for existing payout deposit by date', {
+      payoutId,
+      date: formattedDate,
+      amount: amountDollars,
     });
-    
+
     const result = await query<{
-      QueryResponse: { Deposit?: Array<{ Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number }> };
+      QueryResponse: {
+        Deposit?: Array<{ Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number }>;
+      };
     }>(queryString, options);
 
     const deposits = result?.QueryResponse?.Deposit;
     if (deposits && deposits.length > 0) {
       // Find deposits with matching amount
-      const matchingDeposit = deposits.find(deposit => 
-        deposit.TotalAmt === amountDollars
-      );
-      
+      const matchingDeposit = deposits.find((deposit) => deposit.TotalAmt === amountDollars);
+
       if (matchingDeposit) {
-        logger.info('[QBO] Found existing deposit for payout by date and amount check', { 
-          payoutId, 
+        logger.info('[QBO] Found existing deposit for payout by date and amount check', {
+          payoutId,
           existingId: matchingDeposit.Id,
           docNumber: matchingDeposit.DocNumber,
           date: matchingDeposit.TxnDate,
-          amount: matchingDeposit.TotalAmt
+          amount: matchingDeposit.TotalAmt,
         });
         return matchingDeposit.Id;
       }
     }
 
-    logger.debug('[QBO] No existing payout deposit found by date and amount check', { payoutId, date: formattedDate, amount: amountDollars });
+    logger.debug('[QBO] No existing payout deposit found by date and amount check', {
+      payoutId,
+      date: formattedDate,
+      amount: amountDollars,
+    });
     return null;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.warn('[QBO] Payout deposit check failed', { 
-      payoutId, 
-      error: errorMessage 
+    logger.warn('[QBO] Payout deposit check failed', {
+      payoutId,
+      error: errorMessage,
     });
     return null;
   }
@@ -2270,15 +2289,15 @@ const postToQbo = async <T extends QuickBooksDocType>(
 ): Promise<PostResult> => {
   // Extract DocNumber from payload for duplicate checking
   const docNumber = (payload as { DocNumber?: string }).DocNumber;
-  
+
   // Check for duplicate before posting
   if (docNumber) {
     const existingId = await checkForDuplicate(entity, docNumber, options);
     if (existingId) {
-      logger.info('[QBO] Returning existing document instead of creating duplicate', { 
-        entity, 
-        docNumber, 
-        existingId 
+      logger.info('[QBO] Returning existing document instead of creating duplicate', {
+        entity,
+        docNumber,
+        existingId,
       });
       return { id: existingId, type: entity, raw: { duplicate: true, existingId } };
     }
@@ -2312,7 +2331,7 @@ const postToQbo = async <T extends QuickBooksDocType>(
   logger.info('[QBO] Sending payload to QuickBooks', {
     entity,
     docNumber,
-    payload: JSON.stringify(payload, null, 2)
+    payload: JSON.stringify(payload, null, 2),
   });
 
   const executePost = () => context.request(url, buildRequestInit());
@@ -2321,39 +2340,43 @@ const postToQbo = async <T extends QuickBooksDocType>(
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
-    
+
     // Check for duplicate document number error from QuickBooks
     if (
       response.status === 400 &&
       errorText &&
       (/Duplicate Document Number/i.test(errorText) || /DocNumber.*already exists/i.test(errorText))
     ) {
-      logger.warn('[QBO] QuickBooks rejected duplicate DocNumber', { 
-        entity, 
+      logger.warn('[QBO] QuickBooks rejected duplicate DocNumber', {
+        entity,
         docNumber,
-        error: errorText 
+        error: errorText,
       });
-      
+
       // Try to find the existing document
       if (docNumber) {
         const existingId = await checkForDuplicate(entity, docNumber, options);
         if (existingId) {
-          logger.info('[QBO] Found existing document after duplicate error', { 
-            entity, 
-            docNumber, 
-            existingId 
+          logger.info('[QBO] Found existing document after duplicate error', {
+            entity,
+            docNumber,
+            existingId,
           });
-          return { id: existingId, type: entity, raw: { duplicate: true, existingId, recoveredFromError: true } };
+          return {
+            id: existingId,
+            type: entity,
+            raw: { duplicate: true, existingId, recoveredFromError: true },
+          };
         }
       }
-      
+
       // If we can't find the duplicate, throw a more informative error
       throw new Error(
         `QuickBooks rejected duplicate DocNumber ${docNumber ?? 'unknown'} for ${entity}, but could not locate existing document. ` +
-        `Original error: ${errorText ?? response.statusText}`
+          `Original error: ${errorText ?? response.statusText}`
       );
     }
-    
+
     const retryTargets = errorText ? parseInvalidReferenceTargets(errorText) : null;
 
     const accountsMarked = retryTargets?.accounts
@@ -2507,9 +2530,7 @@ export const postChargeToQbo = async ({
 
     // Build description as "Category - TransactionType"
     const category = getCheckoutCategory(stripe?.checkoutSession);
-    const description = category 
-      ? `${category} - ${transactionTypeName}` 
-      : transactionTypeName;
+    const description = category ? `${category} - ${transactionTypeName}` : transactionTypeName;
 
     // Get cover fees information
     const coverFeesInfo = getCoverFeesInfo(stripe?.checkoutSession);
@@ -2631,17 +2652,17 @@ export const postPayoutToQbo = async ({
     try {
       const existingDepositId = await checkForPayoutDeposit(payoutId, date, payoutAmount, options);
       if (existingDepositId) {
-        logger.info('[QBO] Found existing deposit for payout', { 
-          payoutId, 
-          existingId: existingDepositId 
+        logger.info('[QBO] Found existing deposit for payout', {
+          payoutId,
+          existingId: existingDepositId,
         });
         return { qboId: existingDepositId, type: 'bank-deposit' };
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.warn('[QBO] Failed to check for existing payout deposit, proceeding with post', { 
-        payoutId, 
-        error: errorMessage 
+      logger.warn('[QBO] Failed to check for existing payout deposit, proceeding with post', {
+        payoutId,
+        error: errorMessage,
       });
     }
   }
@@ -2842,7 +2863,9 @@ export const ensureCustomer = async (
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Failed to create customer: ${response.status} ${response.statusText} - ${errorText}`);
+    throw new Error(
+      `Failed to create customer: ${response.status} ${response.statusText} - ${errorText}`
+    );
   }
 
   const result = await response.json();
@@ -2881,7 +2904,7 @@ export const ensureAccount = async (
     const data = await queryResult.json();
     if (data.QueryResponse?.Account?.length > 0) {
       const account = data.QueryResponse.Account[0];
-      
+
       // Log the account type for debugging
       logger.info('Found existing account', {
         accountName,
@@ -2893,7 +2916,7 @@ export const ensureAccount = async (
         classification: account.Classification,
         expectedType: accountType,
       });
-      
+
       // Check if account is active
       if (account.Active === false) {
         const errorMsg = `Account "${accountName}" exists but is inactive. Please activate the account in QuickBooks or use a different account.`;
@@ -2904,7 +2927,7 @@ export const ensureAccount = async (
         });
         throw new Error(errorMsg);
       }
-      
+
       // For bank accounts, check if the subtype is appropriate for deposits
       if (accountType === 'Bank' && account.AccountType === 'Bank') {
         const validBankSubTypes = ['Checking', 'Savings', 'MoneyMarket'];
@@ -2919,7 +2942,7 @@ export const ensureAccount = async (
           throw new Error(errorMsg);
         }
       }
-      
+
       // If account type is specified and doesn't match, throw an error
       if (accountType && account.AccountType !== accountType) {
         const errorMsg = `Account "${accountName}" exists but is type "${account.AccountType}". For this operation, a "${accountType}" account is required. Please use a different account or create a new one with the correct type.`;
@@ -2930,7 +2953,7 @@ export const ensureAccount = async (
         });
         throw new Error(errorMsg);
       }
-      
+
       return {
         value: account.Id,
         name: account.Name,
@@ -2945,7 +2968,9 @@ export const ensureAccount = async (
 
   // Account doesn't exist, create it (if accountType is provided)
   if (!accountType) {
-    throw new Error(`Account "${accountName}" does not exist and no account type provided for creation`);
+    throw new Error(
+      `Account "${accountName}" does not exist and no account type provided for creation`
+    );
   }
 
   // Determine the correct AccountSubType based on AccountType
@@ -3004,7 +3029,9 @@ export const ensureAccount = async (
       status: response.status,
       error: errorText,
     });
-    throw new Error(`Failed to create account: ${response.status} ${response.statusText} - ${errorText}`);
+    throw new Error(
+      `Failed to create account: ${response.status} ${response.statusText} - ${errorText}`
+    );
   }
 
   const result = await response.json();

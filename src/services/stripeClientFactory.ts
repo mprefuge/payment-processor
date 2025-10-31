@@ -1,6 +1,6 @@
 /**
  * Centralized Stripe Client Factory
- * 
+ *
  * Single responsibility: Create and manage Stripe client instances
  * Ensures consistent configuration across all handlers
  */
@@ -24,7 +24,7 @@ class StripeClientFactory {
    */
   getClient(livemode: boolean, options?: StripeClientOptions): Stripe {
     const cacheKey = `${livemode}`;
-    
+
     if (this.clientCache.has(cacheKey)) {
       return this.clientCache.get(cacheKey)!;
     }
@@ -47,7 +47,7 @@ class StripeClientFactory {
    */
   getDefaultClient(options?: StripeClientOptions): Stripe {
     const cacheKey = 'default';
-    
+
     if (this.clientCache.has(cacheKey)) {
       return this.clientCache.get(cacheKey)!;
     }

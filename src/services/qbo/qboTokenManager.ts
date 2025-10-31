@@ -84,7 +84,9 @@ class QBOTokenManager {
     return Date.now() + refreshThreshold >= tokens.accessTokenExpiresAt;
   }
 
-  async refreshTokens(fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>): Promise<RefreshTokenResult> {
+  async refreshTokens(
+    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  ): Promise<RefreshTokenResult> {
     const tokens = await this.getTokens();
     let refreshToken = tokens?.refreshToken;
 
@@ -158,7 +160,9 @@ class QBOTokenManager {
     await this.store.set('tokens', null);
   }
 
-  async getValidAccessToken(fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>): Promise<string> {
+  async getValidAccessToken(
+    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  ): Promise<string> {
     // First check if we have a valid access token
     if (!(await this.isAccessTokenExpired())) {
       const tokens = await this.getTokens();

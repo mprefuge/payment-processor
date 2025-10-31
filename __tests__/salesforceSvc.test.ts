@@ -17,10 +17,18 @@ type MockConnection = {
 const createMockConnection = (): MockConnection => {
   const upsert = vi.fn();
   const query = vi.fn().mockImplementation((soql: string) => {
-    if (soql.includes("SELECT Id FROM RecordType WHERE SObjectType = 'Transaction__c' AND Name = 'General'")) {
+    if (
+      soql.includes(
+        "SELECT Id FROM RecordType WHERE SObjectType = 'Transaction__c' AND Name = 'General'"
+      )
+    ) {
       return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
     }
-    if (soql.includes("SELECT Id FROM RecordType WHERE SObjectType = 'Transaction__c' AND Name = 'Payout'")) {
+    if (
+      soql.includes(
+        "SELECT Id FROM RecordType WHERE SObjectType = 'Transaction__c' AND Name = 'Payout'"
+      )
+    ) {
       return Promise.resolve({ records: [{ Id: '012000000000000BBB' }] });
     }
     return Promise.resolve({ records: [] });
@@ -125,7 +133,7 @@ describe('createSalesforceSvc', () => {
     query.mockImplementation((soql: string) => {
       if (soql.includes('Stripe_Balance_Transaction_Id__c IN')) {
         return Promise.resolve({
-          records: [{ Id: 'existing_txn_1', Stripe_Balance_Transaction_Id__c: 'bt_1' }]
+          records: [{ Id: 'existing_txn_1', Stripe_Balance_Transaction_Id__c: 'bt_1' }],
         });
       }
       return Promise.resolve({ records: [] });

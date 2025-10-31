@@ -18,7 +18,11 @@ import {
   getFrequencyFromSubscription,
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
-import { loadConfig, normalizeTransactionCategory, generateTransactionName } from '../../config/contactMatching';
+import {
+  loadConfig,
+  normalizeTransactionCategory,
+  generateTransactionName,
+} from '../../config/contactMatching';
 
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
   if (input === null || input === undefined) {
@@ -133,7 +137,7 @@ const processSuccessfulPaymentIntent = async ({
   const combinedMetadata: Record<string, unknown> = {
     ...(paymentIntent?.metadata ?? {}),
     ...((charge as any)?.metadata ?? {}),
-    ...(checkoutSession as any)?.metadata ?? {},
+    ...((checkoutSession as any)?.metadata ?? {}),
   };
 
   const extractCampaign = (meta: Record<string, unknown>): string | null => {
@@ -170,19 +174,19 @@ const processSuccessfulPaymentIntent = async ({
 
           // Add contact as campaign member if contact is available
           let contactId = transaction.contact__c;
-          
+
           // If contact ID is not available from metadata, try to resolve from Stripe customer ID
           if (!contactId && transaction.stripe_customer_id__c) {
             try {
               context.log('[StripeWebhook] Resolving contact from Stripe customer ID', {
                 stripeCustomerId: transaction.stripe_customer_id__c,
               });
-              
+
               // Search for contact by Stripe customer ID
               const contacts = await crm.searchContact({
                 stripeCustomerId: transaction.stripe_customer_id__c,
               });
-              
+
               if (contacts && contacts.length > 0) {
                 contactId = contacts[0].Id;
                 context.log('[StripeWebhook] Resolved contact from Stripe customer ID', {
@@ -202,7 +206,7 @@ const processSuccessfulPaymentIntent = async ({
               });
             }
           }
-          
+
           if (contactId && typeof contactId === 'string' && contactId.trim().length > 0) {
             try {
               context.log('[StripeWebhook] Adding contact as campaign member', {
@@ -284,7 +288,11 @@ const processSuccessfulPaymentIntent = async ({
   // Extract frequency from subscription if not already set in metadata
   if (subscriptionId && !transaction.frequency__c) {
     try {
-      const frequency = await getFrequencyFromSubscription(stripe, subscriptionId, (...args: unknown[]) => context.log(...args));
+      const frequency = await getFrequencyFromSubscription(
+        stripe,
+        subscriptionId,
+        (...args: unknown[]) => context.log(...args)
+      );
       if (frequency) {
         transaction.frequency__c = frequency;
         context.log('[StripeWebhook] Set frequency from subscription', {
@@ -294,7 +302,10 @@ const processSuccessfulPaymentIntent = async ({
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error getting frequency from subscription';
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error getting frequency from subscription';
       context.log('[StripeWebhook] Failed to get frequency from subscription', {
         paymentIntentId: paymentIntent.id,
         subscriptionId,
@@ -348,7 +359,11 @@ const processSuccessfulPaymentIntent = async ({
   // If not found by checkout session, search by charge ID
   if (!overrideId && charge?.id) {
     try {
-      overrideId = await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', charge.id, 'General');
+      overrideId = await salesforce.findTransactionIdByExternalId(
+        'stripe_charge_id__c',
+        charge.id,
+        'General'
+      );
       if (overrideId) {
         context.log('[StripeWebhook] Found existing transaction by charge ID', {
           chargeId: charge.id,
@@ -431,12 +446,14 @@ const processSuccessfulPaymentIntent = async ({
   // Generate transaction name if not already set
   if (!transaction.Name) {
     const config = loadConfig();
-    
+
     // Try to get product name from charge
     let productName: string | null = null;
     if (charge) {
       try {
-        productName = await getProductNameFromCharge(stripe, charge, (...args: unknown[]) => context.log(...args));
+        productName = await getProductNameFromCharge(stripe, charge, (...args: unknown[]) =>
+          context.log(...args)
+        );
       } catch (error) {
         context.log('[StripeWebhook] Error getting product name from charge', {
           chargeId: charge.id,
@@ -444,11 +461,11 @@ const processSuccessfulPaymentIntent = async ({
         });
       }
     }
-    
+
     // Use product name as category, or default
     const category = productName || config.transaction.defaultCategory;
     const normalizedCategory = normalizeTransactionCategory(category, config);
-    
+
     // Associate category with campaign if no campaign is already set
     if (!transaction.campaign__c && productName) {
       try {
@@ -468,19 +485,19 @@ const processSuccessfulPaymentIntent = async ({
 
           // Add contact as campaign member if contact is available
           let contactId = transaction.contact__c;
-          
+
           // If contact ID is not available from metadata, try to resolve from Stripe customer ID
           if (!contactId && transaction.stripe_customer_id__c) {
             try {
               context.log('[StripeWebhook] Resolving contact from Stripe customer ID', {
                 stripeCustomerId: transaction.stripe_customer_id__c,
               });
-              
+
               // Search for contact by Stripe customer ID
               const contacts = await crm.searchContact({
                 stripeCustomerId: transaction.stripe_customer_id__c,
               });
-              
+
               if (contacts && contacts.length > 0) {
                 contactId = contacts[0].Id;
                 context.log('[StripeWebhook] Resolved contact from Stripe customer ID', {
@@ -500,7 +517,7 @@ const processSuccessfulPaymentIntent = async ({
               });
             }
           }
-          
+
           if (contactId && typeof contactId === 'string' && contactId.trim().length > 0) {
             try {
               context.log('[StripeWebhook] Adding contact as campaign member', {
@@ -539,24 +556,31 @@ const processSuccessfulPaymentIntent = async ({
         );
       }
     }
-    
-    const transactionTypeName = transaction.transaction_type__c === 'charge' ? 'Payment' : 
-                                transaction.transaction_type__c === 'refund' ? 'Refund' : 
-                                transaction.transaction_type__c === 'dispute' ? 'Dispute' :
-                                transaction.transaction_type__c === 'payout' ? 'Payout' :
-                                'Transaction';
-    
+
+    const transactionTypeName =
+      transaction.transaction_type__c === 'charge'
+        ? 'Payment'
+        : transaction.transaction_type__c === 'refund'
+          ? 'Refund'
+          : transaction.transaction_type__c === 'dispute'
+            ? 'Dispute'
+            : transaction.transaction_type__c === 'payout'
+              ? 'Payout'
+              : 'Transaction';
+
     const transactionName = generateTransactionName(normalizedCategory, config, {
-      amount: transaction.amount_gross__c ? `$${transaction.amount_gross__c.toFixed(2)}` : undefined,
+      amount: transaction.amount_gross__c
+        ? `$${transaction.amount_gross__c.toFixed(2)}`
+        : undefined,
       date: new Date().toLocaleDateString(),
       id: paymentIntent.id,
       transactionType: transactionTypeName,
     });
-    
+
     if (transactionName) {
       transaction.Name = transactionName;
     }
-    
+
     context.log('[StripeWebhook] Generated transaction name', {
       paymentIntentId: paymentIntent.id,
       category,

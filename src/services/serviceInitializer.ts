@@ -1,6 +1,6 @@
 /**
  * Centralized Service Initialization
- * 
+ *
  * Single responsibility: Initialize and provide access to all external service connections
  * Ensures consistent configuration and reduces duplication across handlers
  */
