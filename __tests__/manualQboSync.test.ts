@@ -4,17 +4,6 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { createContext } = require('./testUtils');
 
-// Mock the qboSvc module
-vi.mock('../dist/services/qboSvc.js', () => ({
-  postSalesReceipt: vi.fn(),
-  postJournalEntry: vi.fn(),
-  postBankDeposit: vi.fn(),
-  ensureItem: vi.fn(),
-  ensureCustomer: vi.fn(),
-  ensureAccount: vi.fn(),
-  query: vi.fn(),
-}));
-
 describe('manualQboSync', () => {
   let handler: any;
   let mockPostSalesReceipt: any;
@@ -28,6 +17,17 @@ describe('manualQboSync', () => {
   beforeEach(async () => {
     vi.resetModules();
 
+    // Mock the qboSvc module
+    vi.doMock('../src/services/qboSvc', () => ({
+      postSalesReceipt: vi.fn(),
+      postJournalEntry: vi.fn(),
+      postBankDeposit: vi.fn(),
+      ensureItem: vi.fn(),
+      ensureCustomer: vi.fn(),
+      ensureAccount: vi.fn(),
+      query: vi.fn(),
+    }));
+
     // Set required environment variables for QBO
     process.env.QBO_REALM_ID = '12345';
     process.env.QBO_CLIENT_ID = 'client';
@@ -36,7 +36,7 @@ describe('manualQboSync', () => {
     process.env.QBO_ENVIRONMENT = 'sandbox';
 
     // Get the mocked functions
-    const qboSvc = await import('../dist/services/qboSvc.js');
+    const qboSvc = await import('../src/services/qboSvc');
     mockPostSalesReceipt = qboSvc.postSalesReceipt;
     mockPostJournalEntry = qboSvc.postJournalEntry;
     mockPostBankDeposit = qboSvc.postBankDeposit;
@@ -51,8 +51,13 @@ describe('manualQboSync', () => {
     mockEnsureAccount.mockResolvedValue({ value: '123', name: 'Checking' });
     mockQuery.mockResolvedValue({ QueryResponse: {} }); // No duplicates by default
 
+    // Mock post functions to fail with QuickBooks error
+    mockPostSalesReceipt.mockRejectedValue(new Error('QuickBooks authentication failed'));
+    mockPostJournalEntry.mockRejectedValue(new Error('QuickBooks authentication failed'));
+    mockPostBankDeposit.mockRejectedValue(new Error('QuickBooks authentication failed'));
+
     // Dynamically import the handler after mocking
-    const handlerModule = await import('../dist/handlers/manualQboSync.js');
+    const handlerModule = await import('../src/handlers/manualQboSync');
     handler = handlerModule;
   });
 
@@ -141,6 +146,12 @@ describe('manualQboSync', () => {
               DetailType: 'DepositLineDetail',
               DepositLineDetail: {
                 AccountRef: { name: 'Undeposited Funds' }, // Will be resolved automatically
+                LinkedTxn: [
+                  {
+                    TxnId: '123',
+                    TxnType: 'SalesReceipt',
+                  },
+                ],
               },
             },
           ],
