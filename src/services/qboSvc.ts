@@ -3167,6 +3167,23 @@ export const ensureReference = async (
 
   if (!response.ok) {
     const errorText = await response.text();
+    
+    // Handle duplicate name errors by extracting the existing ID
+    if (response.status === 400 && errorText && /Duplicate Name Exists Error/i.test(errorText)) {
+      const idMatch = errorText.match(/Id=(\d+)/);
+      if (idMatch) {
+        const existingId = idMatch[1];
+        logger.warn(`Entity ${entityType} "${name}" already exists with ID ${existingId}, returning existing reference`, {
+          name,
+          existingId,
+        });
+        return {
+          value: existingId,
+          name,
+        };
+      }
+    }
+    
     logger.error(`Failed to create ${entityType}`, {
       name,
       status: response.status,

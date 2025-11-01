@@ -664,8 +664,20 @@ const resolveItemReferences = async (
             const termResult = await ensureReference('Term', refValue.name, { Name: refValue.name, Type: 'STANDARD', DueDays: 30 });
             resolvedRef = { value: termResult.value, name: termResult.name || refValue.name };
           } else if (key === 'ShipMethodRef') {
-            const shipResult = await ensureReference('ShipMethod', refValue.name, { Name: refValue.name });
-            resolvedRef = { value: shipResult.value, name: shipResult.name || refValue.name };
+            // QuickBooks doesn't support creating ShipMethod entities via API
+            // Try to query for existing ones, but don't attempt to create
+            const shipResult = await queryReference('ShipMethod', refValue.name);
+            if (shipResult) {
+              resolvedRef = { value: shipResult.value, name: shipResult.name || refValue.name };
+            } else {
+              // ShipMethod doesn't exist and can't be created, remove the reference
+              logger.warn(`ShipMethod "${refValue.name}" not found and cannot be created via API, removing reference`, {
+                refType: key,
+                refName: refValue.name,
+                invocationId: context.invocationId,
+              });
+              delete resolved[key];
+            }
           } else if (key === 'TaxCodeRef') {
             // For tax codes, just query since creating them is complex
             const taxResult = await queryReference('TaxCode', refValue.name);
@@ -750,6 +762,41 @@ const resolveItemReferences = async (
   for (const [key, value] of Object.entries(resolved)) {
     if (!key.endsWith('Ref')) {
       resolved[key] = await resolveItemReferences(value, context, root);
+    }
+  }
+
+  // Special handling for sales receipts: inherit ClassRef from header to lines if needed
+  if (resolved.TxnType === 'SalesReceipt' && resolved.ClassRef && resolved.Line && Array.isArray(resolved.Line)) {
+    const headerClassRef = resolved.ClassRef;
+    for (const line of resolved.Line) {
+      if (line.SalesItemLineDetail && !line.SalesItemLineDetail.ClassRef) {
+        line.SalesItemLineDetail.ClassRef = { ...headerClassRef };
+        logger.info(`Inherited ClassRef from header to line item`, {
+          headerClassRef: headerClassRef.name || headerClassRef.value,
+          lineDescription: line.Description,
+          invocationId: context.invocationId,
+        });
+      }
+      
+      // Fix amount calculation when discounts are present
+      if (line.SalesItemLineDetail && line.SalesItemLineDetail.DiscountAmt && line.SalesItemLineDetail.UnitPrice && line.SalesItemLineDetail.Qty) {
+        const unitPrice = line.SalesItemLineDetail.UnitPrice;
+        const qty = line.SalesItemLineDetail.Qty;
+        const discountAmt = line.SalesItemLineDetail.DiscountAmt;
+        const calculatedAmount = unitPrice * qty;
+        
+        // If Amount is currently set to discounted amount, correct it
+        if (line.Amount === calculatedAmount - discountAmt) {
+          line.Amount = calculatedAmount;
+          logger.info(`Corrected line amount for discount`, {
+            originalAmount: calculatedAmount - discountAmt,
+            correctedAmount: calculatedAmount,
+            discountAmt,
+            lineDescription: line.Description,
+            invocationId: context.invocationId,
+          });
+        }
+      }
     }
   }
 
