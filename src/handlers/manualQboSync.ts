@@ -777,8 +777,12 @@ const resolveItemReferences = async (
           invocationId: context.invocationId,
         });
       }
-      
-      // Fix amount calculation when discounts are present
+    }
+  }
+
+  // Fix amount calculation when discounts are present for all line items
+  if (resolved.Line && Array.isArray(resolved.Line)) {
+    for (const line of resolved.Line) {
       if (line.SalesItemLineDetail && line.SalesItemLineDetail.DiscountAmt && line.SalesItemLineDetail.UnitPrice && line.SalesItemLineDetail.Qty) {
         const unitPrice = line.SalesItemLineDetail.UnitPrice;
         const qty = line.SalesItemLineDetail.Qty;
@@ -786,7 +790,7 @@ const resolveItemReferences = async (
         const calculatedAmount = unitPrice * qty;
         
         // If Amount is currently set to discounted amount, correct it
-        if (line.Amount === calculatedAmount - discountAmt) {
+        if (line.Amount == calculatedAmount - discountAmt) {
           line.Amount = calculatedAmount;
           logger.info(`Corrected line amount for discount`, {
             originalAmount: calculatedAmount - discountAmt,
@@ -928,6 +932,15 @@ const validateAndPost = async (
     }
 
     // Resolve item references before posting
+    // Set TxnType for proper reference resolution
+    if (type === 'sales-receipt') {
+      resolvedData.TxnType = 'SalesReceipt';
+    } else if (type === 'journal-entry') {
+      resolvedData.TxnType = 'JournalEntry';
+    } else if (type === 'bank-deposit') {
+      resolvedData.TxnType = 'Deposit';
+    }
+    
     resolvedData = await resolveItemReferences(resolvedData, context);
 
     // For bank deposits, ensure minimal schema structure
