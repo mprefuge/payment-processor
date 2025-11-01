@@ -2945,7 +2945,8 @@ export const ensureAccount = async (
       }
 
       // If account type is specified and doesn't match, throw an error
-      if (accountType && account.AccountType !== accountType) {
+      // Special case: allow "Undeposited Funds" to be used even if type doesn't match
+      if (accountType && account.AccountType !== accountType && accountName !== 'Undeposited Funds') {
         const errorMsg = `Account "${accountName}" exists but is type "${account.AccountType}". For this operation, a "${accountType}" account is required. Please use a different account or create a new one with the correct type.`;
         logger.error('Account type mismatch - operation cannot proceed', {
           accountName,

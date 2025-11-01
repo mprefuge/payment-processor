@@ -645,8 +645,9 @@ const resolveItemReferences = async (
 
             // Infer account type from the reference key or parent context
             if (key === 'DepositToAccountRef') {
-              if (resolved.TxnType === 'SalesReceipt' || root?.TxnType === 'SalesReceipt') {
-                accountType = 'Other Current Asset'; // Undeposited Funds for sales receipts
+              // Check if the name suggests it's Undeposited Funds
+              if (refValue.name.toLowerCase().includes('undeposited')) {
+                accountType = 'Other Current Asset';
               } else {
                 accountType = 'Bank'; // Bank accounts for deposits
               }
