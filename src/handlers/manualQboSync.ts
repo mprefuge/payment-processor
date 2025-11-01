@@ -165,6 +165,15 @@ const DepositLineDetailSchema = z.object({
     TxnType: z.string(),
     TxnLineId: z.string().optional(),
   })).optional(),
+}).refine(data => {
+  // CheckNum is required only when PaymentMethodRef.name is "Check" (case insensitive)
+  const paymentMethodName = data.PaymentMethodRef?.name?.toLowerCase();
+  if (paymentMethodName === 'check') {
+    return data.CheckNum && data.CheckNum.trim().length > 0;
+  }
+  return true;
+}, {
+  message: "CheckNum is required when PaymentMethodRef.name is 'Check'"
 });
 
 const BankDepositLineSchema = z.object({

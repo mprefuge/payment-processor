@@ -201,6 +201,84 @@ describe('manualQboSync', () => {
     expect(response.jsonBody.error).toContain('QuickBooks');
   });
 
+  it('validates CheckNum is required when PaymentMethodRef is Check', async () => {
+    const { context } = createContext();
+    const req = {
+      json: vi.fn().mockResolvedValue({
+        type: 'bank-deposit',
+        data: {
+          TxnDate: '2024-01-01',
+          DepositToAccountRef: { name: 'Checking' },
+          Line: [
+            {
+              Amount: 200.0,
+              DetailType: 'DepositLineDetail',
+              DepositLineDetail: {
+                AccountRef: { name: 'Undeposited Funds' },
+                PaymentMethodRef: { name: 'Check' }, // Check payment method requires CheckNum
+                LinkedTxn: [
+                  {
+                    TxnId: '123',
+                    TxnType: 'SalesReceipt',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    };
+
+    const response = await handler.default(req, context);
+
+    expect(response.status).toBe(400);
+    expect(response.jsonBody.success).toBe(false);
+    expect(response.jsonBody.error).toBe('Invalid request body');
+    expect(response.jsonBody.details).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "CheckNum is required when PaymentMethodRef.name is 'Check'"
+        })
+      ])
+    );
+  });
+
+  it('validates CheckNum is optional when PaymentMethodRef is not Check', async () => {
+    const { context } = createContext();
+    const req = {
+      json: vi.fn().mockResolvedValue({
+        type: 'bank-deposit',
+        data: {
+          TxnDate: '2024-01-01',
+          DepositToAccountRef: { name: 'Checking' },
+          Line: [
+            {
+              Amount: 200.0,
+              DetailType: 'DepositLineDetail',
+              DepositLineDetail: {
+                AccountRef: { name: 'Undeposited Funds' },
+                PaymentMethodRef: { name: 'Credit Card' }, // Non-check payment method
+                LinkedTxn: [
+                  {
+                    TxnId: '123',
+                    TxnType: 'SalesReceipt',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    };
+
+    const response = await handler.default(req, context);
+
+    // Should pass validation and fail at QBO call (expected in test environment)
+    expect(response.status).toBe(500);
+    expect(response.jsonBody.success).toBe(false);
+    expect(response.jsonBody.error).toContain('QuickBooks');
+  });
+
   it.skip('successfully syncs a bank deposit with SalesReceiptIds', async () => {
     // TODO: This test needs proper mocking setup for the query function
     // The feature is implemented and working correctly (see logs showing SalesReceiptIds processing),
