@@ -645,7 +645,11 @@ const resolveItemReferences = async (
 
             // Infer account type from the reference key or parent context
             if (key === 'DepositToAccountRef') {
-              accountType = 'Bank'; // Bank accounts for deposits
+              if (resolved.TxnType === 'SalesReceipt' || root?.TxnType === 'SalesReceipt') {
+                accountType = 'Other Current Asset'; // Undeposited Funds for sales receipts
+              } else {
+                accountType = 'Bank'; // Bank accounts for deposits
+              }
             } else if (resolved.TxnType === 'SalesReceipt' || root?.TxnType === 'SalesReceipt') {
               accountType = 'Other Current Asset'; // Linked sales receipts come from Undeposited Funds
             } else if (key === 'ItemAccountRef') {
@@ -983,6 +987,17 @@ const validateAndPost = async (
 
     // Resolve item references before posting
     resolvedData = await resolveItemReferences(resolvedData, context);
+
+    // Fallback for sales receipt DepositToAccountRef if not resolved
+    if (type === 'sales-receipt' && (!resolvedData.DepositToAccountRef?.value)) {
+      logger.warn('DepositToAccountRef not resolved, falling back to Undeposited Funds', {
+        providedName: resolvedData.DepositToAccountRef?.name,
+        invocationId: context.invocationId,
+      });
+      resolvedData.DepositToAccountRef = { name: 'Undeposited Funds' };
+      // Resolve again
+      resolvedData = await resolveItemReferences(resolvedData, context);
+    }
 
     // For bank deposits, ensure minimal schema structure
     if (type === 'bank-deposit') {
