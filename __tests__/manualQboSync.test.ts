@@ -17,7 +17,7 @@ describe('manualQboSync', () => {
   beforeEach(async () => {
     vi.resetModules();
 
-    // Mock the qboSvc module
+        // Mock the qboSvc module
     vi.doMock('../src/services/qboSvc', () => ({
       postSalesReceipt: vi.fn(),
       postJournalEntry: vi.fn(),
@@ -25,6 +25,7 @@ describe('manualQboSync', () => {
       ensureItem: vi.fn(),
       ensureCustomer: vi.fn(),
       ensureAccount: vi.fn(),
+      ensureReference: vi.fn(),
       query: vi.fn(),
     }));
 
@@ -43,13 +44,14 @@ describe('manualQboSync', () => {
     mockEnsureItem = qboSvc.ensureItem;
     mockEnsureCustomer = qboSvc.ensureCustomer;
     mockEnsureAccount = qboSvc.ensureAccount;
+    const mockEnsureReference = qboSvc.ensureReference;
     mockQuery = qboSvc.query;
 
     // Set up default mock implementations
     mockEnsureItem.mockResolvedValue({ value: '456', name: 'Service' });
     mockEnsureCustomer.mockResolvedValue({ value: '789', name: 'Customer' });
     mockEnsureAccount.mockResolvedValue({ value: '123', name: 'Checking' });
-    mockQuery.mockResolvedValue({ QueryResponse: {} }); // No duplicates by default
+    mockEnsureReference.mockResolvedValue({ value: '999', name: 'Test Class' });
 
     // Mock post functions to fail with QuickBooks error
     mockPostSalesReceipt.mockRejectedValue(new Error('QuickBooks authentication failed'));
@@ -80,6 +82,39 @@ describe('manualQboSync', () => {
         data: {
           TxnDate: '2024-01-01',
           DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
+          ClassRef: { name: 'Test Class' }, // Will be resolved automatically
+          Line: [
+            {
+              Amount: 100.0,
+              DetailType: 'SalesItemLineDetail',
+              SalesItemLineDetail: {
+                ItemRef: { name: 'Service' }, // Will be resolved automatically
+                ItemAccountRef: { name: 'Income' }, // Will be resolved automatically
+              },
+            },
+          ],
+        },
+      }),
+    };
+
+    const response = await handler.default(req, context);
+
+    // Expect 500 due to QBO auth failure in test environment
+    expect(response.status).toBe(500);
+    expect(response.jsonBody.success).toBe(false);
+    expect(response.jsonBody.error).toContain('QuickBooks');
+  });
+
+  it('defaults DepositToAccountRef for sales receipt when not provided', async () => {
+    // Note: In test environment, QBO calls will fail due to invalid credentials
+    // This tests that DepositToAccountRef is defaulted to 'Undeposited Funds'
+    const { context } = createContext();
+    const req = {
+      json: vi.fn().mockResolvedValue({
+        type: 'sales-receipt',
+        data: {
+          TxnDate: '2024-01-01',
+          // DepositToAccountRef not provided - should default to 'Undeposited Funds'
           Line: [
             {
               Amount: 100.0,

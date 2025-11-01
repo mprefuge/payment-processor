@@ -86,6 +86,7 @@ export interface QuickBooksSalesReceipt {
   BillEmail?: QuickBooksEmailAddress;
   BillAddr?: QuickBooksPhysicalAddress;
   ShipAddr?: QuickBooksPhysicalAddress;
+  ClassRef?: QuickBooksReference;
   Line: QuickBooksSalesReceiptLine[];
 }
 

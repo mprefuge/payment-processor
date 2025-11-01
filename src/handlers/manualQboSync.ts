@@ -78,7 +78,7 @@ const SalesReceiptDataSchema = z.object({
   CustomerMemo: z.object({
     value: z.string(),
   }).optional(),
-  DepositToAccountRef: QuickBooksReferenceSchema,
+  DepositToAccountRef: QuickBooksReferenceSchema.optional(),
   CustomerRef: QuickBooksReferenceSchema.optional(),
   BillEmail: QuickBooksEmailAddressSchema.optional(),
   BillAddr: QuickBooksPhysicalAddressSchema.optional(),
@@ -658,8 +658,38 @@ const resolveItemReferences = async (
             const accountResult = await ensureAccount(refValue.name, accountType);
             resolvedRef = { value: accountResult.value, name: accountResult.name || refValue.name };
           } else if (key === 'ClassRef') {
-            const classResult = await ensureReference('Class', refValue.name, { Name: refValue.name });
-            resolvedRef = { value: classResult.value, name: classResult.name || refValue.name };
+            // Handle hierarchical class names like "Parent:Child"
+            const classNameParts = refValue.name.split(':');
+            let classCreateData: any = { Name: refValue.name };
+            
+            if (classNameParts.length > 1) {
+              // Hierarchical class: find or create parent first
+              const parentName = classNameParts[0].trim();
+              const childName = classNameParts.slice(1).join(':').trim();
+              
+              // First ensure the parent class exists
+              const parentClass = await ensureReference('Class', parentName, { Name: parentName });
+              
+              // Then create child class with ParentRef
+              classCreateData = { 
+                Name: childName,
+                ParentRef: { value: parentClass.value }
+              };
+              
+              // Query for existing child class under this parent
+              const existingChild = await queryReference('Class', childName);
+              if (existingChild) {
+                resolvedRef = { value: existingChild.value, name: existingChild.name || childName };
+              } else {
+                // Create the child class
+                const childResult = await ensureReference('Class', childName, classCreateData);
+                resolvedRef = { value: childResult.value, name: childResult.name || childName };
+              }
+            } else {
+              // Simple class name
+              const classResult = await ensureReference('Class', refValue.name, classCreateData);
+              resolvedRef = { value: classResult.value, name: classResult.name || refValue.name };
+            }
           } else if (key === 'DepartmentRef') {
             const deptResult = await ensureReference('Department', refValue.name, { Name: refValue.name });
             resolvedRef = { value: deptResult.value, name: deptResult.name || refValue.name };
@@ -838,6 +868,14 @@ const validateAndPost = async (
 
     let resolvedData = data;
 
+    // Default DepositToAccountRef for sales receipts if not provided
+    if (type === 'sales-receipt' && !resolvedData.DepositToAccountRef) {
+      resolvedData.DepositToAccountRef = { name: 'Undeposited Funds' };
+      logger.info('Defaulting DepositToAccountRef to Undeposited Funds for sales-receipt', {
+        invocationId: context.invocationId,
+      });
+    }
+
     // Special handling for bank-deposit with SalesReceiptIds
     if (type === 'bank-deposit' && data.SalesReceiptIds && Array.isArray(data.SalesReceiptIds)) {
       logger.info('Processing bank deposit with SalesReceiptIds using minimal schema', {
@@ -965,6 +1003,10 @@ const validateAndPost = async (
       type,
       customerRefValue: resolvedData.CustomerRef?.value,
       customerRefName: resolvedData.CustomerRef?.name,
+      classRefValue: resolvedData.ClassRef?.value,
+      classRefName: resolvedData.ClassRef?.name,
+      depositToAccountRefValue: resolvedData.DepositToAccountRef?.value,
+      depositToAccountRefName: resolvedData.DepositToAccountRef?.name,
       invocationId: context.invocationId,
     });
 
