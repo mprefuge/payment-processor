@@ -240,6 +240,7 @@ interface ManualSyncResponse {
   success: boolean;
   id?: string;
   type?: QuickBooksDocType;
+  docNumber?: string;
   error?: string;
 }
 
@@ -261,12 +262,17 @@ const calculateTotal = (data: any): number => {
   }, 0);
 };
 
-// Generate DocNumber in format "MAN-YYYYMMDD-TOTAL"
-const generateDocNumber = (total: number): string => {
+// Generate DocNumber in format "MAN-YYYY-MMDDHHMMSS"
+const generateDocNumber = (): string => {
   const now = new Date();
-  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
-  const totalStr = Math.abs(total).toFixed(2).replace('.', ''); // Remove decimal point for integer representation
-  return `MAN-${dateStr}-${totalStr}`;
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const dateTimeStr = `${month}${day}${hours}${minutes}${seconds}`;
+  return `MAN-${year}-${dateTimeStr}`;
 };
 
 // Check for duplicate documents by DocNumber
@@ -962,6 +968,17 @@ const validateAndPost = async (
     // Clean the payload to remove any null/undefined values
     const cleanedData = cleanPayload(resolvedData);
 
+    // Generate DocNumber if not provided
+    let generatedDocNumber: string | undefined;
+    if (!cleanedData.DocNumber) {
+      generatedDocNumber = generateDocNumber();
+      cleanedData.DocNumber = generatedDocNumber;
+      logger.info(`Generated DocNumber for ${type}`, {
+        docNumber: generatedDocNumber,
+        invocationId: context.invocationId,
+      });
+    }
+
     let result;
 
     switch (type) {
@@ -988,6 +1005,7 @@ const validateAndPost = async (
       success: true,
       id: result.id,
       type: result.type,
+      ...(generatedDocNumber && { docNumber: generatedDocNumber }),
     };
   } catch (error) {
     logger.error(`Failed to sync ${type} to QuickBooks`, {
