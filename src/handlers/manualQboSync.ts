@@ -765,8 +765,8 @@ const resolveItemReferences = async (
     }
   }
 
-  // Special handling for sales receipts: inherit ClassRef from header to lines if needed
-  if (resolved.TxnType === 'SalesReceipt' && resolved.ClassRef && resolved.Line && Array.isArray(resolved.Line)) {
+    // Special handling for sales receipts: inherit ClassRef from header to lines if needed
+  if (resolved.ClassRef && resolved.Line && Array.isArray(resolved.Line) && resolved.Line.some((line: any) => line.SalesItemLineDetail)) {
     const headerClassRef = resolved.ClassRef;
     for (const line of resolved.Line) {
       if (line.SalesItemLineDetail && !line.SalesItemLineDetail.ClassRef) {
@@ -932,15 +932,6 @@ const validateAndPost = async (
     }
 
     // Resolve item references before posting
-    // Set TxnType for proper reference resolution
-    if (type === 'sales-receipt') {
-      resolvedData.TxnType = 'SalesReceipt';
-    } else if (type === 'journal-entry') {
-      resolvedData.TxnType = 'JournalEntry';
-    } else if (type === 'bank-deposit') {
-      resolvedData.TxnType = 'Deposit';
-    }
-    
     resolvedData = await resolveItemReferences(resolvedData, context);
 
     // For bank deposits, ensure minimal schema structure
