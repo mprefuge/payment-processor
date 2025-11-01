@@ -711,7 +711,7 @@ const resolveItemReferences = async (
                 // Create vendor
                 entityResult = await ensureReference('Vendor', refValue.name, { 
                   Name: refValue.name,
-                  CompanyName: refValue.name 
+                  Vendor1099: false
                 });
               }
             } else if (entityType === 'Employee') {
@@ -745,6 +745,9 @@ const resolveItemReferences = async (
             });
           } else {
             // Leave unresolved references as-is for validation
+            if (key === 'EntityRef') {
+              delete resolved.Entity;
+            }
             logger.warn(`Could not resolve ${key} for "${refValue.name}"`, {
               refType: key,
               refName: refValue.name,
@@ -752,6 +755,9 @@ const resolveItemReferences = async (
             });
           }
         } catch (error) {
+          if (key === 'EntityRef') {
+            delete resolved.Entity;
+          }
           logger.warn(`Failed to resolve ${key}: ${refValue.name}`, {
             refType: key,
             refName: refValue.name,
