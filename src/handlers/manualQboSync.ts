@@ -7,6 +7,8 @@ import {
   ensureItem,
   ensureCustomer,
   ensureAccount,
+  queryReference,
+  ensureReference,
   query,
   type QuickBooksSalesReceipt,
   type QuickBooksJournalEntry,
@@ -649,6 +651,70 @@ const resolveItemReferences = async (
 
             const accountResult = await ensureAccount(refValue.name, accountType);
             resolvedRef = { value: accountResult.value, name: accountResult.name || refValue.name };
+          } else if (key === 'ClassRef') {
+            const classResult = await ensureReference('Class', refValue.name, { Name: refValue.name });
+            resolvedRef = { value: classResult.value, name: classResult.name || refValue.name };
+          } else if (key === 'DepartmentRef') {
+            const deptResult = await ensureReference('Department', refValue.name, { Name: refValue.name });
+            resolvedRef = { value: deptResult.value, name: deptResult.name || refValue.name };
+          } else if (key === 'PaymentMethodRef') {
+            const pmResult = await ensureReference('PaymentMethod', refValue.name, { Name: refValue.name, Type: 'CREDIT_CARD' });
+            resolvedRef = { value: pmResult.value, name: pmResult.name || refValue.name };
+          } else if (key === 'SalesTermRef') {
+            const termResult = await ensureReference('Term', refValue.name, { Name: refValue.name, Type: 'STANDARD', DueDays: 30 });
+            resolvedRef = { value: termResult.value, name: termResult.name || refValue.name };
+          } else if (key === 'ShipMethodRef') {
+            const shipResult = await ensureReference('ShipMethod', refValue.name, { Name: refValue.name });
+            resolvedRef = { value: shipResult.value, name: shipResult.name || refValue.name };
+          } else if (key === 'TaxCodeRef') {
+            // For tax codes, just query since creating them is complex
+            const taxResult = await queryReference('TaxCode', refValue.name);
+            if (taxResult) {
+              resolvedRef = { value: taxResult.value, name: taxResult.name || refValue.name };
+            }
+          } else if (key === 'CurrencyRef') {
+            // For currencies, just query
+            const currencyResult = await queryReference('Currency', refValue.name);
+            if (currencyResult) {
+              resolvedRef = { value: currencyResult.value, name: currencyResult.name || refValue.name };
+            }
+          } else if (key === 'EntityRef') {
+            // EntityRef can be Customer, Vendor, Employee, etc.
+            // Check the Type field in the parent Entity object
+            const entityType = resolved.Type || 'Customer'; // Default to Customer
+            let entityResult;
+            
+            if (entityType === 'Customer') {
+              entityResult = await ensureCustomer(refValue.name);
+            } else if (entityType === 'Vendor') {
+              // For vendors, query first, create if not found
+              entityResult = await queryReference('Vendor', refValue.name);
+              if (!entityResult) {
+                // Create vendor
+                entityResult = await ensureReference('Vendor', refValue.name, { 
+                  Name: refValue.name,
+                  CompanyName: refValue.name 
+                });
+              }
+            } else if (entityType === 'Employee') {
+              // For employees, query first, create if not found  
+              entityResult = await queryReference('Employee', refValue.name);
+              if (!entityResult) {
+                // Create employee
+                entityResult = await ensureReference('Employee', refValue.name, { 
+                  Name: refValue.name,
+                  GivenName: refValue.name.split(' ')[0],
+                  FamilyName: refValue.name.split(' ').slice(1).join(' ') || refValue.name
+                });
+              }
+            } else {
+              // For other types, just query
+              entityResult = await queryReference(entityType, refValue.name);
+            }
+            
+            if (entityResult) {
+              resolvedRef = { value: entityResult.value, name: entityResult.name || refValue.name };
+            }
           }
 
           if (resolvedRef) {
@@ -931,8 +997,8 @@ export default async function manualQboSync(
       };
     }
   } catch (error) {
-    logger.error('Unexpected error in manual QBO sync handler', {
-      error: error instanceof Error ? error.message : String(error),
+    logger.error('Unexpected error in manual QBO sync', {
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
       invocationId: context.invocationId,
     });
 
@@ -944,4 +1010,4 @@ export default async function manualQboSync(
       },
     };
   }
-}
+};

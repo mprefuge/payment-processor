@@ -3090,6 +3090,105 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
   return values as T;
 };
 
+export const queryReference = async (
+  entityType: string,
+  name: string,
+  options?: PostOptions
+): Promise<QuickBooksReference | null> => {
+  const context = await createRequestContext(options);
+
+  try {
+    const queryResult = await context.request(
+      `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
+        `SELECT Id, Name FROM ${entityType} WHERE Name = '${name.replace(/'/g, "\\'")}'`
+      )}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      }
+    );
+
+    const data = await queryResult.json();
+    if (data.QueryResponse?.[entityType]?.length > 0) {
+      const entity = data.QueryResponse[entityType][0];
+      logger.info(`Found existing ${entityType}`, {
+        name,
+        id: entity.Id,
+      });
+      return {
+        value: entity.Id,
+        name: entity.Name,
+      };
+    }
+  } catch (error) {
+    logger.warn(`Failed to query for ${entityType}`, {
+      name,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return null;
+};
+
+export const ensureReference = async (
+  entityType: string,
+  name: string,
+  createData?: any,
+  options?: PostOptions
+): Promise<QuickBooksReference> => {
+  // First, try to find existing entity
+  const existing = await queryReference(entityType, name, options);
+  if (existing) {
+    return existing;
+  }
+
+  // Entity doesn't exist, create it if createData is provided
+  if (!createData) {
+    throw new Error(`${entityType} "${name}" does not exist and no creation data provided`);
+  }
+
+  const context = await createRequestContext(options);
+
+  logger.info(`Creating new ${entityType}`, { name });
+
+  const response = await context.request(
+    `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/${entityType.toLowerCase()}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(createData),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    logger.error(`Failed to create ${entityType}`, {
+      name,
+      status: response.status,
+      error: errorText,
+    });
+    throw new Error(
+      `Failed to create ${entityType}: ${response.status} ${response.statusText} - ${errorText}`
+    );
+  }
+
+  const result = await response.json();
+  const entity = result[entityType];
+  logger.info(`Successfully created ${entityType}`, {
+    name,
+    id: entity.Id,
+  });
+  return {
+    value: entity.Id,
+    name: entity.Name || name,
+  };
+};
+
 export default {
   buildSalesReceipt,
   buildFeesJE,
@@ -3105,5 +3204,7 @@ export default {
   ensureItem,
   ensureCustomer,
   ensureAccount,
+  queryReference,
+  ensureReference,
   query,
 };
