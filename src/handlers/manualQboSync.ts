@@ -570,21 +570,38 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
   }
 };
 
-// Remove null/undefined values from the object to avoid QuickBooks errors
+// Helper function to check if a value is considered "empty"
+const isEmpty = (value: any): boolean => {
+  if (value === null || value === undefined) {
+    return true;
+  }
+  if (typeof value === 'string' && value.trim() === '') {
+    return true;
+  }
+  if (Array.isArray(value) && value.length === 0) {
+    return true;
+  }
+  if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) {
+    return true;
+  }
+  return false;
+};
+
+// Remove null/undefined and empty values from the object to avoid QuickBooks errors
 const cleanPayload = (obj: any): any => {
-  if (obj === null || obj === undefined) {
+  if (isEmpty(obj)) {
     return undefined;
   }
 
   if (Array.isArray(obj)) {
-    return obj.map(cleanPayload).filter((item) => item !== undefined);
+    return obj.map(cleanPayload).filter((item) => !isEmpty(item));
   }
 
   if (typeof obj === 'object') {
     const cleaned: any = {};
     for (const [key, value] of Object.entries(obj)) {
       const cleanedValue = cleanPayload(value);
-      if (cleanedValue !== undefined && cleanedValue !== null) {
+      if (!isEmpty(cleanedValue)) {
         cleaned[key] = cleanedValue;
       }
     }

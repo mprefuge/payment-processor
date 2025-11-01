@@ -405,4 +405,64 @@ describe('manualQboSync', () => {
     expect(response.jsonBody.success).toBe(false);
     expect(response.jsonBody.error).toBe('Internal server error');
   });
+
+  it('removes empty optional fields from payload sent to QBO', async () => {
+    const { context } = createContext();
+    const req = {
+      json: vi.fn().mockResolvedValue({
+        type: 'sales-receipt',
+        data: {
+          TxnDate: '2024-01-01',
+          DepositToAccountRef: { name: 'Checking' },
+          CustomerRef: { name: 'John Doe' },
+          PrivateNote: '', // Empty note should be removed
+          BillAddr: { // Address with some empty fields
+            Line1: '123 Main St',
+            Line2: '', // Empty line should be removed
+            City: 'Seattle',
+            CountrySubDivisionCode: '',
+            PostalCode: '98101',
+            Country: '',
+          },
+          Line: [
+            {
+              Amount: 100.0,
+              DetailType: 'SalesItemLineDetail',
+              Description: '', // Empty description should be removed
+              SalesItemLineDetail: {
+                ItemRef: { name: 'Service' },
+                Qty: 1,
+                UnitPrice: 100.0,
+                ServiceDate: '2024-01-01',
+              },
+            },
+          ],
+        },
+      }),
+    };
+
+    const response = await handler.default(req, context);
+
+    expect(response.status).toBe(500);
+    expect(response.jsonBody.success).toBe(false);
+    expect(response.jsonBody.error).toContain('QuickBooks');
+
+    // Verify that postSalesReceipt was called with cleaned payload
+    expect(mockPostSalesReceipt).toHaveBeenCalledTimes(1);
+    const calledPayload = mockPostSalesReceipt.mock.calls[0][0];
+
+    // Verify empty fields were removed
+    expect(calledPayload.PrivateNote).toBeUndefined();
+
+    // Verify address object had empty fields removed
+    expect(calledPayload.BillAddr.Line1).toBe('123 Main St');
+    expect(calledPayload.BillAddr.Line2).toBeUndefined();
+    expect(calledPayload.BillAddr.City).toBe('Seattle');
+    expect(calledPayload.BillAddr.CountrySubDivisionCode).toBeUndefined();
+    expect(calledPayload.BillAddr.PostalCode).toBe('98101');
+    expect(calledPayload.BillAddr.Country).toBeUndefined();
+
+    // Verify line description was removed
+    expect(calledPayload.Line[0].Description).toBeUndefined();
+  });
 });
