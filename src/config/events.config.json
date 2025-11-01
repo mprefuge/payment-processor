@@ -1,0 +1,58 @@
+{
+  "events": [
+    {
+      "id": "sample-conference-2025",
+      "name": "Sample Conference 2025",
+      "description": "Join us for an amazing conference experience",
+      "type": "paid_onetime",
+      "campaignId": "YOUR_SALESFORCE_CAMPAIGN_ID",
+      "startDate": "2025-12-01T09:00:00Z",
+      "endDate": "2025-12-03T17:00:00Z",
+      "location": "Convention Center, City Name",
+      "capacity": 500,
+      "price": 15000,
+      "currency": "USD",
+      "isActive": true
+    },
+    {
+      "id": "free-webinar-2025",
+      "name": "Free Webinar Series",
+      "description": "Educational webinar - completely free to attend",
+      "type": "free",
+      "campaignId": "YOUR_SALESFORCE_CAMPAIGN_ID",
+      "startDate": "2025-11-15T14:00:00Z",
+      "endDate": "2025-11-15T15:30:00Z",
+      "location": "Online",
+      "isActive": true
+    },
+    {
+      "id": "monthly-membership-2025",
+      "name": "Monthly Membership Program",
+      "description": "Join our community with a monthly subscription",
+      "type": "paid_recurring",
+      "campaignId": "YOUR_SALESFORCE_CAMPAIGN_ID",
+      "startDate": "2025-11-01T00:00:00Z",
+      "endDate": "2026-12-31T23:59:59Z",
+      "price": 2500,
+      "currency": "USD",
+      "recurringInterval": "month",
+      "recurringCount": 12,
+      "isActive": true
+    }
+  ],
+  "theme": {
+    "primaryColor": "#BD2135",
+    "secondaryColor": "#FFFFFF",
+    "accentColor": "#8B1A2B",
+    "backgroundColor": "#F5F5F5",
+    "textColor": "#333333",
+    "fontFamily": "'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
+    "logoUrl": ""
+  },
+  "stripe": {
+    "publishableKey": "STRIPE_PUBLISHABLE_KEY_PLACEHOLDER"
+  },
+  "salesforce": {
+    "defaultCampaignMemberStatus": "Registered"
+  }
+}

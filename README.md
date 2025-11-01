@@ -5,6 +5,7 @@ Azure Functions-based payment processing system with Stripe integration, QuickBo
 ## Features
 
 - **Stripe Integration**: Process one-time and recurring payments via Stripe Checkout
+- **Event Management**: Complete event registration system with ticketing, check-in, and participant tracking
 - **Webhook Handling**: Process Stripe webhook events for payment intents, invoices, refunds, and payouts
 - **QuickBooks Online Sync**: Automatic accounting synchronization with configurable posting strategies
 - **Salesforce CRM**: Contact and transaction management with campaign tracking
@@ -189,6 +190,30 @@ Manually synchronize transactions to QuickBooks Online.
 
 Reconcile Stripe transactions with QuickBooks records.
 
+### Event Registration
+
+`POST /api/events/register`
+
+Register a participant for an event with automatic Salesforce contact creation and payment processing.
+
+### Event Check-In
+
+`POST /api/events/checkin`
+
+Check in a registered participant at an event.
+
+### Event Configuration
+
+`GET /api/events/config`
+
+Retrieve event configuration including available events and theme settings.
+
+### Event Landing Page
+
+`GET /api/events`
+
+Serves the event registration landing page with customizable theming.
+
 ## Project Structure
 
 ```
@@ -249,6 +274,9 @@ Select these events:
 
 ## Documentation
 
+- [Event Management Guide](docs/EVENT_MANAGEMENT_GUIDE.md) - **NEW**: Complete event system with registration, ticketing, and check-in
+- [Event Management Quick Reference](docs/event-management-quick-reference.md)
+- [Event Landing Page Theme Guide](docs/EVENT_LANDING_PAGE_THEME.md)
 - [Deployment Summary](docs/DEPLOYMENT_SUMMARY.md)
 - [Environment Variables](docs/ENVIRONMENT_VARIABLES.md)
 - [QBO Duplicate Detection](docs/QBO_DUPLICATE_DETECTION.md)

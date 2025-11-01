@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Event Registration</title>
+    <style>
+        :root {
+            --primary-color: #BD2135;
+            --secondary-color: #FFFFFF;
+            --accent-color: #8B1A2B;
+            --background-color: #F5F5F5;
+            --text-color: #333333;
+            --font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --border-radius: 12px;
+            --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            --transition: all 0.3s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-family);
+            background: linear-gradient(135deg, var(--background-color) 0%, #E8E8E8 100%);
+            color: var(--text-color);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 40px 20px;
+            background: var(--secondary-color);
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow);
+        }
+
+        .logo {
+            max-width: 150px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: var(--primary-color);
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: var(--text-color);
+            font-size: 1.1rem;
+            opacity: 0.8;
+        }
+
+        .event-selector {
+            background: var(--secondary-color);
+            border-radius: var(--border-radius);
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: var(--box-shadow);
+        }
+
+        .event-selector h2 {
+            color: var(--primary-color);
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+        }
+
+        .event-cards {
+            display: grid;
+            gap: 20px;
+        }
+
+        .event-card {
+            border: 2px solid transparent;
+            border-radius: var(--border-radius);
+            padding: 20px;
+            cursor: pointer;
+            transition: var(--transition);
+            background: var(--background-color);
+        }
+
+        .event-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-2px);
+            box-shadow: var(--box-shadow);
+        }
+
+        .event-card.selected {
+            border-color: var(--primary-color);
+            background: linear-gradient(135deg, var(--primary-color)10, var(--background-color));
+        }
+
+        .event-card h3 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+
+        .event-meta {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
+        .event-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .event-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .badge-free {
+            background: #28a745;
+            color: white;
+        }
+
+        .badge-paid {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .badge-recurring {
+            background: var(--accent-color);
+            color: white;
+        }
+
+        .registration-form {
+            background: var(--secondary-color);
+            border-radius: var(--border-radius);
+            padding: 30px;
+            box-shadow: var(--box-shadow);
+            display: none;
+        }
+
+        .registration-form.active {
+            display: block;
+        }
+
+        .form-section {
+            margin-bottom: 30px;
+        }
+
+        .form-section h3 {
+            color: var(--primary-color);
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        label .required {
+            color: var(--primary-color);
+        }
+
+        input[type="text"],
+        input[type="email"],
+        input[type="tel"],
+        textarea {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #E0E0E0;
+            border-radius: 8px;
+            font-family: var(--font-family);
+            font-size: 1rem;
+            transition: var(--transition);
+        }
+
+        input:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(189, 33, 53, 0.1);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .btn {
+            padding: 14px 32px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            font-family: var(--font-family);
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-color);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(189, 33, 53, 0.3);
+        }
+
+        .btn-primary:disabled {
+            background: #CCC;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--primary-color);
+            border: 2px solid var(--primary-color);
+            margin-right: 10px;
+        }
+
+        .btn-secondary:hover {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+
+        .alert {
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .alert.show {
+            display: block;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--primary-color);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .payment-info {
+            background: #FFF9E6;
+            border: 2px solid #FFE066;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .payment-info h4 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2rem;
+            }
+
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+
+            .form-actions {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <img id="logo" class="logo" alt="Logo" style="display: none;">
+            <h1>Event Registration</h1>
+            <p class="subtitle">Join us for an amazing experience</p>
+        </div>
+
+        <div class="event-selector">
+            <h2>Select an Event</h2>
+            <div id="eventCards" class="event-cards">
+                <!-- Event cards will be populated dynamically -->
+            </div>
+        </div>
+
+        <div id="registrationForm" class="registration-form">
+            <div id="alertContainer"></div>
+
+            <div class="loading" id="loadingIndicator">
+                <div class="spinner"></div>
+                <p>Processing your registration...</p>
+            </div>
+
+            <form id="regForm">
+                <div class="form-section">
+                    <h3>Selected Event</h3>
+                    <p id="selectedEventInfo"></p>
+                </div>
+
+                <div class="form-section">
+                    <h3>Contact Information</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="firstName">First Name <span class="required">*</span></label>
+                            <input type="text" id="firstName" name="firstName" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="lastName">Last Name <span class="required">*</span></label>
+                            <input type="text" id="lastName" name="lastName" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="email">Email <span class="required">*</span></label>
+                            <input type="email" id="email" name="email" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="phone">Phone</label>
+                            <input type="tel" id="phone" name="phone">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="company">Company/Organization</label>
+                        <input type="text" id="company" name="company">
+                    </div>
+                </div>
+
+                <div class="form-section">
+                    <h3>Address (Optional)</h3>
+                    <div class="form-group">
+                        <label for="mailingStreet">Street Address</label>
+                        <input type="text" id="mailingStreet" name="mailingStreet">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="mailingCity">City</label>
+                            <input type="text" id="mailingCity" name="mailingCity">
+                        </div>
+                        <div class="form-group">
+                            <label for="mailingState">State/Province</label>
+                            <input type="text" id="mailingState" name="mailingState">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="mailingPostalCode">Postal Code</label>
+                            <input type="text" id="mailingPostalCode" name="mailingPostalCode">
+                        </div>
+                        <div class="form-group">
+                            <label for="mailingCountry">Country</label>
+                            <input type="text" id="mailingCountry" name="mailingCountry">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-section">
+                    <h3>Additional Information</h3>
+                    <div class="form-group">
+                        <label for="notes">Notes or Special Requests</label>
+                        <textarea id="notes" name="notes" placeholder="Any dietary restrictions, accessibility needs, or other information..."></textarea>
+                    </div>
+                </div>
+
+                <div id="paymentSection" class="payment-info" style="display: none;">
+                    <h4>💳 Payment Required</h4>
+                    <p>This is a paid event. Payment processing will be handled on the next screen.</p>
+                    <p id="paymentAmount"></p>
+                </div>
+
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" id="backBtn">Back</button>
+                    <button type="submit" class="btn btn-primary" id="submitBtn">Complete Registration</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Configuration will be loaded from the server
+        let config = null;
+        let selectedEvent = null;
+
+        // Load configuration and initialize
+        async function loadConfig() {
+            try {
+                const response = await fetch('/api/events/config');
+                if (!response.ok) {
+                    // Use default config if endpoint doesn't exist
+                    config = {
+                        events: [],
+                        theme: {
+                            primaryColor: '#BD2135',
+                            secondaryColor: '#FFFFFF',
+                            accentColor: '#8B1A2B',
+                            backgroundColor: '#F5F5F5',
+                            textColor: '#333333',
+                            fontFamily: "'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
+                            logoUrl: ''
+                        }
+                    };
+                } else {
+                    config = await response.json();
+                }
+                
+                applyTheme();
+                loadEvents();
+            } catch (error) {
+                console.error('Error loading config:', error);
+                showAlert('error', 'Failed to load event configuration');
+            }
+        }
+
+        // Apply theme from configuration
+        function applyTheme() {
+            if (!config.theme) return;
+
+            const root = document.documentElement;
+            if (config.theme.primaryColor) root.style.setProperty('--primary-color', config.theme.primaryColor);
+            if (config.theme.secondaryColor) root.style.setProperty('--secondary-color', config.theme.secondaryColor);
+            if (config.theme.accentColor) root.style.setProperty('--accent-color', config.theme.accentColor);
+            if (config.theme.backgroundColor) root.style.setProperty('--background-color', config.theme.backgroundColor);
+            if (config.theme.textColor) root.style.setProperty('--text-color', config.theme.textColor);
+            if (config.theme.fontFamily) root.style.setProperty('--font-family', config.theme.fontFamily);
+
+            // Set logo if provided
+            if (config.theme.logoUrl) {
+                const logo = document.getElementById('logo');
+                logo.src = config.theme.logoUrl;
+                logo.style.display = 'block';
+            }
+        }
+
+        // Load events into cards
+        function loadEvents() {
+            const container = document.getElementById('eventCards');
+            
+            if (!config.events || config.events.length === 0) {
+                container.innerHTML = '<p>No events available at this time.</p>';
+                return;
+            }
+
+            container.innerHTML = config.events
+                .filter(event => event.isActive)
+                .map(event => createEventCard(event))
+                .join('');
+        }
+
+        // Create HTML for an event card
+        function createEventCard(event) {
+            const badgeClass = event.type === 'free' ? 'badge-free' : 
+                              event.type === 'paid_recurring' ? 'badge-recurring' : 'badge-paid';
+            const badgeText = event.type === 'free' ? 'FREE' : 
+                            event.type === 'paid_recurring' ? 'RECURRING' : 'PAID';
+            
+            const price = event.price ? `$${(event.price / 100).toFixed(2)}` : '';
+            const priceText = event.type === 'paid_recurring' && event.recurringInterval 
+                ? `${price}/${event.recurringInterval}` 
+                : price;
+
+            const startDate = new Date(event.startDate).toLocaleDateString('en-US', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            });
+
+            return `
+                <div class="event-card" onclick="selectEvent('${event.id}')">
+                    <h3>${event.name}</h3>
+                    <p>${event.description}</p>
+                    <div class="event-meta">
+                        <span class="event-badge ${badgeClass}">${badgeText}</span>
+                        ${priceText ? `<span><strong>${priceText}</strong></span>` : ''}
+                        <span>📅 ${startDate}</span>
+                        ${event.location ? `<span>📍 ${event.location}</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Handle event selection
+        function selectEvent(eventId) {
+            selectedEvent = config.events.find(e => e.id === eventId);
+            
+            // Update UI
+            document.querySelectorAll('.event-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            event.target.closest('.event-card').classList.add('selected');
+
+            // Show registration form
+            document.getElementById('registrationForm').classList.add('active');
+            
+            // Update selected event info
+            const infoEl = document.getElementById('selectedEventInfo');
+            const startDate = new Date(selectedEvent.startDate).toLocaleDateString();
+            infoEl.innerHTML = `
+                <strong>${selectedEvent.name}</strong><br>
+                ${selectedEvent.description}<br>
+                📅 ${startDate} | 📍 ${selectedEvent.location || 'Online'}
+            `;
+
+            // Show/hide payment section
+            const paymentSection = document.getElementById('paymentSection');
+            if (selectedEvent.type !== 'free') {
+                paymentSection.style.display = 'block';
+                const amount = `$${(selectedEvent.price / 100).toFixed(2)}`;
+                const frequency = selectedEvent.recurringInterval ? `/${selectedEvent.recurringInterval}` : '';
+                document.getElementById('paymentAmount').textContent = `Amount: ${amount}${frequency}`;
+            } else {
+                paymentSection.style.display = 'none';
+            }
+
+            // Scroll to form
+            document.getElementById('registrationForm').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Handle form submission
+        document.getElementById('regForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            if (!selectedEvent) {
+                showAlert('error', 'Please select an event first');
+                return;
+            }
+
+            // Show loading indicator
+            document.getElementById('loadingIndicator').classList.add('show');
+            document.getElementById('submitBtn').disabled = true;
+
+            // Collect form data
+            const formData = new FormData(e.target);
+            const contact = {
+                email: formData.get('email'),
+                firstName: formData.get('firstName'),
+                lastName: formData.get('lastName'),
+                phone: formData.get('phone') || undefined,
+                company: formData.get('company') || undefined,
+                mailingStreet: formData.get('mailingStreet') || undefined,
+                mailingCity: formData.get('mailingCity') || undefined,
+                mailingState: formData.get('mailingState') || undefined,
+                mailingPostalCode: formData.get('mailingPostalCode') || undefined,
+                mailingCountry: formData.get('mailingCountry') || undefined,
+            };
+
+            const registrationData = {
+                eventId: selectedEvent.id,
+                contact,
+                notes: formData.get('notes') || undefined,
+            };
+
+            try {
+                const response = await fetch('/api/events/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(registrationData),
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert('success', result.message || 'Registration successful!');
+                    e.target.reset();
+                    document.getElementById('registrationForm').classList.remove('active');
+                    
+                    // If there's a checkout URL, redirect to it
+                    if (result.checkoutUrl) {
+                        setTimeout(() => {
+                            window.location.href = result.checkoutUrl;
+                        }, 2000);
+                    }
+                } else {
+                    showAlert('error', result.error || 'Registration failed');
+                }
+            } catch (error) {
+                console.error('Registration error:', error);
+                showAlert('error', 'An error occurred during registration');
+            } finally {
+                document.getElementById('loadingIndicator').classList.remove('show');
+                document.getElementById('submitBtn').disabled = false;
+            }
+        });
+
+        // Back button handler
+        document.getElementById('backBtn').addEventListener('click', () => {
+            document.getElementById('registrationForm').classList.remove('active');
+            selectedEvent = null;
+            document.querySelectorAll('.event-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+        });
+
+        // Show alert message
+        function showAlert(type, message) {
+            const container = document.getElementById('alertContainer');
+            container.innerHTML = `
+                <div class="alert alert-${type} show">
+                    ${message}
+                </div>
+            `;
+
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 5000);
+        }
+
+        // Initialize on page load
+        loadConfig();
+    </script>
+</body>
+</html>
