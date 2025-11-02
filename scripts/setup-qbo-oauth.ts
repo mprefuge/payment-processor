@@ -4,7 +4,10 @@
  * QuickBooks Online OAuth Setup Script
  *
  * This script handles the OAuth flow to obtain access and refresh tokens
- * for QuickBooks Online integration.
+ * for QuickBooks Online integration. Designed for local development setup.
+ *
+ * For Azure Functions, run this locally to get initial tokens, then deploy
+ * the refresh token as an environment variable.
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
@@ -33,13 +36,14 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
     );
   }
 
-  console.log('🔧 QuickBooks Online OAuth Setup');
-  console.log('=================================');
+  console.log('🔧 QuickBooks Online OAuth Setup (Local Development)');
+  console.log('===================================================');
   console.log('');
-  console.log('Requirements:');
-  console.log('1. QuickBooks Online company account');
-  console.log('2. QuickBooks app registered at https://developer.intuit.com/');
-  console.log(`3. Redirect URI configured in your app: ${redirectUri}`);
+  console.log('This script is designed for LOCAL DEVELOPMENT setup.');
+  console.log('For Azure Functions, run this locally to obtain tokens, then:');
+  console.log('1. Copy the refresh token from the output');
+  console.log('2. Set QBO_REFRESH_TOKEN in your Azure Function environment');
+  console.log('3. Deploy your function - it will handle token refresh automatically');
   console.log('');
 
   // Generate authorization URL
@@ -98,7 +102,7 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
           console.log('🔄 Received authorization code, exchanging for tokens...');
 
           // Exchange code for tokens
-          await tokenManager.exchangeCodeForTokens(code, redirectUri, fetch);
+          const tokens = await tokenManager.exchangeCodeForTokens(code, redirectUri, fetch);
 
           // Send success response
           res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -111,12 +115,15 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
     body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
     .success { color: #28a745; }
     .info { color: #17a2b8; }
+    .token { background: #f8f9fa; padding: 10px; border-radius: 4px; font-family: monospace; margin: 10px 0; }
   </style>
 </head>
 <body>
   <h1 class="success">✅ Setup Complete!</h1>
   <p class="info">QuickBooks Online tokens have been obtained and stored.</p>
-  <p>You can now close this window and return to your terminal.</p>
+  <p><strong>For Azure Functions:</strong> Set this environment variable:</p>
+  <div class="token">QBO_REFRESH_TOKEN=${tokens.refreshToken}</div>
+  <p>You can now close this window and deploy your function.</p>
 </body>
 </html>
           `);
@@ -124,7 +131,9 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
           console.log('✅ Tokens obtained and stored successfully!');
           console.log('');
           console.log('The tokens are now stored in data/qbo-tokens/tokens.json');
-          console.log('The application will automatically refresh tokens as needed.');
+          console.log('');
+          console.log('🚀 For Azure Functions deployment:');
+          console.log(`   Set environment variable: QBO_REFRESH_TOKEN=${tokens.refreshToken}`);
           console.log('');
           console.log('🎉 QuickBooks Online integration is now ready!');
 

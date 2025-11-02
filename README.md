@@ -74,6 +74,44 @@ cp local.settings.json.template local.settings.json
 
 See [ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) for complete documentation.
 
+## QuickBooks Online Setup
+
+Since Azure Functions run in the cloud without browser access, QuickBooks OAuth setup must be done locally on your development machine:
+
+### 1. Register Your QuickBooks App
+
+1. Go to [QuickBooks Developer](https://developer.intuit.com/)
+2. Create a new app or use existing one
+3. Configure redirect URI: `http://localhost:3000/oauth/callback`
+4. Note your Client ID and Client Secret
+
+### 2. Local OAuth Setup
+
+```bash
+# Set your QuickBooks app credentials locally
+export QBO_CLIENT_ID="your-client-id"
+export QBO_CLIENT_SECRET="your-client-secret"
+export QBO_REALM_ID="your-company-id"
+
+# Run the OAuth setup script
+npm run setup:qbo
+```
+
+### 3. Follow Browser Prompts
+
+1. The script will open your browser to QuickBooks authorization
+2. Log in to QuickBooks and authorize the app
+3. The script will handle the OAuth callback automatically
+
+### 4. Deploy to Azure
+
+Copy the `QBO_REFRESH_TOKEN` value from the setup output and set it as an environment variable in your Azure Function App.
+
+The Azure Function will automatically:
+- Use the refresh token to obtain access tokens
+- Refresh tokens before they expire
+- Handle all token management in the background
+
 ## Development
 
 ### Running Locally
