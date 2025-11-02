@@ -14,6 +14,11 @@ interface RefreshTokenResult {
   refreshToken?: string;
 }
 
+interface OAuthTokensResult {
+  accessToken: string;
+  refreshToken: string;
+}
+
 const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
 
@@ -96,7 +101,10 @@ class QBOTokenManager {
     }
 
     if (!refreshToken) {
-      throw new Error('No refresh token available for QBO token refresh');
+      throw new Error(
+        'No refresh token available for QBO token refresh. ' +
+        'Please run "npm run setup:qbo" to set up QuickBooks Online integration.'
+      );
     }
 
     if (await this.isRefreshTokenExpired()) {
@@ -179,6 +187,99 @@ class QBOTokenManager {
     // If no valid token, try to refresh
     const refreshResult = await this.refreshTokens(fetcher);
     return refreshResult.accessToken;
+  }
+
+  /**
+   * Checks if QuickBooks Online integration is properly set up
+   */
+  async isSetupComplete(): Promise<boolean> {
+    const tokens = await this.getTokens();
+    const hasStoredTokens = tokens?.refreshToken && !this.isRefreshTokenExpired();
+
+    // Also check env vars as fallback
+    const hasEnvToken = process.env.QBO_REFRESH_TOKEN;
+
+    return Boolean(hasStoredTokens || hasEnvToken);
+  }
+
+  /**
+   * Generates the QuickBooks OAuth authorization URL for initial setup
+   */
+  generateAuthorizationUrl(redirectUri: string, state?: string): string {
+    const { clientId } = env.quickBooks;
+    if (!clientId) {
+      throw new Error('QBO OAuth client ID must be configured');
+    }
+
+    const baseUrl = 'https://appcenter.intuit.com/connect/oauth2';
+    const params = new URLSearchParams({
+      client_id: clientId,
+      response_type: 'code',
+      scope: 'com.intuit.quickbooks.accounting',
+      redirect_uri: redirectUri,
+      state: state || 'qbo_setup',
+    });
+
+    return `${baseUrl}?${params.toString()}`;
+  }
+
+  /**
+   * Exchanges authorization code for access and refresh tokens
+   */
+  async exchangeCodeForTokens(
+    code: string,
+    redirectUri: string,
+    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  ): Promise<OAuthTokensResult> {
+    const { clientId, clientSecret } = env.quickBooks;
+    if (!clientId || !clientSecret) {
+      throw new Error('QBO OAuth client ID and client secret must be configured');
+    }
+
+    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`, 'utf8').toString('base64');
+    const params = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code,
+      redirect_uri: redirectUri,
+    });
+
+    const response = await fetcher('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${basicAuth}`,
+      },
+      body: params.toString(),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => undefined);
+      throw new Error(
+        `Failed to exchange authorization code for tokens (status ${response.status}): ${
+          errorText ?? response.statusText
+        }`
+      );
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const accessToken = data.access_token?.trim();
+    const refreshToken = data.refresh_token?.trim();
+
+    if (!accessToken || !refreshToken) {
+      throw new Error('QBO token exchange response did not include required tokens');
+    }
+
+    // Store the tokens
+    await this.setTokens(accessToken, refreshToken);
+
+    // Update environment variables for backward compatibility
+    process.env.QBO_ACCESS_TOKEN = accessToken;
+    process.env.QBO_REFRESH_TOKEN = refreshToken;
+    env.quickBooks.refreshToken = refreshToken;
+
+    logger.info('QBO tokens obtained and stored via OAuth flow');
+    return { accessToken, refreshToken };
   }
 }
 
