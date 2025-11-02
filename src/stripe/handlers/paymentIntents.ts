@@ -21,7 +21,6 @@ import { ensureStripeClient, markPosted } from './common';
 import {
   loadConfig,
   normalizeTransactionCategory,
-  generateTransactionName,
 } from '../../config/contactMatching';
 
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
@@ -568,26 +567,6 @@ const processSuccessfulPaymentIntent = async ({
               ? 'Payout'
               : 'Transaction';
 
-    const transactionName = generateTransactionName(normalizedCategory, config, {
-      amount: transaction.amount_gross__c
-        ? `$${transaction.amount_gross__c.toFixed(2)}`
-        : undefined,
-      date: new Date().toLocaleDateString(),
-      id: paymentIntent.id,
-      transactionType: transactionTypeName,
-    });
-
-    if (transactionName) {
-      transaction.Name = transactionName;
-    }
-
-    context.log('[StripeWebhook] Generated transaction name', {
-      paymentIntentId: paymentIntent.id,
-      category,
-      normalizedCategory,
-      transactionTypeName,
-      transactionName,
-    });
   }
 
   // Validate required fields before upserting

@@ -434,40 +434,6 @@ const buildDepositInput = async (
 const getPayoutAdapter = (deps: StripeWebhookDependencies): PayoutAccountingAdapter | undefined =>
   deps.accounting?.payouts;
 
-const getBankName = async (
-  stripe: Stripe,
-  payout: Stripe.Payout,
-  logger: Logger
-): Promise<string> => {
-  try {
-    // Check if destination is already expanded with bank details
-    if (payout.destination && typeof payout.destination === 'object') {
-      const dest = payout.destination as any;
-      if (dest.bank_name && typeof dest.bank_name === 'string') {
-        return dest.bank_name;
-      }
-      if (dest.last4 && typeof dest.last4 === 'string') {
-        return `Bank ****${dest.last4}`;
-      }
-    }
-
-    // If destination is just an ID string, we can't easily fetch it without knowing the account
-    // For standard Stripe accounts, the destination is on the connected account side
-    // So we'll just use a generic name with the last 4 of the payout ID
-    if (typeof payout.destination === 'string' && payout.destination.startsWith('ba_')) {
-      const last4 = payout.destination.slice(-4);
-      return `Bank ****${last4}`;
-    }
-  } catch (error) {
-    logger('[StripeWebhook] Failed to retrieve bank account name', {
-      payoutId: payout.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  return '';
-};
-
 const buildPayoutTransaction = async (
   stripe: Stripe,
   payout: Stripe.Payout,
@@ -475,13 +441,9 @@ const buildPayoutTransaction = async (
   eventType: string,
   logger: Logger
 ) => {
-  const bankName = await getBankName(stripe, payout, logger);
-  const transactionName = bankName ? `Payout - ${bankName}` : 'Payout';
-
   if (!depositInput) {
     // For created/updated events or manual payouts without transactions
     return {
-      Name: transactionName,
       transaction_type__c: 'payout' as 'payout',
       status__c: (payout.status === 'paid'
         ? 'paid'
@@ -550,7 +512,6 @@ const buildPayoutTransaction = async (
   memoLines.push(`Net: $${(netAmount / 100).toFixed(2)}`);
 
   return {
-    Name: transactionName,
     transaction_type__c: 'payout' as 'payout',
     status__c: (payout.status === 'paid'
       ? 'paid'
