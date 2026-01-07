@@ -84,11 +84,12 @@ export interface QuickBooksSalesReceipt {
   DepositToAccountRef: QuickBooksReference;
   CustomerRef?: QuickBooksReference;
   BillEmail?: QuickBooksEmailAddress;
+  CustomerMemo?: { value: string };
   BillAddr?: QuickBooksPhysicalAddress;
   ShipAddr?: QuickBooksPhysicalAddress;
   ClassRef?: QuickBooksReference;
   Line: QuickBooksSalesReceiptLine[];
-}
+} 
 
 interface QuickBooksJournalEntryLineDetail {
   PostingType: 'Debit' | 'Credit';
@@ -148,10 +149,14 @@ interface BuildSalesReceiptInput {
   depositAccountName?: string;
   feesAccountName?: string;
   stripeFeeAmountCents?: number;
+  stripeChargeId?: string | null;
+  stripeInvoiceId?: string | null;
+  stripeInvoiceNumber?: string | null;
+  stripeSubscriptionId?: string | null;
   customer?: SalesReceiptCustomerDetails | null;
   description?: string;
   coverFeesAmountCents?: number;
-}
+} 
 
 type StripeCustomerContext = {
   charge?: Stripe.Charge | null;
@@ -1257,6 +1262,10 @@ export const buildSalesReceipt = ({
   depositAccountName = env.quickBooks.accounts.stripeClearing,
   feesAccountName,
   stripeFeeAmountCents = 0,
+  stripeChargeId = null,
+  stripeInvoiceId = null,
+  stripeInvoiceNumber = null,
+  stripeSubscriptionId = null,
   customer = null,
   description,
   coverFeesAmountCents = 0,
@@ -1374,7 +1383,38 @@ export const buildSalesReceipt = ({
     receipt.ShipAddr = shippingAddress;
   }
 
-  return receipt;
+  try {
+    const origCents = ensurePositiveAmount(amountCents, 'Original charge amount');
+    const feeCents = ensurePositiveAmount(stripeFeeAmountCents ?? 0, 'Stripe fee amount');
+    const netCents = origCents - feeCents;
+
+    const parts: string[] = [];
+    parts.push(`Original Charge Amount: ${centsToDollars(origCents).toFixed(2)}`);
+    parts.push(`Stripe Fees: ${centsToDollars(feeCents).toFixed(2)}`);
+    parts.push(`Net Amount Received: ${centsToDollars(netCents).toFixed(2)}`);
+
+    const sc = toTrimmed(stripeChargeId ?? null);
+    if (sc) parts.push(`Stripe Charge ID: ${sc}`);
+
+    const si = toTrimmed(stripeInvoiceId ?? null);
+    if (si) parts.push(`Stripe Invoice ID: ${si}`);
+
+    const sin = toTrimmed(stripeInvoiceNumber ?? null);
+    if (sin) parts.push(`Stripe Invoice Number: ${sin}`);
+
+    const ss = toTrimmed(stripeSubscriptionId ?? null);
+    if (ss) parts.push(`Stripe Subscription ID: ${ss}`);
+
+    const memoText = parts.join('\n');
+    const truncated = truncate(memoText, 1000);
+    if (truncated) {
+      receipt.CustomerMemo = { value: truncated };
+    }
+  } catch (e) {
+    logger.debug('Failed to build CustomerMemo for sales receipt', { error: e instanceof Error ? e.message : String(e) });
+  }
+
+  return receipt; 
 };
 
 const createJournalEntryLine = (
@@ -2579,6 +2619,10 @@ export const postChargeToQbo = async ({
       depositAccountName: depositAccountRef.value,
       feesAccountName: feesAccountRef.value,
       stripeFeeAmountCents: feeAmount,
+      stripeChargeId: stripe?.charge?.id ?? null,
+      stripeInvoiceId: typeof stripe?.charge?.invoice === 'string' ? (stripe as any).charge.invoice : null,
+      stripeInvoiceNumber: (stripe?.checkoutSession as any)?.invoice?.number ?? null,
+      stripeSubscriptionId: (stripe?.checkoutSession as any)?.subscription ?? (stripe?.paymentIntent as any)?.subscription ?? null,
       customer: receiptCustomer,
       description,
       coverFeesAmountCents: coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0,

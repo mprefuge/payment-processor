@@ -336,6 +336,56 @@ describe('postChargeToQbo', () => {
       value: 'QBO_ACCOUNT_FEES',
       name: 'Stripe Fees',
     });
+
+    // Verify CustomerMemo (statement message) includes amounts and stripe charge id
+    expect(salesReceiptBody.CustomerMemo).toBeDefined();
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 100.00');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 3.25');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 96.75');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
+  }, { timeout: 20000 });
+
+  it('includes invoice and subscription details in CustomerMemo when available', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-2', DisplayName: 'Donor Example' } }, // Customer create
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      }, // Item lookup
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-2' } }, // Sales receipt create
+      { QueryResponse: {} }, // Duplicate check for fee journal entry (unused)
+      { JournalEntry: { Id: 'fee-je-2' } } // Fee journal entry create (unused)
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 2_585, // $25.85
+      fee: 87, // $0.87
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext({ invoice: 'in_1SlBuhBJf9YYVP9mdUcoaPkw' }, { invoice: { number: '3OKSMZT1-0002' }, subscription: 'sub_1SZx7kBJf9YYVP9mCJ3HXqDy' }),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    expect(salesReceiptRequest).toBeDefined();
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+
+    expect(salesReceiptBody.CustomerMemo).toBeDefined();
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 25.85');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 0.87');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 24.98');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Invoice ID: in_1SlBuhBJf9YYVP9mdUcoaPkw');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Invoice Number: 3OKSMZT1-0002');
+    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Subscription ID: sub_1SZx7kBJf9YYVP9mCJ3HXqDy');
   }, { timeout: 20000 });
 
   it('uses default sales item when checkout metadata is missing', async () => {
