@@ -1,6 +1,16 @@
 const { logger: rootLogger, createLogger } = require('../../lib/logger');
 const BaseAccountingProvider = require('./baseAccountingProvider');
 const QuickBooks = require('node-quickbooks');
+const { createPersistentStorageClients } = require('../idempotency/storage/persistentStoreFactory');
+let tokenManager;
+try {
+  tokenManager = require('./qboTokenManager').default || require('./qboTokenManager');
+} catch (e) {
+  tokenManager = null;
+}
+
+const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
+const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const MAX_VENDOR_ACCOUNT_NUMBER_LENGTH = 30;
@@ -1156,12 +1166,35 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
         this.logger.info('[QBO] Successfully refreshed OAuth tokens');
 
-        // Note: In production, you should persist these tokens to storage
-        // so they can be used across sessions
-        if (process.env.NODE_ENV === 'production') {
-          this.logger.warn(
-            '[QBO] WARNING: Refreshed tokens should be persisted to storage (e.g., env vars, key vault)'
-          );
+        // Persist tokens to storage (via token manager if available, otherwise token store)
+        try {
+          if (tokenManager && typeof tokenManager.setTokens === 'function') {
+            await tokenManager.setTokens(refreshedTokens.accessToken, refreshedTokens.refreshToken);
+            this.logger.info('[QBO] Persisted refreshed tokens via token manager');
+          } else {
+            const now = Date.now();
+            const tokenData = {
+              accessToken: refreshedTokens.accessToken,
+              refreshToken: refreshedTokens.refreshToken,
+              accessTokenExpiresAt: now + ACCESS_TOKEN_LIFETIME_MS,
+              refreshTokenExpiresAt: now + REFRESH_TOKEN_LIFETIME_MS,
+            };
+            try {
+              const clients = createPersistentStorageClients('qbo-tokens');
+              await clients.tokenStore.set('tokens', tokenData);
+              this.logger.info('[QBO] Persisted refreshed tokens to storage');
+            } catch (err) {
+              this.logger.warn('[QBO] Failed to persist refreshed tokens to storage: ' + (err && err.message ? err.message : String(err)));
+            }
+          }
+        } catch (err) {
+          this.logger.warn('[QBO] Failed to persist refreshed tokens: ' + (err && err.message ? err.message : String(err)));
+        }
+
+        // Update env vars for backward compatibility
+        process.env.QBO_ACCESS_TOKEN = refreshedTokens.accessToken;
+        if (refreshedTokens.refreshToken) {
+          process.env.QBO_REFRESH_TOKEN = refreshedTokens.refreshToken;
         }
 
         return true;

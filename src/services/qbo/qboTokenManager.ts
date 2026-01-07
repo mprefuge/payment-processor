@@ -175,6 +175,21 @@ class QBOTokenManager {
     if (!(await this.isAccessTokenExpired())) {
       const tokens = await this.getTokens();
       if (tokens?.accessToken) {
+        // Proactively refresh if access token is close to expiry
+        if (await this.shouldRefreshProactively()) {
+          try {
+            const refreshed = await this.refreshTokens(fetcher);
+            return refreshed.accessToken;
+          } catch (err) {
+            logger.warn(
+              'Proactive QBO token refresh failed: ' +
+                (err instanceof Error ? err.message : String(err))
+            );
+            // Return current token even if proactive refresh failed
+            return tokens.accessToken;
+          }
+        }
+
         return tokens.accessToken;
       }
       // Check env vars as fallback
@@ -194,7 +209,7 @@ class QBOTokenManager {
    */
   async isSetupComplete(): Promise<boolean> {
     const tokens = await this.getTokens();
-    const hasStoredTokens = tokens?.refreshToken && !this.isRefreshTokenExpired();
+    const hasStoredTokens = Boolean(tokens?.refreshToken && !(await this.isRefreshTokenExpired()));
 
     // Also check env vars as fallback
     const hasEnvToken = process.env.QBO_REFRESH_TOKEN;

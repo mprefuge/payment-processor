@@ -110,6 +110,7 @@ Copy the `QBO_REFRESH_TOKEN` value from the setup output and set it as an enviro
 The Azure Function will automatically:
 - Use the refresh token to obtain access tokens
 - Refresh tokens before they expire
+- Persist refreshed tokens to the token store so manual updates aren't typically necessary
 - Handle all token management in the background
 
 ## Development

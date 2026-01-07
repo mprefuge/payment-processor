@@ -15,6 +15,7 @@
 ### Changed
 - **Code Formatting**: All source files formatted with Prettier for consistency
 - **Documentation**: Updated inline code comments and JSDoc where appropriate
+- **QuickBooks Integration**: Automatically refresh and persist QuickBooks OAuth tokens so manual environment updates are not typically required
 
 ### Quality Assurance
 - ✅ All tests passing (104 passed, 7 skipped)
