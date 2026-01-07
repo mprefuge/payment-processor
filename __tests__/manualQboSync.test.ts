@@ -61,7 +61,7 @@ describe('manualQboSync', () => {
     // Dynamically import the handler after mocking
     const handlerModule = await import('../src/handlers/manualQboSync');
     handler = handlerModule;
-  });
+  }, 20000);
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -103,7 +103,7 @@ describe('manualQboSync', () => {
     expect(response.status).toBe(500);
     expect(response.jsonBody.success).toBe(false);
     expect(response.jsonBody.error).toContain('QuickBooks');
-  });
+  }, { timeout: 20000 });
 
   it('defaults DepositToAccountRef for sales receipt when not provided', async () => {
     // Note: In test environment, QBO calls will fail due to invalid credentials

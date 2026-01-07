@@ -146,6 +146,8 @@ interface BuildSalesReceiptInput {
   date: string | Date;
   revenueItemName: string;
   depositAccountName?: string;
+  feesAccountName?: string;
+  stripeFeeAmountCents?: number;
   customer?: SalesReceiptCustomerDetails | null;
   description?: string;
   coverFeesAmountCents?: number;
@@ -1253,6 +1255,8 @@ export const buildSalesReceipt = ({
   date,
   revenueItemName,
   depositAccountName = env.quickBooks.accounts.stripeClearing,
+  feesAccountName,
+  stripeFeeAmountCents = 0,
   customer = null,
   description,
   coverFeesAmountCents = 0,
@@ -1294,7 +1298,7 @@ export const buildSalesReceipt = ({
     },
   });
 
-  // Add separate line for cover fees if applicable
+  // Add separate line for cover fees if applicable (customer-covered fees)
   if (coverFees > 0) {
     const coverFeesAmount = centsToDollars(coverFees);
     if (!Number.isFinite(coverFeesAmount)) {
@@ -1309,6 +1313,30 @@ export const buildSalesReceipt = ({
       Description: 'Processing Fee Coverage',
       SalesItemLineDetail: {
         ItemRef: createItemRef(itemReference),
+      },
+    });
+  }
+
+  // Add Stripe fee line if applicable (platform-paid fee). Represented as a negative amount
+  // on the sales receipt so the net deposit reflects fees without creating a separate JE.
+  const stripeFee = ensurePositiveAmount(stripeFeeAmountCents ?? 0, 'Stripe fee amount');
+  if (stripeFee > 0) {
+    const stripeFeeAmount = -centsToDollars(stripeFee);
+    if (!Number.isFinite(stripeFeeAmount)) {
+      throw new Error(`Invalid stripe fee amount calculated for sales receipt: ${stripeFeeAmount} (from ${stripeFee} cents)`);
+    }
+
+    const feeItemAccountRef = typeof feesAccountName === 'string' && feesAccountName.trim()
+      ? createAccountRef(feesAccountName)
+      : undefined;
+
+    lines.push({
+      Amount: stripeFeeAmount,
+      DetailType: 'SalesItemLineDetail',
+      Description: 'Stripe Processing Fee',
+      SalesItemLineDetail: {
+        ItemRef: createItemRef(itemReference),
+        ...(feeItemAccountRef ? { ItemAccountRef: feeItemAccountRef } : {}),
       },
     });
   }
@@ -2549,27 +2577,14 @@ export const postChargeToQbo = async ({
       date,
       revenueItemName: revenueItemPayload,
       depositAccountName: depositAccountRef.value,
+      feesAccountName: feesAccountRef.value,
+      stripeFeeAmountCents: feeAmount,
       customer: receiptCustomer,
       description,
       coverFeesAmountCents: coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0,
     });
 
     const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
-
-    if (feeAmount > 0) {
-      const feeDocNumber = buildDocNumber('FEE', date, feeAmount, chargeId);
-      const feeJournalEntry = buildFeesJE({
-        docNumber: feeDocNumber,
-        feeAmountCents: feeAmount,
-        memo: normalizedMemo,
-        date,
-        feesAccountId: feesAccountRef.value,
-        clearingAccountId: depositAccountRef.value,
-      });
-
-      await postJournalEntry(feeJournalEntry, options);
-    }
-
     return { qboId: salesReceiptResult.id, type: 'sales-receipt' };
   }
 

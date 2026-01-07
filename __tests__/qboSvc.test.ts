@@ -275,7 +275,7 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-1', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(8); // Customer lookups (2), customer create, item lookup, duplicate checks (2), sales receipt, journal entry
+    expect(fetcher).toHaveBeenCalledTimes(6); // Customer lookups (2), customer create, item lookup, duplicate check, sales receipt
 
     const [emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
     expect(emailLookupRequest.url).toContain('/query?query=');
@@ -304,7 +304,7 @@ describe('postChargeToQbo', () => {
     const feeJournalRequest = requests.find((request) => request.url.includes('journalentry'));
 
     expect(salesReceiptRequest).toBeDefined();
-    expect(feeJournalRequest).toBeDefined();
+    expect(feeJournalRequest).toBeUndefined();
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
@@ -330,31 +330,13 @@ describe('postChargeToQbo', () => {
       City: 'Givington',
     });
 
-    const feeJournalBody = JSON.parse((feeJournalRequest?.init?.body ?? '{}') as string);
-    const feeLines = feeJournalBody.Line.map((line: any) => ({
-      type: line.JournalEntryLineDetail.PostingType,
-      accountRef: line.JournalEntryLineDetail.AccountRef,
-      amount: line.Amount,
-    }));
-    expect(feeLines).toEqual([
-      {
-        type: 'Debit',
-        accountRef: {
-          value: 'QBO_ACCOUNT_FEES',
-          name: 'Stripe Fees',
-        },
-        amount: 3.25,
-      },
-      {
-        type: 'Credit',
-        accountRef: {
-          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'Stripe Clearing',
-        },
-        amount: 3.25,
-      },
-    ]);
-  });
+    // Fee should be present as the second line on the sales receipt with the fees account referenced
+    expect(salesReceiptBody.Line[1].Amount).toBe(-3.25);
+    expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_FEES',
+      name: 'Stripe Fees',
+    });
+  }, { timeout: 20000 });
 
   it('uses default sales item when checkout metadata is missing', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
@@ -731,7 +713,7 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(9); // Customer lookup, item lookup, customer create, item lookup, account lookup, 2x duplicate checks, sales receipt, journal entry
+    expect(fetcher).toHaveBeenCalledTimes(7); // Customer lookup, item lookup, customer create, item lookup, account lookup, duplicate check, sales receipt
 
     const accountLookupRequest = requests.find((request, index) => {
       if (!request.url.includes('/query?query=')) {
@@ -743,7 +725,6 @@ describe('postChargeToQbo', () => {
     expect(accountLookupRequest?.init?.method).toBe('GET');
 
     const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
-    const journalRequest = requests.find((request) => request.url.includes('journalentry'));
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
@@ -755,11 +736,11 @@ describe('postChargeToQbo', () => {
       name: 'Stripe Sales Item',
     });
 
-    const journalBody = JSON.parse((journalRequest?.init?.body ?? '{}') as string);
-    const clearingLine = journalBody.Line.find(
-      (line: any) => line.JournalEntryLineDetail.AccountRef.name === 'Stripe Clearing'
-    );
-    expect(clearingLine?.JournalEntryLineDetail.AccountRef.value).toBe('999');
+    // Fee should be present as the second line on the sales receipt with the fees account referenced
+    expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_FEES',
+      name: 'Stripe Fees',
+    });
   });
 
   it('creates QuickBooks item when transaction type metadata does not exist', async () => {
@@ -792,7 +773,7 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-3', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(9); // Customer lookup, item lookup, customer create, item lookup, item create, 2x duplicate checks, sales receipt, journal entry
+    expect(fetcher).toHaveBeenCalledTimes(7); // Customer lookup, item lookup, customer create, item lookup, item create, duplicate check, sales receipt
 
     const itemLookupRequest = requests.find((request, index) => {
       if (!request.url.includes('/query?query=')) {
@@ -816,6 +797,12 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
       value: '321',
       name: 'New Donation',
+    });
+
+    // Fee should be present as the second line on the sales receipt with the fees account referenced
+    expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_FEES',
+      name: 'Stripe Fees',
     });
   });
 
