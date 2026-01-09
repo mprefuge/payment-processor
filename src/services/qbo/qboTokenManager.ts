@@ -25,6 +25,8 @@ const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
 class QBOTokenManager {
   private store: any;
   private initialized = false;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastRefreshAt: number | null = null;
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -32,6 +34,16 @@ class QBOTokenManager {
     const clients = createPersistentStorageClients('qbo-tokens');
     this.store = clients.tokenStore;
     this.initialized = true;
+
+    // If tokens already exist in storage, schedule a proactive refresh
+    try {
+      const tokens = await this.store.get('tokens');
+      if (tokens && tokens.accessTokenExpiresAt) {
+        this.scheduleProactiveRefresh(tokens.accessTokenExpiresAt).catch(() => undefined);
+      }
+    } catch (err) {
+      // ignore
+    }
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -63,6 +75,22 @@ class QBOTokenManager {
     if (process.env.NODE_ENV !== 'test') {
       await this.store.set('tokens', tokenData);
     }
+
+    // Update env / cached config
+    process.env.QBO_ACCESS_TOKEN = accessToken;
+    if (refreshToken) {
+      process.env.QBO_REFRESH_TOKEN = refreshToken;
+      // also update parsed env copy if present
+      env.quickBooks.refreshToken = refreshToken;
+    }
+
+    // Schedule proactive refresh one hour before expiry
+    try {
+      await this.scheduleProactiveRefresh(tokenData.accessTokenExpiresAt).catch(() => undefined);
+    } catch (_err) {
+      // ignore scheduling failures
+    }
+
     logger.info('QBO tokens updated and persisted');
   }
 
@@ -90,8 +118,15 @@ class QBOTokenManager {
   }
 
   async refreshTokens(
-    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
   ): Promise<RefreshTokenResult> {
+    const usedFetcher = fetcher ?? (typeof fetch !== 'undefined' ? fetch : undefined);
+    if (!usedFetcher) {
+      throw new Error('Fetch API is not available to perform QBO token refresh');
+    }
+
+    // Record refresh timestamp to avoid immediate re-refresh loops
+    this.lastRefreshAt = Date.now();
     const tokens = await this.getTokens();
     let refreshToken = tokens?.refreshToken;
 
@@ -122,7 +157,7 @@ class QBOTokenManager {
       refresh_token: refreshToken,
     });
 
-    const response = await fetcher('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
+    const response = await usedFetcher('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -133,11 +168,37 @@ class QBOTokenManager {
     });
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => undefined);
+      // Try to parse JSON body to inspect specific errors (e.g., invalid_grant)
+      const rawText = await response.text().catch(() => undefined);
+      let parsed: any = undefined;
+      try {
+        parsed = rawText ? JSON.parse(rawText) : undefined;
+      } catch (_err) {
+        // ignore parse errors
+      }
+
+      const isInvalidGrant =
+        response.status === 400 &&
+        ((parsed && parsed.error === 'invalid_grant') ||
+          (typeof rawText === 'string' && /invalid_grant/i.test(rawText)) ||
+          (typeof rawText === 'string' && /incorrect or invalid refresh token/i.test(rawText)));
+
+      if (isInvalidGrant) {
+        // Clear any stored tokens to avoid repeated failures
+        try {
+          await this.clearTokens();
+          logger.warn('QBO refresh token appears invalid or revoked; cleared stored tokens');
+        } catch (err) {
+          logger.warn('Failed to clear stored QBO tokens after invalid refresh token: ' + (err instanceof Error ? err.message : String(err)));
+        }
+
+        throw new Error(
+          'QBO refresh token is invalid or revoked. Manual re-authentication is required (run "npm run setup:qbo").'
+        );
+      }
+
       throw new Error(
-        `Failed to refresh QuickBooks access token (status ${response.status}): ${
-          errorText ?? response.statusText
-        }`
+        `Failed to refresh QuickBooks access token (status ${response.status}): ${rawText ?? response.statusText}`
       );
     }
 
@@ -166,6 +227,45 @@ class QBOTokenManager {
   async clearTokens(): Promise<void> {
     await this.ensureInitialized();
     await this.store.set('tokens', null);
+    // Cancel any scheduled proactive refresh
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer as any);
+      this.refreshTimer = null;
+    }
+    this.lastRefreshAt = null;
+  }
+
+  async scheduleProactiveRefresh(accessTokenExpiresAt: number): Promise<void> {
+    // Cancel existing timer
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer as any);
+      this.refreshTimer = null;
+    }
+
+    // Schedule refresh one hour before expiry
+    const oneHourMs = 60 * 60 * 1000;
+    const refreshAt = accessTokenExpiresAt - oneHourMs;
+    const now = Date.now();
+
+    // If refreshAt already passed, refresh immediately (but guard against frequent refreshes)
+    const earliestNextRefreshAt = (this.lastRefreshAt ?? 0) + 5 * 60 * 1000; // 5 minutes between refresh attempts
+    if (refreshAt <= now) {
+      if (Date.now() >= earliestNextRefreshAt) {
+        // attempt immediate refresh in background (don't await)
+        this.refreshTokens().catch((err) => logger.warn('Proactive immediate token refresh failed: ' + (err instanceof Error ? err.message : String(err))));
+      }
+      return;
+    }
+
+    const delay = Math.max(refreshAt - now, 0);
+
+    // Safety: cap delay to reasonable range
+    const maxDelay = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const safeDelay = Math.min(delay, maxDelay);
+
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTokens().catch((err) => logger.warn('Proactive scheduled token refresh failed: ' + (err instanceof Error ? err.message : String(err))));
+    }, safeDelay);
   }
 
   async getValidAccessToken(

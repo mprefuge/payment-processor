@@ -1144,6 +1144,29 @@ class QuickBooksProvider extends BaseAccountingProvider {
       if (!refreshResponse.access_token || refreshResponse.error) {
         const errorDescription =
           refreshResponse.error_description || refreshResponse.error || 'Missing access token';
+
+        const isInvalidGrant =
+          Boolean(refreshResponse.error && refreshResponse.error === 'invalid_grant') ||
+          (typeof errorDescription === 'string' && /invalid refresh token|invalid_grant|incorrect or invalid refresh token/i.test(errorDescription));
+
+        if (isInvalidGrant) {
+          this.logger.warn('[QBO] Refresh token invalid or revoked; clearing stored oauth tokens');
+          try {
+            if (typeof tokenManager?.clearTokens === 'function') {
+              await tokenManager.clearTokens();
+              this.logger.info('[QBO] Cleared persisted tokens via token manager');
+            } else {
+              const clients = createPersistentStorageClients('qbo-tokens');
+              await clients.tokenStore.set('tokens', null);
+              this.logger.info('[QBO] Cleared persisted tokens from storage');
+            }
+          } catch (err) {
+            this.logger.warn('[QBO] Failed to clear persisted tokens: ' + (err && err.message ? err.message : String(err)));
+          }
+
+          throw new Error('QBO refresh token is invalid or revoked; manual re-authentication required.');
+        }
+
         throw new Error(errorDescription);
       }
 
