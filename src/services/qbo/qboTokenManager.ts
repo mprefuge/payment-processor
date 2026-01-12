@@ -26,6 +26,7 @@ class QBOTokenManager {
   private store: any;
   private initialized = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private lastRefreshAt: number | null = null;
 
   async initialize(): Promise<void> {
@@ -232,6 +233,11 @@ class QBOTokenManager {
       clearTimeout(this.refreshTimer as any);
       this.refreshTimer = null;
     }
+    // Cancel auto refresh interval if running
+    if (this.autoRefreshInterval) {
+      clearInterval(this.autoRefreshInterval as any);
+      this.autoRefreshInterval = null;
+    }
     this.lastRefreshAt = null;
   }
 
@@ -266,6 +272,44 @@ class QBOTokenManager {
     this.refreshTimer = setTimeout(() => {
       this.refreshTokens().catch((err) => logger.warn('Proactive scheduled token refresh failed: ' + (err instanceof Error ? err.message : String(err))));
     }, safeDelay);
+  }
+
+  async startAutoRefresh(intervalMs: number = 24 * 60 * 60 * 1000): Promise<void> {
+    await this.initialize();
+    if (this.autoRefreshInterval) {
+      clearInterval(this.autoRefreshInterval as any);
+      this.autoRefreshInterval = null;
+    }
+
+    this.autoRefreshInterval = setInterval(async () => {
+      try {
+        if (!(await this.isSetupComplete())) return;
+        if (await this.isRefreshTokenExpired()) {
+          logger.warn('QBO refresh token expired; clearing stored tokens and requiring manual re-authentication');
+          await this.clearTokens();
+          return;
+        }
+
+        // Avoid frequent refreshes; require at least 24 hours between auto-refreshes
+        const minMsBetweenAutoRefresh = 24 * 60 * 60 * 1000;
+        if (this.lastRefreshAt && Date.now() - this.lastRefreshAt < minMsBetweenAutoRefresh) {
+          return;
+        }
+
+        await this.refreshTokens().catch((err) =>
+          logger.warn('Auto QBO token refresh failed: ' + (err instanceof Error ? err.message : String(err)))
+        );
+      } catch (err) {
+        logger.warn('QBO auto-refresh task encountered an error: ' + (err instanceof Error ? err.message : String(err)));
+      }
+    }, intervalMs);
+  }
+
+  stopAutoRefresh(): void {
+    if (this.autoRefreshInterval) {
+      clearInterval(this.autoRefreshInterval as any);
+      this.autoRefreshInterval = null;
+    }
   }
 
   async getValidAccessToken(

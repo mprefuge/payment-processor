@@ -45,4 +45,19 @@ describe('QBO Token Manager - invalid refresh handling', () => {
     expect(process.env.QBO_REFRESH_TOKEN).toBe('new-refresh');
     expect(scheduleSpy).toHaveBeenCalled();
   });
+
+  it('startAutoRefresh sets interval', async () => {
+    (tokenManager as any).store = { set: vi.fn().mockResolvedValue(undefined), get: vi.fn().mockResolvedValue({ refreshToken: 'rt', accessTokenExpiresAt: Date.now() + 3600 * 1000 + 500 }) };
+    await tokenManager.startAutoRefresh(1000);
+    expect((tokenManager as any).autoRefreshInterval).not.toBeNull();
+    tokenManager.stopAutoRefresh();
+    expect((tokenManager as any).autoRefreshInterval).toBeNull();
+  });
+
+  it('clearTokens stops auto refresh', async () => {
+    // Simulate an existing auto-refresh interval and ensure clearTokens cancels it
+    (tokenManager as any).autoRefreshInterval = setInterval(() => {}, 1000) as any;
+    await tokenManager.clearTokens();
+    expect((tokenManager as any).autoRefreshInterval).toBeNull();
+  });
 });
