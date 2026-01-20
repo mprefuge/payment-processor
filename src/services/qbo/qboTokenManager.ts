@@ -1,6 +1,6 @@
-import { createPersistentStorageClients } from '../idempotency/storage/persistentStoreFactory';
 import env from '../../config/env';
 import { logger } from '../../lib/logger';
+import { createTokenStore, TokenStore } from './tokenStore';
 
 interface TokenData {
   accessToken: string;
@@ -23,7 +23,7 @@ const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
 
 class QBOTokenManager {
-  private store: any;
+  private store: TokenStore | null = null;
   private initialized = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private autoRefreshInterval: ReturnType<typeof setInterval> | null = null;
@@ -32,8 +32,7 @@ class QBOTokenManager {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    const clients = createPersistentStorageClients('qbo-tokens');
-    this.store = clients.tokenStore;
+    this.store = createTokenStore();
     this.initialized = true;
 
     // If tokens already exist in storage, schedule a proactive refresh
@@ -57,7 +56,7 @@ class QBOTokenManager {
       return null;
     }
     await this.ensureInitialized();
-    const data = await this.store.get('tokens');
+    const data = await this.store!.get('tokens');
     return data as TokenData | null;
   }
 
@@ -74,7 +73,7 @@ class QBOTokenManager {
 
     // Don't persist in test environments to avoid test interference
     if (process.env.NODE_ENV !== 'test') {
-      await this.store.set('tokens', tokenData);
+      await this.store!.set('tokens', tokenData);
     }
 
     // Update env / cached config
@@ -227,7 +226,7 @@ class QBOTokenManager {
 
   async clearTokens(): Promise<void> {
     await this.ensureInitialized();
-    await this.store.set('tokens', null);
+    await this.store!.set('tokens', null);
     // Cancel any scheduled proactive refresh
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer as any);
