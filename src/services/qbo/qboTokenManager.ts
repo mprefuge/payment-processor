@@ -37,7 +37,7 @@ class QBOTokenManager {
 
     // If tokens already exist in storage, schedule a proactive refresh
     try {
-      const tokens = await this.store.get('tokens');
+      const tokens: Tokens | null = await this.store.get('tokens');
       if (tokens && tokens.accessTokenExpiresAt) {
         this.scheduleProactiveRefresh(tokens.accessTokenExpiresAt).catch(() => undefined);
       }

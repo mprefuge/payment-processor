@@ -7,6 +7,12 @@ export interface TokenStore {
   set(key: string, value: unknown | null): Promise<void>;
 }
 
+export interface Tokens {
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt: string; // or Date, depending on your implementation
+}
+
 class TableTokenStore implements TokenStore {
   private clientPromise: Promise<TableClient> | null = null;
   private readonly tableName: string;
@@ -37,7 +43,7 @@ class TableTokenStore implements TokenStore {
     return this.clientPromise;
   }
 
-  async get(key: string): Promise<unknown | null> {
+  async get(key: string): Promise<Tokens | null> {
     const client = await this.getClient();
     try {
       const entity = await client.getEntity(this.partitionKey, key);
