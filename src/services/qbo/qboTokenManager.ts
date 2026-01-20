@@ -1,6 +1,6 @@
 import env from '../../config/env';
 import { logger } from '../../lib/logger';
-import { createTokenStore, TokenStore } from './tokenStore';
+import { createTokenStore, TokenStore, Tokens } from './tokenStore';
 
 interface TokenData {
   accessToken: string;
@@ -20,7 +20,7 @@ interface OAuthTokensResult {
 }
 
 const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
-const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
+const REFRESH_TOKEN_LIFETIME_MS = 1 * 24 * 60 * 60 * 1000; // 1 day
 
 class QBOTokenManager {
   private store: TokenStore | null = null;
@@ -37,9 +37,10 @@ class QBOTokenManager {
 
     // If tokens already exist in storage, schedule a proactive refresh
     try {
-      const tokens: Tokens | null = await this.store.get('tokens');
-      if (tokens && tokens.accessTokenExpiresAt) {
-        this.scheduleProactiveRefresh(tokens.accessTokenExpiresAt).catch(() => undefined);
+      const tokens = (await this.store.get('tokens')) as Tokens | null; // Type assertion
+      if (tokens && typeof tokens.accessTokenExpiresAt === 'string') {
+        const expiresAt = Number(tokens.accessTokenExpiresAt); // Ensure it's a number
+        this.scheduleProactiveRefresh(expiresAt).catch(() => undefined);
       }
     } catch (err) {
       // ignore

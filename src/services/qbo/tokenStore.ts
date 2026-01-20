@@ -49,10 +49,11 @@ class TableTokenStore implements TokenStore {
       const entity = await client.getEntity(this.partitionKey, key);
       if (entity && typeof entity.value === 'string') {
         try {
-          return JSON.parse(entity.value);
+          const parsedValue: Tokens = JSON.parse(entity.value); // Ensure it matches Tokens type
+          return parsedValue;
         } catch (err) {
           logger.warn('Failed to parse token entity payload; returning raw value');
-          return entity.value;
+          return null; // Return null instead of a string
         }
       }
       return null;
