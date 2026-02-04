@@ -9,6 +9,10 @@ on:
       - prod
   workflow_dispatch:
 
+concurrency:
+  group: payment-processing-function-prod
+  cancel-in-progress: true
+
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
   NODE_VERSION: '20.x' # set this to the node version to use (supports 8.x, 10.x, 12.x)
@@ -62,17 +66,11 @@ jobs:
         with:
           name: node-app
 
-      - name: Unzip artifact for deployment
-        run: |
-          unzip release.zip
-          rm release.zip
-
       - name: 'Run Azure Functions Action'
         uses: Azure/functions-action@v1
         id: fa
         with:
           app-name: 'payment-processing-function'
           slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-
+          package: release.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_FA090DCEEE59435FA572FA7E342A8755 }}
