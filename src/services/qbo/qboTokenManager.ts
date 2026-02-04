@@ -20,7 +20,7 @@ interface OAuthTokensResult {
 }
 
 const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
-const REFRESH_TOKEN_LIFETIME_MS = 1 * 24 * 60 * 60 * 1000; // 1 day
+const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
 
 class QBOTokenManager {
   private store: TokenStore | null = null;
