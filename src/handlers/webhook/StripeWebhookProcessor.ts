@@ -35,33 +35,32 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
       return this.responseFormatter.error('invalid_signature');
     }
 
-    // Check for duplicate events
-    const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
-    if (isProcessed) {
-      logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
-      return {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        jsonBody: { duplicate: true, eventType: event.type },
-      };
-    }
+    return this.dependencies.idempotencyStore.withLock(`stripe_webhook_evt_${event.id}`, async () => {
+      const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
+      if (isProcessed) {
+        logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
+        return {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          jsonBody: { duplicate: true, eventType: event.type },
+        };
+      }
 
-    // Mark event as processed
-    await this.dependencies.idempotencyStore.markProcessed(event.id);
-
-    try {
-      await this.eventRouter.route(event, this.dependencies, context);
-      return this.responseFormatter.success(event.type);
-    } catch (error) {
-      logger.error('[StripeWebhook] Event processing failed', {
-        eventId: event.id,
-        eventType: event.type,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return this.responseFormatter.error('processing_error');
-    }
+      try {
+        await this.eventRouter.route(event, this.dependencies, context);
+        await this.dependencies.idempotencyStore.markProcessed(event.id);
+        return this.responseFormatter.success(event.type);
+      } catch (error) {
+        logger.error('[StripeWebhook] Event processing failed', {
+          eventId: event.id,
+          eventType: event.type,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return this.responseFormatter.error('processing_error');
+      }
+    });
   }
 
   private getStripeSignature(req: StripeWebhookRequest): string | undefined {
@@ -102,7 +101,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     if (typeof req.text === 'function') {
       try {
         const text = await req.text();
-        logger.debug('[StripeWebhook] Using req.text():', text.substring(0, 100));
+        logger.debug('[StripeWebhook] Using req.text() for webhook payload');
         return text;
       } catch (error) {
         logger.warn('[StripeWebhook] req.text() failed:', error);
@@ -118,10 +117,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     if (req.body && typeof req.body === 'object') {
       try {
         const result = JSON.stringify(req.body);
-        logger.warn(
-          '[StripeWebhook] WARNING: Using stringified parsed body:',
-          result.substring(0, 100)
-        );
+        logger.warn('[StripeWebhook] WARNING: Using stringified parsed body for webhook payload');
         return result;
       } catch (error) {
         return '';

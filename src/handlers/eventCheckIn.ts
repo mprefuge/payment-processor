@@ -7,6 +7,7 @@ import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { createEventSvc } from '../services/eventSvc';
 import type { EventCheckInRequest } from '../types/events';
 import { stripeClientFactory } from '../services/stripeClientFactory';
+import env from '../config/env';
 const CrmFactory = require('../services/salesforce/crmFactory');
 
 /**
@@ -60,7 +61,7 @@ export default async function eventCheckIn(
     const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
     const salesforceConnection = await crmService.connect();
     
-    const stripeClient = stripeClientFactory.getClient(false);
+    const stripeClient = stripeClientFactory.getClient(!env.testMode);
 
     // Create event service
     const eventSvc = createEventSvc({

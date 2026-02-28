@@ -229,6 +229,16 @@ Manually synchronize transactions to QuickBooks Online.
 
 Reconcile Stripe transactions with QuickBooks records.
 
+### Salesforce Payment Sync
+
+`GET|POST /api/stripe/salesforce-payments-sync`
+
+Synchronize all successful Stripe payments to Salesforce.
+
+- In `TEST_MODE=true`, this endpoint automatically runs as dry-run only.
+- Dry-run returns payment counts, payment type counts, customer counts, and example Salesforce payloads.
+- Use `?format=csv` to export successful payment data as a downloadable CSV file instead of syncing to Salesforce.
+
 ### Event Registration
 
 `POST /api/events/register`

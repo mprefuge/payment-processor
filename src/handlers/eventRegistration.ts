@@ -7,6 +7,7 @@ import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { createEventSvc } from '../services/eventSvc';
 import type { EventRegistrationRequest, Event } from '../types/events';
 import { stripeClientFactory } from '../services/stripeClientFactory';
+import env from '../config/env';
 const CrmFactory = require('../services/salesforce/crmFactory');
 
 /**
@@ -62,7 +63,7 @@ export default async function eventRegistration(
     const salesforceConnection = await crmService.connect();
 
     // Create event service to query for active events
-    const stripeClient = stripeClientFactory.getClient(false); // Use test mode by default
+    const stripeClient = stripeClientFactory.getClient(!env.testMode);
     const eventSvc = createEventSvc({
       salesforceConnection,
       stripeClient,

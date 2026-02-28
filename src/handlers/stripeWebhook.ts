@@ -22,6 +22,7 @@ import {
 } from '../stripe/types';
 import { createMockStripeServices } from '../stripe/mock';
 import { serviceContainer } from '../services/container';
+import { stripeClientFactory } from '../services/stripeClientFactory';
 
 const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2023-10-16';
 
@@ -49,27 +50,10 @@ const createStripeServices = (): StripeWebhookDependencies['stripe'] => {
     return createMockStripeServices();
   }
 
-  const defaultClient = new Stripe(env.stripe.secret, {
-    apiVersion: STRIPE_API_VERSION,
-  });
+  const defaultClient = stripeClientFactory.getDefaultClient({ apiVersion: STRIPE_API_VERSION });
 
-  const cache = new Map<boolean, Stripe>();
-
-  const getClient = (livemode: boolean): Stripe => {
-    if (cache.has(livemode)) {
-      return cache.get(livemode)!;
-    }
-
-    const secret = livemode
-      ? process.env.STRIPE_LIVE_SECRET_KEY || env.stripe.secret
-      : process.env.STRIPE_TEST_SECRET_KEY || env.stripe.secret;
-
-    const client = new Stripe(secret, {
-      apiVersion: STRIPE_API_VERSION,
-    });
-    cache.set(livemode, client);
-    return client;
-  };
+  const getClient = (livemode: boolean): Stripe =>
+    stripeClientFactory.getClient(livemode, { apiVersion: STRIPE_API_VERSION });
 
   return {
     verifyEvent: (payload, signature) =>

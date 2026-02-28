@@ -11,6 +11,9 @@ const stripeTrueUpModule = require('./handlers/stripeTrueUp');
 const stripeTrueUp = stripeTrueUpModule.default || stripeTrueUpModule;
 const manualQboSyncModule = require('./handlers/manualQboSync');
 const manualQboSync = manualQboSyncModule.default || manualQboSyncModule;
+const salesforcePaymentsSyncModule = require('./handlers/salesforcePaymentsSync');
+const salesforcePaymentsSync =
+  salesforcePaymentsSyncModule.default || salesforcePaymentsSyncModule;
 const eventRegistrationModule = require('./handlers/eventRegistration');
 const eventRegistration = eventRegistrationModule.default || eventRegistrationModule;
 const eventCheckInModule = require('./handlers/eventCheckIn');
@@ -57,6 +60,13 @@ app.http('manualQboSync', {
   route: 'qbo/manual-sync',
   authLevel: 'function',
   handler: manualQboSync,
+});
+
+app.http('salesforcePaymentsSync', {
+  methods: ['GET', 'POST'],
+  route: 'stripe/salesforce-payments-sync',
+  authLevel: 'function',
+  handler: salesforcePaymentsSync,
 });
 
 app.http('eventRegistration', {
@@ -164,6 +174,7 @@ export {
   payoutSyncTrigger,
   stripeTrueUp,
   manualQboSync,
+  salesforcePaymentsSync,
   eventRegistration,
   eventCheckIn,
 };
