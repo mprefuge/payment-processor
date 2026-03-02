@@ -1617,6 +1617,8 @@ const itemLookupCache = new Map<string, string>();
 
 interface QuickBooksRequestContext {
   request: (url: string, init?: RequestInit) => Promise<Response>;
+  /** convenience logging function (points to shared logger) */
+  log: (...args: unknown[]) => void;
 }
 
 const setAuthorizationHeader = (headers: Headers, token: string) => {
@@ -1665,7 +1667,7 @@ const createRequestContext = async (options?: PostOptions): Promise<QuickBooksRe
     return response;
   };
 
-  return { request };
+  return { request, log: logger.warn };
 };
 
 const escapeQueryValue = (value: string): string => {
