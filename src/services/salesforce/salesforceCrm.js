@@ -16,6 +16,7 @@ class SalesforceCrmService extends BaseCrmService {
 
     // cached record type id for Contact object (looked up lazily)
     this._contactRecordTypeId = null;
+    this._recordTypeIdCache = new Map();
   }
 
   /**
@@ -103,6 +104,64 @@ class SalesforceCrmService extends BaseCrmService {
 
     this._contactRecordTypeId = records[0].Id;
     return this._contactRecordTypeId;
+  }
+
+  /**
+   * Resolve a RecordType Id by sObject API name and record type Name.
+   * Caches lookups for the life of this CRM service instance.
+   * @param {string} sObjectType - Salesforce object API name (e.g. Transaction__c)
+   * @param {string} recordTypeName - Record type label/name (e.g. General)
+   * @returns {Promise<string|null>} RecordType Id or null when not found
+   */
+  async getRecordTypeIdByName(sObjectType, recordTypeName) {
+    await this.authenticate();
+
+    const objectName = typeof sObjectType === 'string' ? sObjectType.trim() : '';
+    const name = typeof recordTypeName === 'string' ? recordTypeName.trim() : '';
+
+    if (!objectName || !name) {
+      return null;
+    }
+
+    const cacheKey = `${objectName}::${name}`;
+    if (this._recordTypeIdCache.has(cacheKey)) {
+      return this._recordTypeIdCache.get(cacheKey);
+    }
+
+    const soql =
+      `SELECT Id FROM RecordType WHERE SObjectType = '${objectName.replace(/'/g, "\\'")}' ` +
+      `AND Name = '${name.replace(/'/g, "\\'")}' LIMIT 1`;
+
+    const result = await this.conn.query(soql);
+    const records = Array.isArray(result.records) ? result.records : [];
+    const recordTypeId = records.length > 0 && records[0].Id ? records[0].Id : null;
+
+    this._recordTypeIdCache.set(cacheKey, recordTypeId);
+    return recordTypeId;
+  }
+
+  /**
+   * Find a campaign Id by campaign Name.
+   * @param {string} campaignName - Campaign name to locate
+   * @returns {Promise<string|null>} Campaign Id or null when not found
+   */
+  async findCampaignIdByName(campaignName) {
+    await this.authenticate();
+
+    const trimmedName = typeof campaignName === 'string' ? campaignName.trim() : '';
+    if (!trimmedName) {
+      return null;
+    }
+
+    const query = `SELECT Id FROM Campaign WHERE Name = '${trimmedName.replace(/'/g, "\\'")}' LIMIT 1`;
+    const result = await this.conn.query(query);
+    const records = Array.isArray(result.records) ? result.records : [];
+
+    if (records.length === 0 || !records[0].Id) {
+      return null;
+    }
+
+    return records[0].Id;
   }
 
   async searchContact(searchCriteria) {

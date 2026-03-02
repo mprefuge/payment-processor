@@ -5,11 +5,6 @@ const Stripe = require('stripe');
 const { ensureSalesforceIdOnCustomer } = require('../stripe/utils');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
-const {
-  loadConfig,
-  normalizeTransactionCategory,
-  generateTransactionName,
-} = require('../config/contactMatching');
 const { AzureIdempotencyStore } = require('../services/idempotencyStore');
 
 // Create in-memory idempotency store
@@ -739,7 +734,7 @@ const syncContactToCrm = async (context, stripe, customerData) => {
     if (customerData.stripeCustomerId && contact && contact.Id) {
       const metadataLogger =
         typeof context?.log === 'function'
-          ? context.log
+          ? context.log.bind(context)
           : typeof logger?.info === 'function'
             ? logger.info.bind(logger)
             : () => {};
@@ -790,6 +785,101 @@ const convertCentsToDollars = (amountInCents) => {
   return amountInCents / 100;
 };
 
+const DEFAULT_TRANSACTION_RECORD_TYPE_NAME = 'General';
+const DEFAULT_CAMPAIGN_NAME = 'General Giving';
+
+const resolveCampaignId = async (crmService, transactionData) => {
+  const configuredCampaignName =
+    transactionData.metadata?.campaign__c ||
+    transactionData.metadata?.Campaign__c ||
+    transactionData.metadata?.campaign;
+
+  const campaignName =
+    typeof configuredCampaignName === 'string' && configuredCampaignName.trim().length > 0
+      ? configuredCampaignName.trim()
+      : DEFAULT_CAMPAIGN_NAME;
+
+  if (campaignName.match(/^701[a-zA-Z0-9]{15}$/)) {
+    console.log('Campaign metadata is already a Salesforce ID', { campaignId: campaignName });
+    return campaignName;
+  }
+
+  if (typeof crmService.findCampaignIdByName === 'function') {
+    try {
+      console.log('Resolving campaign name to Salesforce ID', { campaignName });
+      const campaignId = await crmService.findCampaignIdByName(campaignName);
+      if (campaignId) {
+        console.log('Campaign resolved to Salesforce ID', {
+          campaignName,
+          campaignId,
+        });
+        return campaignId;
+      }
+
+      console.log('Campaign not found in Salesforce by name', { campaignName });
+    } catch (error) {
+      console.log('Failed to resolve campaign by name, will continue without campaign assignment', {
+        campaignName,
+        error: error.message,
+      });
+      logger.error('Campaign lookup error:', error);
+    }
+  }
+
+  if (typeof crmService.findOrCreateCampaign === 'function') {
+    try {
+      console.log('Resolving campaign via findOrCreateCampaign', { campaignName });
+      const campaignId = await crmService.findOrCreateCampaign(campaignName);
+      console.log('Campaign resolved to Salesforce ID', {
+        campaignName,
+        campaignId,
+      });
+      return campaignId;
+    } catch (error) {
+      console.log('Failed to resolve campaign, will skip campaign assignment', {
+        campaignName,
+        error: error.message,
+      });
+      logger.error('Campaign resolution error:', error);
+    }
+  }
+
+  return null;
+};
+
+const resolveTransactionRecordTypeId = async (crmService) => {
+  if (typeof crmService.getRecordTypeIdByName !== 'function') {
+    return null;
+  }
+
+  try {
+    const recordTypeId = await crmService.getRecordTypeIdByName(
+      'Transaction__c',
+      DEFAULT_TRANSACTION_RECORD_TYPE_NAME
+    );
+
+    if (recordTypeId) {
+      console.log('Resolved transaction record type', {
+        recordTypeName: DEFAULT_TRANSACTION_RECORD_TYPE_NAME,
+        recordTypeId,
+      });
+    } else {
+      console.log('Transaction record type not found by name', {
+        recordTypeName: DEFAULT_TRANSACTION_RECORD_TYPE_NAME,
+      });
+    }
+
+    return recordTypeId;
+  } catch (error) {
+    console.log('Failed to resolve transaction record type', {
+      recordTypeName: DEFAULT_TRANSACTION_RECORD_TYPE_NAME,
+      error: error.message,
+    });
+    logger.error('Transaction record type lookup error:', error);
+    return null;
+  }
+};
+
 const createPendingTransaction = async (context, session, contactId, transactionData) => {
   try {
     if (!contactId) {
@@ -824,44 +914,8 @@ const createPendingTransaction = async (context, session, contactId, transaction
       return null;
     }
 
-    const matchingConfig = loadConfig();
-    const category = session.metadata?.category || transactionData.category || 'General';
-    const normalizedCategory = normalizeTransactionCategory(category, matchingConfig);
-
-    // Resolve campaign name to Salesforce ID if present in metadata
-    let campaignId = null;
-    const campaignName =
-      transactionData.metadata?.campaign__c ||
-      transactionData.metadata?.Campaign__c ||
-      transactionData.metadata?.campaign;
-
-    if (campaignName && typeof campaignName === 'string' && campaignName.trim().length > 0) {
-      const trimmedName = campaignName.trim();
-
-      // Check if it's already a Salesforce ID (18-char starting with '701')
-      if (trimmedName.match(/^701[a-zA-Z0-9]{15}$/)) {
-        console.log('Campaign metadata is already a Salesforce ID', { campaignId: trimmedName });
-        campaignId = trimmedName;
-      } else if (typeof crmService.findOrCreateCampaign === 'function') {
-        // It's a campaign name, resolve to ID via CRM
-        try {
-          console.log('Resolving campaign name to Salesforce ID', { campaignName: trimmedName });
-          campaignId = await crmService.findOrCreateCampaign(trimmedName);
-          console.log('Campaign resolved to Salesforce ID', {
-            campaignName: trimmedName,
-            campaignId,
-          });
-        } catch (error) {
-          console.log('Failed to resolve campaign, will skip campaign assignment', {
-            campaignName: trimmedName,
-            error: error.message,
-          });
-          logger.error('Campaign resolution error:', error);
-        }
-      } else {
-        console.log('CRM service does not support campaign creation');
-      }
-    }
+    const campaignId = await resolveCampaignId(crmService, transactionData);
+    const recordTypeId = await resolveTransactionRecordTypeId(crmService);
 
     // Add contact as campaign member if campaign was resolved
     if (campaignId && typeof crmService.addCampaignMember === 'function') {
@@ -906,6 +960,10 @@ const createPendingTransaction = async (context, session, contactId, transaction
       transactionRecord.Campaign__c = campaignId;
     }
 
+    if (recordTypeId) {
+      transactionRecord.RecordTypeId = recordTypeId;
+    }
+
     const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
     if (paymentIntentId) {
       transactionRecord.Stripe_Payment_Intent_Id__c = paymentIntentId;
@@ -928,20 +986,6 @@ const createPendingTransaction = async (context, session, contactId, transaction
 
     if (transactionData.attribution) {
       transactionRecord.Attribution__c = transactionData.attribution;
-    }
-
-    const transactionTypeName =
-      transactionData.transactionType || transactionData.metadata?.transactionType || 'Payment';
-
-    const name = generateTransactionName(normalizedCategory, matchingConfig, {
-      amount: amount !== null ? `$${amount.toFixed(2)}` : undefined,
-      date: new Date().toLocaleDateString(),
-      id: session.id,
-      transactionType: transactionTypeName,
-    });
-
-    if (name) {
-      transactionRecord.Name = name;
     }
 
     const upsertResult = await crmService.upsertTransactionsRecord(
@@ -994,14 +1038,51 @@ const upsertSalesforceTransaction = async (context, session, requestData) => {
       Status__c: 'Pending',
     };
 
+    const campaignId = await resolveCampaignId(crmService, requestData);
+    const recordTypeId = await resolveTransactionRecordTypeId(crmService);
+
+    if (campaignId) {
+      transactionRecord.Campaign__c = campaignId;
+    }
+
+    if (recordTypeId) {
+      transactionRecord.RecordTypeId = recordTypeId;
+    }
+
+    const amount = convertCentsToDollars(requestData.amount);
+    if (amount !== null) {
+      transactionRecord.Amount_Gross__c = amount;
+    }
+
+    const currency = session.currency ? session.currency.toUpperCase() : 'USD';
+    if (currency) {
+      transactionRecord.Currency_ISO_Code__c = currency;
+    }
+
+    if (requestData.frequency) {
+      transactionRecord.Frequency__c = requestData.frequency;
+    }
+
+    transactionRecord.Payment_Method__c = 'Pending';
+
     if (requestData.attribution) {
       transactionRecord.Attribution__c = requestData.attribution;
     }
 
-    await crmService.upsertTransactionsRecord(transactionRecord, 'Stripe_Checkout_Session_Id__c');
-    console.log('Upserted pending transaction in CRM', { sessionId: session.id });
+    const upsertResult = await crmService.upsertTransactionsRecord(
+      transactionRecord,
+      'Stripe_Checkout_Session_Id__c'
+    );
 
-    return transactionRecord;
+    if (upsertResult) {
+      console.log('Upserted pending transaction in CRM', { sessionId: session.id });
+    } else {
+      console.log('Pending transaction upsert skipped by CRM validation', {
+        sessionId: session.id,
+      });
+    }
+
+    return upsertResult;
   } catch (error) {
     console.log(`Error upserting pending transaction: ${error.message}`);
     logger.error('Pending transaction upsert error details:', error);

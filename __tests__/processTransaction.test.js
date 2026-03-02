@@ -333,11 +333,11 @@ describe('processTransaction', () => {
     expect(createTransactionMock).not.toHaveBeenCalled();
     expect(upsertMock).toHaveBeenCalledTimes(1);
     expect(upsertMock).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
         Transaction_Type__c: 'charge',
         Status__c: 'Pending',
-      },
+      }),
       'Stripe_Checkout_Session_Id__c'
     );
   });
@@ -501,6 +501,80 @@ describe('processTransaction', () => {
     expect(upsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
+        Status__c: 'Pending',
+      }),
+      'Stripe_Checkout_Session_Id__c'
+    );
+  });
+
+  it('defaults campaign to General Giving and resolves General transaction record type', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+        update: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test',
+            url: 'https://stripe.test/session',
+          }),
+        },
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    process.env.CRM_PROVIDER = 'salesforce';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
+    const findCampaignIdByNameMock = vi.fn().mockResolvedValue('701GENERALGIVING001');
+    const getRecordTypeIdByNameMock = vi.fn().mockResolvedValue('012GENERALTXN00001');
+
+    const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
+      searchContact: vi.fn().mockResolvedValue([]),
+      createContact: vi.fn().mockResolvedValue({
+        Id: '003TEST',
+        FirstName: 'Donor',
+        LastName: 'Example',
+        Email: 'donor@example.com',
+      }),
+      updateContact: vi.fn(),
+      upsertTransactionsRecord: upsertMock,
+      findCampaignIdByName: findCampaignIdByNameMock,
+      getRecordTypeIdByName: getRecordTypeIdByNameMock,
+      addCampaignMember: vi.fn().mockResolvedValue({ id: 'cm_test', isNew: true }),
+    };
+
+    const CrmFactory = require('../dist/services/salesforce/crmFactory');
+    vi.spyOn(CrmFactory, 'validateConfig').mockReturnValue({ isValid: true });
+    vi.spyOn(CrmFactory, 'createCrmService').mockReturnValue(crmServiceMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 7500,
+        frequency: 'month',
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(findCampaignIdByNameMock).toHaveBeenCalledWith('General Giving');
+    expect(getRecordTypeIdByNameMock).toHaveBeenCalledWith('Transaction__c', 'General');
+    expect(upsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Campaign__c: '701GENERALGIVING001',
+        RecordTypeId: '012GENERALTXN00001',
         Status__c: 'Pending',
       }),
       'Stripe_Checkout_Session_Id__c'
