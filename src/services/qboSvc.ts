@@ -460,12 +460,12 @@ const deriveSalesReceiptCustomer = (source: StripeCustomerContext): EnsureCustom
     toTrimmed(checkoutMetadata?.Category as string | undefined);
 
   const preferredName =
-    customerCategory || // Use customer category as highest priority
     toTrimmed(activeCustomer?.name) ||
     toTrimmed(checkoutDetails?.name) ||
     toTrimmed(paymentShipping?.name) ||
     toTrimmed(chargeShipping?.name) ||
-    toTrimmed(billingDetails?.name);
+    toTrimmed(billingDetails?.name) ||
+    customerCategory;
 
   const email =
     normalizeEmail(billingDetails?.email) ||

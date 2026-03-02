@@ -367,6 +367,70 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
   }, { timeout: 20000 });
 
+  it('prefers donor name over checkout category when deriving QuickBooks payee/customer', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-name-priority', DisplayName: 'Jane Donor' } }, // Customer create
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      }, // Item lookup
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-name-priority' } } // Sales receipt create
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const stripeCustomer = createStripeCustomer({
+      name: 'Jane Donor',
+      email: 'jane@example.com',
+    });
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext(
+        {
+          billing_details: {
+            name: 'Jane Donor',
+            email: 'jane@example.com',
+          } as any,
+        },
+        {
+          customer_details: {
+            name: 'Jane Donor',
+            email: 'jane@example.com',
+          } as any,
+          metadata: {
+            transactionType: 'Stripe Sales Item',
+            category: 'General',
+          },
+        },
+        stripeCustomer
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-name-priority', type: 'sales-receipt' });
+
+    const customerCreateRequest = requests.find((request) => request.url.includes('/customer'));
+    expect(customerCreateRequest).toBeDefined();
+    const customerBody = JSON.parse((customerCreateRequest?.init?.body ?? '{}') as string);
+    expect(customerBody.DisplayName).toBe('Jane Donor');
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    expect(salesReceiptRequest).toBeDefined();
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.CustomerRef).toMatchObject({
+      value: 'cust-name-priority',
+      name: 'Jane Donor',
+    });
+  });
+
   it('ignores cover fees when metadata amount is >= gross charge', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const gross = 5_000; // $50.00
