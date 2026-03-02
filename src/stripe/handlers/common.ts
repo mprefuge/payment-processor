@@ -100,16 +100,7 @@ export const handleCheckoutSessionCompleted = async (
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
 
   const transaction: TransactionUpsertDTO = {
-    transaction_type__c: 'charge',
-    status__c: 'processing',
-    stripe_checkout_session_id__c: session.id,
-    stripe_payment_intent_id__c: normalizeStripeId(session.payment_intent),
-    stripe_customer_id__c: normalizeStripeId(session.customer),
-    stripe_subscription_id__c: normalizeStripeId(session.subscription),
-    amount_gross__c: centsToMajorUnits(session.amount_total ?? null),
-    amount_net__c: centsToMajorUnits(session.amount_subtotal ?? null),
-    currency_iso_code__c: session.currency ? session.currency.toUpperCase() : null,
-    received_at__c: timestampToIsoString(session.created ?? null),
+    ...buildCheckoutSessionTransaction(session, 'processing'),
     ...(campaignId ? { campaign__c: campaignId } : {}),
   };
 
@@ -133,6 +124,108 @@ export const handleCheckoutSessionCompleted = async (
   }
 
   await salesforce.upsertTransactionByExternalId(transaction, 'stripe_checkout_session_id__c');
+};
+
+const buildCheckoutSessionTransaction = (
+  session: Stripe.Checkout.Session,
+  status: TransactionUpsertDTO['status__c'],
+  memo?: string
+): TransactionUpsertDTO => ({
+  transaction_type__c: 'charge',
+  status__c: status,
+  stripe_checkout_session_id__c: session.id,
+  stripe_payment_intent_id__c: normalizeStripeId(session.payment_intent),
+  stripe_customer_id__c: normalizeStripeId(session.customer),
+  stripe_subscription_id__c: normalizeStripeId(session.subscription),
+  amount_gross__c: centsToMajorUnits(session.amount_total ?? null),
+  amount_net__c: centsToMajorUnits(session.amount_subtotal ?? null),
+  currency_iso_code__c: session.currency ? session.currency.toUpperCase() : null,
+  received_at__c: timestampToIsoString(session.created ?? null),
+  ...(memo ? { memo__c: memo } : {}),
+});
+
+const upsertCheckoutSessionStatus = async (
+  context: HttpContext,
+  session: Stripe.Checkout.Session,
+  status: TransactionUpsertDTO['status__c'],
+  deps: StripeWebhookDependencies,
+  memo?: string
+): Promise<void> => {
+  const salesforce = await deps.getSalesforceSvc();
+  const transaction = buildCheckoutSessionTransaction(session, status, memo);
+
+  if (
+    transaction.status__c == null ||
+    (transaction as any).status__c === '' ||
+    transaction.amount_gross__c == null
+  ) {
+    context.log('[StripeWebhook] Skipping checkout session status upsert due to missing required fields', {
+      sessionId: session.id,
+      status: transaction.status__c,
+      amountGross: transaction.amount_gross__c,
+      transaction,
+    });
+    return;
+  }
+
+  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_checkout_session_id__c');
+};
+
+export const handleCheckoutSessionExpired = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies
+): Promise<void> => {
+  const session = event.data.object as Stripe.Checkout.Session;
+
+  context.log('[StripeWebhook] Processing checkout session expired', {
+    sessionId: session.id,
+    paymentIntent: normalizeStripeId(session.payment_intent),
+  });
+
+  await upsertCheckoutSessionStatus(
+    context,
+    session,
+    'failed',
+    deps,
+    'Checkout session expired before payment completion.'
+  );
+};
+
+export const handleCheckoutSessionAsyncPaymentFailed = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies
+): Promise<void> => {
+  const session = event.data.object as Stripe.Checkout.Session;
+
+  context.log('[StripeWebhook] Processing checkout session async payment failed', {
+    sessionId: session.id,
+    paymentIntent: normalizeStripeId(session.payment_intent),
+  });
+
+  await upsertCheckoutSessionStatus(
+    context,
+    session,
+    'failed',
+    deps,
+    'Checkout session payment failed after asynchronous processing.'
+  );
+};
+
+export const handleCheckoutSessionAsyncPaymentSucceeded = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies
+): Promise<void> => {
+  const session = event.data.object as Stripe.Checkout.Session;
+
+  context.log('[StripeWebhook] Processing checkout session async payment succeeded', {
+    sessionId: session.id,
+    paymentIntent: normalizeStripeId(session.payment_intent),
+  });
+
+  await upsertCheckoutSessionStatus(context, session, 'paid', deps);
 };
 
 export type StripeHandler = (

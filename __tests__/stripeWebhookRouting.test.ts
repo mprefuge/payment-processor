@@ -7,6 +7,11 @@ import {
   handleInvoicePaymentActionRequired,
   handleInvoicePaymentFailed,
 } from '../src/stripe/handlers/invoicePaid';
+import {
+  handleCheckoutSessionAsyncPaymentFailed,
+  handleCheckoutSessionAsyncPaymentSucceeded,
+  handleCheckoutSessionExpired,
+} from '../src/stripe/handlers/common';
 import { handlePaymentIntentActionRequired } from '../src/stripe/handlers/paymentIntents';
 import * as paymentIntentHandlers from '../src/stripe/handlers/paymentIntents';
 import type { HttpContext, StripeWebhookDependencies } from '../src/stripe/types';
@@ -351,6 +356,99 @@ describe('payment intent action required handler', () => {
         status__c: 'pending',
       }),
       'stripe_payment_intent_id__c'
+    );
+  });
+});
+
+describe('checkout session lifecycle handlers', () => {
+  const createSessionEvent = (
+    type:
+      | 'checkout.session.expired'
+      | 'checkout.session.async_payment_failed'
+      | 'checkout.session.async_payment_succeeded'
+  ): Stripe.Event =>
+    ({
+      type,
+      data: {
+        object: {
+          id: 'cs_lifecycle_status',
+          payment_intent: 'pi_lifecycle_status',
+          customer: 'cus_lifecycle_status',
+          amount_total: 2500,
+          amount_subtotal: 2500,
+          currency: 'usd',
+          created: 1_700_000_000,
+        },
+      },
+      livemode: false,
+    }) as Stripe.Event;
+
+  it('marks checkout session as failed when expired', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+    const deps = createDeps({
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    await handleCheckoutSessionExpired(context, createSessionEvent('checkout.session.expired'), deps);
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_checkout_session_id__c: 'cs_lifecycle_status',
+        stripe_payment_intent_id__c: 'pi_lifecycle_status',
+        status__c: 'failed',
+      }),
+      'stripe_checkout_session_id__c'
+    );
+  });
+
+  it('marks checkout session as failed when async payment fails', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+    const deps = createDeps({
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    await handleCheckoutSessionAsyncPaymentFailed(
+      context,
+      createSessionEvent('checkout.session.async_payment_failed'),
+      deps
+    );
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_checkout_session_id__c: 'cs_lifecycle_status',
+        status__c: 'failed',
+      }),
+      'stripe_checkout_session_id__c'
+    );
+  });
+
+  it('marks checkout session as paid when async payment succeeds', async () => {
+    const context = createContext();
+    const upsert = vi.fn().mockResolvedValue({});
+    const deps = createDeps({
+      salesforceOverrides: {
+        upsertTransactionByExternalId: upsert,
+      },
+    });
+
+    await handleCheckoutSessionAsyncPaymentSucceeded(
+      context,
+      createSessionEvent('checkout.session.async_payment_succeeded'),
+      deps
+    );
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_checkout_session_id__c: 'cs_lifecycle_status',
+        status__c: 'paid',
+      }),
+      'stripe_checkout_session_id__c'
     );
   });
 });

@@ -3,7 +3,12 @@ import type { HttpContext } from '../../stripe/types';
 import type { StripeWebhookDependencies } from '../../stripe/types';
 import type { EventRouter } from './types';
 import { logger } from '../../lib/logger';
-import { handleCheckoutSessionCompleted } from '../../stripe/handlers/common';
+import {
+  handleCheckoutSessionAsyncPaymentFailed,
+  handleCheckoutSessionAsyncPaymentSucceeded,
+  handleCheckoutSessionCompleted,
+  handleCheckoutSessionExpired,
+} from '../../stripe/handlers/common';
 import {
   handlePaymentIntentActionRequired,
   handlePaymentIntentCanceled,
@@ -31,6 +36,15 @@ export class StripeEventRouter implements EventRouter {
     switch (eventType) {
       case 'checkout.session.completed':
         await handleCheckoutSessionCompleted(context, event, deps);
+        return;
+      case 'checkout.session.expired':
+        await handleCheckoutSessionExpired(context, event, deps);
+        return;
+      case 'checkout.session.async_payment_failed':
+        await handleCheckoutSessionAsyncPaymentFailed(context, event, deps);
+        return;
+      case 'checkout.session.async_payment_succeeded':
+        await handleCheckoutSessionAsyncPaymentSucceeded(context, event, deps);
         return;
       case 'payment_intent.succeeded':
         await handlePaymentIntentSucceeded(context, event, deps);
