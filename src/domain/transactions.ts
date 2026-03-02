@@ -158,6 +158,16 @@ export interface MapStripeToTransactionInput {
   paymentIntent?: Stripe.PaymentIntent | null;
   charge?: Stripe.Charge | null;
   balanceTransaction?: Stripe.BalanceTransaction | null;
+  /**
+   * Customer object returned by Stripe (may be a deleted customer record).
+   *
+   * When a salesforce_id is stored on the customer metadata we want to
+   * surface it as the transaction.contact__c lookup.  Previously we only
+   * looked at metadata on the payment intent and charge which meant that
+   * metadata written to the customer during customer creation would never
+   * propagate into transactions.
+   */
+  stripeCustomer?: Stripe.Customer | Stripe.DeletedCustomer | null;
 }
 
 const normalizeStripeId = (value: unknown): string | null => {
@@ -524,8 +534,12 @@ export const mapStripeToTransaction = (
   }
 
   const combinedMetadata: Record<string, unknown> = {
+    // intent/charge metadata should be overridden by the customer when both
+    // are present; the customer is the more persistent object and is where we
+    // typically write the salesforce_id in the various handlers and utils.
     ...toMetadataRecord(paymentIntent?.metadata ?? null),
     ...toMetadataRecord(charge?.metadata ?? null),
+    ...toMetadataRecord(input.stripeCustomer?.metadata ?? null),
   };
 
   const contactId = parseMetadataString(

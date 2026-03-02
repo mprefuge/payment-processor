@@ -514,10 +514,23 @@ const syncSalesforcePayments = async (request, context) => {
 
           const paymentIntent = await fetchPaymentIntentForCharge(deps.stripe, charge);
 
+          // attempt to pull metadata from the Stripe customer as well; this
+          // allows a salesforce_id stored on the customer to be used for the
+          // contact lookup in the transaction record.
+          let stripeCustomerObj = null;
+          if (customerId) {
+            try {
+              stripeCustomerObj = await deps.stripe.customers.retrieve(customerId);
+            } catch (e) {
+              // ignore retrieval errors and continue without customer metadata
+            }
+          }
+
           const transactionPayload = mapStripeToTransaction({
             paymentIntent,
             charge,
             balanceTransaction,
+            stripeCustomer: stripeCustomerObj,
           });
 
           const paymentType =

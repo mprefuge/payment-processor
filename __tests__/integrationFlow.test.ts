@@ -93,6 +93,9 @@ describe('Integration: Complete Payment Flow', () => {
       email: 'test@example.com',
       name: 'Test User',
       object: 'customer',
+      metadata: {
+        salesforce_id: '003INTEGRATION',
+      },
     };
 
     const mockStripeClient = {
@@ -100,6 +103,7 @@ describe('Integration: Complete Payment Flow', () => {
         search: vi.fn().mockResolvedValue({ data: [] }),
         create: vi.fn().mockResolvedValue(mockCustomer),
         update: vi.fn().mockResolvedValue(mockCustomer),
+        retrieve: vi.fn().mockResolvedValue(mockCustomer),
       },
       checkout: {
         sessions: {
@@ -363,6 +367,7 @@ describe('Integration: Complete Payment Flow', () => {
       transaction_type__c: 'charge',
       currency_iso_code__c: 'USD',
       status__c: 'paid',
+      contact__c: '003INTEGRATION',
     });
 
     expect(salesforceTransactionId).toBeTruthy();
@@ -436,6 +441,7 @@ describe('Integration: Complete Payment Flow', () => {
         search: vi.fn().mockResolvedValue({ data: [] }),
         create: vi.fn().mockResolvedValue(mockCustomer),
         update: vi.fn().mockResolvedValue(mockCustomer),
+        retrieve: vi.fn().mockResolvedValue(mockCustomer),
       },
       checkout: {
         sessions: {

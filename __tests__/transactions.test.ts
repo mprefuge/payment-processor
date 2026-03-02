@@ -92,4 +92,17 @@ describe('mapStripeToTransaction', () => {
 
     expect(dto.contact__c).toBe('003FAKEID');
   });
+
+  it('falls back to salesforce_id found on the Stripe customer when intent/charge metadata is empty', () => {
+    const customer = { id: 'cus_test', metadata: { salesforce_id: '003CUST' } };
+
+    const dto = mapStripeToTransaction({
+      paymentIntent: buildPaymentIntent({}) as any,
+      charge: buildCharge({}) as any,
+      balanceTransaction: buildBalanceTransaction() as any,
+      stripeCustomer: customer as any,
+    });
+
+    expect(dto.contact__c).toBe('003CUST');
+  });
 });

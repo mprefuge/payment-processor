@@ -125,10 +125,26 @@ const processSuccessfulPaymentIntent = async ({
     }
   }
 
+  // attempt to resolve the stripe customer so that any metadata stored on
+  // the customer (not just the payment intent/charge) can contribute to the
+  // transaction fields.  most importantly we look for a salesforce_id key.
+  let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
+  try {
+    stripeCustomer = await resolveStripeCustomer(stripe, charge, paymentIntent, context.log);
+  } catch (err) {
+    // resolution failures are non‑fatal; we'll continue without customer info
+    const msg = err instanceof Error ? err.message : String(err);
+    context.log('[StripeWebhook] Failed to fetch Stripe customer for transaction mapping', {
+      error: msg,
+      paymentIntentId: paymentIntent.id,
+    });
+  }
+
   const transaction = mapStripeToTransaction({
     paymentIntent,
     charge: charge ?? undefined,
     balanceTransaction: balanceTransaction ?? undefined,
+    stripeCustomer,
   });
 
   // Resolve campaign name from metadata to Salesforce Campaign ID
@@ -607,7 +623,7 @@ const processSuccessfulPaymentIntent = async ({
   }
 
   await deps.idempotencyStore.withLock(`bt_${balanceTransactionId}`, async () => {
-    const stripeCustomer = await resolveStripeCustomer(stripe, charge, paymentIntent, context.log);
+    // reuse the customer we fetched earlier; resolution already logged above
 
     const posting = await deps.accounting.postChargeToQbo({
       gross: Math.abs(balanceTransaction.amount ?? 0),

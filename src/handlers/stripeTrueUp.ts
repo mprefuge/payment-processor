@@ -815,6 +815,7 @@ const processPayments = async (
           paymentIntent: null, // We'll get the ID from the charge itself in the mapping
           charge: chargeObj,
           balanceTransaction,
+          stripeCustomer,
         });
 
         // Extract frequency from subscription if charge has invoice and no frequency is set
@@ -1273,6 +1274,7 @@ const processRefunds = async (
           paymentIntent: null,
           charge: chargeFragment ?? null,
           balanceTransaction,
+          stripeCustomer,
         });
 
         // Generate transaction name
