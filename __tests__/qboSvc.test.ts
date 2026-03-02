@@ -45,6 +45,27 @@ const importQboSvc = async () => {
   return import('../src/services/qboSvc');
 };
 
+// simple sanity check around the raw builder to make sure our new defensive
+// logic in buildSalesReceipt handles the pathological case where the caller
+// mistakenly passes cover fees that equal or exceed the total amount.
+describe('buildSalesReceipt helper', () => {
+  it('ignores cover fees when provided amount is >= total', async () => {
+    const { buildSalesReceipt } = await importQboSvc();
+    const receipt = buildSalesReceipt({
+      amountCents: 1_000,
+      date: new Date('2024-01-01'),
+      revenueItemName: 'rev-item',
+      depositAccountName: 'acct-dep',
+      feesAccountName: 'acct-fees',
+      coverFeesAmountCents: 1_000, // exactly equal
+    });
+
+    // there should only be a single line (no cover-fees line) and amount should be full total
+    expect(receipt.Line.length).toBe(1);
+    expect(receipt.Line[0].Amount).toBe(10.0);
+  });
+});
+
 const resetAccounts = () => {
   Object.assign(baseEnv.quickBooks.accounts, defaultAccounts);
 };
@@ -344,6 +365,127 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 96.75');
     expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
   }, { timeout: 20000 });
+
+  it('ignores cover fees when metadata amount is >= gross charge', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const gross = 5_000; // $50.00
+    const coverAmount = 6_000; // larger than gross
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-cover', DisplayName: 'Donor Cover' } }, // Customer create
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      }, // Item lookup
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-cover' } }, // Sales receipt create
+      { QueryResponse: {} }, // Duplicate check for fee journal entry
+      { JournalEntry: { Id: 'fee-je-cover' } } // Fee journal entry create
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext({}, { metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) } }),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-cover', type: 'sales-receipt' });
+
+    const salesReceiptRequest = requests.find((r) => r.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+
+    // only the main line should exist; cover fees should have been ignored
+    expect(salesReceiptBody.Line.length).toBe(1);
+    expect(salesReceiptBody.Line[0].Amount).toBe(50.0);
+    expect(salesReceiptBody.Line.find((l:any) => l.Amount < 0)).toBeUndefined();
+  });
+
+  it('reads cover fees from paymentIntent/charge metadata when session unavailable', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-meta', DisplayName: 'Meta Donor' } }, // Customer create
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      }, // Item lookup
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-meta' } }, // Sales receipt create
+      { QueryResponse: {} }, // Duplicate check for fee journal entry
+      { JournalEntry: { Id: 'fee-je-meta' } } // Fee journal entry create
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const coverAmount = 300; // $3.00
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: {
+        charge: { metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) } } as any,
+        paymentIntent: { metadata: {} } as any,
+        customer: null,
+        checkoutSession: null,
+      },
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-meta', type: 'sales-receipt' });
+    const salesReceiptRequest = requests.find((r) => r.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+
+    // should have two lines: base + negative fee line
+    expect(salesReceiptBody.Line.length).toBe(2);
+    expect(salesReceiptBody.Line[1].Amount).toBe(-3.0);
+  });
+
+  // directly exercise getCoverFeesInfo to verify metadata aggregation
+  describe('getCoverFeesInfo helper', () => {
+    it('reads values from paymentIntent metadata when session absent', async () => {
+      const { getCoverFeesInfo } = await importQboSvc();
+      const info = getCoverFeesInfo({
+        checkoutSession: null,
+        paymentIntent: { metadata: { cover_fees: 'true', cover_fees_amount: '250' } } as any,
+        charge: null,
+      });
+      expect(info).toEqual({ enabled: true, amountCents: 250 });
+    });
+
+    it('prefers later metadata when multiple objects supply values', async () => {
+      const { getCoverFeesInfo } = await importQboSvc();
+      const info = getCoverFeesInfo({
+        checkoutSession: { metadata: { cover_fees: 'true', cover_fees_amount: '100' } } as any,
+        paymentIntent: { metadata: { cover_fees_amount: '200' } } as any,
+        charge: null,
+      });
+      // paymentIntent value should overwrite session value
+      expect(info).toEqual({ enabled: true, amountCents: 200 });
+    });
+
+    it('ignores negative fee amounts', async () => {
+      const { getCoverFeesInfo } = await importQboSvc();
+      const info = getCoverFeesInfo({
+        paymentIntent: { metadata: { cover_fees: 'true', cover_fees_amount: '-50' } } as any,
+      });
+      expect(info).toEqual({ enabled: true, amountCents: 0 });
+    });
+
+    it('returns disabled when no metadata found', async () => {
+      const { getCoverFeesInfo } = await importQboSvc();
+      const info = getCoverFeesInfo({});
+      expect(info).toEqual({ enabled: false, amountCents: 0 });
+    });
+  });
 
   it('includes invoice and subscription details in CustomerMemo when available', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';

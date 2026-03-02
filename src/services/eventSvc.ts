@@ -42,6 +42,9 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
   /**
    * Find or create a contact in Salesforce
    */
+  // simple cache stored in closure, reused across calls
+  let cachedContactRecordTypeId: string | undefined;
+
   const findOrCreateContact = async (contact: RegistrantContact): Promise<string> => {
     const { email, firstName, lastName, phone, company, mailingStreet, mailingCity, mailingState, mailingPostalCode, mailingCountry } = contact;
 
@@ -61,6 +64,16 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
       return records[0].Id;
     }
 
+    // resolve record type id for new contact (cache if possible)
+    if (!cachedContactRecordTypeId) {
+      const recordTypeQuery = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
+      const rtResult = await salesforceConnection.query<{ Id: string }>(recordTypeQuery);
+      const rtRecords = Array.isArray(rtResult.records) ? rtResult.records : [];
+      if (rtRecords.length > 0 && rtRecords[0].Id) {
+        cachedContactRecordTypeId = rtRecords[0].Id;
+      }
+    }
+
     // Create new contact
     const contactData: ContactUpsertDTO = {
       Email: email,
@@ -73,6 +86,7 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
       MailingState: mailingState || undefined,
       MailingPostalCode: mailingPostalCode || undefined,
       MailingCountry: mailingCountry || undefined,
+      ...(cachedContactRecordTypeId ? { RecordTypeId: cachedContactRecordTypeId } : {}),
     };
 
     const createResult = await salesforceConnection.sobject('Contact').create(contactData);

@@ -169,6 +169,11 @@ const createStripeServices = (): StripeServices => {
 let defaultSalesforceSvcPromise: Promise<SalesforceSvc> | null = null;
 let salesforceConnection: any = null;
 
+// helper used in unit tests so we can stub the connection object
+export const __setSalesforceConnection = (conn: any) => {
+  salesforceConnection = conn;
+};
+
 const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   return async (): Promise<SalesforceSvc> => {
     if (!defaultSalesforceSvcPromise) {
@@ -428,6 +433,8 @@ const findOrCreateContactInSalesforce = async (
   transactionName: string | null,
   contextLog: typeof console.log
 ): Promise<{ id: string } | null> => {
+  // cache record type id to avoid repeated lookups
+  let cachedContactRecordTypeId: string | undefined;
   if (!customer || customer.deleted) {
     return null;
   }
@@ -619,6 +626,26 @@ const findOrCreateContactInSalesforce = async (
         Email: stripeCustomer.email || null,
         Stripe_Customer_Id__c: stripeCustomer.id,
       };
+
+      // lookup record type id if we haven't yet
+      if (!cachedContactRecordTypeId) {
+        try {
+          const rtQuery = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
+          const rtRes: any = await connection.query(rtQuery);
+          const rtRecs = Array.isArray(rtRes.records) ? rtRes.records : [];
+          if (rtRecs.length > 0 && rtRecs[0].Id) {
+            cachedContactRecordTypeId = rtRecs[0].Id;
+          }
+        } catch (err) {
+          // if lookup fails, we simply omit the field
+          contextLog('[StripeTrueUp] Failed to lookup Contact record type id', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      if (cachedContactRecordTypeId) {
+        contactRecord.RecordTypeId = cachedContactRecordTypeId;
+      }
 
       contextLog('[StripeTrueUp] Creating new contact', {
         stripeCustomerId: stripeCustomer.id,
@@ -1809,5 +1836,7 @@ handlerWithInternals.__internals = {
   setDependencies,
   resetDependencies,
 };
+
+export { findOrCreateContactInSalesforce };
 
 export default handlerWithInternals;

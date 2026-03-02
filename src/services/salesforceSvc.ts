@@ -226,9 +226,18 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return [];
   };
 
-  const resolveRecordTypeId = async (recordTypeName: string): Promise<string> => {
+  /**
+   * Retrieve a record type ID for the provided sObject and record type name.
+   * falls back to TRANSACTION_OBJECT when no object is supplied to maintain
+   * compatibility with existing callers.
+   */
+  const resolveRecordTypeId = async (
+    recordTypeName: string,
+    sObject: string = TRANSACTION_OBJECT
+  ): Promise<string> => {
     const escapedName = escapeForSoqlLiteral(recordTypeName);
-    const soql = `SELECT Id FROM RecordType WHERE SObjectType = '${TRANSACTION_OBJECT}' AND Name = '${escapedName}' LIMIT 1`;
+    const escapedObject = escapeForSoqlLiteral(sObject);
+    const soql = `SELECT Id FROM RecordType WHERE SObjectType = '${escapedObject}' AND Name = '${escapedName}' LIMIT 1`;
 
     const result = await connection.query<{ Id: string }>(soql);
     const records = toLookupRecords(result);
@@ -239,7 +248,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     );
 
     if (!recordWithId) {
-      throw new Error(`Record type '${recordTypeName}' not found for ${TRANSACTION_OBJECT}`);
+      throw new Error(`Record type '${recordTypeName}' not found for ${sObject}`);
     }
 
     return recordWithId.Id;
@@ -473,6 +482,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     );
   };
 
+  // cached record type id for Contact so we only query Salesforce once
+  let cachedContactRecordTypeId: string | undefined;
+
   const upsertCustomerByStripeId = async (dto: CustomerUpsertDTO): Promise<UpsertResult> => {
     const stripeCustomerId = ensureNonEmpty(dto.stripe_customer_id__c, 'Stripe Customer ID');
     const name = ensureNonEmpty(dto.Name, 'Customer Name');
@@ -629,6 +641,14 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
       if (dto.Email && dto.Email.trim()) {
         contactRecord.Email = dto.Email.trim();
+      }
+
+      // add record type id on creation
+      if (!cachedContactRecordTypeId) {
+        cachedContactRecordTypeId = await resolveRecordTypeId('Contact', 'Contact');
+      }
+      if (cachedContactRecordTypeId) {
+        contactRecord.RecordTypeId = cachedContactRecordTypeId;
       }
 
       const createResult = await connection.sobject('Contact').create(contactRecord);

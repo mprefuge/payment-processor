@@ -566,15 +566,39 @@ const getCheckoutCategory = (
   return null;
 };
 
+/**
+ * Determine whether cover fees are enabled and the configured amount.  Covers
+ * several sources of Stripe metadata so that the flag survives event
+ * propagation even if the Checkout Session itself is unavailable.  The
+ * `stripeContext` object is loosely typed to allow passing whatever is
+ * available (checkout session, payment intent, charge, etc).  Metadata from all
+ * supplied objects is merged with later values taking precedence.
+ */
 const getCoverFeesInfo = (
-  session: Stripe.Checkout.Session | null | undefined
+  stripeContext:
+    | {
+        checkoutSession?: Stripe.Checkout.Session | null;
+        paymentIntent?: Stripe.PaymentIntent | null;
+        charge?: Stripe.Charge | null;
+      }
+    | null
+    | undefined
 ): { enabled: boolean; amountCents: number } => {
-  if (!session) {
-    return { enabled: false, amountCents: 0 };
+  const metadata: Record<string, unknown> = {};
+
+  if (stripeContext) {
+    const addMeta = (md: unknown) => {
+      if (md && typeof md === 'object') {
+        Object.assign(metadata, md as Record<string, unknown>);
+      }
+    };
+
+    addMeta(stripeContext.checkoutSession?.metadata);
+    addMeta(stripeContext.paymentIntent?.metadata);
+    addMeta(stripeContext.charge?.metadata);
   }
 
-  const metadata = session.metadata as Record<string, unknown> | null | undefined;
-  if (!metadata || typeof metadata !== 'object') {
+  if (Object.keys(metadata).length === 0) {
     return { enabled: false, amountCents: 0 };
   }
 
@@ -607,6 +631,11 @@ const getCoverFeesInfo = (
     if (!isNaN(parsed)) {
       amountCents = Math.round(parsed >= 100 ? parsed : parsed * 100);
     }
+  }
+
+  // never return a negative fee amount; caller can ignore zero if desired
+  if (amountCents < 0) {
+    amountCents = 0;
   }
 
   return { enabled: true, amountCents };
@@ -1280,11 +1309,19 @@ export const buildSalesReceipt = ({
     throw new Error('QuickBooks revenue item reference must be provided for sales receipts.');
   }
 
-  const coverFees = ensurePositiveAmount(coverFeesAmountCents, 'Cover fees amount');
-  const baseAmount = amount - coverFees;
+  let coverFees = ensurePositiveAmount(coverFeesAmountCents, 'Cover fees amount');
+  let baseAmount = amount - coverFees;
 
   if (baseAmount <= 0 && coverFees > 0) {
-    throw new Error('Cover fees amount cannot exceed or equal total amount.');
+    // invalid metadata or calculation produced fees >= total.  don't crash the
+    // entire webhook; just log and treat it as if no cover fees were applied.
+    logger.warn('[qboSvc] Cover fees amount >= total amount; ignoring cover fees', {
+      amountCents,
+      coverFeesAmountCents,
+      computedBase: baseAmount,
+    });
+    coverFees = 0;
+    baseAmount = amount;
   }
 
   const lineDescription = description || memo;
@@ -2601,8 +2638,21 @@ export const postChargeToQbo = async ({
     const category = getCheckoutCategory(stripe?.checkoutSession);
     const description = category ? `${category} - ${transactionTypeName}` : transactionTypeName;
 
-    // Get cover fees information
-    const coverFeesInfo = getCoverFeesInfo(stripe?.checkoutSession);
+    // Get cover fees information from any available Stripe object metadata
+    const coverFeesInfo = getCoverFeesInfo(stripe as any);
+
+    // defensive: if metadata specifies a cover fee equal to or larger than the
+    // gross amount we are about to post, ignore it and log a warning instead of
+    // letting buildSalesReceipt blow up with an exception.  This prevents a bad
+    // metadata value from taking down the webhook handler.
+    let coverFeesAmountCents = coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0;
+    if (coverFeesAmountCents >= grossAmount) {
+      context.log('[QuickBooks] Ignoring invalid cover fees metadata; amount >= gross', {
+        coverFeesAmountCents,
+        grossAmount,
+      });
+      coverFeesAmountCents = 0;
+    }
 
     // Resolve account references for the sales receipt
     const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
@@ -2625,7 +2675,7 @@ export const postChargeToQbo = async ({
       stripeSubscriptionId: (stripe?.checkoutSession as any)?.subscription ?? (stripe?.paymentIntent as any)?.subscription ?? null,
       customer: receiptCustomer,
       description,
-      coverFeesAmountCents: coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0,
+      coverFeesAmountCents,
     });
 
     const salesReceiptResult = await postSalesReceipt(salesReceipt, options);

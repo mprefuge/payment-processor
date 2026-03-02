@@ -68,22 +68,23 @@ describe('Event Management Service', () => {
       );
     });
 
-    it('should create new contact if not found', async () => {
+    it('should create new contact if not found and include record type', async () => {
       const eventSvc = createEventSvc({
         salesforceConnection: mockSalesforceConnection as any,
         stripeClient: mockStripeClient,
       });
 
-      mockSalesforceConnection.query.mockResolvedValue({
-        records: [],
-      });
+      // first call: search for existing contact
+      // second call: lookup record type
+      mockSalesforceConnection.query
+        .mockResolvedValueOnce({ records: [] })
+        .mockResolvedValueOnce({ records: [{ Id: 'rt123' }] });
 
-      mockSalesforceConnection.sobject.mockReturnValue({
-        create: vi.fn().mockResolvedValue({
-          success: true,
-          id: 'newContact123',
-        }),
+      const createFn = vi.fn().mockResolvedValue({
+        success: true,
+        id: 'newContact123',
       });
+      mockSalesforceConnection.sobject.mockReturnValue({ create: createFn });
 
       const contact: RegistrantContact = {
         email: 'new@example.com',
@@ -95,6 +96,11 @@ describe('Event Management Service', () => {
 
       expect(contactId).toBe('newContact123');
       expect(mockSalesforceConnection.sobject).toHaveBeenCalledWith('Contact');
+
+      // record creation payload should contain the record type id
+      expect(createFn).toHaveBeenCalledWith(
+        expect.objectContaining({ RecordTypeId: 'rt123' })
+      );
     });
   });
 

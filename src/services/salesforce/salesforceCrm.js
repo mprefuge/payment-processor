@@ -13,6 +13,9 @@ class SalesforceCrmService extends BaseCrmService {
     super(config);
     this.conn = null;
     this.salesforceService = null;
+
+    // cached record type id for Contact object (looked up lazily)
+    this._contactRecordTypeId = null;
   }
 
   /**
@@ -77,6 +80,31 @@ class SalesforceCrmService extends BaseCrmService {
    * @param {Object} searchCriteria - Search criteria
    * @returns {Promise<Array>} Array of matching contacts
    */
+  /**
+   * Retrieve the Salesforce record type ID for the standard "Contact" record type.
+   * Caches the value once retrieved so we only query Salesforce once per instance.
+   * @returns {Promise<string>} RecordTypeId
+   */
+  async getContactRecordTypeId() {
+    if (this._contactRecordTypeId) {
+      return this._contactRecordTypeId;
+    }
+
+    await this.authenticate();
+
+    // name of the record type we care about is literally "Contact" in the org
+    const soql = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
+    const result = await this.conn.query(soql);
+    const records = Array.isArray(result.records) ? result.records : [];
+
+    if (records.length === 0 || !records[0].Id) {
+      throw new Error('Unable to resolve Contact record type id');
+    }
+
+    this._contactRecordTypeId = records[0].Id;
+    return this._contactRecordTypeId;
+  }
+
   async searchContact(searchCriteria) {
     await this.authenticate();
 
@@ -139,6 +167,9 @@ class SalesforceCrmService extends BaseCrmService {
 
     const { email, firstName, lastName, phone, address, stripeCustomerId } = contactData;
 
+    // determine the record type id for Contact once per call (cached internally)
+    const recordTypeId = await this.getContactRecordTypeId();
+
     const configuredLeadSource =
       typeof this.config?.contactLeadSource === 'string'
         ? this.config.contactLeadSource.trim()
@@ -152,6 +183,7 @@ class SalesforceCrmService extends BaseCrmService {
           : null;
 
     const buildContactRecord = (includeLeadSource = true) => ({
+      RecordTypeId: recordTypeId,
       FirstName: firstName,
       LastName: lastName,
       Email: email,

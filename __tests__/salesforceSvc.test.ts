@@ -342,4 +342,42 @@ describe('createSalesforceSvc', () => {
     );
     expect(create).not.toHaveBeenCalled();
   });
+
+  it('creates new contact and includes contact record type', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+
+    // no contacts found during search, record type lookup should happen
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('FROM Contact')) {
+        return Promise.resolve({ records: [] });
+      }
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: 'rt-con' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const create = vi.fn().mockResolvedValue({ success: true, id: '003new', errors: [] });
+    sobject.mockImplementation((name: string) => {
+      if (name === 'Contact') {
+        return { update: vi.fn(), create };
+      }
+      return { update: vi.fn(), create: vi.fn() };
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const result = await service.upsertCustomerByStripeId({
+      stripe_customer_id__c: 'cus_neo',
+      Name: 'Neo Human',
+    });
+
+    expect(result).toMatchObject({ success: true, created: true, id: '003new' });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ RecordTypeId: 'rt-con' })
+    );
+  });
 });

@@ -194,4 +194,6 @@ export interface ContactUpsertDTO {
   MailingState?: string;
   MailingPostalCode?: string;
   MailingCountry?: string;
+  // when creating a new contact, we may specify a RecordTypeId
+  RecordTypeId?: string;
 }

@@ -403,6 +403,252 @@ describe('Integration: Complete Payment Flow', () => {
     console.log('-----------------------------------------------------------\n');
   });
 
+  it('full flow with cover fees persists metadata through Stripe, Salesforce and QBO', async () => {
+    // Essentially duplicate the happy-path test but add cover-fees to each mock and
+    // assert that the flag/amount travels all the way through.
+
+    // compute base and fee amounts (standard card rate 2.9% + $0.30)
+    const baseAmount = 5000;
+    const expectedCoverFees = Math.round(baseAmount * 0.029) + 30; // 175 cents
+    const totalAmount = baseAmount + expectedCoverFees;
+
+    // ============================================================
+    // STEP 1: Stripe mocks for checkout session with cover-fees metadata
+    // ============================================================
+    const mockCheckoutSession = {
+      id: 'cs_cover_' + randomUUID().substring(0, 8),
+      url: 'https://checkout.stripe.com/pay/covertest',
+      object: 'checkout.session',
+      mode: 'payment',
+      status: 'open',
+      customer: 'cus_cover123',
+      payment_intent: 'pi_cover123',
+      amount_total: totalAmount,
+      currency: 'usd',
+      metadata: {
+        cover_fees: 'true',
+        cover_fees_amount: String(expectedCoverFees),
+      },
+    };
+
+    const mockCustomer = {
+      id: 'cus_cover123',
+      email: 'test@example.com',
+      name: 'Test User',
+      object: 'customer',
+      metadata: { salesforce_id: '003INTEGRATION' },
+    };
+
+    const mockStripeClient = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue(mockCustomer),
+        update: vi.fn().mockResolvedValue(mockCustomer),
+        retrieve: vi.fn().mockResolvedValue(mockCustomer),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue(mockCheckoutSession),
+        },
+      },
+    };
+
+    processTransactionInternals?.setStripeClientFactory(() => mockStripeClient);
+
+    // execute transaction handler
+    const { context: txContext2 } = createContext();
+    const request2 = createHttpRequest({
+      headers: { 'idempotency-key': 'test-cover-' + randomUUID() },
+      body: {
+        amount: baseAmount,
+        frequency: 'onetime',
+        customer: {
+          email: 'test@example.com',
+          firstname: 'Test',
+          lastname: 'User',
+          address: '123 Main St',
+          city: 'San Francisco',
+          state: 'CA',
+          zipcode: '94102',
+        },
+        coverFee: true,
+        paymentMethod: 'card',
+      },
+    });
+
+    const rawTxResponse2 = await processTransactionHandler(request2, txContext2);
+    const txResponse2 = normalizeResponse(rawTxResponse2);
+    expect(txResponse2.status).toBe(200);
+    const txBody2 = JSON.parse(txResponse2.body);
+    expect(txBody2.url).toBe(mockCheckoutSession.url);
+    expect(txBody2.id).toBe(mockCheckoutSession.id);
+
+    // verify checkout call included metadata and correct unit amount
+    expect(mockStripeClient.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          cover_fees: 'true',
+          cover_fees_amount: String(expectedCoverFees),
+        }),
+        line_items: expect.arrayContaining([
+          expect.objectContaining({
+            price_data: expect.objectContaining({
+              unit_amount: totalAmount,
+            }),
+          }),
+        ]),
+      })
+    );
+
+    createdObjects.checkoutSession = mockCheckoutSession;
+    createdObjects.stripeCustomer = mockCustomer;
+
+    // ============================================================
+    // STEP 2: webhook mocks
+    // ============================================================
+    const mockPaymentIntent2 = {
+      id: 'pi_cover123',
+      object: 'payment_intent',
+      amount: totalAmount,
+      currency: 'usd',
+      status: 'succeeded',
+      customer: 'cus_cover123',
+      created: Math.floor(Date.now() / 1000),
+      charges: {
+        data: [
+          {
+            id: 'ch_cover123',
+            amount: totalAmount,
+            currency: 'usd',
+            status: 'succeeded',
+            balance_transaction: 'txn_cover123',
+            created: Math.floor(Date.now() / 1000),
+          },
+        ],
+      },
+      latest_charge: 'ch_cover123',
+      livemode: false,
+    };
+
+    const mockBalanceTransaction2 = {
+      id: 'txn_cover123',
+      object: 'balance_transaction',
+      amount: totalAmount,
+      currency: 'usd',
+      fee: 175,
+      net: totalAmount - 175,
+      type: 'charge',
+      created: Math.floor(Date.now() / 1000),
+    };
+
+    const mockStripeWebhookClient2 = {
+      paymentIntents: {
+        retrieve: vi.fn().mockResolvedValue(mockPaymentIntent2),
+      },
+      charges: {
+        retrieve: vi.fn().mockResolvedValue(mockPaymentIntent2.charges.data[0]),
+      },
+      balanceTransactions: {
+        retrieve: vi.fn().mockResolvedValue(mockBalanceTransaction2),
+      },
+      checkout: {
+        sessions: {
+          list: vi.fn().mockResolvedValue({
+            data: [mockCheckoutSession],
+            has_more: false,
+          }),
+          retrieve: vi.fn().mockResolvedValue(mockCheckoutSession),
+        },
+      },
+      invoices: {
+        retrieve: vi.fn().mockResolvedValue(null),
+      },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: mockPaymentIntent2.customer,
+          email: 'test@example.com',
+          name: 'Test User',
+          metadata: { salesforce_id: '003INTEGRATION' },
+        }),
+      },
+    };
+
+    // mock Salesforce and QBO services similar to previous test but capture post args
+    const mockSalesforceSvc2 = { ...mockSalesforceSvc };
+    mockSalesforceSvc2.upsertTransactionByExternalId = vi.fn().mockResolvedValue({
+      success: true,
+      id: 'a02' + randomUUID().substring(0, 15),
+      errors: [],
+    });
+    let capturedPostArgs: any = null;
+
+    const mockQboResult2 = {
+      qboId: 'SR-COVER',
+      type: 'SalesReceipt',
+      success: true,
+    };
+
+    const mockIdempotencyStore2 = mockIdempotencyStore;
+
+    webhookInternals?.setDependencies({
+      stripe: {
+        verifyEvent: vi.fn().mockReturnValue({
+          id: 'evt_cover',
+          type: 'payment_intent.succeeded',
+          data: { object: mockPaymentIntent2 },
+          livemode: false,
+        } as any),
+        getClient: vi.fn().mockReturnValue(mockStripeWebhookClient2),
+      },
+      idempotencyStore: mockIdempotencyStore2,
+      getSalesforceSvc: async () => mockSalesforceSvc2,
+      accounting: {
+        postChargeToQbo: vi.fn().mockImplementation(async (args) => {
+          capturedPostArgs = args;
+          qboDocumentCreated = true;
+          createdObjects.qboSalesReceipt = mockQboResult2;
+          return mockQboResult2;
+        }),
+        postRefundToQbo: vi.fn(),
+        postDisputeToQbo: vi.fn(),
+      },
+    });
+
+    // execute webhook
+    const { context: webhookContext2 } = createContext();
+    const webhookBody2 = JSON.stringify({
+      id: 'evt_cover',
+      type: 'payment_intent.succeeded',
+      data: { object: mockPaymentIntent2 },
+    });
+    const webhookRequest2 = createHttpRequest({
+      headers: { 'stripe-signature': 'test-signature' },
+      body: webhookBody2,
+    });
+
+    const rawWebhookResponse2 = await stripeWebhookHandler(webhookRequest2, webhookContext2);
+    const webhookResponse2 = normalizeResponse(rawWebhookResponse2);
+    expect(webhookResponse2.status).toBe(200);
+
+    // verify salesforce upsert arguments contain cover fee fields
+    expect(mockSalesforceSvc2.upsertTransactionByExternalId).toHaveBeenCalled();
+    const sfCall2 = mockSalesforceSvc2.upsertTransactionByExternalId.mock.calls[0];
+    const [txnData2] = sfCall2;
+    expect(txnData2.cover_fees__c).toBe(true);
+    expect(txnData2.cover_fees_amount__c).toBe(expectedCoverFees);
+
+    // verify qbo post got stripe metadata with cover fees
+    expect(capturedPostArgs).toBeTruthy();
+    expect(capturedPostArgs.stripe?.checkoutSession?.metadata).toMatchObject({
+      cover_fees: 'true',
+      cover_fees_amount: String(expectedCoverFees),
+    });
+
+    // verify qbo result
+    expect(qboDocumentCreated).toBe(true);
+    expect(createdObjects.qboSalesReceipt.qboId).toBe('SR-COVER');
+  });
+
   it('prevents duplicate checkout sessions with idempotency key', async () => {
     // ============================================================
     // Test Idempotency Protection
