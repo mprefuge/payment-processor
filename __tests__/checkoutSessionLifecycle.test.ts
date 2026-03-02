@@ -85,7 +85,7 @@ describe('checkout session lifecycle', () => {
     expect(upsertPending).toHaveBeenCalled();
     const upsertCall = upsertPending.mock.calls[0]?.[0] ?? {};
     expect(upsertCall).toMatchObject({
-      Status__c: 'pending',
+      Status__c: 'Pending',
       Stripe_Checkout_Session_Id__c: 'cs_lifecycle',
     });
 

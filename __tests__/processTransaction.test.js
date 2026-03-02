@@ -197,7 +197,7 @@ describe('processTransaction', () => {
       expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
         Transaction_Type__c: 'charge',
-        Status__c: 'pending',
+        Status__c: 'Pending',
         Contact__c: '003TEST',
         Frequency__c: 'month',
         Payment_Method__c: 'Pending',
@@ -336,7 +336,7 @@ describe('processTransaction', () => {
       {
         Stripe_Checkout_Session_Id__c: 'cs_test',
         Transaction_Type__c: 'charge',
-        Status__c: 'pending',
+        Status__c: 'Pending',
       },
       'Stripe_Checkout_Session_Id__c'
     );
@@ -436,11 +436,72 @@ describe('processTransaction', () => {
       expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
         Transaction_Type__c: 'charge',
-        Status__c: 'pending',
+        Status__c: 'Pending',
         Contact__c: '003TEST',
         Campaign__c: '701xx000000000AAA',
         Frequency__c: 'onetime',
         Payment_Method__c: 'Pending',
+      }),
+      'Stripe_Checkout_Session_Id__c'
+    );
+  });
+
+  it('uses Salesforce automatically when credentials exist and CRM_PROVIDER is unset', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+        update: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test',
+            url: 'https://stripe.test/session',
+          }),
+        },
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    delete process.env.CRM_PROVIDER;
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
+    const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
+      searchContact: vi.fn().mockResolvedValue([]),
+      createContact: vi.fn().mockResolvedValue({ Id: '003TEST' }),
+      updateContact: vi.fn(),
+      upsertTransactionsRecord: upsertMock,
+      createTransaction: vi.fn(),
+    };
+
+    const CrmFactory = require('../dist/services/salesforce/crmFactory');
+    vi.spyOn(CrmFactory, 'validateConfig').mockReturnValue({ isValid: true });
+    vi.spyOn(CrmFactory, 'createCrmService').mockReturnValue(crmServiceMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 5000,
+        frequency: 'onetime',
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(upsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Stripe_Checkout_Session_Id__c: 'cs_test',
+        Status__c: 'Pending',
       }),
       'Stripe_Checkout_Session_Id__c'
     );

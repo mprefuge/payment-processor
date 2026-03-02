@@ -483,7 +483,19 @@ const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
 // Get CRM configuration from environment variables
 const getCrmConfig = () => {
-  const provider = process.env.CRM_PROVIDER;
+  const configuredProvider = process.env.CRM_PROVIDER;
+  const hasSalesforceCredentials =
+    typeof process.env.SF_CLIENT_ID === 'string' &&
+    process.env.SF_CLIENT_ID.trim().length > 0 &&
+    typeof process.env.SF_CLIENT_SECRET === 'string' &&
+    process.env.SF_CLIENT_SECRET.trim().length > 0;
+
+  const provider =
+    typeof configuredProvider === 'string' && configuredProvider.trim().length > 0
+      ? configuredProvider
+      : hasSalesforceCredentials
+        ? 'salesforce'
+        : null;
 
   if (!provider) {
     logger.info('No CRM provider configured, skipping CRM integration');
@@ -883,7 +895,7 @@ const createPendingTransaction = async (context, session, contactId, transaction
     const transactionRecord = {
       Stripe_Checkout_Session_Id__c: session.id,
       Transaction_Type__c: 'charge',
-      Status__c: 'pending',
+      Status__c: 'Pending',
       Contact__c: contactId,
       Frequency__c: transactionData.frequency || 'onetime',
       Payment_Method__c: 'Pending',
@@ -979,7 +991,7 @@ const upsertSalesforceTransaction = async (context, session, requestData) => {
     const transactionRecord = {
       Stripe_Checkout_Session_Id__c: session.id,
       Transaction_Type__c: 'charge',
-      Status__c: 'pending',
+      Status__c: 'Pending',
     };
 
     if (requestData.attribution) {
