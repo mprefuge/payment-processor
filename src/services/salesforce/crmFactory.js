@@ -69,7 +69,7 @@ class CrmFactory {
    * @returns {Object} Validation result
    */
   static validateSalesforceConfig(config) {
-    const required = ['username', 'password'];
+    const required = ['clientId', 'clientSecret'];
     const missing = required.filter((field) => !config[field]);
 
     if (missing.length > 0) {

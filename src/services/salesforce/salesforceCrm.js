@@ -1,6 +1,6 @@
 const { logger } = require('../../lib/logger');
-const jsforce = require('jsforce');
 const BaseCrmService = require('./baseCrm');
+const { SalesforceService, buildSalesforceConfig } = require('../salesforceService');
 
 const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
@@ -12,25 +12,27 @@ class SalesforceCrmService extends BaseCrmService {
   constructor(config) {
     super(config);
     this.conn = null;
+    this.salesforceService = null;
   }
 
   /**
    * Initialize Salesforce connection
    */
-  async connect() {
+  async authenticate() {
     if (this.conn && this.conn.accessToken) {
       return this.conn;
     }
 
-    this.conn = new jsforce.Connection({
-      loginUrl: this.config.loginUrl || 'https://login.salesforce.com',
-    });
+    const defaultConfig = buildSalesforceConfig();
+    const authConfig = {
+      loginUrl: this.config.loginUrl || defaultConfig.loginUrl,
+      clientId: this.config.clientId || defaultConfig.clientId,
+      clientSecret: this.config.clientSecret || defaultConfig.clientSecret,
+    };
 
     try {
-      await this.conn.login(
-        this.config.username,
-        this.config.password + (this.config.securityToken || '')
-      );
+      this.salesforceService = new SalesforceService(authConfig);
+      this.conn = await this.salesforceService.authenticate();
       logger.info('Successfully connected to Salesforce');
       return this.conn;
     } catch (error) {
@@ -39,9 +41,13 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
+  async connect() {
+    return this.authenticate();
+  }
+
   async healthCheck() {
     try {
-      const connection = await this.connect();
+      const connection = await this.authenticate();
       const result = await connection.query('SELECT Id FROM User LIMIT 1');
 
       const recordCount = Array.isArray(result?.records) ? result.records.length : 0;
@@ -72,7 +78,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Array>} Array of matching contacts
    */
   async searchContact(searchCriteria) {
-    await this.connect();
+    await this.authenticate();
 
     const { email, phone, firstName, lastName, stripeCustomerId } = searchCriteria;
 
@@ -129,7 +135,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Created contact object
    */
   async createContact(contactData) {
-    await this.connect();
+    await this.authenticate();
 
     const { email, firstName, lastName, phone, address, stripeCustomerId } = contactData;
 
@@ -265,7 +271,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Updated contact object
    */
   async updateContact(contactId, contactData) {
-    await this.connect();
+    await this.authenticate();
 
     const { address, email, firstName, lastName, phone, stripeCustomerId } = contactData;
 
@@ -332,7 +338,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<string>} Salesforce Campaign ID
    */
   async findOrCreateCampaign(campaignName) {
-    await this.connect();
+    await this.authenticate();
 
     if (!campaignName || typeof campaignName !== 'string') {
       throw new Error('Campaign name is required');
@@ -394,7 +400,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Campaign member result
    */
   async addCampaignMember(campaignId, contactId, status = 'Sent') {
-    await this.connect();
+    await this.authenticate();
 
     if (!campaignId || typeof campaignId !== 'string') {
       throw new Error('Campaign ID is required');
@@ -464,7 +470,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Created task object
    */
   async createTask(contactId, taskData) {
-    await this.connect();
+    await this.authenticate();
 
     const { subject, description, type = 'Transaction', status = 'Completed' } = taskData;
 
@@ -502,7 +508,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object|null>} Existing transaction or null if not found
    */
   async findTransactionByStripeId(stripeId) {
-    await this.connect();
+    await this.authenticate();
 
     try {
       // First try custom Transaction object
@@ -545,7 +551,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Created transaction object
    */
   async createTransaction(contactId, transactionData) {
-    await this.connect();
+    await this.authenticate();
 
     const {
       amount,
@@ -625,7 +631,7 @@ class SalesforceCrmService extends BaseCrmService {
     transactionData,
     externalIdField = 'Stripe_Checkout_Session_Id__c'
   ) {
-    await this.connect();
+    await this.authenticate();
 
     if (!externalIdField) {
       throw new Error('External ID field is required for transaction upsert');
@@ -755,7 +761,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Updated transaction object
    */
   async updateTransaction(transactionId, transactionData) {
-    await this.connect();
+    await this.authenticate();
 
     const { status, paymentMethod, transactionId: stripeTransactionId } = transactionData;
 
@@ -843,7 +849,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object|null>} Existing transaction or null if not found
    */
   async findTransactionBySessionId(sessionId) {
-    await this.connect();
+    await this.authenticate();
 
     try {
       // First try custom Transaction object
@@ -887,7 +893,7 @@ class SalesforceCrmService extends BaseCrmService {
    * @returns {Promise<Object>} Created payout object
    */
   async createPayout(payoutData) {
-    await this.connect();
+    await this.authenticate();
 
     const {
       payoutId,

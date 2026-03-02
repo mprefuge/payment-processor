@@ -1,18 +1,37 @@
 const Stripe = require('stripe');
-const jsforce = require('jsforce');
+const { SalesforceService, buildSalesforceConfig } = require('../services/salesforceService');
 
 const { mapStripeToTransaction } = require('../domain/transactions');
 
 let createSalesforceSvc;
+let TRANSACTION_FIELD_API_NAMES = {};
 try {
-  ({ createSalesforceSvc } = require('../services/salesforceSvc'));
+  ({ createSalesforceSvc, TRANSACTION_FIELD_API_NAMES } = require('../services/salesforceSvc'));
 } catch (error) {
   createSalesforceSvc = null;
+  TRANSACTION_FIELD_API_NAMES = {};
 }
 
 const STRIPE_API_VERSION = '2023-10-16';
 const DEFAULT_EXAMPLE_LIMIT = 3;
 const MAX_EXAMPLE_LIMIT = 10;
+const DEFAULT_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 100;
+const DEFAULT_MAX_PAGES = 3;
+const MAX_MAX_PAGES = 25;
+const DEFAULT_MAX_RUNTIME_MS = 25_000;
+const MIN_MAX_RUNTIME_MS = 5_000;
+const MAX_MAX_RUNTIME_MS = 110_000;
+const DEFAULT_MAX_RECORDS = 300;
+const MAX_MAX_RECORDS = 5_000;
+
+const SALESFORCE_RELATIONSHIP_FIELD = 'Contact__r.Stripe_Customer_Id__c';
+const TRANSACTION_CSV_HEADERS = Array.from(
+  new Set([
+    ...Object.values(TRANSACTION_FIELD_API_NAMES || {}),
+    SALESFORCE_RELATIONSHIP_FIELD,
+  ])
+);
 
 const csvEscape = (value) => {
   if (value === null || value === undefined) {
@@ -37,22 +56,7 @@ const formatTimestampForFilename = (date = new Date()) => {
   return `${year}${month}${day}-${hours}${minutes}${seconds}`;
 };
 
-const buildPaymentsCsv = (rows) => {
-  const headers = [
-    'stripe_charge_id',
-    'stripe_payment_intent_id',
-    'payment_type',
-    'payment_status',
-    'amount_gross',
-    'amount_fee',
-    'amount_net',
-    'currency',
-    'stripe_customer_id',
-    'customer_name',
-    'customer_email',
-    'received_at',
-  ];
-
+const buildPaymentsCsv = (rows, headers = TRANSACTION_CSV_HEADERS) => {
   const csvRows = [headers.join(',')];
 
   for (const row of rows) {
@@ -61,6 +65,19 @@ const buildPaymentsCsv = (rows) => {
   }
 
   return `${csvRows.join('\n')}\n`;
+};
+
+const toSalesforceTransactionCsvRow = (transactionPayload, fallbackCustomerId = null) => {
+  const row = {};
+
+  for (const [dtoFieldName, apiFieldName] of Object.entries(TRANSACTION_FIELD_API_NAMES || {})) {
+    row[apiFieldName] = transactionPayload?.[dtoFieldName] ?? null;
+  }
+
+  row[SALESFORCE_RELATIONSHIP_FIELD] =
+    transactionPayload?.stripe_customer_id__c || fallbackCustomerId || null;
+
+  return row;
 };
 
 const parseBoolean = (value, defaultValue = false) => {
@@ -102,6 +119,28 @@ const parseExampleLimit = (value) => {
 
   if (rounded > MAX_EXAMPLE_LIMIT) {
     return MAX_EXAMPLE_LIMIT;
+  }
+
+  return rounded;
+};
+
+const parseIntegerWithBounds = (value, defaultValue, min, max) => {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return defaultValue;
+  }
+
+  const rounded = Math.trunc(parsed);
+  if (rounded < min) {
+    return min;
+  }
+
+  if (rounded > max) {
+    return max;
   }
 
   return rounded;
@@ -182,6 +221,45 @@ const collectStripePages = async (listFn, initialParams) => {
   return results;
 };
 
+const fetchChargesPage = async (stripe, { limit, startingAfter }) => {
+  const params = {
+    limit,
+  };
+
+  if (startingAfter) {
+    params.starting_after = startingAfter;
+  }
+
+  const response = await stripe.charges.list(params);
+  const data = Array.isArray(response?.data) ? response.data : [];
+  const hasMore = Boolean(response?.has_more && data.length > 0);
+  const nextCursor = hasMore ? data[data.length - 1].id : null;
+
+  return {
+    data,
+    hasMore,
+    nextCursor,
+  };
+};
+
+const fetchPaymentIntentForCharge = async (stripe, charge) => {
+  const paymentIntentId = normalizeStripeId(charge?.payment_intent);
+  if (!paymentIntentId) {
+    return null;
+  }
+
+  const paymentIntentApi = stripe?.paymentIntents;
+  if (!paymentIntentApi || typeof paymentIntentApi.retrieve !== 'function') {
+    return null;
+  }
+
+  try {
+    return await paymentIntentApi.retrieve(paymentIntentId);
+  } catch (error) {
+    return null;
+  }
+};
+
 const resolveStripeSecret = (testMode) => {
   if (testMode) {
     return process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_SECRET || null;
@@ -196,21 +274,12 @@ const createSalesforceGetter = () => {
   return async () => {
     if (!cachedPromise) {
       cachedPromise = (async () => {
-        const username = process.env.SALESFORCE_USERNAME;
-        const password = process.env.SALESFORCE_PASSWORD;
-        const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
-        const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
-
-        if (!username || !password) {
-          throw new Error('Salesforce credentials are not configured.');
-        }
-
         if (!createSalesforceSvc) {
           throw new Error('Salesforce service is not available.');
         }
 
-        const connection = new jsforce.Connection({ loginUrl });
-        await connection.login(username, `${password}${securityToken}`);
+        const service = new SalesforceService(buildSalesforceConfig());
+        const connection = await service.authenticate();
         return createSalesforceSvc({ connection });
       })();
     }
@@ -260,6 +329,12 @@ const readQuery = (request) => {
       dryRun: request.query.get('dryRun') || undefined,
       exampleLimit: request.query.get('exampleLimit') || undefined,
       format: request.query.get('format') || undefined,
+      cursor: request.query.get('cursor') || undefined,
+      pageSize: request.query.get('pageSize') || undefined,
+      maxPages: request.query.get('maxPages') || undefined,
+      maxRuntimeMs: request.query.get('maxRuntimeMs') || undefined,
+      maxRecords: request.query.get('maxRecords') || undefined,
+      includeCustomerLookup: request.query.get('includeCustomerLookup') || undefined,
     };
   }
 
@@ -274,6 +349,12 @@ const readQuery = (request) => {
         dryRun: parsed.searchParams.get('dryRun') || undefined,
         exampleLimit: parsed.searchParams.get('exampleLimit') || undefined,
         format: parsed.searchParams.get('format') || undefined,
+        cursor: parsed.searchParams.get('cursor') || undefined,
+        pageSize: parsed.searchParams.get('pageSize') || undefined,
+        maxPages: parsed.searchParams.get('maxPages') || undefined,
+        maxRuntimeMs: parsed.searchParams.get('maxRuntimeMs') || undefined,
+        maxRecords: parsed.searchParams.get('maxRecords') || undefined,
+        includeCustomerLookup: parsed.searchParams.get('includeCustomerLookup') || undefined,
       };
     }
   } catch (error) {
@@ -305,10 +386,37 @@ const syncSalesforcePayments = async (request, context) => {
     const exampleLimit = parseExampleLimit(query.exampleLimit);
     const format = typeof query.format === 'string' ? query.format.trim().toLowerCase() : '';
     const exportCsv = format === 'csv';
-
-    const charges = await collectStripePages(deps.stripe.charges.list.bind(deps.stripe.charges), {
-      limit: 100,
-    });
+    const pageSize = parseIntegerWithBounds(
+      query.pageSize,
+      DEFAULT_PAGE_SIZE,
+      1,
+      MAX_PAGE_SIZE
+    );
+    const maxPages = parseIntegerWithBounds(
+      query.maxPages,
+      DEFAULT_MAX_PAGES,
+      1,
+      MAX_MAX_PAGES
+    );
+    const maxRuntimeMs = parseIntegerWithBounds(
+      query.maxRuntimeMs,
+      DEFAULT_MAX_RUNTIME_MS,
+      MIN_MAX_RUNTIME_MS,
+      MAX_MAX_RUNTIME_MS
+    );
+    const maxRecords = parseIntegerWithBounds(
+      query.maxRecords,
+      DEFAULT_MAX_RECORDS,
+      1,
+      MAX_MAX_RECORDS
+    );
+    const includeCustomerLookup = parseBoolean(
+      query.includeCustomerLookup,
+      !dryRun && !exportCsv
+    );
+    const requestedCursor =
+      typeof query.cursor === 'string' && query.cursor.trim().length > 0 ? query.cursor.trim() : null;
+    const startedAt = Date.now();
 
     const summary = {
       totalPayments: 0,
@@ -335,6 +443,10 @@ const syncSalesforcePayments = async (request, context) => {
     const examples = [];
     const errorSamples = [];
     const csvRows = [];
+    let pagesProcessed = 0;
+    let hasMore = false;
+    let nextCursor = requestedCursor;
+    let stopReason = 'completed';
 
     let salesforce = null;
     const ensureSalesforce = async () => {
@@ -344,141 +456,211 @@ const syncSalesforcePayments = async (request, context) => {
       return salesforce;
     };
 
-    for (const charge of charges) {
-      summary.totalPayments += 1;
+    while (pagesProcessed < maxPages) {
+      if (summary.totalPayments >= maxRecords) {
+        stopReason = 'max_records_reached';
+        break;
+      }
 
-      try {
-        if (charge.status !== 'succeeded') {
-          summary.skippedPayments += 1;
-          continue;
-        }
+      if (Date.now() - startedAt >= maxRuntimeMs) {
+        stopReason = 'max_runtime_reached';
+        break;
+      }
 
-        summary.successfulPayments += 1;
+      const page = await fetchChargesPage(deps.stripe, {
+        limit: pageSize,
+        startingAfter: nextCursor,
+      });
 
-        const customerId = normalizeStripeId(charge.customer);
-        if (customerId) {
-          summary.customers.withCustomerId += 1;
-          uniqueCustomerIds.add(customerId);
-        } else {
-          summary.customers.withoutCustomerId += 1;
-        }
+      pagesProcessed += 1;
+      hasMore = page.hasMore;
+      nextCursor = page.nextCursor;
 
-        const paymentType = derivePaymentType(charge);
-        summary.paymentTypes[paymentType] += 1;
+      for (const charge of page.data) {
+        summary.totalPayments += 1;
 
-        let balanceTransaction = null;
-        const balanceTransactionId = normalizeStripeId(charge.balance_transaction);
-        if (balanceTransactionId) {
-          try {
-            balanceTransaction = await deps.stripe.balanceTransactions.retrieve(balanceTransactionId);
-          } catch (error) {
-            balanceTransaction = null;
-          }
-        }
+        try {
+          const isSucceededCharge = charge.status === 'succeeded';
 
-        const transactionPayload = mapStripeToTransaction({
-          paymentIntent: null,
-          charge,
-          balanceTransaction,
-        });
+          if (!isSucceededCharge) {
+            summary.skippedPayments += 1;
 
-        let customerPayload = null;
-
-        if (customerId) {
-          try {
-            const stripeCustomer = await deps.stripe.customers.retrieve(customerId);
-            if (stripeCustomer && !stripeCustomer.deleted) {
-              const { firstName, lastName } = splitName(stripeCustomer.name);
-              customerPayload = {
-                stripe_customer_id__c: stripeCustomer.id,
-                Name: stripeCustomer.name || stripeCustomer.email || `Customer ${stripeCustomer.id}`,
-                Email: stripeCustomer.email || null,
-                FirstName: firstName,
-                LastName: lastName,
-              };
+            if (!exportCsv) {
+              continue;
             }
-          } catch (error) {
-            customerPayload = null;
           }
-        }
 
-        if (examples.length < exampleLimit) {
-          examples.push({
-            stripeCharge: {
-              id: charge.id,
-              amount: toAmount(charge.amount),
-              currency: charge.currency || null,
-              customerId,
-              status: charge.status,
-              paymentType,
-            },
-            salesforceCustomerPayload: customerPayload,
-            salesforcePaymentPayload: {
-              stripe_charge_id__c: transactionPayload.stripe_charge_id__c || null,
-              stripe_payment_intent_id__c: transactionPayload.stripe_payment_intent_id__c || null,
-              transaction_type__c: transactionPayload.transaction_type__c,
-              status__c: transactionPayload.status__c,
-              amount_gross__c: transactionPayload.amount_gross__c,
-              amount_fee__c: transactionPayload.amount_fee__c,
-              amount_net__c: transactionPayload.amount_net__c,
-              currency_iso_code__c: transactionPayload.currency_iso_code__c,
-              stripe_customer_id__c: transactionPayload.stripe_customer_id__c || null,
-              received_at__c: transactionPayload.received_at__c || null,
-            },
+          if (isSucceededCharge) {
+            summary.successfulPayments += 1;
+          }
+
+          const customerId = normalizeStripeId(charge.customer);
+          if (customerId) {
+            summary.customers.withCustomerId += 1;
+            uniqueCustomerIds.add(customerId);
+          } else {
+            summary.customers.withoutCustomerId += 1;
+          }
+
+          let balanceTransaction = null;
+          const balanceTransactionId = normalizeStripeId(charge.balance_transaction);
+          if (balanceTransactionId) {
+            try {
+              balanceTransaction = await deps.stripe.balanceTransactions.retrieve(balanceTransactionId);
+            } catch (error) {
+              balanceTransaction = null;
+            }
+          }
+
+          const paymentIntent = await fetchPaymentIntentForCharge(deps.stripe, charge);
+
+          const transactionPayload = mapStripeToTransaction({
+            paymentIntent,
+            charge,
+            balanceTransaction,
+          });
+
+          const paymentType =
+            transactionPayload.status__c === 'refunded'
+              ? 'refunded'
+              : transactionPayload.status__c === 'disputed'
+                ? 'disputed'
+                : derivePaymentType(charge);
+
+          if (exportCsv || isSucceededCharge) {
+            summary.paymentTypes[paymentType] += 1;
+          }
+
+          let customerPayload = null;
+
+          if (customerId && includeCustomerLookup) {
+            try {
+              const stripeCustomer = await deps.stripe.customers.retrieve(customerId);
+              if (stripeCustomer && !stripeCustomer.deleted) {
+                const { firstName, lastName } = splitName(stripeCustomer.name);
+                customerPayload = {
+                  stripe_customer_id__c: stripeCustomer.id,
+                  Name: stripeCustomer.name || stripeCustomer.email || `Customer ${stripeCustomer.id}`,
+                  Email: stripeCustomer.email || null,
+                  FirstName: firstName,
+                  LastName: lastName,
+                };
+              }
+            } catch (error) {
+              customerPayload = null;
+            }
+          }
+
+          if (examples.length < exampleLimit) {
+            examples.push({
+              stripeCharge: {
+                id: charge.id,
+                amount: toAmount(charge.amount),
+                currency: charge.currency || null,
+                customerId,
+                status: charge.status,
+                paymentType,
+              },
+              salesforceCustomerPayload: customerPayload,
+              salesforcePaymentPayload: {
+                stripe_charge_id__c: transactionPayload.stripe_charge_id__c || null,
+                stripe_payment_intent_id__c: transactionPayload.stripe_payment_intent_id__c || null,
+                transaction_type__c: transactionPayload.transaction_type__c,
+                status__c: transactionPayload.status__c,
+                amount_gross__c: transactionPayload.amount_gross__c,
+                amount_fee__c: transactionPayload.amount_fee__c,
+                amount_net__c: transactionPayload.amount_net__c,
+                currency_iso_code__c: transactionPayload.currency_iso_code__c,
+                stripe_customer_id__c: transactionPayload.stripe_customer_id__c || null,
+                received_at__c: transactionPayload.received_at__c || null,
+              },
+            });
+          }
+
+          if (exportCsv) {
+            csvRows.push(toSalesforceTransactionCsvRow(transactionPayload, customerId));
+          }
+
+          if (!isSucceededCharge) {
+            continue;
+          }
+
+          if (dryRun || exportCsv) {
+            continue;
+          }
+
+          const salesforceSvc = await ensureSalesforce();
+
+          if (customerPayload) {
+            await salesforceSvc.upsertCustomerByStripeId(customerPayload);
+            summary.salesforce.customerUpserts += 1;
+          }
+
+          await salesforceSvc.upsertTransactionByExternalId(
+            transactionPayload,
+            'stripe_charge_id__c'
+          );
+          summary.salesforce.paymentUpserts += 1;
+        } catch (error) {
+          summary.errors += 1;
+
+          if (errorSamples.length < exampleLimit) {
+            errorSamples.push({
+              chargeId: charge?.id || null,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+
+          context.log('[salesforcePaymentsSync] Failed to process payment', {
+            chargeId: charge?.id,
+            error: error instanceof Error ? error.message : String(error),
           });
         }
 
-        if (exportCsv) {
-          csvRows.push({
-            stripe_charge_id: transactionPayload.stripe_charge_id__c || charge.id || null,
-            stripe_payment_intent_id: transactionPayload.stripe_payment_intent_id__c || null,
-            payment_type: paymentType,
-            payment_status: transactionPayload.status__c || charge.status || null,
-            amount_gross: transactionPayload.amount_gross__c,
-            amount_fee: transactionPayload.amount_fee__c,
-            amount_net: transactionPayload.amount_net__c,
-            currency: transactionPayload.currency_iso_code__c || charge.currency || null,
-            stripe_customer_id: transactionPayload.stripe_customer_id__c || customerId,
-            customer_name: customerPayload?.Name || null,
-            customer_email: customerPayload?.Email || null,
-            received_at: transactionPayload.received_at__c || null,
-          });
+        if (summary.totalPayments >= maxRecords) {
+          stopReason = 'max_records_reached';
+          break;
         }
 
-        if (dryRun || exportCsv) {
-          continue;
+        if (Date.now() - startedAt >= maxRuntimeMs) {
+          stopReason = 'max_runtime_reached';
+          break;
         }
+      }
 
-        const salesforceSvc = await ensureSalesforce();
+      if (!hasMore) {
+        stopReason = 'completed';
+        break;
+      }
 
-        if (customerPayload) {
-          await salesforceSvc.upsertCustomerByStripeId(customerPayload);
-          summary.salesforce.customerUpserts += 1;
-        }
+      if (summary.totalPayments >= maxRecords || Date.now() - startedAt >= maxRuntimeMs) {
+        break;
+      }
 
-        await salesforceSvc.upsertTransactionByExternalId(
-          transactionPayload,
-          'stripe_charge_id__c'
-        );
-        summary.salesforce.paymentUpserts += 1;
-      } catch (error) {
-        summary.errors += 1;
-
-        if (errorSamples.length < exampleLimit) {
-          errorSamples.push({
-            chargeId: charge?.id || null,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-
-        context.log('[salesforcePaymentsSync] Failed to process payment', {
-          chargeId: charge?.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
+      if (nextCursor === null) {
+        break;
       }
     }
 
+    if (hasMore && stopReason === 'completed') {
+      stopReason = pagesProcessed >= maxPages ? 'max_pages_reached' : 'partial';
+    }
+
     summary.customers.uniqueCustomerCount = uniqueCustomerIds.size;
+
+    const pagination = {
+      pageSize,
+      maxPages,
+      maxRuntimeMs,
+      maxRecords,
+      pagesProcessed,
+      recordsProcessed: summary.totalPayments,
+      requestedCursor,
+      nextCursor: hasMore ? nextCursor : null,
+      hasMore,
+      stopReason,
+      continuationRecommended: hasMore,
+    };
 
     if (exportCsv) {
       const csvContent = buildPaymentsCsv(csvRows);
@@ -489,6 +671,9 @@ const syncSalesforcePayments = async (request, context) => {
         headers: {
           'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': `attachment; filename="${fileName}"`,
+          'X-Has-More': hasMore ? 'true' : 'false',
+          'X-Next-Cursor': hasMore && nextCursor ? nextCursor : '',
+          'X-Stop-Reason': stopReason,
         },
         body: csvContent,
       };
@@ -501,6 +686,7 @@ const syncSalesforcePayments = async (request, context) => {
         dryRun,
         testMode,
         dryRunForcedByTestMode: forcedByTestMode,
+        pagination,
         paymentCount: summary.totalPayments,
         counts: summary,
         examplePayloads: examples,

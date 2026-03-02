@@ -55,10 +55,9 @@ cp local.settings.json.template local.settings.json
 **Salesforce CRM**:
 
 - `CRM_PROVIDER=salesforce`
-- `SALESFORCE_USERNAME`
-- `SALESFORCE_PASSWORD`
-- `SALESFORCE_SECURITY_TOKEN`
-- `SALESFORCE_LOGIN_URL`
+- `SF_CLIENT_ID`
+- `SF_CLIENT_SECRET`
+- `SF_LOGIN_URL` (optional, defaults to `https://login.salesforce.com`)
 
 **QuickBooks Online**:
 
@@ -238,6 +237,11 @@ Synchronize all successful Stripe payments to Salesforce.
 - In `TEST_MODE=true`, this endpoint automatically runs as dry-run only.
 - Dry-run returns payment counts, payment type counts, customer counts, and example Salesforce payloads.
 - Use `?format=csv` to export successful payment data as a downloadable CSV file instead of syncing to Salesforce.
+- CSV mode uses the full mapped Salesforce `Transaction__c` API field set from Stripe-derived data (including IDs, amounts, status, payment metadata, and posting fields) plus `Contact__r.Stripe_Customer_Id__c` for relationship mapping; suitable for Data Loader upsert/import.
+- Use pagination/continuation query params to handle large datasets without request timeouts:
+  - `pageSize` (1-100), `maxPages`, `maxRuntimeMs`, `maxRecords`, `cursor`
+  - JSON mode returns `pagination.nextCursor` and `pagination.hasMore`
+  - CSV mode returns `X-Next-Cursor` and `X-Has-More` response headers
 
 ### Event Registration
 

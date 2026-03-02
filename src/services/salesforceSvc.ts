@@ -156,6 +156,53 @@ const ensureNonEmpty = (value: string, fieldName: string): string => {
   return trimmed;
 };
 
+const splitStripeCustomerIds = (value: unknown): string[] => {
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  return value
+    .split(/[;,]/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+};
+
+const contactHasStripeCustomerId = (value: unknown, stripeCustomerId: string): boolean => {
+  const normalizedTarget = stripeCustomerId.trim().toLowerCase();
+  if (normalizedTarget.length === 0) {
+    return false;
+  }
+
+  const ids = splitStripeCustomerIds(value);
+  return ids.some((id) => id.toLowerCase() === normalizedTarget);
+};
+
+const mergeStripeCustomerIds = (existingValue: unknown, stripeCustomerId: string): string => {
+  const normalizedIncoming = stripeCustomerId.trim();
+  if (normalizedIncoming.length === 0) {
+    return splitStripeCustomerIds(existingValue).join(';');
+  }
+
+  const existingIds = splitStripeCustomerIds(existingValue);
+  const seen = new Set<string>();
+  const merged: string[] = [];
+
+  for (const id of existingIds) {
+    const key = id.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(id);
+    }
+  }
+
+  const incomingKey = normalizedIncoming.toLowerCase();
+  if (!seen.has(incomingKey)) {
+    merged.push(normalizedIncoming);
+  }
+
+  return merged.join(';');
+};
+
 export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): SalesforceSvc => {
   const resolveExternalIdField = (field: TransactionExternalIdField): string =>
     TRANSACTION_FIELD_API_NAMES[field] ?? field;
@@ -453,7 +500,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     // Search by Stripe Customer ID
     if (stripeCustomerId) {
       const escapedId = stripeCustomerId.replace(/'/g, "\\'");
-      whereConditions.push(`Stripe_Customer_Id__c = '${escapedId}'`);
+      whereConditions.push(`Stripe_Customer_Id__c LIKE '%${escapedId}%'`);
     }
 
     // Search by email
@@ -483,8 +530,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       if (queryResult.records && queryResult.records.length > 0) {
         // Priority matching:
         // 1. Exact Stripe Customer ID match
-        const stripeIdMatch = queryResult.records.find(
-          (c: any) => c.Stripe_Customer_Id__c === stripeCustomerId
+        const stripeIdMatch = queryResult.records.find((c: any) =>
+          contactHasStripeCustomerId(c.Stripe_Customer_Id__c, stripeCustomerId)
         );
 
         if (stripeIdMatch) {
@@ -517,9 +564,16 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         Id: existingContact.Id,
       };
 
-      // Update Stripe Customer ID if not set
-      if (!existingContact.Stripe_Customer_Id__c && stripeCustomerId) {
-        updateFields.Stripe_Customer_Id__c = stripeCustomerId;
+      // Update Stripe Customer ID list if missing this Stripe ID
+      if (stripeCustomerId) {
+        const mergedStripeIds = mergeStripeCustomerIds(
+          existingContact.Stripe_Customer_Id__c,
+          stripeCustomerId
+        );
+
+        if ((existingContact.Stripe_Customer_Id__c || '') !== mergedStripeIds) {
+          updateFields.Stripe_Customer_Id__c = mergedStripeIds;
+        }
       }
 
       // Update email if provided and different

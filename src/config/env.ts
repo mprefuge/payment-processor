@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-type SalesforceAuthMode = 'disabled' | 'jwt' | 'username-password';
+type SalesforceAuthMode = 'disabled' | 'client-credentials';
 type QuickBooksEnvironment = 'sandbox' | 'production';
 type AccountingPostingStrategy = 'je-transfer' | 'sales-receipt';
 
@@ -13,9 +13,8 @@ export interface EnvConfig {
   salesforce: {
     authMode: SalesforceAuthMode;
     clientId?: string;
-    username?: string;
+    clientSecret?: string;
     loginUrl: string;
-    jwtPrivateKey?: string;
   };
   quickBooks: {
     environment: QuickBooksEnvironment;
@@ -133,11 +132,11 @@ function loadEnv(): EnvConfig {
   const authModeExplicitlySet = Boolean(
     process.env.SF_AUTH_MODE ?? process.env.SALESFORCE_AUTH_MODE
   );
-  const salesforceUsername = resolveEnv('SF_USERNAME', {
-    fallbackNames: ['SALESFORCE_USERNAME'],
+  const salesforceClientId = resolveEnv('SF_CLIENT_ID', {
+    fallbackNames: ['SALESFORCE_CLIENT_ID'],
   });
-  const salesforcePassword = resolveEnv('SF_PASSWORD', {
-    fallbackNames: ['SALESFORCE_PASSWORD'],
+  const salesforceClientSecret = resolveEnv('SF_CLIENT_SECRET', {
+    fallbackNames: ['SALESFORCE_CLIENT_SECRET'],
   });
 
   let resolvedSalesforceAuthMode: SalesforceAuthMode = (
@@ -147,57 +146,38 @@ function loadEnv(): EnvConfig {
   if (
     !authModeExplicitlySet &&
     resolvedSalesforceAuthMode === 'disabled' &&
-    salesforceUsername &&
-    salesforcePassword
+    salesforceClientId &&
+    salesforceClientSecret
   ) {
-    resolvedSalesforceAuthMode = 'username-password';
+    resolvedSalesforceAuthMode = 'client-credentials';
   }
 
   const salesforceRaw = {
     authMode: resolvedSalesforceAuthMode,
-    clientId: resolveEnv('SF_CLIENT_ID', {
-      fallbackNames: ['SALESFORCE_CLIENT_ID'],
-    }),
-    username: salesforceUsername,
+    clientId: salesforceClientId,
+    clientSecret: salesforceClientSecret,
     loginUrl:
       resolveEnv('SF_LOGIN_URL', {
         fallbackNames: ['SALESFORCE_LOGIN_URL'],
         defaultValue: DEFAULT_SALESFORCE_LOGIN_URL,
       }) ?? DEFAULT_SALESFORCE_LOGIN_URL,
-    jwtPrivateKey: resolveEnv('SF_JWT_PRIVATE_KEY', {
-      fallbackNames: ['SALESFORCE_JWT_PRIVATE_KEY'],
-      trim: false,
-    }),
   };
 
   const salesforceSchema = z.object({
-    authMode: z.enum(['disabled', 'jwt', 'username-password'] as const),
+    authMode: z.enum(['disabled', 'client-credentials'] as const),
     clientId: z.string().min(1).optional(),
-    username: z.string().min(1).optional(),
+    clientSecret: z.string().min(1).optional(),
     loginUrl: z.string().url(),
-    jwtPrivateKey: z.string().min(1).optional(),
   });
 
   const salesforce = salesforceSchema.parse(salesforceRaw);
 
-  if (salesforce.authMode === 'jwt') {
+  if (salesforce.authMode === 'client-credentials') {
     if (!salesforce.clientId) {
-      missing.push('SF_CLIENT_ID');
+      missing.push('SF_CLIENT_ID (or SALESFORCE_CLIENT_ID)');
     }
-    if (!salesforce.username) {
-      missing.push('SF_USERNAME');
-    }
-    if (!salesforce.jwtPrivateKey) {
-      missing.push('SF_JWT_PRIVATE_KEY');
-    }
-  }
-
-  if (salesforce.authMode === 'username-password') {
-    if (!salesforce.username) {
-      missing.push('SF_USERNAME (or SALESFORCE_USERNAME)');
-    }
-    if (!salesforcePassword) {
-      missing.push('SF_PASSWORD (or SALESFORCE_PASSWORD)');
+    if (!salesforce.clientSecret) {
+      missing.push('SF_CLIENT_SECRET (or SALESFORCE_CLIENT_SECRET)');
     }
   }
 
@@ -403,9 +383,8 @@ function loadEnv(): EnvConfig {
     salesforce: {
       authMode: salesforce.authMode,
       clientId: salesforce.clientId,
-      username: salesforce.username,
+      clientSecret: salesforce.clientSecret,
       loginUrl: salesforce.loginUrl,
-      jwtPrivateKey: salesforce.jwtPrivateKey,
     },
     quickBooks: {
       environment: quickBooks.environment,

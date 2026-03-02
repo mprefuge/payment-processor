@@ -19,10 +19,9 @@ describe('processTransaction', () => {
     internals.resetStripeClientFactory();
     vi.restoreAllMocks();
     delete process.env.CRM_PROVIDER;
-    delete process.env.SALESFORCE_USERNAME;
-    delete process.env.SALESFORCE_PASSWORD;
-    delete process.env.SALESFORCE_SECURITY_TOKEN;
-    delete process.env.SALESFORCE_LOGIN_URL;
+    delete process.env.SF_CLIENT_ID;
+    delete process.env.SF_CLIENT_SECRET;
+    delete process.env.SF_LOGIN_URL;
   });
 
   it('returns checkout URL when valid request body is provided', async () => {
@@ -74,6 +73,61 @@ describe('processTransaction', () => {
     expect(stripeMock.checkout.sessions.create).toHaveBeenCalled();
   });
 
+  it('searchStripeCustomer queries email and filters name locally', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({
+          data: [
+            { id: 'cusA', name: 'Donor Example' },
+            { id: 'cusB', name: 'Different' },
+          ],
+        }),
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    const results = await internals.searchStripeCustomer(
+      stripeMock,
+      'donor@example.com',
+      'Donor Example'
+    );
+
+    expect(stripeMock.customers.search).toHaveBeenCalledWith({
+      query: "email:'donor@example.com'",
+      limit: 20,
+    });
+
+    // should only keep the matching-name record
+    expect(results).toEqual([{ id: 'cusA', name: 'Donor Example' }]);
+  });
+
+  it('searchStripeCustomer returns nothing if name fails to match', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({
+          data: [
+            { id: 'cusX', name: 'Other Name' },
+          ],
+        }),
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    const results = await internals.searchStripeCustomer(
+      stripeMock,
+      'donor@example.com',
+      'Donor Example'
+    );
+
+    expect(stripeMock.customers.search).toHaveBeenCalledWith({
+      query: "email:'donor@example.com'",
+      limit: 20,
+    });
+    expect(results).toEqual([]);
+  });
+
   it('upserts a pending Salesforce transaction when CRM is configured', async () => {
     const stripeMock = {
       customers: {
@@ -94,12 +148,13 @@ describe('processTransaction', () => {
     internals.setStripeClientFactory(() => stripeMock);
 
     process.env.CRM_PROVIDER = 'salesforce';
-    process.env.SALESFORCE_USERNAME = 'test@example.com';
-    process.env.SALESFORCE_PASSWORD = 'password123';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
 
     const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
     const createTransactionMock = vi.fn();
     const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
       searchContact: vi.fn().mockResolvedValue([]),
       createContact: vi.fn().mockResolvedValue({
         Id: '003TEST',
@@ -154,6 +209,74 @@ describe('processTransaction', () => {
     );
   });
 
+  it('ensures salesforce_id metadata is written when contact is created', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test', metadata: {} }),
+        update: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+        retrieve: vi.fn().mockResolvedValue({ id: 'cus_test', metadata: {} }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test',
+            url: 'https://stripe.test/session',
+          }),
+        },
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    process.env.CRM_PROVIDER = 'salesforce';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
+
+    const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
+      searchContact: vi.fn().mockResolvedValue([]),
+      createContact: vi.fn().mockResolvedValue({
+        Id: '003TEST',
+        FirstName: 'Donor',
+        LastName: 'Example',
+        Email: 'donor@example.com',
+      }),
+      updateContact: vi.fn(),
+      upsertTransactionsRecord: vi.fn().mockResolvedValue({ success: true, id: 'txn_test' }),
+      createTransaction: vi.fn(),
+    };
+
+    const CrmFactory = require('../dist/services/salesforce/crmFactory');
+    vi.spyOn(CrmFactory, 'validateConfig').mockReturnValue({ isValid: true });
+    vi.spyOn(CrmFactory, 'createCrmService').mockReturnValue(crmServiceMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 7500,
+        frequency: 'month',
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+          phone: '+15555555555',
+        },
+        metadata: {
+          attribution: 'referral-program',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(stripeMock.customers.update).toHaveBeenCalledWith('cus_test',
+      expect.objectContaining({
+        metadata: expect.objectContaining({ salesforce_id: '003TEST' }),
+      })
+    );
+  });
+
   it('skips pending transaction creation when no CRM contact is available', async () => {
     const stripeMock = {
       customers: {
@@ -174,12 +297,13 @@ describe('processTransaction', () => {
     internals.setStripeClientFactory(() => stripeMock);
 
     process.env.CRM_PROVIDER = 'salesforce';
-    process.env.SALESFORCE_USERNAME = 'test@example.com';
-    process.env.SALESFORCE_PASSWORD = 'password123';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
 
     const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
     const createTransactionMock = vi.fn();
     const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
       searchContact: vi.fn().mockResolvedValue([]),
       createContact: vi.fn().mockRejectedValue(new Error('Contact creation failed')),
       updateContact: vi.fn(),
@@ -244,8 +368,8 @@ describe('processTransaction', () => {
     internals.setStripeClientFactory(() => stripeMock);
 
     process.env.CRM_PROVIDER = 'salesforce';
-    process.env.SALESFORCE_USERNAME = 'test@example.com';
-    process.env.SALESFORCE_PASSWORD = 'password123';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
 
     const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
     const findOrCreateCampaignMock = vi.fn().mockResolvedValue('701xx000000000AAA');
@@ -255,6 +379,7 @@ describe('processTransaction', () => {
       status: 'Sent',
     });
     const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
       searchContact: vi.fn().mockResolvedValue([]),
       createContact: vi.fn().mockResolvedValue({
         Id: '003TEST',

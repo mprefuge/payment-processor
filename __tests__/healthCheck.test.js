@@ -38,9 +38,8 @@ describe('healthCheck', () => {
     process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live';
     process.env.SENDGRID_API_KEY = 'sg_key';
     process.env.CRM_PROVIDER = 'salesforce';
-    process.env.SALESFORCE_USERNAME = 'user@example.com';
-    process.env.SALESFORCE_PASSWORD = 'password';
-    process.env.SALESFORCE_SECURITY_TOKEN = 'token';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
     process.env.ACCOUNTING_SYNC_ENABLED = 'true';
     process.env.ACCOUNTING_PROVIDER = 'quickbooks';
     process.env.QBO_ACCESS_TOKEN = 'access';
@@ -154,9 +153,8 @@ describe('healthCheck', () => {
     delete process.env.STRIPE_TEST_SECRET_KEY;
     delete process.env.STRIPE_LIVE_SECRET_KEY;
     process.env.CRM_PROVIDER = 'salesforce';
-    delete process.env.SALESFORCE_USERNAME;
-    delete process.env.SALESFORCE_PASSWORD;
-    delete process.env.SALESFORCE_SECURITY_TOKEN;
+    delete process.env.SF_CLIENT_ID;
+    delete process.env.SF_CLIENT_SECRET;
     process.env.ACCOUNTING_SYNC_ENABLED = 'true';
     process.env.ACCOUNTING_PROVIDER = 'quickbooks';
     delete process.env.QBO_ACCESS_TOKEN;

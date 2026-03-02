@@ -80,4 +80,16 @@ describe('mapStripeToTransaction', () => {
     expect(dto.designation__c).toBe('a15xx000000000AAA');
     expect(dto.restriction__c).toBe('a0Oxx000000000AAA');
   });
+
+  it('honors salesforce_id metadata as the contact reference', () => {
+    const metadata = { salesforce_id: '003FAKEID' };
+
+    const dto = mapStripeToTransaction({
+      paymentIntent: buildPaymentIntent(metadata) as any,
+      charge: buildCharge() as any,
+      balanceTransaction: buildBalanceTransaction() as any,
+    });
+
+    expect(dto.contact__c).toBe('003FAKEID');
+  });
 });

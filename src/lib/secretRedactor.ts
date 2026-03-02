@@ -424,8 +424,8 @@ export function registerEnvConfigSecrets(config: EnvConfig | null | undefined): 
   registerSecretValue(config.stripe.secret, { force: true });
   registerSecretValue(config.stripe.webhookSecret, { force: true });
 
-  if (config.salesforce.jwtPrivateKey) {
-    registerSecretValue(config.salesforce.jwtPrivateKey, { force: true });
+  if (config.salesforce.clientSecret) {
+    registerSecretValue(config.salesforce.clientSecret, { force: true });
   }
 
   registerSecretCollection(config.quickBooks, { force: true });

@@ -1,5 +1,5 @@
 const Stripe = require('stripe');
-const jsforce = require('jsforce');
+const { SalesforceService, buildSalesforceConfig } = require('../services/salesforceService');
 
 let createSalesforceSvc;
 try {
@@ -163,21 +163,12 @@ const createSalesforceGetter = () => {
   return async () => {
     if (!cachedPromise) {
       cachedPromise = (async () => {
-        const username = process.env.SALESFORCE_USERNAME;
-        const password = process.env.SALESFORCE_PASSWORD;
-        const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
-        const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
-
-        if (!username || !password) {
-          throw new Error('Salesforce credentials are not configured.');
-        }
-
         if (!createSalesforceSvc) {
           throw new Error('Salesforce service is not available.');
         }
 
-        const connection = new jsforce.Connection({ loginUrl });
-        await connection.login(username, `${password}${securityToken}`);
+        const service = new SalesforceService(buildSalesforceConfig());
+        const connection = await service.authenticate();
         return createSalesforceSvc({ connection });
       })();
     }

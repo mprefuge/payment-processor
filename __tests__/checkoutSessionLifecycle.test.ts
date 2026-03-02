@@ -15,10 +15,9 @@ describe('checkout session lifecycle', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     delete process.env.CRM_PROVIDER;
-    delete process.env.SALESFORCE_USERNAME;
-    delete process.env.SALESFORCE_PASSWORD;
-    delete process.env.SALESFORCE_SECURITY_TOKEN;
-    delete process.env.SALESFORCE_LOGIN_URL;
+    delete process.env.SF_CLIENT_ID;
+    delete process.env.SF_CLIENT_SECRET;
+    delete process.env.SF_LOGIN_URL;
   });
 
   it('creates a pending transaction on checkout creation then updates to paid after completion', async () => {
@@ -28,6 +27,7 @@ describe('checkout session lifecycle', () => {
     const upsertByExternal = vi.fn().mockResolvedValue({ success: true, id: 'sf_pending' });
 
     const crmServiceMock: any = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
       // used by processTransaction
       searchContact: vi.fn().mockResolvedValue([]),
       createContact: vi.fn().mockResolvedValue({ Id: '003TEST' }),
@@ -65,8 +65,8 @@ describe('checkout session lifecycle', () => {
 
     // Enable Salesforce CRM in env so processTransaction will try to create pending txn
     process.env.CRM_PROVIDER = 'salesforce';
-    process.env.SALESFORCE_USERNAME = 'test@example.com';
-    process.env.SALESFORCE_PASSWORD = 'password';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
 
     const { context } = createContext();
 

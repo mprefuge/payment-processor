@@ -17,10 +17,9 @@ const getCrmConfig = () => {
   return {
     provider: 'salesforce',
     config: {
-      username: process.env.SALESFORCE_USERNAME,
-      password: process.env.SALESFORCE_PASSWORD,
-      securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
-      loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com',
+      clientId: process.env.SF_CLIENT_ID,
+      clientSecret: process.env.SF_CLIENT_SECRET,
+      loginUrl: process.env.SF_LOGIN_URL || 'https://login.salesforce.com',
     },
   };
 };
@@ -59,8 +58,8 @@ export default async function eventCheckIn(
     // Get Salesforce connection and Stripe client
     const crmConfig = getCrmConfig();
     const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
-    const salesforceConnection = await crmService.connect();
-    
+    const salesforceConnection = await crmService.authenticate();
+
     const stripeClient = stripeClientFactory.getClient(!env.testMode);
 
     // Create event service

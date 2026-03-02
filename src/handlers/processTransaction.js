@@ -2,6 +2,7 @@ const { logger } = require('../lib/logger');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const Stripe = require('stripe');
+const { ensureSalesforceIdOnCustomer } = require('../stripe/utils');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const {
@@ -501,10 +502,9 @@ const getCrmConfig = () => {
       return {
         provider: 'salesforce',
         config: {
-          username: process.env.SALESFORCE_USERNAME,
-          password: process.env.SALESFORCE_PASSWORD,
-          securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
-          loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com',
+          clientId: process.env.SF_CLIENT_ID,
+          clientSecret: process.env.SF_CLIENT_SECRET,
+          loginUrl: process.env.SF_LOGIN_URL || 'https://login.salesforce.com',
           contactLeadSource,
         },
       };
@@ -517,7 +517,7 @@ const getCrmConfig = () => {
 };
 
 // Sync contact to CRM after checkout session is created
-const syncContactToCrm = async (context, customerData) => {
+const syncContactToCrm = async (context, stripe, customerData) => {
   try {
     const crmConfig = getCrmConfig();
 
@@ -535,6 +535,9 @@ const syncContactToCrm = async (context, customerData) => {
 
     // Create CRM service
     const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+    if (typeof crmService.authenticate === 'function') {
+      await crmService.authenticate();
+    }
 
     // Prepare search criteria including Stripe Customer ID if available
     const searchCriteria = {
@@ -719,6 +722,24 @@ const syncContactToCrm = async (context, customerData) => {
       );
     }
 
+    // if we have both a stripe customer and a salesforce contact ID, make
+    // sure the customer object is annotated so future lookups are fast.
+    if (customerData.stripeCustomerId && contact && contact.Id) {
+      const metadataLogger =
+        typeof context?.log === 'function'
+          ? context.log
+          : typeof logger?.info === 'function'
+            ? logger.info.bind(logger)
+            : () => {};
+
+      await ensureSalesforceIdOnCustomer(
+        stripe,
+        customerData.stripeCustomerId,
+        contact.Id,
+        metadataLogger
+      );
+    }
+
     return contact;
   } catch (error) {
     // Log error but don't fail the checkout process
@@ -727,6 +748,7 @@ const syncContactToCrm = async (context, customerData) => {
     return null;
   }
 };
+
 
 // Create pending transaction in CRM after checkout session is created
 const normalizeStripeEntityId = (value) => {
@@ -779,6 +801,9 @@ const createPendingTransaction = async (context, session, contactId, transaction
 
     // Create CRM service
     const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+    if (typeof crmService.authenticate === 'function') {
+      await crmService.authenticate();
+    }
 
     if (typeof crmService.upsertTransactionsRecord !== 'function') {
       console.log(
@@ -942,6 +967,9 @@ const upsertSalesforceTransaction = async (context, session, requestData) => {
     }
 
     const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+    if (typeof crmService.authenticate === 'function') {
+      await crmService.authenticate();
+    }
 
     if (typeof crmService.upsertTransactionsRecord !== 'function') {
       console.log('CRM service does not support transaction upsert');
@@ -1015,14 +1043,20 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
     const sanitizedEmail = escapeStripeQueryValue(email);
     const sanitizedFullName = escapeStripeQueryValue(fullName);
 
+    // query by e‑mail only – searching on name is unreliable and can
+    // return zero results even for a perfectly‑matched customer.  we
+    // still check the name locally so we don't falsely return somebody
+    // with the same email but a different name.
     const customers = await stripe.customers.search({
-      query: `email:'${sanitizedEmail}' AND name:'${sanitizedFullName}'`,
+      query: `email:'${sanitizedEmail}'`,
+      limit: 20,
     });
 
-    // Additional validation: ensure name matches exactly
-    // This protects against cases where Stripe search might use fuzzy matching
     const validCustomers = customers.data.filter((customer) => {
-      return customer.name && customer.name.toLowerCase() === fullName.toLowerCase();
+      return (
+        customer.name &&
+        customer.name.toLowerCase() === fullName.toLowerCase()
+      );
     });
 
     return validCustomers;
@@ -1388,7 +1422,7 @@ module.exports = async function (request, context) {
 
     // Sync contact to CRM (Salesforce) if configured
     // This happens after checkout session creation to not block the payment flow
-    const contact = await syncContactToCrm(actualContext, customerDetails);
+    const contact = await syncContactToCrm(actualContext, stripe, customerDetails);
 
     let pendingTransactionUpserted = false;
 

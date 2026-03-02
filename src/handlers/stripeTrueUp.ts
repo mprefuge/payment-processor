@@ -1,6 +1,5 @@
 import type { InvocationContext, HttpRequest } from '@azure/functions';
 import Stripe from 'stripe';
-import jsforce from 'jsforce';
 
 // Try to import env config, but don't fail if it's incomplete
 let env: any = { stripe: { secret: '' } };
@@ -35,7 +34,9 @@ import {
   type SalesforceSvc,
   type QuickBooksDocumentReference,
 } from '../services/salesforceSvc';
+import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
+import { ensureSalesforceIdOnCustomer } from '../stripe/utils';
 import {
   loadConfig,
   normalizeTransactionCategory,
@@ -172,17 +173,8 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   return async (): Promise<SalesforceSvc> => {
     if (!defaultSalesforceSvcPromise) {
       defaultSalesforceSvcPromise = (async () => {
-        const username = process.env.SALESFORCE_USERNAME;
-        const password = process.env.SALESFORCE_PASSWORD;
-        const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
-        const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
-
-        if (!username || !password) {
-          throw new Error('Salesforce credentials are not configured.');
-        }
-
-        salesforceConnection = new jsforce.Connection({ loginUrl });
-        await salesforceConnection.login(username, `${password}${securityToken}`);
+        const service = new SalesforceService(buildSalesforceConfig());
+        salesforceConnection = await service.authenticate();
         return createSalesforceSvc({ connection: salesforceConnection });
       })();
     }
@@ -199,28 +191,18 @@ const createCrmGetter = (): (() => Promise<any>) => {
       defaultCrmSvcPromise = (async () => {
         try {
           const CrmFactory = require('../services/salesforce/crmFactory');
-          const username = process.env.SALESFORCE_USERNAME;
-          const password = process.env.SALESFORCE_PASSWORD;
-          const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
-          const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
-
-          if (!username || !password) {
-            throw new Error('Salesforce CRM credentials are not configured.');
-          }
-
-          const crmConfig = {
-            username,
-            password,
-            securityToken,
-            loginUrl,
-          };
+          const crmConfig = buildSalesforceConfig();
 
           const validation = CrmFactory.validateConfig('salesforce', crmConfig);
           if (!validation.isValid) {
             throw new Error(`Invalid CRM configuration: ${validation.error}`);
           }
 
-          return CrmFactory.createCrmService('salesforce', crmConfig);
+          const crmService = CrmFactory.createCrmService('salesforce', crmConfig);
+          if (typeof crmService.authenticate === 'function') {
+            await crmService.authenticate();
+          }
+          return crmService;
         } catch (error) {
           defaultCrmSvcPromise = null;
           const message =
@@ -672,18 +654,8 @@ const findOrCreateContactInSalesforce = async (
 };
 
 const createSalesforceConnection = async (): Promise<any> => {
-  const username = process.env.SALESFORCE_USERNAME;
-  const password = process.env.SALESFORCE_PASSWORD;
-  const securityToken = process.env.SALESFORCE_SECURITY_TOKEN || '';
-  const loginUrl = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
-
-  if (!username || !password) {
-    throw new Error('Salesforce credentials are not configured.');
-  }
-
-  const connection = new jsforce.Connection({ loginUrl });
-  await connection.login(username, `${password}${securityToken}`);
-  return connection;
+  const service = new SalesforceService(buildSalesforceConfig());
+  return service.authenticate();
 };
 
 const processPayments = async (
@@ -815,6 +787,10 @@ const processPayments = async (
               contactId,
               success: !!contactId,
             });
+
+            if (stripeCustomer && contactId) {
+              await ensureSalesforceIdOnCustomer(stripe, stripeCustomer.id, contactId, context.log);
+            }
           } catch (error) {
             context.log('[StripeTrueUp] Failed to upsert contact in Salesforce', {
               customerId: stripeCustomer.id,
@@ -1263,6 +1239,10 @@ const processRefunds = async (
               });
               contactId = customerUpsertResult?.id ?? null;
 
+              if (stripeCustomer && contactId) {
+                await ensureSalesforceIdOnCustomer(stripe, stripeCustomer.id, contactId, context.log);
+              }
+
               context.log('[StripeTrueUp] Contact upsert completed for refund', {
                 refundId: refund.id,
                 contactId,
@@ -1673,16 +1653,12 @@ const validateEnvironment = (): { valid: boolean; errors: string[] } => {
     }
   }
 
-  // Check Salesforce credentials (optional but warn if missing)
-  if (!process.env.SALESFORCE_USERNAME && !process.env.SF_USERNAME) {
-    errors.push(
-      'SALESFORCE_USERNAME or SF_USERNAME is not configured (Salesforce sync will be skipped)'
-    );
+  // Check Salesforce credentials
+  if (!process.env.SF_CLIENT_ID) {
+    errors.push('SF_CLIENT_ID is not configured (Salesforce sync will fail)');
   }
-  if (!process.env.SALESFORCE_PASSWORD && !process.env.SF_PASSWORD) {
-    errors.push(
-      'SALESFORCE_PASSWORD or SF_PASSWORD is not configured (Salesforce sync will be skipped)'
-    );
+  if (!process.env.SF_CLIENT_SECRET) {
+    errors.push('SF_CLIENT_SECRET is not configured (Salesforce sync will fail)');
   }
 
   // Check QBO credentials (using the actual variable names from env.ts)

@@ -136,6 +136,48 @@ export const resolveStripeCustomer = async (
   }
 };
 
+/**
+ * Ensure a Stripe customer record contains a salesforce_id metadata field.
+ * When a contact is looked up or created in Salesforce we want to reflect
+ * that ID back on the customer so future transactions can be mapped
+ * directly without an additional search.
+ *
+ * This is intentionally tolerant: failures are logged but not thrown so they
+ * don't block the primary payment flow.
+ */
+export const ensureSalesforceIdOnCustomer = async (
+  stripe: Stripe,
+  customerId: string,
+  salesforceId: string,
+  logger: (...args: unknown[]) => void = () => {}
+): Promise<void> => {
+  if (!customerId || !salesforceId) {
+    return;
+  }
+
+  try {
+    const cust = (await stripe.customers.retrieve(customerId)) as Stripe.Customer;
+    const current = cust.metadata?.salesforce_id;
+    if (current === salesforceId) {
+      return; // nothing to do
+    }
+
+    const newMetadata = { ...(cust.metadata || {}), salesforce_id: salesforceId };
+    await stripe.customers.update(customerId, { metadata: newMetadata });
+    logger('[Stripe] Added salesforce_id to customer metadata', {
+      customerId,
+      salesforceId,
+    });
+  } catch (err) {
+    logger('[Stripe] Failed to update customer metadata with salesforce_id', {
+      customerId,
+      salesforceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // swallow error
+  }
+};
+
 export const findCheckoutSessionForPaymentIntent = async (
   stripe: Stripe,
   paymentIntentId: string | null | undefined

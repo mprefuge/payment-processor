@@ -1,10 +1,10 @@
 import Stripe from 'stripe';
-import jsforce from 'jsforce';
 
 import env from '../config/env';
 import { logger } from '../lib/logger';
 import { AzureIdempotencyStore, type IdempotencyStore } from '../services/idempotencyStore';
 import { createSalesforceSvc, type SalesforceSvc } from '../services/salesforceSvc';
+import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
 import type { UpsertResult } from 'jsforce/lib/types';
 import {
   postChargeToQbo,
@@ -86,24 +86,6 @@ const createDisabledSalesforceSvc = (): SalesforceSvc => {
   };
 };
 
-const resolveSalesforceUsername = (): string | undefined =>
-  env.salesforce.username ||
-  process.env.SALESFORCE_USERNAME ||
-  process.env.SF_USERNAME ||
-  undefined;
-
-const resolveSalesforcePassword = (): string | undefined =>
-  process.env.SALESFORCE_PASSWORD || process.env.SF_PASSWORD || undefined;
-
-const resolveSalesforceSecurityToken = (): string =>
-  process.env.SALESFORCE_SECURITY_TOKEN || process.env.SF_SECURITY_TOKEN || '';
-
-const resolveSalesforceLoginUrl = (): string =>
-  env.salesforce.loginUrl ||
-  process.env.SALESFORCE_LOGIN_URL ||
-  process.env.SF_LOGIN_URL ||
-  'https://login.salesforce.com';
-
 const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   const disabledSvc = createDisabledSalesforceSvc();
 
@@ -111,7 +93,7 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
     return async () => disabledSvc;
   }
 
-  if (env.salesforce.authMode !== 'username-password') {
+  if (env.salesforce.authMode !== 'client-credentials') {
     throw new Error(`Unsupported Salesforce auth mode: ${env.salesforce.authMode}`);
   }
 
@@ -119,17 +101,8 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
     if (!defaultSalesforceSvcPromise) {
       defaultSalesforceSvcPromise = (async () => {
         try {
-          const username = resolveSalesforceUsername();
-          const password = resolveSalesforcePassword();
-          const securityToken = resolveSalesforceSecurityToken();
-          const loginUrl = resolveSalesforceLoginUrl();
-
-          if (!username || !password) {
-            throw new Error('Salesforce credentials are not configured.');
-          }
-
-          const connection = new jsforce.Connection({ loginUrl });
-          await connection.login(username, `${password}${securityToken}`);
+          const service = new SalesforceService(buildSalesforceConfig());
+          const connection = await service.authenticate();
           return createSalesforceSvc({ connection });
         } catch (error) {
           defaultSalesforceSvcPromise = null;
@@ -161,7 +134,7 @@ const createCrmGetter = (): (() => Promise<any>) => {
     });
   }
 
-  if (env.salesforce.authMode !== 'username-password') {
+  if (env.salesforce.authMode !== 'client-credentials') {
     throw new Error(`Unsupported Salesforce auth mode for CRM: ${env.salesforce.authMode}`);
   }
 
@@ -170,28 +143,18 @@ const createCrmGetter = (): (() => Promise<any>) => {
       defaultCrmSvcPromise = (async () => {
         try {
           const CrmFactory = require('../services/salesforce/crmFactory');
-          const username = resolveSalesforceUsername();
-          const password = resolveSalesforcePassword();
-          const securityToken = resolveSalesforceSecurityToken();
-          const loginUrl = resolveSalesforceLoginUrl();
-
-          if (!username || !password) {
-            throw new Error('Salesforce CRM credentials are not configured.');
-          }
-
-          const crmConfig = {
-            username,
-            password,
-            securityToken,
-            loginUrl,
-          };
+          const crmConfig = buildSalesforceConfig();
 
           const validation = CrmFactory.validateConfig('salesforce', crmConfig);
           if (!validation.isValid) {
             throw new Error(`Invalid CRM configuration: ${validation.error}`);
           }
 
-          return CrmFactory.createCrmService('salesforce', crmConfig);
+          const crmService = CrmFactory.createCrmService('salesforce', crmConfig);
+          if (typeof crmService.authenticate === 'function') {
+            await crmService.authenticate();
+          }
+          return crmService;
         } catch (error) {
           defaultCrmSvcPromise = null;
           const message =

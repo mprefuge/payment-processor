@@ -226,4 +226,120 @@ describe('createSalesforceSvc', () => {
     expect(secondCallRecords[0]).toMatchObject({ Id: 'a1' });
     expect(result).toEqual({ success: true, id: 'a1', errors: [] });
   });
+
+  it('matches existing contact when Stripe customer ID is in a delimited Stripe_Customer_Id__c list', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('FROM Contact')) {
+        return Promise.resolve({
+          records: [
+            {
+              Id: '003existing',
+              FirstName: 'Jane',
+              LastName: 'Doe',
+              Email: 'jane@example.com',
+              Stripe_Customer_Id__c: 'cus_old;cus_12345abcde',
+            },
+          ],
+        });
+      }
+
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+
+      return Promise.resolve({ records: [] });
+    });
+
+    const update = vi.fn().mockResolvedValue({ success: true, id: '003existing', errors: [] });
+    const create = vi.fn();
+    sobject.mockImplementation((name: string) => {
+      if (name === 'Contact') {
+        return { update, create };
+      }
+      return { update: vi.fn(), create: vi.fn() };
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const result = await service.upsertCustomerByStripeId({
+      stripe_customer_id__c: 'cus_12345abcde',
+      Name: 'Jane Doe',
+      Email: 'jane@example.com',
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      created: false,
+      id: '003existing',
+    });
+
+    // No update needed because ID already exists in delimited list
+    expect(update).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('appends Stripe customer ID to existing contact Stripe_Customer_Id__c list when missing', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('FROM Contact')) {
+        return Promise.resolve({
+          records: [
+            {
+              Id: '003existing2',
+              FirstName: 'John',
+              LastName: 'Smith',
+              Email: 'john@example.com',
+              Stripe_Customer_Id__c: 'cus_first;cus_second',
+            },
+          ],
+        });
+      }
+
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+
+      return Promise.resolve({ records: [] });
+    });
+
+    const update = vi.fn().mockResolvedValue({ success: true, id: '003existing2', errors: [] });
+    const create = vi.fn();
+    sobject.mockImplementation((name: string) => {
+      if (name === 'Contact') {
+        return { update, create };
+      }
+      return { update: vi.fn(), create: vi.fn() };
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const result = await service.upsertCustomerByStripeId({
+      stripe_customer_id__c: 'cus_new_third',
+      Name: 'John Smith',
+      Email: 'john@example.com',
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      created: false,
+      id: '003existing2',
+    });
+
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Id: '003existing2',
+        Stripe_Customer_Id__c: 'cus_first;cus_second;cus_new_third',
+      })
+    );
+    expect(create).not.toHaveBeenCalled();
+  });
 });

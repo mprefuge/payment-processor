@@ -251,9 +251,10 @@ describe('salesforcePaymentsSync', () => {
     const { context } = createContext();
     const req = {
       method: 'GET',
-      url: 'http://localhost/api/stripe/salesforce-payments-sync?format=csv',
+      url: 'http://localhost/api/stripe/salesforce-payments-sync?format=csv&includeCustomerLookup=true',
       query: {
         format: 'csv',
+        includeCustomerLookup: 'true',
       },
     };
 
@@ -262,13 +263,84 @@ describe('salesforcePaymentsSync', () => {
     expect(result.status).toBe(200);
     expect(result.headers?.['Content-Type']).toContain('text/csv');
     expect(result.headers?.['Content-Disposition']).toContain('attachment; filename=');
-    expect(result.body).toContain('stripe_charge_id,stripe_payment_intent_id,payment_type');
+    expect(result.body).toContain(
+      'Name,Transaction_Type__c,Status__c,Stripe_Payment_Intent_Id__c,Stripe_Charge_Id__c'
+    );
+    expect(result.body).toContain('Contact__r.Stripe_Customer_Id__c');
     expect(result.body).toContain('ch_csv_1');
-    expect(result.body).toContain('CSV Person');
-    expect(result.body).toContain('csv.person@example.com');
+    expect(result.body).toContain('cus_csv_1');
 
     expect(getSalesforceSvc).not.toHaveBeenCalled();
     expect(salesforce.upsertCustomerByStripeId).not.toHaveBeenCalled();
     expect(salesforce.upsertTransactionByExternalId).not.toHaveBeenCalled();
+  });
+
+  it('supports pagination and continuation for large datasets', async () => {
+    const chargesList = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'ch_page_1',
+            status: 'succeeded',
+            amount: 1000,
+            currency: 'usd',
+            customer: null,
+            balance_transaction: null,
+            refunded: false,
+            disputed: false,
+            amount_refunded: 0,
+          },
+        ],
+        has_more: true,
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'ch_page_2',
+            status: 'succeeded',
+            amount: 2000,
+            currency: 'usd',
+            customer: null,
+            balance_transaction: null,
+            refunded: false,
+            disputed: false,
+            amount_refunded: 0,
+          },
+        ],
+        has_more: false,
+      });
+
+    internals.setDependencies({
+      testMode: true,
+      stripe: {
+        charges: { list: chargesList },
+        balanceTransactions: { retrieve: vi.fn() },
+        customers: { retrieve: vi.fn() },
+      },
+      getSalesforceSvc: vi.fn(),
+    });
+
+    const { context } = createContext();
+    const req = {
+      method: 'GET',
+      url: 'http://localhost/api/stripe/salesforce-payments-sync?pageSize=1&maxPages=1',
+      query: {
+        pageSize: '1',
+        maxPages: '1',
+      },
+    };
+
+    const result = await handler(req, context);
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.pagination).toMatchObject({
+      hasMore: true,
+      nextCursor: 'ch_page_1',
+      pagesProcessed: 1,
+      stopReason: 'max_pages_reached',
+      continuationRecommended: true,
+    });
+    expect(result.jsonBody.paymentCount).toBe(1);
   });
 });

@@ -139,10 +139,9 @@ const getCrmConfigFromEnv = () => {
       return {
         provider: 'salesforce',
         config: {
-          username: process.env.SALESFORCE_USERNAME,
-          password: process.env.SALESFORCE_PASSWORD,
-          securityToken: process.env.SALESFORCE_SECURITY_TOKEN,
-          loginUrl: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com',
+          clientId: process.env.SF_CLIENT_ID,
+          clientSecret: process.env.SF_CLIENT_SECRET,
+          loginUrl: process.env.SF_LOGIN_URL || 'https://login.salesforce.com',
         },
       };
     default:
@@ -206,7 +205,9 @@ const checkCrmConnection = async () => {
       });
     }
 
-    if (typeof crmService.connect === 'function') {
+    if (typeof crmService.authenticate === 'function') {
+      await crmService.authenticate();
+    } else if (typeof crmService.connect === 'function') {
       await crmService.connect();
     }
 
@@ -368,18 +369,13 @@ const REQUIRED_ENVIRONMENT_KEYS = [
   { key: 'STRIPE_LIVE_SECRET_KEY', label: 'Stripe live secret key', when: () => true },
   { key: 'SENDGRID_API_KEY', label: 'SendGrid API key', when: () => true },
   {
-    key: 'SALESFORCE_USERNAME',
-    label: 'Salesforce username',
+    key: 'SF_CLIENT_ID',
+    label: 'Salesforce client ID',
     when: () => (process.env.CRM_PROVIDER || '').toLowerCase() === 'salesforce',
   },
   {
-    key: 'SALESFORCE_PASSWORD',
-    label: 'Salesforce password',
-    when: () => (process.env.CRM_PROVIDER || '').toLowerCase() === 'salesforce',
-  },
-  {
-    key: 'SALESFORCE_SECURITY_TOKEN',
-    label: 'Salesforce security token',
+    key: 'SF_CLIENT_SECRET',
+    label: 'Salesforce client secret',
     when: () => (process.env.CRM_PROVIDER || '').toLowerCase() === 'salesforce',
   },
   {

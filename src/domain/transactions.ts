@@ -528,7 +528,13 @@ export const mapStripeToTransaction = (
     ...toMetadataRecord(charge?.metadata ?? null),
   };
 
-  const contactId = parseMetadataString(combinedMetadata, 'contact__c', 'Contact__c', 'contact');
+  const contactId = parseMetadataString(
+    combinedMetadata,
+    'contact__c',
+    'Contact__c',
+    'contact',
+    'salesforce_id'
+  );
   const accountId = parseMetadataString(combinedMetadata, 'account__c', 'Account__c', 'account');
   const campaignId = parseMetadataString(
     combinedMetadata,
