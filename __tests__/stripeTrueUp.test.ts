@@ -378,4 +378,98 @@ describe('stripeTrueUp handler overrides', () => {
 
     internals.resetDependencies();
   });
+
+  it('prefers metadata salesforce_id over creating/upserting contact', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_txn_meta', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      upsertCustomerByStripeId: vi.fn().mockResolvedValue({ id: '003_created', success: true }),
+      findContactIdById: vi.fn().mockResolvedValue('003Meta999999999AAA'),
+    };
+
+    const stripe = {
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'cus_meta_preferred',
+          deleted: false,
+          email: 'meta@example.com',
+        }),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([
+          {
+            id: 'ch_meta_first',
+            status: 'succeeded',
+            customer: 'cus_meta_preferred',
+            currency: 'usd',
+            created: 1_700_000_000,
+            metadata: {
+              salesforce_id: '003Meta999999999AAA',
+            },
+            balance_transaction: {
+              id: 'bt_meta_first',
+              amount: 1400,
+              fee: 40,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_000,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postChargeToQbo: vi.fn(),
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'payments',
+      bypassQbo: 'true',
+    });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.counts.processed).toBe(1);
+    expect(salesforce.findContactIdById).toHaveBeenCalledWith('003Meta999999999AAA');
+    expect(salesforce.upsertCustomerByStripeId).not.toHaveBeenCalled();
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_charge_id__c: 'ch_meta_first',
+        contact__c: '003Meta999999999AAA',
+      }),
+      'stripe_charge_id__c',
+      undefined
+    );
+
+    internals.resetDependencies();
+  });
 });

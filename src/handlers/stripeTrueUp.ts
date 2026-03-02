@@ -918,6 +918,10 @@ const processPayments = async (
 
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
+        const chargeObj = charge as Stripe.Charge;
+        const metadataSalesforceId = extractSalesforceIdFromMetadata(
+          chargeObj.metadata as Record<string, unknown> | undefined
+        );
 
         const stripeCustomer = await resolveCustomerForCharge(
           stripe,
@@ -930,11 +934,29 @@ const processPayments = async (
           customerId: stripeCustomer?.id,
           customerExists: !!stripeCustomer,
           customerDeleted: stripeCustomer?.deleted,
+          metadataSalesforceId,
         });
 
-        // Upsert customer to Salesforce first to get the Contact ID
         let contactId: string | null = null;
-        if (stripeCustomer && !stripeCustomer.deleted) {
+        if (metadataSalesforceId) {
+          contactId = await resolveContactIdFromMetadata(
+            salesforce,
+            chargeObj.metadata as Record<string, unknown> | undefined,
+            (...args: unknown[]) => context.log(...args),
+            charge.id,
+            'charge'
+          );
+
+          if (!contactId) {
+            context.log(
+              '[StripeTrueUp] Stripe metadata salesforce_id provided but could not be resolved; skipping contact creation fallback',
+              {
+                chargeId: charge.id,
+                metadataSalesforceId,
+              }
+            );
+          }
+        } else if (stripeCustomer && !stripeCustomer.deleted) {
           context.log('[StripeTrueUp] Calling upsertCustomerByStripeId', {
             customerId: stripeCustomer.id,
             customerName: (stripeCustomer as Stripe.Customer).name,
@@ -971,18 +993,6 @@ const processPayments = async (
           context.log('[StripeTrueUp] Skipping contact creation', {
             reason: !stripeCustomer ? 'no customer' : 'customer deleted',
           });
-        }
-
-        const chargeObj = charge as Stripe.Charge;
-
-        if (!contactId) {
-          contactId = await resolveContactIdFromMetadata(
-            salesforce,
-            chargeObj.metadata as Record<string, unknown> | undefined,
-            (...args: unknown[]) => context.log(...args),
-            charge.id,
-            'charge'
-          );
         }
 
         // Build transaction with contact link if we have a contact ID
@@ -1395,6 +1405,10 @@ const processRefunds = async (
           }
         }
 
+        const metadataSalesforceId = extractSalesforceIdFromMetadata(
+          (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined
+        );
+
         // Upsert customer first to get the Contact ID
         // Note: Customer sync for refunds is for Salesforce only
         // QBO refunds are posted as journal entries without customer association
@@ -1403,7 +1417,26 @@ const processRefunds = async (
         // when we build the refund transaction) by declaring it here.
         let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
 
-        if (chargeFragment && chargeFragment.customer) {
+        if (metadataSalesforceId && chargeFragment) {
+          contactId = await resolveContactIdFromMetadata(
+            salesforce,
+            (chargeFragment.metadata as Record<string, unknown> | undefined) || undefined,
+            (...args: unknown[]) => context.log(...args),
+            refund.id,
+            'refund'
+          );
+
+          if (!contactId) {
+            context.log(
+              '[StripeTrueUp] Stripe metadata salesforce_id provided on refund charge but could not be resolved; skipping contact creation fallback',
+              {
+                refundId: refund.id,
+                chargeId: chargeFragment.id,
+                metadataSalesforceId,
+              }
+            );
+          }
+        } else if (chargeFragment && chargeFragment.customer) {
           context.log('[StripeTrueUp] Processing refund customer', {
             refundId: refund.id,
             chargeId: chargeFragment.id,
@@ -1456,16 +1489,6 @@ const processRefunds = async (
             refundId: refund.id,
             reason: !chargeFragment ? 'no charge' : 'no customer on charge',
           });
-        }
-
-        if (!contactId) {
-          contactId = await resolveContactIdFromMetadata(
-            salesforce,
-            (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined,
-            (...args: unknown[]) => context.log(...args),
-            refund.id,
-            'refund'
-          );
         }
 
         const paymentIntentIdRefund = chargeFragment?.payment_intent
