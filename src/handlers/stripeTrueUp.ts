@@ -1496,7 +1496,7 @@ const processRefunds = async (
               '[StripeTrueUp] Stripe metadata salesforce_id provided on refund charge but could not be resolved; skipping contact creation fallback',
               {
                 refundId: refund.id,
-                chargeId: chargeFragment.id,
+                chargeId: chargeFragment?.id ?? chargeId,
                 metadataSalesforceId,
                 metadataSource,
               }
