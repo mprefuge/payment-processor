@@ -4,6 +4,7 @@ import {
   fetchStripeRefundsSince,
   fetchStripeDisputesSince,
   fetchStripePayoutsSince,
+  fetchBalanceTransactionsForPayout,
 } from './fetchStripe';
 import { resolveQboCustomer, UNKNOWN_DONOR_NAME } from './customerResolver';
 import { ensureStripeVendor } from './vendor';
@@ -97,16 +98,14 @@ export {
   fetchStripeRefundsSince,
   fetchStripeDisputesSince,
   fetchStripePayoutsSince,
+  fetchBalanceTransactionsForPayout,
   resolveQboCustomer,
   ensureStripeVendor,
   mapBalanceTxnToEntries,
   buildChargeJE,
-  postJEIfNew,
   postTransferIfNew,
   reconcilePayout,
   attachStripeArtifacts,
-  recordProcessed,
-  alreadyProcessed,
   computeClearingImpact,
   computeAmounts,
   buildMemo,

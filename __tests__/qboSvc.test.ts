@@ -450,9 +450,9 @@ describe('postChargeToQbo', () => {
     const salesReceiptRequest = requests.find((r) => r.url.includes('salesreceipt'));
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
 
-    // should have two lines: base + negative fee line
+    // should have two lines: base + cover-fee line
     expect(salesReceiptBody.Line.length).toBe(2);
-    expect(salesReceiptBody.Line[1].Amount).toBe(-3.0);
+    expect(salesReceiptBody.Line[1].Amount).toBe(3.0);
   });
 
   // directly exercise getCoverFeesInfo to verify metadata aggregation

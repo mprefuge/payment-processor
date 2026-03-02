@@ -3,6 +3,16 @@ import { logger as rootLogger } from '../../../lib/logger';
 const DEFAULT_LIMIT = 100;
 const MAX_AUTOPAGE = 1000;
 
+type LoggerLike = { warn: (...args: unknown[]) => void } | ((...args: unknown[]) => void);
+
+const warnLog = (logger: LoggerLike, ...args: unknown[]) => {
+  if (typeof logger === 'function') {
+    logger(...args);
+    return;
+  }
+  logger.warn(...args);
+};
+
 function normalizeSince(since: unknown): number {
   if (since === undefined || since === null) {
     throw new Error('A since value is required to fetch Stripe resources');
@@ -34,7 +44,7 @@ function normalizeSince(since: unknown): number {
 async function fetchAll(
   stripeListFn: (params: Record<string, unknown>) => Promise<any>,
   params: Record<string, unknown>,
-  logger = rootLogger
+  logger: LoggerLike = rootLogger
 ) {
   const items: any[] = [];
   let startingAfter: string | undefined;
@@ -55,14 +65,15 @@ async function fetchAll(
     }
 
     if (response.data.length === 0) {
-      logger.warn('[Stripe] Pagination halted because response was empty while has_more=true');
+      warnLog(logger, '[Stripe] Pagination halted because response was empty while has_more=true');
       break;
     }
 
     startingAfter = response.data[response.data.length - 1].id;
 
     if (page >= MAX_AUTOPAGE) {
-      logger.warn(
+      warnLog(
+        logger,
         `[Stripe] Reached pagination guardrail of ${MAX_AUTOPAGE} pages – stopping early`
       );
       break;
@@ -79,7 +90,10 @@ function createListFetcher({
   listFn: (params: Record<string, unknown>) => Promise<any>;
   baseParams: Record<string, unknown>;
 }) {
-  return async (since: unknown, options: { limit?: number } = {}) => {
+  return async (
+    since: unknown,
+    options: { limit?: number; logger?: LoggerLike; params?: Record<string, unknown> } = {}
+  ) => {
     if (!listFn || typeof listFn !== 'function') {
       throw new Error('A Stripe list function must be provided');
     }
@@ -87,36 +101,152 @@ function createListFetcher({
     const sinceEpoch = normalizeSince(since);
     const limit = options.limit || DEFAULT_LIMIT;
 
+    const logger = options.logger || rootLogger;
+
+    const { createdField, expand: baseExpandParam, ...restBaseParams } = baseParams || {};
+
+    const baseExpand = Array.isArray(baseExpandParam) ? baseExpandParam : [];
+    const {
+      expand: optionExpandParam,
+      created: optionCreatedParam,
+      arrival_date: optionArrivalDateParam,
+      ...restOptionParams
+    } = options.params || {};
+
+    const optionExpand = Array.isArray(optionExpandParam) ? optionExpandParam : [];
+    const optionCreated =
+      optionCreatedParam && typeof optionCreatedParam === 'object' ? optionCreatedParam : undefined;
+    const optionArrivalDate =
+      optionArrivalDateParam && typeof optionArrivalDateParam === 'object'
+        ? optionArrivalDateParam
+        : undefined;
+
+    const expand = Array.from(new Set([...baseExpand, ...optionExpand]));
+
     const params: Record<string, unknown> = {
-      ...baseParams,
       limit,
-      starting_after: undefined,
-      created: { gte: sinceEpoch },
+      ...restBaseParams,
+      ...restOptionParams,
+      expand,
+      created:
+        createdField === 'arrival_date'
+          ? undefined
+          : { gte: sinceEpoch, ...(optionCreated || {}) },
     };
 
-    return fetchAll(listFn, params);
+    if (createdField === 'arrival_date') {
+      params.arrival_date = { gte: sinceEpoch, ...(optionArrivalDate || {}) };
+    }
+
+    return fetchAll(listFn, params, logger);
   };
 }
 
-export const fetchStripeChargesSince = createListFetcher({
-  listFn: (stripe: any) => stripe.charges.list({}),
-  baseParams: { type: 'charge' },
-});
+function buildChargeFetcher(stripe: any) {
+  return createListFetcher({
+    listFn: stripe.charges.list.bind(stripe.charges),
+    baseParams: {
+      expand: ['data.customer', 'data.balance_transaction', 'data.payment_intent'],
+    },
+  });
+}
 
-export const fetchStripeRefundsSince = createListFetcher({
-  listFn: (stripe: any) => stripe.refunds.list({}),
-  baseParams: {},
-});
+function buildRefundFetcher(stripe: any) {
+  return createListFetcher({
+    listFn: stripe.refunds.list.bind(stripe.refunds),
+    baseParams: {
+      expand: ['data.balance_transaction'],
+    },
+  });
+}
 
-export const fetchStripeDisputesSince = createListFetcher({
-  listFn: (stripe: any) => stripe.disputes.list({}),
-  baseParams: {},
-});
+function buildDisputeFetcher(stripe: any) {
+  return createListFetcher({
+    listFn: stripe.disputes.list.bind(stripe.disputes),
+    baseParams: {
+      expand: ['data.balance_transactions'],
+    },
+  });
+}
 
-export const fetchStripePayoutsSince = createListFetcher({
-  listFn: (stripe: any) => stripe.payouts.list({}),
-  baseParams: {},
-});
+function buildPayoutFetcher(stripe: any) {
+  return createListFetcher({
+    listFn: stripe.payouts.list.bind(stripe.payouts),
+    baseParams: {
+      expand: ['data.destination'],
+      createdField: 'arrival_date',
+    },
+  });
+}
 
-// helper exported earlier used in other modules
+export async function fetchStripeChargesSince(stripe: any, since: unknown, options?: any) {
+  if (!stripe || !stripe.charges || typeof stripe.charges.list !== 'function') {
+    throw new Error('Stripe client with charges.list is required');
+  }
+  const fetcher = buildChargeFetcher(stripe);
+  return fetcher(since, options);
+}
+
+export async function fetchStripeRefundsSince(stripe: any, since: unknown, options?: any) {
+  if (!stripe || !stripe.refunds || typeof stripe.refunds.list !== 'function') {
+    throw new Error('Stripe client with refunds.list is required');
+  }
+  const fetcher = buildRefundFetcher(stripe);
+  return fetcher(since, options);
+}
+
+export async function fetchStripeDisputesSince(stripe: any, since: unknown, options?: any) {
+  if (!stripe || !stripe.disputes || typeof stripe.disputes.list !== 'function') {
+    throw new Error('Stripe client with disputes.list is required');
+  }
+  const fetcher = buildDisputeFetcher(stripe);
+  return fetcher(since, options);
+}
+
+export async function fetchStripePayoutsSince(stripe: any, since: unknown, options?: any) {
+  if (!stripe || !stripe.payouts || typeof stripe.payouts.list !== 'function') {
+    throw new Error('Stripe client with payouts.list is required');
+  }
+  const fetcher = buildPayoutFetcher(stripe);
+  return fetcher(since, options);
+}
+
+export async function fetchBalanceTransactionsForPayout(
+  stripe: any,
+  payoutId: string,
+  options: { logger?: LoggerLike; limit?: number; params?: Record<string, unknown> } = {}
+) {
+  if (
+    !stripe ||
+    !stripe.balanceTransactions ||
+    typeof stripe.balanceTransactions.list !== 'function'
+  ) {
+    throw new Error('Stripe client with balanceTransactions.list is required');
+  }
+  if (!payoutId) {
+    throw new Error('A payoutId is required to fetch balance transactions');
+  }
+
+  const logger = options.logger || rootLogger;
+  const expand = Array.from(
+    new Set([
+      'data.source',
+      'data.source.charge',
+      'data.source.refund',
+      'data.source.dispute',
+      ...(((options.params?.expand as unknown[]) || []) as string[]),
+    ])
+  );
+
+  return fetchAll(
+    stripe.balanceTransactions.list.bind(stripe.balanceTransactions),
+    {
+      payout: payoutId,
+      limit: options.limit || DEFAULT_LIMIT,
+      expand,
+    },
+    logger
+  );
+}
+
 export { normalizeSince };
