@@ -246,6 +246,7 @@ describe('Integration: Complete Payment Flow', () => {
           id: mockPaymentIntent.customer,
           email: 'test@example.com',
           name: 'Test User',
+          metadata: { salesforce_id: '003INTEGRATION' },
         }),
       },
     };
