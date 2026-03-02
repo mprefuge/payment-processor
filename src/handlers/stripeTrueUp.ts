@@ -1209,6 +1209,10 @@ const processRefunds = async (
         // Note: Customer sync for refunds is for Salesforce only
         // QBO refunds are posted as journal entries without customer association
         let contactId: string | null = null;
+        // make stripeCustomer available throughout this block (including later
+        // when we build the refund transaction) by declaring it here.
+        let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
+
         if (chargeFragment && chargeFragment.customer) {
           context.log('[StripeTrueUp] Processing refund customer', {
             refundId: refund.id,
@@ -1216,7 +1220,7 @@ const processRefunds = async (
             customerId: extractStripeId(chargeFragment.customer),
           });
 
-          const stripeCustomer = await resolveCustomerForCharge(
+          stripeCustomer = await resolveCustomerForCharge(
             stripe,
             chargeFragment,
             (...args: unknown[]) => context.log(...args)

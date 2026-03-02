@@ -539,7 +539,12 @@ export const mapStripeToTransaction = (
     // typically write the salesforce_id in the various handlers and utils.
     ...toMetadataRecord(paymentIntent?.metadata ?? null),
     ...toMetadataRecord(charge?.metadata ?? null),
-    ...toMetadataRecord(input.stripeCustomer?.metadata ?? null),
+    // Stripe's DeletedCustomer type doesn't include metadata, so coerce to
+    // Customer when accessing it (safe since metadata is only present on the
+    // live-customer object).
+    ...toMetadataRecord(
+      ((input.stripeCustomer as Stripe.Customer | undefined)?.metadata) ?? null
+    ),
   };
 
   const contactId = parseMetadataString(
