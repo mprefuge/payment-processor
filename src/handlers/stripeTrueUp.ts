@@ -353,7 +353,8 @@ const resolveContactIdFromMetadata = async (
   metadata: Record<string, unknown> | null | undefined,
   contextLog: (...args: unknown[]) => void,
   sourceId: string,
-  sourceType: 'charge' | 'refund'
+  sourceType: 'charge' | 'refund',
+  metadataSource: 'customer' | 'charge' = 'charge'
 ): Promise<string | null> => {
   const metadataSalesforceId = extractSalesforceIdFromMetadata(metadata);
   if (!metadataSalesforceId) {
@@ -367,6 +368,7 @@ const resolveContactIdFromMetadata = async (
         contextLog('[StripeTrueUp] Resolved contact from Stripe metadata salesforce_id', {
           sourceType,
           sourceId,
+          metadataSource,
           contactId: validatedContactId,
           metadataSalesforceId,
         });
@@ -376,6 +378,7 @@ const resolveContactIdFromMetadata = async (
       contextLog('[StripeTrueUp] Stripe metadata salesforce_id did not match a Contact', {
         sourceType,
         sourceId,
+        metadataSource,
         metadataSalesforceId,
       });
       return null;
@@ -385,6 +388,7 @@ const resolveContactIdFromMetadata = async (
       contextLog('[StripeTrueUp] Using Stripe metadata salesforce_id as contact fallback', {
         sourceType,
         sourceId,
+        metadataSource,
         metadataSalesforceId,
       });
       return metadataSalesforceId;
@@ -393,6 +397,7 @@ const resolveContactIdFromMetadata = async (
     contextLog('[StripeTrueUp] Failed to resolve contact from Stripe metadata salesforce_id', {
       sourceType,
       sourceId,
+      metadataSource,
       metadataSalesforceId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -919,9 +924,7 @@ const processPayments = async (
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
         const chargeObj = charge as Stripe.Charge;
-        const metadataSalesforceId = extractSalesforceIdFromMetadata(
-          chargeObj.metadata as Record<string, unknown> | undefined
-        );
+        const chargeObjectMetadata = chargeObj.metadata as Record<string, unknown> | undefined;
 
         const stripeCustomer = await resolveCustomerForCharge(
           stripe,
@@ -929,22 +932,50 @@ const processPayments = async (
           (...args: unknown[]) => context.log(...args)
         );
 
+        const customerMetadata =
+          stripeCustomer && !stripeCustomer.deleted
+            ? (((stripeCustomer as Stripe.Customer).metadata as Record<string, unknown>) ||
+              undefined)
+            : undefined;
+        const customerMetadataSalesforceId = extractSalesforceIdFromMetadata(customerMetadata);
+        const chargeMetadataSalesforceId = extractSalesforceIdFromMetadata(chargeObjectMetadata);
+
+        const metadataSource: 'customer' | 'charge' | null = customerMetadataSalesforceId
+          ? 'customer'
+          : chargeMetadataSalesforceId
+            ? 'charge'
+            : null;
+        const selectedMetadata =
+          metadataSource === 'customer'
+            ? customerMetadata
+            : metadataSource === 'charge'
+              ? chargeObjectMetadata
+              : undefined;
+        const metadataSalesforceId =
+          metadataSource === 'customer'
+            ? customerMetadataSalesforceId
+            : metadataSource === 'charge'
+              ? chargeMetadataSalesforceId
+              : null;
+
         context.log('[StripeTrueUp] Retrieved customer from Stripe', {
           chargeId: charge.id,
           customerId: stripeCustomer?.id,
           customerExists: !!stripeCustomer,
           customerDeleted: stripeCustomer?.deleted,
           metadataSalesforceId,
+          metadataSource,
         });
 
         let contactId: string | null = null;
-        if (metadataSalesforceId) {
+        if (metadataSalesforceId && selectedMetadata) {
           contactId = await resolveContactIdFromMetadata(
             salesforce,
-            chargeObj.metadata as Record<string, unknown> | undefined,
+            selectedMetadata,
             (...args: unknown[]) => context.log(...args),
             charge.id,
-            'charge'
+            'charge',
+            metadataSource || 'charge'
           );
 
           if (!contactId) {
@@ -953,6 +984,7 @@ const processPayments = async (
               {
                 chargeId: charge.id,
                 metadataSalesforceId,
+                metadataSource,
               }
             );
           }
@@ -1405,9 +1437,8 @@ const processRefunds = async (
           }
         }
 
-        const metadataSalesforceId = extractSalesforceIdFromMetadata(
-          (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined
-        );
+        const chargeMetadata =
+          (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined;
 
         // Upsert customer first to get the Contact ID
         // Note: Customer sync for refunds is for Salesforce only
@@ -1417,13 +1448,47 @@ const processRefunds = async (
         // when we build the refund transaction) by declaring it here.
         let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
 
-        if (metadataSalesforceId && chargeFragment) {
+        if (chargeFragment && chargeFragment.customer) {
+          stripeCustomer = await resolveCustomerForCharge(
+            stripe,
+            chargeFragment,
+            (...args: unknown[]) => context.log(...args)
+          );
+        }
+
+        const customerMetadata =
+          stripeCustomer && !stripeCustomer.deleted
+            ? (((stripeCustomer as Stripe.Customer).metadata as Record<string, unknown>) ||
+              undefined)
+            : undefined;
+        const customerMetadataSalesforceId = extractSalesforceIdFromMetadata(customerMetadata);
+        const chargeMetadataSalesforceId = extractSalesforceIdFromMetadata(chargeMetadata);
+        const metadataSource: 'customer' | 'charge' | null = customerMetadataSalesforceId
+          ? 'customer'
+          : chargeMetadataSalesforceId
+            ? 'charge'
+            : null;
+        const selectedMetadata =
+          metadataSource === 'customer'
+            ? customerMetadata
+            : metadataSource === 'charge'
+              ? chargeMetadata
+              : undefined;
+        const metadataSalesforceId =
+          metadataSource === 'customer'
+            ? customerMetadataSalesforceId
+            : metadataSource === 'charge'
+              ? chargeMetadataSalesforceId
+              : null;
+
+        if (metadataSalesforceId && selectedMetadata) {
           contactId = await resolveContactIdFromMetadata(
             salesforce,
-            (chargeFragment.metadata as Record<string, unknown> | undefined) || undefined,
+            selectedMetadata,
             (...args: unknown[]) => context.log(...args),
             refund.id,
-            'refund'
+            'refund',
+            metadataSource || 'charge'
           );
 
           if (!contactId) {
@@ -1433,6 +1498,7 @@ const processRefunds = async (
                 refundId: refund.id,
                 chargeId: chargeFragment.id,
                 metadataSalesforceId,
+                metadataSource,
               }
             );
           }
@@ -1443,16 +1509,12 @@ const processRefunds = async (
             customerId: extractStripeId(chargeFragment.customer),
           });
 
-          stripeCustomer = await resolveCustomerForCharge(
-            stripe,
-            chargeFragment,
-            (...args: unknown[]) => context.log(...args)
-          );
-
           context.log('[StripeTrueUp] Retrieved customer for refund', {
             refundId: refund.id,
             customerId: stripeCustomer?.id,
             customerExists: !!stripeCustomer,
+            metadataSalesforceId,
+            metadataSource,
           });
 
           if (stripeCustomer && !stripeCustomer.deleted) {

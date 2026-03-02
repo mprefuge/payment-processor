@@ -472,4 +472,99 @@ describe('stripeTrueUp handler overrides', () => {
 
     internals.resetDependencies();
   });
+
+  it('uses Stripe customer metadata salesforce_id before charge metadata/upsert', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_txn_cmeta', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      upsertCustomerByStripeId: vi.fn().mockResolvedValue({ id: '003_created_again', success: true }),
+      findContactIdById: vi.fn().mockResolvedValue('003FromCustomerMetaAAA'),
+    };
+
+    const stripe = {
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'cus_meta_source',
+          deleted: false,
+          email: 'cmeta@example.com',
+          metadata: {
+            salesforce_id: '003FromCustomerMetaAAA',
+          },
+        }),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([
+          {
+            id: 'ch_customer_metadata_preferred',
+            status: 'succeeded',
+            customer: 'cus_meta_source',
+            currency: 'usd',
+            created: 1_700_000_000,
+            metadata: {},
+            balance_transaction: {
+              id: 'bt_customer_metadata_preferred',
+              amount: 1111,
+              fee: 33,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_000,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postChargeToQbo: vi.fn(),
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'payments',
+      bypassQbo: 'true',
+    });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.counts.processed).toBe(1);
+    expect(salesforce.findContactIdById).toHaveBeenCalledWith('003FromCustomerMetaAAA');
+    expect(salesforce.upsertCustomerByStripeId).not.toHaveBeenCalled();
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_charge_id__c: 'ch_customer_metadata_preferred',
+        contact__c: '003FromCustomerMetaAAA',
+      }),
+      'stripe_charge_id__c',
+      undefined
+    );
+
+    internals.resetDependencies();
+  });
 });
