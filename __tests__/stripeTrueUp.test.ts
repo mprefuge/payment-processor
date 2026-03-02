@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createRequire } from 'module';
 import Stripe from 'stripe';
 import {
   findOrCreateContactInSalesforce,
   __setSalesforceConnection,
 } from '../src/handlers/stripeTrueUp';
+import stripeTrueUpHandler from '../src/handlers/stripeTrueUp';
+
+const require = createRequire(import.meta.url);
+const { createContext } = require('./testUtils');
 
 const makeMockConnection = () => {
   const query = vi.fn();
@@ -57,5 +62,320 @@ describe('stripeTrueUp contact helper', () => {
     expect(result).toEqual({ id: '003exists' });
     expect(connection.query).toHaveBeenCalledTimes(1);
     expect(updateMock).toHaveBeenCalledWith(expect.objectContaining({ Id: '003exists' }));
+  });
+});
+
+describe('stripeTrueUp handler overrides', () => {
+  const baseEnv = {
+    STRIPE_TEST_SECRET_KEY: 'sk_test_123',
+    SF_CLIENT_ID: 'sf_client',
+    SF_CLIENT_SECRET: 'sf_secret',
+    DISABLE_AZURE_TABLES: '1',
+  };
+
+  const createIdempotencyStore = () => ({
+    isProcessed: vi.fn().mockResolvedValue(false),
+    markProcessed: vi.fn().mockResolvedValue(undefined),
+    withLock: vi.fn().mockImplementation(async (_: string, fn: () => Promise<unknown>) => fn()),
+    flush: vi.fn().mockResolvedValue(undefined),
+  });
+
+  const createQueryRequest = (params: Record<string, string>) => ({
+    query: new URLSearchParams(params),
+    headers: {
+      get: vi.fn().mockReturnValue(undefined),
+    },
+  });
+
+  beforeEach(() => {
+    for (const [key, value] of Object.entries(baseEnv)) {
+      process.env[key] = value;
+    }
+    delete process.env.QBO_CLIENT_ID;
+    delete process.env.QBO_CLIENT_SECRET;
+    delete process.env.QBO_REALM_ID;
+    delete process.env.QBO_COMPANY_ID;
+    delete process.env.STRIPE_TRUE_UP_BYPASS_QBO;
+    vi.clearAllMocks();
+  });
+
+  it('bypasses QBO posting when override is set', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const postChargeToQbo = vi.fn();
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_txn', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      upsertCustomerByStripeId: vi.fn().mockResolvedValue({ id: '003_contact', success: true }),
+      findContactIdById: vi.fn().mockResolvedValue(null),
+    };
+
+    const stripe = {
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({ id: 'cus_123', deleted: false, email: 'a@b.com' }),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([
+          {
+            id: 'ch_1',
+            status: 'succeeded',
+            customer: 'cus_123',
+            currency: 'usd',
+            created: 1_700_000_000,
+            metadata: {},
+            balance_transaction: {
+              id: 'bt_1',
+              amount: 1234,
+              fee: 50,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_000,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postChargeToQbo,
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({ from: '2026-01-01T00:00:00Z', type: 'payments', bypassQbo: 'true' });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.bypassQbo).toBe(true);
+    expect(postChargeToQbo).not.toHaveBeenCalled();
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledTimes(1);
+    expect(store.flush).toHaveBeenCalledTimes(1);
+
+    internals.resetDependencies();
+  });
+
+  it('associates existing charge transaction without contact using Stripe metadata salesforce_id', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_existing', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue('a01_existing'),
+      findTransactionRecordByExternalId: vi
+        .fn()
+        .mockResolvedValue({ id: 'a01_existing', contactId: null }),
+      upsertCustomerByStripeId: vi.fn(),
+      findContactIdById: vi.fn().mockResolvedValue('003Meta000000001AAA'),
+    };
+
+    const stripe = {
+      customers: {
+        retrieve: vi.fn(),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([
+          {
+            id: 'ch_needs_contact',
+            status: 'succeeded',
+            customer: null,
+            currency: 'usd',
+            created: 1_700_000_000,
+            metadata: {
+              salesforce_id: '003Meta000000001AAA',
+            },
+            balance_transaction: {
+              id: 'bt_needs_contact',
+              amount: 1500,
+              fee: 45,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_000,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postChargeToQbo: vi.fn(),
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'payments',
+      resubmit: 'true',
+      bypassQbo: 'true',
+    });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.counts.processed).toBe(1);
+    expect(body.counts.skipped).toBe(0);
+    expect(salesforce.findTransactionRecordByExternalId).toHaveBeenCalledWith(
+      'stripe_charge_id__c',
+      'ch_needs_contact',
+      'General'
+    );
+    expect(salesforce.findContactIdById).toHaveBeenCalledWith('003Meta000000001AAA');
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_charge_id__c: 'ch_needs_contact',
+        contact__c: '003Meta000000001AAA',
+      }),
+      'stripe_charge_id__c',
+      { overrideId: 'a01_existing' }
+    );
+
+    internals.resetDependencies();
+  });
+
+  it('limits payment processing to the requested number of records', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_txn', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      upsertCustomerByStripeId: vi.fn(),
+      findContactIdById: vi.fn().mockResolvedValue(null),
+    };
+
+    const stripe = {
+      customers: {
+        retrieve: vi.fn(),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([
+          {
+            id: 'ch_limit_1',
+            status: 'succeeded',
+            customer: null,
+            currency: 'usd',
+            created: 1_700_000_000,
+            metadata: {},
+            balance_transaction: {
+              id: 'bt_limit_1',
+              amount: 1200,
+              fee: 40,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_000,
+            },
+          },
+          {
+            id: 'ch_limit_2',
+            status: 'succeeded',
+            customer: null,
+            currency: 'usd',
+            created: 1_700_000_001,
+            metadata: {},
+            balance_transaction: {
+              id: 'bt_limit_2',
+              amount: 1300,
+              fee: 45,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_001,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postChargeToQbo: vi.fn(),
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'payments',
+      bypassQbo: 'true',
+      limit: '1',
+    });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.limit).toBe(1);
+    expect(body.counts.fetched).toBe(1);
+    expect(body.counts.processed).toBe(1);
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledTimes(1);
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({ stripe_charge_id__c: 'ch_limit_1' }),
+      'stripe_charge_id__c',
+      undefined
+    );
+
+    internals.resetDependencies();
   });
 });

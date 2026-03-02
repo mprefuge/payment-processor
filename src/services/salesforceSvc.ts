@@ -94,7 +94,13 @@ export interface SalesforceSvc {
     value: string,
     recordTypeName?: string
   ) => Promise<string | null>;
+  findTransactionRecordByExternalId?: (
+    key: TransactionExternalIdField,
+    value: string,
+    recordTypeName?: string
+  ) => Promise<{ id: string; contactId: string | null } | null>;
   upsertCustomerByStripeId: (dto: CustomerUpsertDTO) => Promise<UpsertResult>;
+  findContactIdById?: (contactId: string) => Promise<string | null>;
 }
 
 type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -105,6 +111,11 @@ type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
 type TransactionRecord = Record<string, TransactionFieldValue>;
 
 type TransactionLookupRecord = { Id?: string };
+
+type TransactionContactLookupRecord = {
+  Id?: string;
+  Contact__c?: string | null;
+};
 
 const TRANSACTION_OBJECT = 'Transaction__c';
 
@@ -482,6 +493,46 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     );
   };
 
+  const findTransactionRecordByExternalId = async (
+    key: TransactionExternalIdField,
+    value: string,
+    recordTypeName?: string
+  ): Promise<{ id: string; contactId: string | null } | null> => {
+    const normalizedKey = ensureNonEmpty(key, 'External ID field');
+    const normalizedValue = ensureNonEmpty(value, 'External ID value');
+    const apiField = resolveExternalIdField(normalizedKey as TransactionExternalIdField);
+    const escapedValue = escapeForSoqlLiteral(normalizedValue);
+
+    let soql = `SELECT Id, Contact__c FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}'`;
+
+    if (recordTypeName) {
+      const recordTypeId = await resolveRecordTypeId(recordTypeName);
+      const escapedRecordTypeId = escapeForSoqlLiteral(recordTypeId);
+      soql += ` AND RecordTypeId = '${escapedRecordTypeId}'`;
+    }
+
+    soql += ' LIMIT 1';
+
+    const result = await connection.query<TransactionContactLookupRecord>(soql);
+    const records = toLookupRecords(result) as TransactionContactLookupRecord[];
+    const record = records.find(
+      (candidate): candidate is { Id: string; Contact__c?: string | null } =>
+        typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
+    );
+
+    if (!record) {
+      return null;
+    }
+
+    return {
+      id: record.Id,
+      contactId:
+        typeof record.Contact__c === 'string' && record.Contact__c.trim().length > 0
+          ? record.Contact__c
+          : null,
+    };
+  };
+
   // cached record type id for Contact so we only query Salesforce once
   let cachedContactRecordTypeId: string | undefined;
 
@@ -673,12 +724,28 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return result;
   };
 
+  const findContactIdById = async (contactId: string): Promise<string | null> => {
+    const normalizedId = ensureNonEmpty(contactId, 'Contact ID');
+    const escapedId = escapeForSoqlLiteral(normalizedId);
+    const result = await connection.query<{ Id?: string }>(
+      `SELECT Id FROM Contact WHERE Id = '${escapedId}' LIMIT 1`
+    );
+    const records = toLookupRecords(result);
+    const record = records.find(
+      (candidate): candidate is { Id: string } =>
+        typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
+    );
+    return record?.Id ?? null;
+  };
+
   return {
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
     markPostedToQbo,
     findTransactionIdByExternalId,
+    findTransactionRecordByExternalId,
     upsertCustomerByStripeId,
+    findContactIdById,
   };
 };
 

@@ -320,6 +320,87 @@ const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
   return defaultValue;
 };
 
+const toTrimmedString = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const extractSalesforceIdFromMetadata = (
+  metadata: Record<string, unknown> | null | undefined
+): string | null => {
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+
+  return (
+    toTrimmedString(metadata.salesforce_id) ||
+    toTrimmedString(metadata.salesforceId) ||
+    toTrimmedString(metadata.SalesforceId)
+  );
+};
+
+const isLikelySalesforceContactId = (value: string): boolean => {
+  const trimmed = value.trim();
+  return /^003[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/.test(trimmed);
+};
+
+const resolveContactIdFromMetadata = async (
+  salesforce: SalesforceSvc,
+  metadata: Record<string, unknown> | null | undefined,
+  contextLog: (...args: unknown[]) => void,
+  sourceId: string,
+  sourceType: 'charge' | 'refund'
+): Promise<string | null> => {
+  const metadataSalesforceId = extractSalesforceIdFromMetadata(metadata);
+  if (!metadataSalesforceId) {
+    return null;
+  }
+
+  try {
+    if (typeof salesforce.findContactIdById === 'function') {
+      const validatedContactId = await salesforce.findContactIdById(metadataSalesforceId);
+      if (validatedContactId) {
+        contextLog('[StripeTrueUp] Resolved contact from Stripe metadata salesforce_id', {
+          sourceType,
+          sourceId,
+          contactId: validatedContactId,
+          metadataSalesforceId,
+        });
+        return validatedContactId;
+      }
+
+      contextLog('[StripeTrueUp] Stripe metadata salesforce_id did not match a Contact', {
+        sourceType,
+        sourceId,
+        metadataSalesforceId,
+      });
+      return null;
+    }
+
+    if (isLikelySalesforceContactId(metadataSalesforceId)) {
+      contextLog('[StripeTrueUp] Using Stripe metadata salesforce_id as contact fallback', {
+        sourceType,
+        sourceId,
+        metadataSalesforceId,
+      });
+      return metadataSalesforceId;
+    }
+  } catch (error) {
+    contextLog('[StripeTrueUp] Failed to resolve contact from Stripe metadata salesforce_id', {
+      sourceType,
+      sourceId,
+      metadataSalesforceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return null;
+};
+
 const toEpochSeconds = (value: unknown): number => {
   try {
     return normalizeSince(value as never);
@@ -327,6 +408,34 @@ const toEpochSeconds = (value: unknown): number => {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid date parameter: ${message}`);
   }
+};
+
+const parseLimit = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error('Query parameter "limit" must be a positive integer.');
+    }
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (!/^\d+$/.test(normalized)) {
+      throw new Error('Query parameter "limit" must be a positive integer.');
+    }
+
+    const parsed = Number.parseInt(normalized, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error('Query parameter "limit" must be a positive integer.');
+    }
+    return parsed;
+  }
+
+  throw new Error('Query parameter "limit" must be a positive integer.');
 };
 
 const markPosted = async (
@@ -691,7 +800,9 @@ const processPayments = async (
   from: number,
   to: number | null,
   dryRun: boolean,
-  resubmit: boolean
+  resubmit: boolean,
+  bypassQbo: boolean,
+  limit: number | null
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -707,7 +818,8 @@ const processPayments = async (
     : { logger: context.log };
 
   const charges = await dependencies.fetchers.payments(stripe, from, params as never);
-  summary.fetched = charges.length;
+  const recordsToProcess = typeof limit === 'number' ? charges.slice(0, limit) : charges;
+  summary.fetched = recordsToProcess.length;
 
   let salesforceSvc: SalesforceSvc | null = null;
   const ensureSalesforce = async (): Promise<SalesforceSvc> => {
@@ -717,7 +829,7 @@ const processPayments = async (
     return salesforceSvc;
   };
 
-  for (const charge of charges) {
+  for (const charge of recordsToProcess) {
     try {
       // Only process successful charges
       if (charge.status !== 'succeeded') {
@@ -746,20 +858,50 @@ const processPayments = async (
 
       // Check if already processed
       let shouldSkip = false;
+      let existingTransactionId: string | null = null;
       if (resubmit) {
         // In resubmit mode, check Salesforce for existing transaction
         const salesforce = await ensureSalesforce();
-        const existingId = await salesforce.findTransactionIdByExternalId(
-          'stripe_charge_id__c',
-          charge.id,
-          'General'
-        );
-        if (existingId) {
-          context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
-            chargeId: charge.id,
-            salesforceId: existingId,
-          });
-          shouldSkip = true;
+        if (typeof salesforce.findTransactionRecordByExternalId === 'function') {
+          const existingRecord = await salesforce.findTransactionRecordByExternalId(
+            'stripe_charge_id__c',
+            charge.id,
+            'General'
+          );
+
+          if (existingRecord?.id) {
+            existingTransactionId = existingRecord.id;
+
+            if (existingRecord.contactId) {
+              context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
+                chargeId: charge.id,
+                salesforceId: existingRecord.id,
+                contactId: existingRecord.contactId,
+              });
+              shouldSkip = true;
+            } else {
+              context.log(
+                '[StripeTrueUp] Existing Salesforce transaction has no contact; attempting reassociation',
+                {
+                  chargeId: charge.id,
+                  salesforceId: existingRecord.id,
+                }
+              );
+            }
+          }
+        } else {
+          const existingId = await salesforce.findTransactionIdByExternalId(
+            'stripe_charge_id__c',
+            charge.id,
+            'General'
+          );
+          if (existingId) {
+            context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
+              chargeId: charge.id,
+              salesforceId: existingId,
+            });
+            shouldSkip = true;
+          }
         }
       } else {
         // Normal mode: check idempotency store
@@ -831,8 +973,19 @@ const processPayments = async (
           });
         }
 
-        // Build transaction with contact link if we have a contact ID
         const chargeObj = charge as Stripe.Charge;
+
+        if (!contactId) {
+          contactId = await resolveContactIdFromMetadata(
+            salesforce,
+            chargeObj.metadata as Record<string, unknown> | undefined,
+            (...args: unknown[]) => context.log(...args),
+            charge.id,
+            'charge'
+          );
+        }
+
+        // Build transaction with contact link if we have a contact ID
         const paymentIntentId =
           typeof chargeObj.payment_intent === 'string'
             ? chargeObj.payment_intent
@@ -1049,7 +1202,8 @@ const processPayments = async (
 
         const upsertResult = await salesforce.upsertTransactionByExternalId(
           transaction,
-          'stripe_charge_id__c'
+          'stripe_charge_id__c',
+          existingTransactionId ? { overrideId: existingTransactionId } : undefined
         );
         summary.salesforceUpdates += 1;
 
@@ -1067,33 +1221,39 @@ const processPayments = async (
 
         const grossAmount = Math.abs(balanceTransaction.amount ?? 0);
 
-        // Validate gross amount before QBO posting
-        if (grossAmount === 0) {
-          context.log('[StripeTrueUp] Skipping QBO charge posting due to zero gross amount', {
+        if (bypassQbo) {
+          context.log('[StripeTrueUp] QBO posting bypassed by override for charge', {
             chargeId: charge.id,
-            balanceTransactionAmount: balanceTransaction.amount,
           });
-          summary.skipped += 1;
-          continue;
+        } else {
+          // Validate gross amount before QBO posting
+          if (grossAmount === 0) {
+            context.log('[StripeTrueUp] Skipping QBO charge posting due to zero gross amount', {
+              chargeId: charge.id,
+              balanceTransactionAmount: balanceTransaction.amount,
+            });
+            summary.skipped += 1;
+            continue;
+          }
+
+          const posting = await dependencies.accounting.postChargeToQbo({
+            gross: grossAmount,
+            fee: Math.abs(balanceTransaction.fee ?? 0),
+            memo: `Stripe charge ${charge.id}`,
+            date: timestampToDate(
+              balanceTransaction.created ?? balanceTransaction.available_on ?? null
+            ),
+            stripe: {
+              charge: charge as Stripe.Charge,
+              paymentIntent: null,
+              customer: stripeCustomer,
+              checkoutSession: checkoutSessionStub as Stripe.Checkout.Session | undefined,
+            },
+          });
+          summary.qboPosts += 1;
+
+          await markPosted(salesforce, upsertResult, posting);
         }
-
-        const posting = await dependencies.accounting.postChargeToQbo({
-          gross: grossAmount,
-          fee: Math.abs(balanceTransaction.fee ?? 0),
-          memo: `Stripe charge ${charge.id}`,
-          date: timestampToDate(
-            balanceTransaction.created ?? balanceTransaction.available_on ?? null
-          ),
-          stripe: {
-            charge: charge as Stripe.Charge,
-            paymentIntent: null,
-            customer: stripeCustomer,
-            checkoutSession: checkoutSessionStub as Stripe.Checkout.Session | undefined,
-          },
-        });
-        summary.qboPosts += 1;
-
-        await markPosted(salesforce, upsertResult, posting);
         await dependencies.idempotencyStore.markProcessed(key);
       }
 
@@ -1116,7 +1276,9 @@ const processRefunds = async (
   from: number,
   to: number | null,
   dryRun: boolean,
-  resubmit: boolean
+  resubmit: boolean,
+  bypassQbo: boolean,
+  limit: number | null
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -1132,7 +1294,8 @@ const processRefunds = async (
     : { logger: context.log };
 
   const refunds = await dependencies.fetchers.refunds(stripe, from, params as never);
-  summary.fetched = refunds.length;
+  const recordsToProcess = typeof limit === 'number' ? refunds.slice(0, limit) : refunds;
+  summary.fetched = recordsToProcess.length;
 
   let salesforceSvc: SalesforceSvc | null = null;
   const ensureSalesforce = async (): Promise<SalesforceSvc> => {
@@ -1142,7 +1305,7 @@ const processRefunds = async (
     return salesforceSvc;
   };
 
-  for (const refund of refunds) {
+  for (const refund of recordsToProcess) {
     try {
       // Only process successful refunds
       if (refund.status !== 'succeeded') {
@@ -1295,6 +1458,16 @@ const processRefunds = async (
           });
         }
 
+        if (!contactId) {
+          contactId = await resolveContactIdFromMetadata(
+            salesforce,
+            (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined,
+            (...args: unknown[]) => context.log(...args),
+            refund.id,
+            'refund'
+          );
+        }
+
         const paymentIntentIdRefund = chargeFragment?.payment_intent
           ? typeof chargeFragment.payment_intent === 'string'
             ? chargeFragment.payment_intent
@@ -1387,26 +1560,32 @@ const processRefunds = async (
 
         const refundAmount = Math.abs(balanceTransaction.amount ?? 0);
 
-        // Validate refund amount before QBO posting
-        if (refundAmount === 0) {
-          context.log('[StripeTrueUp] Skipping QBO refund posting due to zero refund amount', {
+        if (bypassQbo) {
+          context.log('[StripeTrueUp] QBO posting bypassed by override for refund', {
             refundId: refund.id,
-            balanceTransactionAmount: balanceTransaction.amount,
           });
-          summary.skipped += 1;
-          continue;
+        } else {
+          // Validate refund amount before QBO posting
+          if (refundAmount === 0) {
+            context.log('[StripeTrueUp] Skipping QBO refund posting due to zero refund amount', {
+              refundId: refund.id,
+              balanceTransactionAmount: balanceTransaction.amount,
+            });
+            summary.skipped += 1;
+            continue;
+          }
+
+          const posting = await dependencies.accounting.postRefundToQbo({
+            amount: refundAmount,
+            memo: `Stripe refund ${refund.id}`,
+            date: timestampToDate(
+              balanceTransaction.created ?? balanceTransaction.available_on ?? null
+            ),
+          });
+          summary.qboPosts += 1;
+
+          await markPosted(salesforce, upsertResult, posting);
         }
-
-        const posting = await dependencies.accounting.postRefundToQbo({
-          amount: refundAmount,
-          memo: `Stripe refund ${refund.id}`,
-          date: timestampToDate(
-            balanceTransaction.created ?? balanceTransaction.available_on ?? null
-          ),
-        });
-        summary.qboPosts += 1;
-
-        await markPosted(salesforce, upsertResult, posting);
         await dependencies.idempotencyStore.markProcessed(key);
       }
 
@@ -1429,7 +1608,9 @@ const processPayouts = async (
   from: number,
   to: number | null,
   dryRun: boolean,
-  resubmit: boolean
+  resubmit: boolean,
+  bypassQbo: boolean,
+  limit: number | null
 ): Promise<ProcessSummary> => {
   const summary: ProcessSummary = {
     fetched: 0,
@@ -1445,7 +1626,8 @@ const processPayouts = async (
     : { logger: context.log };
 
   const payouts = await dependencies.fetchers.payouts(stripe, from, params as never);
-  summary.fetched = payouts.length;
+  const recordsToProcess = typeof limit === 'number' ? payouts.slice(0, limit) : payouts;
+  summary.fetched = recordsToProcess.length;
 
   let salesforceSvc: SalesforceSvc | null = null;
   const ensureSalesforce = async (): Promise<SalesforceSvc> => {
@@ -1455,7 +1637,7 @@ const processPayouts = async (
     return salesforceSvc;
   };
 
-  for (const payout of payouts) {
+  for (const payout of recordsToProcess) {
     try {
       if (!payout || !payout.id) {
         summary.errors += 1;
@@ -1608,40 +1790,46 @@ const processPayouts = async (
           }
         }
 
-        // Post to QuickBooks
-        const posting = await dependencies.accounting.postPayoutToQbo({
-          amount: payoutAmount,
-          memo: `Stripe payout ${payout.id}`,
-          date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
-          payoutId: payout.id, // Include payout ID for duplicate detection
-        });
-        summary.qboPosts += 1;
+        if (bypassQbo) {
+          context.log('[StripeTrueUp] QBO posting bypassed by override for payout', {
+            payoutId: payout.id,
+          });
+        } else {
+          // Post to QuickBooks
+          const posting = await dependencies.accounting.postPayoutToQbo({
+            amount: payoutAmount,
+            memo: `Stripe payout ${payout.id}`,
+            date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
+            payoutId: payout.id, // Include payout ID for duplicate detection
+          });
+          summary.qboPosts += 1;
 
-        // Mark Salesforce transaction as posted to QBO
-        if (posting && posting.qboId) {
-          try {
-            const payoutTxnId = await salesforce.findTransactionIdByExternalId(
-              'stripe_payout_id__c',
-              payout.id,
-              'Payout'
-            );
+          // Mark Salesforce transaction as posted to QBO
+          if (posting && posting.qboId) {
+            try {
+              const payoutTxnId = await salesforce.findTransactionIdByExternalId(
+                'stripe_payout_id__c',
+                payout.id,
+                'Payout'
+              );
 
-            if (payoutTxnId) {
-              await salesforce.markPostedToQbo(payoutTxnId, {
-                id: posting.qboId,
-                type: posting.type || 'bank-deposit',
-              });
-              context.log('[StripeTrueUp] Marked payout transaction as posted to QBO', {
+              if (payoutTxnId) {
+                await salesforce.markPostedToQbo(payoutTxnId, {
+                  id: posting.qboId,
+                  type: posting.type || 'bank-deposit',
+                });
+                context.log('[StripeTrueUp] Marked payout transaction as posted to QBO', {
+                  payoutId: payout.id,
+                  salesforceId: payoutTxnId,
+                  qboDocId: posting.qboId,
+                });
+              }
+            } catch (error) {
+              context.log('[StripeTrueUp] Failed to mark payout as posted to QBO in Salesforce', {
                 payoutId: payout.id,
-                salesforceId: payoutTxnId,
-                qboDocId: posting.qboId,
+                error: error instanceof Error ? error.message : String(error),
               });
             }
-          } catch (error) {
-            context.log('[StripeTrueUp] Failed to mark payout as posted to QBO in Salesforce', {
-              payoutId: payout.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
           }
         }
 
@@ -1671,7 +1859,7 @@ const respond = (status: number, body: Record<string, unknown>) => {
   };
 };
 
-const validateEnvironment = (): { valid: boolean; errors: string[] } => {
+const validateEnvironment = (bypassQbo: boolean): { valid: boolean; errors: string[] } => {
   const errors: string[] = [];
   const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
@@ -1695,14 +1883,18 @@ const validateEnvironment = (): { valid: boolean; errors: string[] } => {
   }
 
   // Check QBO credentials (using the actual variable names from env.ts)
-  if (!process.env.QBO_CLIENT_ID) {
-    errors.push('QBO_CLIENT_ID is not configured (QuickBooks sync will fail)');
-  }
-  if (!process.env.QBO_CLIENT_SECRET) {
-    errors.push('QBO_CLIENT_SECRET is not configured (QuickBooks sync will fail)');
-  }
-  if (!process.env.QBO_REALM_ID && !process.env.QBO_COMPANY_ID) {
-    errors.push('QBO_REALM_ID or QBO_COMPANY_ID is not configured (QuickBooks sync will fail)');
+  if (!bypassQbo) {
+    if (!process.env.QBO_CLIENT_ID) {
+      errors.push('QBO_CLIENT_ID is not configured (QuickBooks sync will fail)');
+    }
+    if (!process.env.QBO_CLIENT_SECRET) {
+      errors.push('QBO_CLIENT_SECRET is not configured (QuickBooks sync will fail)');
+    }
+    if (!process.env.QBO_REALM_ID && !process.env.QBO_COMPANY_ID) {
+      errors.push(
+        'QBO_REALM_ID or QBO_COMPANY_ID is not configured (QuickBooks sync will fail)'
+      );
+    }
   }
 
   return { valid: errors.length === 0, errors };
@@ -1710,8 +1902,22 @@ const validateEnvironment = (): { valid: boolean; errors: string[] } => {
 
 const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promise<any> => {
   try {
-    // Validate environment first
-    const envCheck = validateEnvironment();
+    const queryRaw = (req as unknown as { query?: unknown }).query;
+    let query: Record<string, string | undefined> = {};
+
+    if (queryRaw instanceof URLSearchParams) {
+      query = Object.fromEntries(queryRaw.entries());
+    } else if (queryRaw && typeof queryRaw === 'object') {
+      query = queryRaw as Record<string, string | undefined>;
+    }
+
+    const bypassQboDefault = parseBoolean(process.env.STRIPE_TRUE_UP_BYPASS_QBO, false);
+    const bypassQboParam =
+      query.bypassQbo ?? query.skipQbo ?? getHeader(req, 'x-bypass-qbo') ?? getHeader(req, 'x-skip-qbo');
+    const bypassQbo = parseBoolean(bypassQboParam, bypassQboDefault);
+
+    // Validate environment after resolving runtime overrides
+    const envCheck = validateEnvironment(bypassQbo);
     if (!envCheck.valid) {
       context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
       return respond(500, {
@@ -1721,14 +1927,6 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
       });
     }
 
-    const queryRaw = (req as unknown as { query?: unknown }).query;
-    let query: Record<string, string | undefined> = {};
-
-    if (queryRaw instanceof URLSearchParams) {
-      query = Object.fromEntries(queryRaw.entries());
-    } else if (queryRaw && typeof queryRaw === 'object') {
-      query = queryRaw as Record<string, string | undefined>;
-    }
     const fromParam = query.from;
     if (!fromParam) {
       return respond(400, {
@@ -1781,17 +1979,53 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
 
     const dryRun = parseBoolean(query.dryRun, false);
     const resubmit = parseBoolean(query.resubmit, false);
+    let limit: number | null;
+    try {
+      limit = parseLimit(query.limit);
+    } catch (error) {
+      return respond(400, {
+        error: 'bad_request',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
     const stripe = dependencies.stripe.getClient(liveMode);
 
     let summary: ProcessSummary;
     if (type === 'payments') {
-      summary = await processPayments(context, stripe, from, to, dryRun, resubmit);
+      summary = await processPayments(
+        context,
+        stripe,
+        from,
+        to,
+        dryRun,
+        resubmit,
+        bypassQbo,
+        limit
+      );
     } else if (type === 'refunds') {
-      summary = await processRefunds(context, stripe, from, to, dryRun, resubmit);
+      summary = await processRefunds(
+        context,
+        stripe,
+        from,
+        to,
+        dryRun,
+        resubmit,
+        bypassQbo,
+        limit
+      );
     } else {
-      summary = await processPayouts(context, stripe, from, to, dryRun, resubmit);
+      summary = await processPayouts(
+        context,
+        stripe,
+        from,
+        to,
+        dryRun,
+        resubmit,
+        bypassQbo,
+        limit
+      );
     }
 
     // Flush idempotency store to ensure all processed keys are persisted
@@ -1804,6 +2038,8 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
       type,
       dryRun,
       resubmit,
+      bypassQbo,
+      limit,
       liveMode,
       range: {
         from: timestampToIsoString(from),
