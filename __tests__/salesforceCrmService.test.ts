@@ -1,9 +1,9 @@
-const { describe, it, expect, vi, beforeEach } = require('vitest');
-const SalesforceCrmService = require('../src/services/salesforce/salesforceCrm');
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import SalesforceCrmService from '../src/services/salesforce/salesforceCrm';
 
 describe('SalesforceCrmService', () => {
-  let service;
-  let mockConn;
+  let service: any;
+  let mockConn: any;
 
   beforeEach(() => {
     mockConn = {

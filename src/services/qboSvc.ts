@@ -574,7 +574,7 @@ const getCheckoutCategory = (
  * available (checkout session, payment intent, charge, etc).  Metadata from all
  * supplied objects is merged with later values taking precedence.
  */
-const getCoverFeesInfo = (
+export const getCoverFeesInfo = (
   stripeContext:
     | {
         checkoutSession?: Stripe.Checkout.Session | null;

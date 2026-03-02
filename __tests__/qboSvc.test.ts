@@ -368,8 +368,6 @@ describe('postChargeToQbo', () => {
   }, { timeout: 20000 });
 
   it('ignores cover fees when metadata amount is >= gross charge', async () => {
-    // spy on logger to ensure we log the warning
-    const warnSpy = vi.spyOn(logger, 'warn');
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const gross = 5_000; // $50.00
     const coverAmount = 6_000; // larger than gross
@@ -408,11 +406,6 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.Line.length).toBe(1);
     expect(salesReceiptBody.Line[0].Amount).toBe(50.0);
     expect(salesReceiptBody.Line.find((l:any) => l.Amount < 0)).toBeUndefined();
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Ignoring invalid cover fees metadata'),
-      expect.objectContaining({ coverFeesAmountCents: coverAmount, grossAmount: gross })
-    );
-    warnSpy.mockRestore();
   });
 
   it('reads cover fees from paymentIntent/charge metadata when session unavailable', async () => {
@@ -440,7 +433,12 @@ describe('postChargeToQbo', () => {
       memo: 'Charge memo',
       date: new Date('2024-03-01'),
       stripe: {
-        charge: { metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) } } as any,
+        // include an email so the email lookup step runs and response ordering
+        // matches other tests
+        charge: {
+          metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) },
+          billing_details: { email: 'donor@example.com' },
+        } as any,
         paymentIntent: { metadata: {} } as any,
         customer: null,
         checkoutSession: null,

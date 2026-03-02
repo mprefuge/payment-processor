@@ -259,7 +259,9 @@ describe('Integration: Complete Payment Flow', () => {
       errors: [],
     };
 
-    const mockSalesforceSvc = {
+    // we declare the service variable outside tests so it can be reused/copied
+    let mockSalesforceSvc: any;
+    mockSalesforceSvc = {
       upsertTransactionByExternalId: vi.fn().mockResolvedValue(mockSalesforceUpsertResult),
       findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
       linkPayoutOnTransactions: vi.fn().mockResolvedValue([]),
@@ -574,12 +576,15 @@ describe('Integration: Complete Payment Flow', () => {
     };
 
     // mock Salesforce and QBO services similar to previous test but capture post args
-    const mockSalesforceSvc2 = { ...mockSalesforceSvc };
-    mockSalesforceSvc2.upsertTransactionByExternalId = vi.fn().mockResolvedValue({
-      success: true,
-      id: 'a02' + randomUUID().substring(0, 15),
-      errors: [],
-    });
+    // create a fresh copy of salesforce svc for second run
+    const mockSalesforceSvc2 = {
+      ...mockSalesforceSvc,
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({
+        success: true,
+        id: 'a02' + randomUUID().substring(0, 15),
+        errors: [],
+      }),
+    };
     let capturedPostArgs: any = null;
 
     const mockQboResult2 = {
