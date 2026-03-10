@@ -21,6 +21,9 @@ interface OAuthTokensResult {
 
 const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
+const QBO_OAUTH_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+
+type OAuthFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 class QBOTokenManager {
   private store: TokenStore | null = null;
@@ -28,6 +31,30 @@ class QBOTokenManager {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private autoRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private lastRefreshAt: number | null = null;
+
+  private updateRuntimeTokens(accessToken: string, refreshToken?: string): void {
+    process.env.QBO_ACCESS_TOKEN = accessToken;
+    if (refreshToken) {
+      process.env.QBO_REFRESH_TOKEN = refreshToken;
+      env.quickBooks.refreshToken = refreshToken;
+    }
+  }
+
+  private resolveFetcher(fetcher?: OAuthFetcher): OAuthFetcher {
+    const runtimeFetcher = fetcher ?? (typeof fetch !== 'undefined' ? fetch : undefined);
+    if (!runtimeFetcher) {
+      throw new Error('Fetch API is not available to perform QBO token refresh');
+    }
+    return runtimeFetcher;
+  }
+
+  private getOAuthClientCredentials(): { clientId: string; clientSecret: string } {
+    const { clientId, clientSecret } = env.quickBooks;
+    if (!clientId || !clientSecret) {
+      throw new Error('QBO OAuth client ID and client secret must be configured');
+    }
+    return { clientId, clientSecret };
+  }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -78,12 +105,7 @@ class QBOTokenManager {
     }
 
     // Update env / cached config
-    process.env.QBO_ACCESS_TOKEN = accessToken;
-    if (refreshToken) {
-      process.env.QBO_REFRESH_TOKEN = refreshToken;
-      // also update parsed env copy if present
-      env.quickBooks.refreshToken = refreshToken;
-    }
+    this.updateRuntimeTokens(accessToken, refreshToken);
 
     // Schedule proactive refresh one hour before expiry
     try {
@@ -119,12 +141,9 @@ class QBOTokenManager {
   }
 
   async refreshTokens(
-    fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    fetcher?: OAuthFetcher
   ): Promise<RefreshTokenResult> {
-    const usedFetcher = fetcher ?? (typeof fetch !== 'undefined' ? fetch : undefined);
-    if (!usedFetcher) {
-      throw new Error('Fetch API is not available to perform QBO token refresh');
-    }
+    const usedFetcher = this.resolveFetcher(fetcher);
 
     // Record refresh timestamp to avoid immediate re-refresh loops
     this.lastRefreshAt = Date.now();
@@ -147,10 +166,7 @@ class QBOTokenManager {
       throw new Error('QBO refresh token has expired. Manual re-authentication required.');
     }
 
-    const { clientId, clientSecret } = env.quickBooks;
-    if (!clientId || !clientSecret) {
-      throw new Error('QBO OAuth client ID and client secret must be configured');
-    }
+    const { clientId, clientSecret } = this.getOAuthClientCredentials();
 
     const basicAuth = Buffer.from(`${clientId}:${clientSecret}`, 'utf8').toString('base64');
     const params = new URLSearchParams({
@@ -158,7 +174,7 @@ class QBOTokenManager {
       refresh_token: refreshToken,
     });
 
-    const response = await usedFetcher('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
+    const response = await usedFetcher(QBO_OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -215,11 +231,7 @@ class QBOTokenManager {
     await this.setTokens(newAccessToken, newRefreshToken || refreshToken);
 
     // Update environment variables for backward compatibility
-    process.env.QBO_ACCESS_TOKEN = newAccessToken;
-    if (newRefreshToken) {
-      process.env.QBO_REFRESH_TOKEN = newRefreshToken;
-      env.quickBooks.refreshToken = newRefreshToken;
-    }
+    this.updateRuntimeTokens(newAccessToken, newRefreshToken);
 
     logger.info('QBO tokens refreshed successfully');
     return { accessToken: newAccessToken, refreshToken: newRefreshToken };
@@ -313,7 +325,7 @@ class QBOTokenManager {
   }
 
   async getValidAccessToken(
-    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    fetcher: OAuthFetcher
   ): Promise<string> {
     // First check if we have a valid access token
     if (!(await this.isAccessTokenExpired())) {
@@ -388,12 +400,9 @@ class QBOTokenManager {
   async exchangeCodeForTokens(
     code: string,
     redirectUri: string,
-    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    fetcher: OAuthFetcher
   ): Promise<OAuthTokensResult> {
-    const { clientId, clientSecret } = env.quickBooks;
-    if (!clientId || !clientSecret) {
-      throw new Error('QBO OAuth client ID and client secret must be configured');
-    }
+    const { clientId, clientSecret } = this.getOAuthClientCredentials();
 
     const basicAuth = Buffer.from(`${clientId}:${clientSecret}`, 'utf8').toString('base64');
     const params = new URLSearchParams({
@@ -402,7 +411,7 @@ class QBOTokenManager {
       redirect_uri: redirectUri,
     });
 
-    const response = await fetcher('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
+    const response = await fetcher(QBO_OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -433,9 +442,7 @@ class QBOTokenManager {
     await this.setTokens(accessToken, refreshToken);
 
     // Update environment variables for backward compatibility
-    process.env.QBO_ACCESS_TOKEN = accessToken;
-    process.env.QBO_REFRESH_TOKEN = refreshToken;
-    env.quickBooks.refreshToken = refreshToken;
+    this.updateRuntimeTokens(accessToken, refreshToken);
 
     logger.info('QBO tokens obtained and stored via OAuth flow');
     return { accessToken, refreshToken };

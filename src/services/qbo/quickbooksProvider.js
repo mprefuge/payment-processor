@@ -70,6 +70,184 @@ class QuickBooksProvider extends BaseAccountingProvider {
     }
   }
 
+  _ensureQboClient() {
+    if (!this.qbo) {
+      throw new Error('QuickBooks client not initialized. Check configuration.');
+    }
+
+    return this.qbo;
+  }
+
+  async _callQbo(methodName, ...args) {
+    const qboClient = this._ensureQboClient();
+    const method = qboClient[methodName];
+
+    if (typeof method !== 'function') {
+      throw new Error(`QuickBooks client method is not available: ${methodName}`);
+    }
+
+    return this._executeWithTokenRefresh(
+      () =>
+        new Promise((resolve, reject) => {
+          method.call(qboClient, ...args, (err, data) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(data);
+          });
+        })
+    );
+  }
+
+  _normalizeRecordCollection(queryResponse, key) {
+    if (!queryResponse || typeof queryResponse !== 'object') {
+      return [];
+    }
+
+    const collection = queryResponse[key];
+    return Array.isArray(collection) ? collection : [];
+  }
+
+  _deduplicateById(records) {
+    const seenIds = new Set();
+
+    return records.filter((record) => {
+      const id = record && record.Id;
+
+      if (!id) {
+        return false;
+      }
+
+      if (seenIds.has(id)) {
+        return false;
+      }
+
+      seenIds.add(id);
+      return true;
+    });
+  }
+
+  _recordMatchesEmailOrDisplayName(record, normalizedEmail, normalizedDisplayName) {
+    if (!record) {
+      return false;
+    }
+
+    const recordEmail =
+      record.PrimaryEmailAddr && record.PrimaryEmailAddr.Address
+        ? record.PrimaryEmailAddr.Address.toString().trim().toLowerCase()
+        : null;
+
+    const recordDisplayName =
+      record.DisplayName && typeof record.DisplayName.toString === 'function'
+        ? record.DisplayName.toString().trim().toLowerCase()
+        : null;
+
+    const emailMatches = Boolean(normalizedEmail && recordEmail === normalizedEmail);
+    const displayNameMatches =
+      Boolean(normalizedDisplayName) && Boolean(recordDisplayName) && recordDisplayName === normalizedDisplayName;
+
+    return emailMatches || displayNameMatches;
+  }
+
+  async _findPartiesByEmail(entityType, normalizedEmail) {
+    if (!normalizedEmail) {
+      return [];
+    }
+
+    const findMethod = entityType === 'Customer' ? 'findCustomers' : 'findVendors';
+    const data = await this._callQbo(findMethod, [
+      { field: 'PrimaryEmailAddr', operator: '=', value: normalizedEmail },
+    ]);
+
+    return this._normalizeRecordCollection(data.QueryResponse, entityType);
+  }
+
+  async _findPartiesByDisplayName(entityType, displayName) {
+    const normalizedDisplayName =
+      typeof displayName === 'string' ? displayName.trim() : '';
+
+    if (!normalizedDisplayName) {
+      return [];
+    }
+
+    const findMethod = entityType === 'Customer' ? 'findCustomers' : 'findVendors';
+    const data = await this._callQbo(findMethod, { DisplayName: normalizedDisplayName });
+
+    return this._normalizeRecordCollection(data.QueryResponse, entityType);
+  }
+
+  async _createParty(entityType, payload) {
+    const createMethod = entityType === 'Customer' ? 'createCustomer' : 'createVendor';
+    return this._callQbo(createMethod, payload);
+  }
+
+  async _ensureParty(entityType, input, payloadBuilder) {
+    this._ensureQboClient();
+
+    const displayNameSource =
+      input.displayName || input.name || input.email || input.externalId || entityType;
+    const fallbackDisplayName = entityType === 'Customer' ? 'Stripe Customer' : 'Stripe';
+    const displayName =
+      displayNameSource.toString().trim().substring(0, 99) || fallbackDisplayName;
+    const normalizedDisplayName = displayName.toLowerCase();
+    const normalizedEmail = this._normalizeEmail(input.email);
+
+    let matches = [];
+
+    try {
+      const emailMatches = await this._findPartiesByEmail(entityType, normalizedEmail);
+      matches = this._deduplicateById(emailMatches);
+
+      if (matches.length === 0) {
+        const displayNameMatches = await this._findPartiesByDisplayName(entityType, displayName);
+        matches = this._deduplicateById(displayNameMatches);
+      }
+    } catch (error) {
+      const lookUpErrorMessage = this._extractQboErrorMessage(error);
+      const entityLabel = entityType.toLowerCase();
+      this.logger.error(`[QBO] Error searching for ${entityLabel}:`, lookUpErrorMessage);
+      throw new Error(`Failed to look up ${entityLabel} "${displayName}": ${lookUpErrorMessage}`);
+    }
+
+    const matchedRecord = matches.find((record) =>
+      this._recordMatchesEmailOrDisplayName(record, normalizedEmail, normalizedDisplayName)
+    );
+
+    if (matchedRecord) {
+      const entityLabel = entityType.toLowerCase();
+      this.logger.info(
+        `[QBO] Found existing ${entityLabel}: ${matchedRecord.DisplayName} (ID: ${matchedRecord.Id})`
+      );
+
+      return {
+        id: matchedRecord.Id,
+        displayName: matchedRecord.DisplayName || displayName,
+      };
+    }
+
+    const payload = payloadBuilder({ displayName, normalizedEmail, input });
+
+    try {
+      const created = await this._createParty(entityType, payload);
+      const entityLabel = entityType.toLowerCase();
+
+      this.logger.info(
+        `[QBO] Created ${entityLabel}: ${created.DisplayName || displayName} (ID: ${created.Id})`
+      );
+
+      return {
+        id: created.Id,
+        displayName: created.DisplayName || displayName,
+      };
+    } catch (error) {
+      const createErrorMessage = this._extractQboErrorMessage(error);
+      const entityLabel = entityType.toLowerCase();
+      this.logger.error(`[QBO] Error creating ${entityLabel}:`, createErrorMessage);
+      throw new Error(`Failed to create ${entityLabel} "${displayName}": ${createErrorMessage}`);
+    }
+  }
+
   _normalizeEmail(value) {
     if (value === null || value === undefined) {
       return null;
@@ -162,23 +340,17 @@ class QuickBooksProvider extends BaseAccountingProvider {
       accounts.map((a) => a.name)
     );
 
-    if (!this.qbo) {
-      throw new Error('QuickBooks client not initialized. Check configuration.');
-    }
+    this._ensureQboClient();
 
     const accountMap = {};
 
     for (const account of accounts) {
       try {
         // Search for existing account by name using findAccounts
-        const existingAccounts = await this._executeWithTokenRefresh(
-          () =>
-            new Promise((resolve, reject) => {
-              this.qbo.findAccounts({ Name: account.name }, (err, data) => {
-                if (err) reject(err);
-                else resolve(data.QueryResponse.Account || []);
-              });
-            })
+        const accountSearchResult = await this._callQbo('findAccounts', { Name: account.name });
+        const existingAccounts = this._normalizeRecordCollection(
+          accountSearchResult.QueryResponse,
+          'Account'
         );
 
         if (existingAccounts.length > 0) {
@@ -195,22 +367,15 @@ class QuickBooksProvider extends BaseAccountingProvider {
             AccountSubType: account.subType || 'CashOnHand',
           };
 
-          const created = await this._executeWithTokenRefresh(
-            () =>
-              new Promise((resolve, reject) => {
-                this.qbo.createAccount(newAccount, (err, data) => {
-                  if (err) reject(err);
-                  else resolve(data);
-                });
-              })
-          );
+          const created = await this._callQbo('createAccount', newAccount);
 
           accountMap[account.name] = created.Id;
           this.logger.info(`[QBO] Created account: ${account.name} (ID: ${created.Id})`);
         }
       } catch (error) {
-        this.logger.error(`[QBO] Error ensuring account ${account.name}:`, error.message);
-        throw new Error(`Failed to ensure account "${account.name}": ${error.message}`);
+        const errorMessage = this._extractQboErrorMessage(error);
+        this.logger.error(`[QBO] Error ensuring account ${account.name}:`, errorMessage);
+        throw new Error(`Failed to ensure account "${account.name}": ${errorMessage}`);
       }
     }
 
@@ -221,269 +386,48 @@ class QuickBooksProvider extends BaseAccountingProvider {
    * Ensure a customer exists in QuickBooks and return its reference
    */
   async ensureCustomer(customer) {
-    if (!this.qbo) {
-      throw new Error('QuickBooks client not initialized. Check configuration.');
-    }
+    return this._ensureParty('Customer', customer, ({ displayName, normalizedEmail, input }) => {
+      const customerPayload = {
+        DisplayName: displayName,
+      };
 
-    const displayNameSource =
-      customer.displayName ||
-      customer.name ||
-      customer.email ||
-      customer.externalId ||
-      'Stripe Customer';
-    const displayName = displayNameSource.toString().trim().substring(0, 99) || 'Stripe Customer';
-    const normalizedEmail = this._normalizeEmail(customer.email);
-    const normalizedDisplayName = displayName.toLowerCase();
-    const existingCustomers = [];
-
-    const uniqueById = (list) => {
-      const seen = new Set();
-      return list.filter((item) => {
-        if (!item || !item.Id) {
-          return false;
-        }
-        if (seen.has(item.Id)) {
-          return false;
-        }
-        seen.add(item.Id);
-        return true;
-      });
-    };
-
-    try {
+      if (input.givenName) {
+        customerPayload.GivenName = input.givenName;
+      }
+      if (input.familyName) {
+        customerPayload.FamilyName = input.familyName;
+      }
       if (normalizedEmail) {
-        const emailMatches = await this._executeWithTokenRefresh(
-          () =>
-            new Promise((resolve, reject) => {
-              this.qbo.findCustomers(
-                [{ field: 'PrimaryEmailAddr', operator: '=', value: normalizedEmail }],
-                (err, data) => {
-                  if (err) reject(err);
-                  else resolve((data.QueryResponse && data.QueryResponse.Customer) || []);
-                }
-              );
-            })
-        );
-
-        existingCustomers.push(...emailMatches);
+        customerPayload.PrimaryEmailAddr = { Address: normalizedEmail };
+      }
+      if (input.externalId) {
+        customerPayload.Notes = `Stripe Customer ID: ${input.externalId}`;
       }
 
-      if (existingCustomers.length === 0 && normalizedDisplayName) {
-        const nameMatches = await this._executeWithTokenRefresh(
-          () =>
-            new Promise((resolve, reject) => {
-              this.qbo.findCustomers({ DisplayName: displayName }, (err, data) => {
-                if (err) reject(err);
-                else resolve((data.QueryResponse && data.QueryResponse.Customer) || []);
-              });
-            })
-        );
-
-        existingCustomers.push(...nameMatches);
-      }
-    } catch (error) {
-      this.logger.error('[QBO] Error searching for customer:', error.message);
-      throw new Error(`Failed to look up customer "${displayName}": ${error.message}`);
-    }
-
-    const customers = uniqueById(existingCustomers);
-    const matchedCustomer = customers.find((cust) => {
-      if (!cust) {
-        return false;
-      }
-
-      const emailMatch =
-        normalizedEmail &&
-        cust.PrimaryEmailAddr &&
-        cust.PrimaryEmailAddr.Address &&
-        cust.PrimaryEmailAddr.Address.toString().trim().toLowerCase() === normalizedEmail;
-      const nameMatch =
-        cust.DisplayName &&
-        cust.DisplayName.toString().trim().toLowerCase() === normalizedDisplayName;
-      return emailMatch || nameMatch;
+      return customerPayload;
     });
-
-    if (matchedCustomer) {
-      this.logger.info(
-        `[QBO] Found existing customer: ${matchedCustomer.DisplayName} (ID: ${matchedCustomer.Id})`
-      );
-      return {
-        id: matchedCustomer.Id,
-        displayName: matchedCustomer.DisplayName || displayName,
-      };
-    }
-
-    const newCustomer = {
-      DisplayName: displayName,
-    };
-
-    if (customer.givenName) {
-      newCustomer.GivenName = customer.givenName;
-    }
-    if (customer.familyName) {
-      newCustomer.FamilyName = customer.familyName;
-    }
-    if (normalizedEmail) {
-      newCustomer.PrimaryEmailAddr = { Address: normalizedEmail };
-    }
-    if (customer.externalId) {
-      newCustomer.Notes = `Stripe Customer ID: ${customer.externalId}`;
-    }
-
-    try {
-      const created = await this._executeWithTokenRefresh(
-        () =>
-          new Promise((resolve, reject) => {
-            this.qbo.createCustomer(newCustomer, (err, data) => {
-              if (err) reject(err);
-              else resolve(data);
-            });
-          })
-      );
-
-      this.logger.info(
-        `[QBO] Created customer: ${created.DisplayName || displayName} (ID: ${created.Id})`
-      );
-
-      return {
-        id: created.Id,
-        displayName: created.DisplayName || displayName,
-      };
-    } catch (error) {
-      const errorMessage = this._extractQboErrorMessage(error);
-      this.logger.error('[QBO] Error creating customer:', errorMessage);
-      throw new Error(`Failed to create customer "${displayName}": ${errorMessage}`);
-    }
   }
 
   /**
    * Ensure a vendor exists in QuickBooks and return its reference
    */
   async ensureVendor(vendor) {
-    if (!this.qbo) {
-      throw new Error('QuickBooks client not initialized. Check configuration.');
-    }
+    return this._ensureParty('Vendor', vendor, ({ displayName, normalizedEmail, input }) => {
+      const vendorPayload = {
+        DisplayName: displayName,
+      };
 
-    const displayNameSource = vendor.displayName || vendor.name || 'Stripe';
-    const displayName = displayNameSource.toString().trim().substring(0, 99) || 'Stripe';
-    const normalizedEmail = this._normalizeEmail(vendor.email);
-    const normalizedDisplayName = displayName.toLowerCase();
-
-    const uniqueById = (list) => {
-      const seen = new Set();
-      return list.filter((item) => {
-        if (!item || !item.Id) {
-          return false;
-        }
-        if (seen.has(item.Id)) {
-          return false;
-        }
-        seen.add(item.Id);
-        return true;
-      });
-    };
-
-    let existingVendors = [];
-
-    try {
       if (normalizedEmail) {
-        const emailMatches = await this._executeWithTokenRefresh(
-          () =>
-            new Promise((resolve, reject) => {
-              this.qbo.findVendors(
-                [{ field: 'PrimaryEmailAddr', operator: '=', value: normalizedEmail }],
-                (err, data) => {
-                  if (err) reject(err);
-                  else resolve((data.QueryResponse && data.QueryResponse.Vendor) || []);
-                }
-              );
-            })
-        );
-
-        existingVendors.push(...emailMatches);
+        vendorPayload.PrimaryEmailAddr = { Address: normalizedEmail };
       }
 
-      if (existingVendors.length === 0 && normalizedDisplayName) {
-        const nameMatches = await this._executeWithTokenRefresh(
-          () =>
-            new Promise((resolve, reject) => {
-              this.qbo.findVendors({ DisplayName: displayName }, (err, data) => {
-                if (err) reject(err);
-                else resolve((data.QueryResponse && data.QueryResponse.Vendor) || []);
-              });
-            })
-        );
-
-        existingVendors.push(...nameMatches);
-      }
-    } catch (error) {
-      this.logger.error('[QBO] Error searching for vendor:', error.message);
-      throw new Error(`Failed to look up vendor "${displayName}": ${error.message}`);
-    }
-
-    const vendors = uniqueById(existingVendors);
-    const matchedVendor = vendors.find((v) => {
-      if (!v) {
-        return false;
+      const sanitizedExternalId = this._sanitizeVendorExternalId(input.externalId);
+      if (sanitizedExternalId) {
+        vendorPayload.AcctNum = sanitizedExternalId;
       }
 
-      const emailMatch =
-        normalizedEmail &&
-        v.PrimaryEmailAddr &&
-        v.PrimaryEmailAddr.Address &&
-        v.PrimaryEmailAddr.Address.toString().trim().toLowerCase() === normalizedEmail;
-      const nameMatch =
-        v.DisplayName && v.DisplayName.toString().trim().toLowerCase() === normalizedDisplayName;
-      return emailMatch || nameMatch;
+      return vendorPayload;
     });
-
-    if (matchedVendor) {
-      this.logger.info(
-        `[QBO] Found existing vendor: ${matchedVendor.DisplayName} (ID: ${matchedVendor.Id})`
-      );
-      return {
-        id: matchedVendor.Id,
-        displayName: matchedVendor.DisplayName || displayName,
-      };
-    }
-
-    const newVendor = {
-      DisplayName: displayName,
-    };
-
-    if (normalizedEmail) {
-      newVendor.PrimaryEmailAddr = { Address: normalizedEmail };
-    }
-
-    const sanitizedExternalId = this._sanitizeVendorExternalId(vendor.externalId);
-    if (sanitizedExternalId) {
-      newVendor.AcctNum = sanitizedExternalId;
-    }
-
-    try {
-      const created = await this._executeWithTokenRefresh(
-        () =>
-          new Promise((resolve, reject) => {
-            this.qbo.createVendor(newVendor, (err, data) => {
-              if (err) reject(err);
-              else resolve(data);
-            });
-          })
-      );
-
-      this.logger.info(
-        `[QBO] Created vendor: ${created.DisplayName || displayName} (ID: ${created.Id})`
-      );
-
-      return {
-        id: created.Id,
-        displayName: created.DisplayName || displayName,
-      };
-    } catch (error) {
-      const errorMessage = this._extractQboErrorMessage(error);
-      this.logger.error('[QBO] Error creating vendor:', errorMessage);
-      throw new Error(`Failed to create vendor "${displayName}": ${errorMessage}`);
-    }
   }
 
   /**

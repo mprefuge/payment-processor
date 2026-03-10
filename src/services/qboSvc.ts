@@ -15,6 +15,30 @@ const DOC_NUMBER_MAX_LENGTH = 21;
 
 type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
 
+type QuickBooksEntityMetadata = {
+  apiPath: 'salesreceipt' | 'journalentry' | 'deposit';
+  queryEntity: 'SalesReceipt' | 'JournalEntry' | 'Deposit';
+  responseContainer: 'SalesReceipt' | 'JournalEntry' | 'Deposit';
+};
+
+const QUICKBOOKS_ENTITY_METADATA: Record<QuickBooksDocType, QuickBooksEntityMetadata> = {
+  'sales-receipt': {
+    apiPath: 'salesreceipt',
+    queryEntity: 'SalesReceipt',
+    responseContainer: 'SalesReceipt',
+  },
+  'journal-entry': {
+    apiPath: 'journalentry',
+    queryEntity: 'JournalEntry',
+    responseContainer: 'JournalEntry',
+  },
+  'bank-deposit': {
+    apiPath: 'deposit',
+    queryEntity: 'Deposit',
+    responseContainer: 'Deposit',
+  },
+};
+
 type Fetcher = (
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1]
@@ -2131,8 +2155,15 @@ const resolveAccountReferences = async (
     lookups.get(normalizedName)?.push(ref);
   }
 
-  for (const [name, refs] of lookups.entries()) {
-    const id = await resolveAccountId(name, context);
+  const lookupEntries = Array.from(lookups.entries());
+  const resolvedLookupIds = await Promise.all(
+    lookupEntries.map(async ([name, refs]) => {
+      const id = await resolveAccountId(name, context);
+      return { name, refs, id };
+    })
+  );
+
+  for (const { name, refs, id } of resolvedLookupIds) {
     for (const ref of refs) {
       ref.value = id;
       if (!ref.name) {
@@ -2289,8 +2320,15 @@ const resolveItemReferences = async (
     lookups.get(normalizedName)?.push(ref);
   }
 
-  for (const [name, refs] of lookups.entries()) {
-    const id = await resolveItemId(name, context);
+  const lookupEntries = Array.from(lookups.entries());
+  const resolvedLookupIds = await Promise.all(
+    lookupEntries.map(async ([name, refs]) => {
+      const id = await resolveItemId(name, context);
+      return { name, refs, id };
+    })
+  );
+
+  for (const { name, refs, id } of resolvedLookupIds) {
     for (const ref of refs) {
       ref.value = id;
       if (!ref.name) {
@@ -2402,12 +2440,7 @@ const checkForDuplicate = async (
   options?: PostOptions
 ): Promise<string | null> => {
   try {
-    const entityName =
-      entity === 'sales-receipt'
-        ? 'SalesReceipt'
-        : entity === 'journal-entry'
-          ? 'JournalEntry'
-          : 'Deposit';
+    const entityName = QUICKBOOKS_ENTITY_METADATA[entity].queryEntity;
 
     // Query QuickBooks for existing document with this DocNumber
     const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
@@ -2539,13 +2572,7 @@ const postToQbo = async <T extends QuickBooksDocType>(
     logger.warn('[QBO] No DocNumber in payload, skipping duplicate check', { entity });
   }
 
-  const url = buildQboUrl(
-    entity === 'sales-receipt'
-      ? 'salesreceipt'
-      : entity === 'journal-entry'
-        ? 'journalentry'
-        : 'deposit'
-  );
+  const url = buildQboUrl(QUICKBOOKS_ENTITY_METADATA[entity].apiPath);
   const context = await createRequestContext(options);
 
   const references = collectReferences(entity, payload);
@@ -2655,12 +2682,7 @@ const postToQbo = async <T extends QuickBooksDocType>(
 
 const extractIdFromResponse = (response: unknown, entity: QuickBooksDocType): string => {
   if (response && typeof response === 'object') {
-    const key =
-      entity === 'sales-receipt'
-        ? 'SalesReceipt'
-        : entity === 'journal-entry'
-          ? 'JournalEntry'
-          : 'Deposit';
+    const key = QUICKBOOKS_ENTITY_METADATA[entity].responseContainer;
 
     const container = (response as Record<string, unknown>)[key];
     if (container && typeof container === 'object') {
