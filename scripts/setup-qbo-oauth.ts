@@ -27,7 +27,10 @@ interface SetupOptions {
 
 async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
   const port = options.port || DEFAULT_PORT;
-  const redirectUri = options.redirectUri || DEFAULT_REDIRECT_URI;
+  const redirectUri =
+    options.redirectUri ||
+    env.quickBooks.redirectUri ||
+    DEFAULT_REDIRECT_URI;
 
   // Check required environment variables
   if (!env.quickBooks.clientId || !env.quickBooks.clientSecret) {

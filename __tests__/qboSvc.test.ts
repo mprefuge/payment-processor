@@ -19,6 +19,7 @@ const baseEnv = {
     realmId: '12345',
     clientId: 'client',
     clientSecret: 'secret',
+    redirectUri: 'http://localhost:3000/oauth/callback',
     refreshToken: 'refresh',
     accounts: { ...defaultAccounts },
   },

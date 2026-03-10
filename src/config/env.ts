@@ -21,6 +21,7 @@ export interface EnvConfig {
     realmId?: string;
     clientId?: string;
     clientSecret?: string;
+    redirectUri?: string;
     refreshToken?: string;
     accounts: {
       stripeClearing: string;
@@ -233,6 +234,7 @@ function loadEnv(): EnvConfig {
     realmId: z.string().min(1).optional(),
     clientId: z.string().min(1).optional(),
     clientSecret: z.string().min(1).optional(),
+    redirectUri: z.string().url().optional(),
     refreshToken: z.string().min(1).optional(),
     accounts: z.object({
       stripeClearing: z.string().min(1),
@@ -352,9 +354,6 @@ function loadEnv(): EnvConfig {
     if (!quickBooks.clientSecret) {
       missing.push('QBO_CLIENT_SECRET');
     }
-    if (!quickBooks.refreshToken) {
-      missing.push('QBO_REFRESH_TOKEN');
-    }
   }
 
   const appInsightsInstrumentationKey = resolveEnv('APPINSIGHTS_INSTRUMENTATIONKEY', {
@@ -391,6 +390,7 @@ function loadEnv(): EnvConfig {
       realmId: quickBooks.realmId,
       clientId: quickBooks.clientId,
       clientSecret: quickBooks.clientSecret,
+      redirectUri: quickBooks.redirectUri,
       refreshToken: quickBooks.refreshToken,
       accounts: quickBooks.accounts,
     },
