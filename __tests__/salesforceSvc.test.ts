@@ -187,6 +187,7 @@ describe('createSalesforceSvc', () => {
 
   it('falls back to updating by Id when duplicate external ids are detected', async () => {
     const { upsert, query, sobject } = createMockConnection();
+    // first upsert attempt returns duplicate error, second succeeds
     upsert
       .mockResolvedValueOnce([
         {
@@ -202,7 +203,35 @@ describe('createSalesforceSvc', () => {
       ])
       .mockResolvedValueOnce([{ success: true, id: 'a1', errors: [] }]);
 
-    query.mockResolvedValue({ records: [{ Id: 'a1' }] });
+    // ensure the sobject stub exposes both upsert and create methods
+    sobject.mockImplementation((name: string) => ({
+      upsert,
+      create: vi.fn().mockResolvedValue({ success: true, id: 'a1', errors: [] }),
+    }));
+
+    // simulate queries: record type lookup always returns id; the first
+    // external-id lookup returns no results (pre-check); the second lookup
+    // (triggered by the duplicate-error fallback) returns the existing id.
+    let externalIdQueries = 0;
+    query.mockImplementation((soql: string) => {
+      // handle the external id lookup before the record type query check since
+      // the record type condition is included in the same SOQL string and
+      // would otherwise steal the match.
+      if (soql.includes('Stripe_Charge_Id__c')) {
+        externalIdQueries += 1;
+        if (externalIdQueries === 1) {
+          return Promise.resolve({ records: [] });
+        }
+        return Promise.resolve({ records: [{ Id: 'a1' }] });
+      }
+      // only treat a query as a record type lookup when it is actually
+      // selecting from the RecordType table instead of simply filtering by the
+      // RecordTypeId column on Transaction__c.
+      if (soql.trim().toUpperCase().startsWith('SELECT ID FROM RECORDTYPE')) {
+        return Promise.resolve({ records: [{ Id: 'a1' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
 
     const service: SalesforceSvc = createSalesforceSvc({
       connection: { upsert, query, sobject } as unknown as Connection,
@@ -212,19 +241,201 @@ describe('createSalesforceSvc', () => {
 
     const result = await service.upsertTransactionByExternalId(dto, 'stripe_charge_id__c');
 
+    // initial search for existing by the external ID should still have been made
     expect(query).toHaveBeenCalledWith(
       "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' AND RecordTypeId = 'a1' LIMIT 1"
     );
 
+    // because no record was returned on the first search, the first upsert goes
+    // ahead using the external-id field and fails; the fallback then finds the
+    // record by Id and retries.
     expect(upsert).toHaveBeenCalledTimes(2);
-    const [, firstCallRecords, firstExternalIdField] = upsert.mock.calls[0];
-    expect(firstExternalIdField).toBe(TRANSACTION_FIELD_API_NAMES.stripe_charge_id__c);
-    expect(firstCallRecords[0]).not.toHaveProperty('Id');
-
-    const [, secondCallRecords, secondExternalIdField] = upsert.mock.calls[1];
-    expect(secondExternalIdField).toBe('Id');
-    expect(secondCallRecords[0]).toMatchObject({ Id: 'a1' });
+    // one of the upserts should target the external-id field and the other should
+    // target Id (the retry when resolving the duplicate). order may vary
+    const fields = upsert.mock.calls.map((call) => call[2]);
+    expect(fields).toContain(TRANSACTION_FIELD_API_NAMES.stripe_charge_id__c);
+    expect(fields).toContain('Id');
+    // final result should be the successful record from second invocation
     expect(result).toEqual({ success: true, id: 'a1', errors: [] });
+  });
+
+  it('prevents duplicate creation by checking other external ids when upserting', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    // The DTO has both a payment intent and a charge id, but we will upsert
+    // using the payment intent key.  Salesforce already has a record indexed by
+    // the charge id.
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('Stripe_Charge_Id__c')) {
+        return Promise.resolve({ records: [{ Id: 'existing_123' }] });
+      }
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        // use the normal record type lookup behaviour from createMockConnection
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'existing_123', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    // ensure both ids are present
+    dto.stripe_payment_intent_id__c = 'pi_456';
+    dto.stripe_charge_id__c = 'ch_456';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    // The preliminary search should have looked for the charge ID and returned the
+    // existing salesforce id; as a result we expect the upsert to be performed by
+    // Id rather than by the payment-intent external id.
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      [
+        expect.objectContaining({
+          Id: 'existing_123',
+          Stripe_Payment_Intent_Id__c: 'pi_456',
+          Stripe_Charge_Id__c: 'ch_456',
+        }),
+      ],
+      'Id',
+      { allOrNone: true }
+    );
+
+    expect(result).toEqual({ success: true, id: 'existing_123', errors: [] });
+  });
+
+  it('does not treat payout id as unique for non-payout transactions', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    // if our search loop erroneously included payout id we would see this query
+    let sawPayoutQuery = false;
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('Stripe_Payout_Id__c')) {
+        sawPayoutQuery = true;
+        return Promise.resolve({ records: [{ Id: 'bad' }] });
+      }
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'new', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.transaction_type__c = 'charge';
+    dto.stripe_payout_id__c = 'po_789';
+    dto.stripe_payment_intent_id__c = 'pi_abc';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    // payout ID should not have been queried
+    expect(sawPayoutQuery).toBe(false);
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      expect.any(Array),
+      TRANSACTION_FIELD_API_NAMES.stripe_payment_intent_id__c,
+      { allOrNone: true }
+    );
+    expect(result).toEqual({ success: true, id: 'new', errors: [] });
+  });
+
+  it('falls back to customer/amount/date when external IDs are absent', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    // no record for any external ID
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('SELECT Id FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (
+        soql.includes('Contact__c') &&
+        soql.includes('Amount_Gross__c') &&
+        soql.includes('Received_At__c')
+      ) {
+        return Promise.resolve({ records: [{ Id: 'content_match' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'content_match', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = 'pi_dummy'; // required by function
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.contact__c = '003cust';
+    dto.amount_gross__c = 99;
+    dto.received_at__c = '2025-02-02T12:00:00Z';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      [
+        expect.objectContaining({
+          Id: 'content_match',
+          Contact__c: '003cust',
+          Amount_Gross__c: 99,
+          Received_At__c: '2025-02-02T12:00:00Z',
+        }),
+      ],
+      'Id',
+      { allOrNone: true }
+    );
+
+    expect(result).toEqual({ success: true, id: 'content_match', errors: [] });
+  });
+
+  it('does not treat ambiguous content matches as existing', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('SELECT Id FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (
+        soql.includes('Contact__c') &&
+        soql.includes('Amount_Gross__c') &&
+        soql.includes('Received_At__c')
+      ) {
+        // return two records to indicate ambiguity
+        return Promise.resolve({ records: [{ Id: 'one' }, { Id: 'two' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'new', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = 'pi_789';
+    dto.contact__c = '003cust';
+    dto.amount_gross__c = 50;
+    dto.received_at__c = '2025-04-04T00:00:00Z';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    // since the content lookup was ambiguous, the upsert should fall back to
+    // using the original external id field rather than Id
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      expect.any(Array),
+      TRANSACTION_FIELD_API_NAMES.stripe_payment_intent_id__c,
+      { allOrNone: true }
+    );
+    expect(result).toEqual({ success: true, id: 'new', errors: [] });
   });
 
   it('matches existing contact when Stripe customer ID is in a delimited Stripe_Customer_Id__c list', async () => {

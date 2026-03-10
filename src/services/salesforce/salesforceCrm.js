@@ -1,6 +1,8 @@
 const { logger } = require('../../lib/logger');
 const BaseCrmService = require('./baseCrm');
-const { SalesforceService, buildSalesforceConfig } = require('../salesforceService');
+// SalesforceService is loaded lazily inside authenticate to avoid requiring a
+// TypeScript module at top-level; tests will often override authenticate so
+// the import may never run.
 
 const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
@@ -26,6 +28,10 @@ class SalesforceCrmService extends BaseCrmService {
     if (this.conn && this.conn.accessToken) {
       return this.conn;
     }
+
+    // require lazily so that tests which never hit authentication don't need
+    // to resolve ../salesforceService (a .ts file which Node cannot load).
+    const { SalesforceService, buildSalesforceConfig } = require('../salesforceService');
 
     const defaultConfig = buildSalesforceConfig();
     const authConfig = {
@@ -743,7 +749,105 @@ class SalesforceCrmService extends BaseCrmService {
       return null;
     }
 
+    // before sending anything to Salesforce we try to find an existing record by
+    // any of the known unique keys that may already be present on the DTO.  If
+    // we discover a matching record, we'll upsert by Id rather than by the
+    // supplied external id field, which prevents creation of duplicate
+    // transactions when a later event carries a different identifier.
+    let uniqueFields = [
+      'Stripe_Payment_Intent_Id__c',
+      'Stripe_Refund_Id__c',
+      'Stripe_Dispute_Id__c',
+      'Stripe_Balance_Transaction_Id__c',
+      'Stripe_Checkout_Session_Id__c',
+      'Stripe_Charge_Id__c',
+      'Stripe_Subscription_Id__c',
+      'Stripe_Invoice_Id__c',
+      'Stripe_Credit_Note_Id__c',
+      // do not include payout id here; see note below
+    ];
+    if (transactionData.Transaction_Type__c === 'payout') {
+      uniqueFields.push('Stripe_Payout_Id__c');
+    }
+
+    let overrideId = null;
     try {
+      for (const field of uniqueFields) {
+        const value = transactionData[field];
+        if (typeof value === 'string' && value.trim().length > 0) {
+          // build a simple query to check for an existing record
+          let soql = `SELECT Id FROM Transaction__c WHERE ${field} = '${value.replace(/'/g, "\\'")}'`;
+          if (transactionData.RecordTypeId) {
+            soql += ` AND RecordTypeId = '${transactionData.RecordTypeId}'`;
+          }
+          soql += ' LIMIT 1';
+          const queryResult = await this.conn.query(soql);
+          if (
+            queryResult &&
+            Array.isArray(queryResult.records) &&
+            queryResult.records.length > 0 &&
+            queryResult.records[0].Id
+          ) {
+            overrideId = queryResult.records[0].Id;
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      // if anything goes wrong while checking for duplicates, log but continue;
+      // we'll simply fall back to the normal upsert behaviour and risk a
+      // duplicate rather than failing the entire operation.
+      logger.warn('[SalesforceCrm] duplicate lookup failed, proceeding with upsert', {
+        error: err.message,
+      });
+    }
+
+    // final defensive check: if we still haven't found a record, try matching on
+    // contact + amount + received date. only use the result when exactly one
+    // record matches; multiple hits are ambiguous and therefore ignored.
+    if (!overrideId) {
+      try {
+        const { Contact__c: contact, Amount_Gross__c: amount, Received_At__c: received } =
+          transactionData;
+        if (
+          typeof contact === 'string' && contact.trim().length > 0 &&
+          typeof amount === 'number' && !Number.isNaN(amount) &&
+          typeof received === 'string' && received.trim().length > 0
+        ) {
+          let soql =
+            `SELECT Id FROM Transaction__c WHERE Contact__c = '${contact.replace(/'/g, "\\'")}'` +
+            ` AND Amount_Gross__c = ${amount}` +
+            ` AND Received_At__c = '${received.replace(/'/g, "\\'")}'`;
+          if (transactionData.RecordTypeId) {
+            soql += ` AND RecordTypeId = '${transactionData.RecordTypeId}'`;
+          }
+          soql += ' LIMIT 2';
+          const queryResult = await this.conn.query(soql);
+          if (
+            queryResult &&
+            Array.isArray(queryResult.records) &&
+            queryResult.records.length === 1 &&
+            queryResult.records[0].Id
+          ) {
+            overrideId = queryResult.records[0].Id;
+          }
+        }
+      } catch (err) {
+        logger.warn('[SalesforceCrm] content lookup failed, proceeding with upsert', {
+          error: err.message,
+        });
+      }
+    }
+
+    try {
+      if (overrideId) {
+        // if we found an existing record use its Id and make sure the incoming
+        // external id field is included in the payload so future lookups can
+        // benefit from it
+        transactionData.Id = overrideId;
+        externalIdField = 'Id';
+      }
+
       const result = await this.conn
         .sobject('Transaction__c')
         .upsert(transactionData, externalIdField);

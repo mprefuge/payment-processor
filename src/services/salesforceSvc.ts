@@ -60,6 +60,25 @@ export type TransactionExternalIdField =
   | 'stripe_credit_note_id__c'
   | 'stripe_payout_id__c';
 
+// list of all fields that are treated as unique identifiers on the Transaction object
+// fields that by themselves are considered unique identifiers for a
+// transaction.  `stripe_payout_id__c` is only unique when the record type is
+// an actual payout; other transaction types (charges, refunds, etc.) may
+// include the payout ID as part of their metadata, so it is not globally
+// unique and must be skipped in those cases.
+const TRANSACTION_EXTERNAL_ID_FIELDS: TransactionExternalIdField[] = [
+  'stripe_payment_intent_id__c',
+  'stripe_refund_id__c',
+  'stripe_dispute_id__c',
+  'stripe_balance_transaction_id__c',
+  'stripe_checkout_session_id__c',
+  'stripe_charge_id__c',
+  'stripe_subscription_id__c',
+  'stripe_invoice_id__c',
+  'stripe_credit_note_id__c',
+  // payout id excluded by default; handled specially below
+];
+
 export interface QuickBooksDocumentReference {
   type: string;
   id: string;
@@ -292,6 +311,74 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return recordWithId?.Id ?? null;
   };
 
+  // look through every external id field present on the DTO and return the first
+  // existing Salesforce transaction id that matches. This lets callers avoid
+  // inserting a new record when a different unique identifier has already been
+  // stored on an earlier event.
+  const findExistingTransactionIdForDto = async (
+    dto: TransactionUpsertDTO,
+    recordTypeId: string
+  ): Promise<string | null> => {
+    // build list of fields to inspect based on transaction type
+    const fields: TransactionExternalIdField[] = [...TRANSACTION_EXTERNAL_ID_FIELDS];
+    if (dto.transaction_type__c === 'payout') {
+      fields.push('stripe_payout_id__c');
+    }
+
+    for (const field of fields) {
+      const value = dto[field];
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const existingId = await resolveExistingTransactionId(field, value.trim(), recordTypeId);
+        if (existingId) {
+          return existingId;
+        }
+      }
+    }
+    return null;
+  };
+
+  // If no matching transaction was found by any external identifier, perform a
+  // last-resort search by contact, amount and received date.  Only return an
+  // ID when exactly one record matches; multiple hits are treated as ambiguous
+  // and we do not override in that case (caller will insert a new row).
+  const findExistingByCustomerAmountDate = async (
+    dto: TransactionUpsertDTO,
+    recordTypeId: string
+  ): Promise<string | null> => {
+    const contact = dto.contact__c;
+    const amount = dto.amount_gross__c;
+    const received = dto.received_at__c;
+
+    if (
+      typeof contact === 'string' && contact.trim().length > 0 &&
+      typeof amount === 'number' && !Number.isNaN(amount) &&
+      typeof received === 'string' && received.trim().length > 0
+    ) {
+      const escapedContact = escapeForSoqlLiteral(contact.trim());
+      const escapedReceived = escapeForSoqlLiteral(received.trim());
+      let soql =
+        `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
+        ` AND Amount_Gross__c = ${amount}` +
+        ` AND Received_At__c = '${escapedReceived}'`;
+
+      if (recordTypeId) {
+        const escapedRecordTypeId = escapeForSoqlLiteral(recordTypeId);
+        soql += ` AND RecordTypeId = '${escapedRecordTypeId}'`;
+      }
+
+      // limit 2 so we can detect ambiguity cheaply
+      soql += ' LIMIT 2';
+
+      const result = await connection.query<TransactionLookupRecord>(soql);
+      const records = toLookupRecords(result);
+      if (records.length === 1 && records[0].Id) {
+        return records[0].Id;
+      }
+    }
+
+    return null;
+  };
+
   const upsertTransactionByExternalId = async (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
@@ -302,7 +389,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       throw new Error(`Transaction payload must include a value for ${key}.`);
     }
     const normalizedExternalId = externalId.trim();
-    const overrideId =
+    let overrideId =
       typeof options.overrideId === 'string' && options.overrideId.trim().length > 0
         ? options.overrideId.trim()
         : null;
@@ -310,6 +397,25 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     // Determine record type based on transaction type
     const recordTypeName = dto.transaction_type__c === 'payout' ? 'Payout' : 'General';
     const recordTypeId = await resolveRecordTypeId(recordTypeName);
+
+    // if the caller didn't already give us an override id, attempt to locate
+    // an existing transaction using any of the external ID fields that may be
+    // populated in the DTO.  This prevents creation of duplicates when a later
+    // webhook arrives with a different identifier than the one saved earlier.
+    if (!overrideId) {
+      const existing = await findExistingTransactionIdForDto(dto, recordTypeId);
+      if (existing) {
+        overrideId = existing;
+      } else {
+        // final safety net - attempt a match on contact/amount/received date
+        const byContent = await findExistingByCustomerAmountDate(dto, recordTypeId);
+        if (byContent) {
+          // found a record by the secondary key set; treat it as the existing
+          // transaction so the upsert will update rather than insert.
+          overrideId = byContent;
+        }
+      }
+    }
 
     const records = [
       sanitizeTransactionRecord({
@@ -319,8 +425,11 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         RecordTypeId: recordTypeId,
       }),
     ];
+
+    const externalIdFieldToUse = overrideId ? 'Id' : resolveExternalIdField(key);
+
     const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, records, resolveExternalIdField(key), {
+      await connection.upsert(TRANSACTION_OBJECT, records, externalIdFieldToUse, {
         allOrNone: true,
       })
     );
