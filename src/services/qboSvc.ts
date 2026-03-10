@@ -718,34 +718,114 @@ const queryQuickBooks = async <T = unknown>(
   return [values as T];
 };
 
+const extractReferenceFromRecord = (
+  record: Record<string, unknown> | null | undefined,
+  idField: string,
+  nameField: string
+): QuickBooksReference | null => {
+  if (!record) {
+    return null;
+  }
+
+  const idValue = record[idField];
+  if (typeof idValue !== 'string' && typeof idValue !== 'number') {
+    return null;
+  }
+
+  const value = typeof idValue === 'number' ? idValue.toString() : idValue.trim();
+  if (!value) {
+    return null;
+  }
+
+  const rawName = record[nameField];
+  const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined;
+  return { value, name };
+};
+
+const buildCustomerCacheKey = (kind: 'email' | 'displayName', value: string): string =>
+  `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:customer:${kind}:${value
+    .trim()
+    .toLowerCase()}`;
+
+const cacheCustomerReference = (
+  reference: QuickBooksReference,
+  email?: string | null,
+  displayName?: string | null
+): void => {
+  if (email && email.trim()) {
+    customerLookupCache.set(buildCustomerCacheKey('email', email), reference);
+  }
+
+  if (displayName && displayName.trim()) {
+    customerLookupCache.set(buildCustomerCacheKey('displayName', displayName), reference);
+  }
+};
+
 const findCustomerByEmail = async (email: string, context: QuickBooksRequestContext) => {
+  const normalizedEmail = email.trim().toLowerCase();
+  const cached = customerLookupCache.get(buildCustomerCacheKey('email', normalizedEmail));
+  if (cached) {
+    return {
+      Id: cached.value,
+      DisplayName: cached.name,
+      PrimaryEmailAddr: { Address: normalizedEmail },
+    } as Record<string, unknown>;
+  }
+
   const query = `select Id, DisplayName, PrimaryEmailAddr from Customer where PrimaryEmailAddr = '${escapeQueryValue(
-    email
+    normalizedEmail
   )}'`;
   const customers = await queryQuickBooks<Record<string, unknown>>(query, context);
 
-  return (
+  const existing =
     customers.find((customer) => {
       const addr = customer?.PrimaryEmailAddr as { Address?: string } | undefined;
       const value = addr?.Address;
-      return typeof value === 'string' && value.trim().toLowerCase() === email.toLowerCase();
-    }) ?? null
-  );
+      return typeof value === 'string' && value.trim().toLowerCase() === normalizedEmail;
+    }) ?? null;
+
+  const reference = extractReferenceFromRecord(existing, 'Id', 'DisplayName');
+  if (reference) {
+    cacheCustomerReference(reference, normalizedEmail, reference.name ?? null);
+  }
+
+  return existing;
 };
 
 const findCustomerByDisplayName = async (
   displayName: string,
   context: QuickBooksRequestContext
 ) => {
-  const query = `select Id, DisplayName from Customer where DisplayName = '${escapeQueryValue(displayName)}'`;
+  const normalizedDisplayName = displayName.trim();
+  const cached = customerLookupCache.get(
+    buildCustomerCacheKey('displayName', normalizedDisplayName)
+  );
+  if (cached) {
+    return {
+      Id: cached.value,
+      DisplayName: cached.name ?? normalizedDisplayName,
+    } as Record<string, unknown>;
+  }
+
+  const query = `select Id, DisplayName from Customer where DisplayName = '${escapeQueryValue(normalizedDisplayName)}'`;
   const customers = await queryQuickBooks<Record<string, unknown>>(query, context);
 
-  return (
+  const existing =
     customers.find((customer) => {
       const name = customer?.DisplayName;
-      return typeof name === 'string' && name.trim().toLowerCase() === displayName.toLowerCase();
-    }) ?? null
-  );
+      return (
+        typeof name === 'string' && name.trim().toLowerCase() === normalizedDisplayName.toLowerCase()
+      );
+    }) ?? null;
+
+  const reference = extractReferenceFromRecord(existing, 'Id', 'DisplayName');
+  if (reference) {
+    const recordEmail = (existing?.PrimaryEmailAddr as { Address?: string } | undefined)?.Address;
+    const normalizedEmail = typeof recordEmail === 'string' ? recordEmail.trim().toLowerCase() : null;
+    cacheCustomerReference(reference, normalizedEmail, normalizedDisplayName);
+  }
+
+  return existing;
 };
 
 const fetchQuickBooksCustomer = async (
@@ -931,11 +1011,14 @@ const ensureSalesReceiptCustomer = async (
           }
         }
 
+        const reference: QuickBooksReference = {
+          value,
+          name: resolvedDisplayName,
+        };
+        cacheCustomerReference(reference, email, resolvedDisplayName);
+
         return {
-          ref: {
-            value,
-            name: resolvedDisplayName,
-          },
+          ref: reference,
           email,
           billingAddress,
           shippingAddress,
@@ -996,11 +1079,21 @@ const ensureSalesReceiptCustomer = async (
         if (typeof id === 'string' || typeof id === 'number') {
           const value = typeof id === 'number' ? id.toString() : id.trim();
           if (value) {
+            const duplicateDisplayName =
+              typeof duplicate.DisplayName === 'string' ? duplicate.DisplayName : displayName;
+            cacheCustomerReference(
+              {
+                value,
+                name: duplicateDisplayName,
+              },
+              email,
+              duplicateDisplayName
+            );
+
             return {
               ref: {
                 value,
-                name:
-                  typeof duplicate.DisplayName === 'string' ? duplicate.DisplayName : displayName,
+                name: duplicateDisplayName,
               },
               email,
               billingAddress,
@@ -1029,8 +1122,10 @@ const ensureSalesReceiptCustomer = async (
     typeof customer?.DisplayName === 'string' ? customer.DisplayName : displayName;
 
   if (typeof idValue === 'string' && idValue.trim()) {
+    const reference: QuickBooksReference = { value: idValue.trim(), name: resolvedDisplayName };
+    cacheCustomerReference(reference, email, resolvedDisplayName);
     return {
-      ref: { value: idValue.trim(), name: resolvedDisplayName },
+      ref: reference,
       email,
       billingAddress,
       shippingAddress,
@@ -1038,8 +1133,10 @@ const ensureSalesReceiptCustomer = async (
   }
 
   if (typeof idValue === 'number' && Number.isFinite(idValue)) {
+    const reference: QuickBooksReference = { value: idValue.toString(), name: resolvedDisplayName };
+    cacheCustomerReference(reference, email, resolvedDisplayName);
     return {
-      ref: { value: idValue.toString(), name: resolvedDisplayName },
+      ref: reference,
       email,
       billingAddress,
       shippingAddress,
@@ -1614,6 +1711,8 @@ const buildQboUrl = (entity: string): string => {
 
 const accountLookupCache = new Map<string, string>();
 const itemLookupCache = new Map<string, string>();
+const customerLookupCache = new Map<string, QuickBooksReference>();
+const referenceLookupCache = new Map<string, QuickBooksReference>();
 
 interface QuickBooksRequestContext {
   request: (url: string, init?: RequestInit) => Promise<Response>;
@@ -1703,6 +1802,33 @@ const isLookupRequired = (ref: AccountRefWithMetadata): boolean => {
 
 const buildAccountCacheKey = (name: string): string =>
   `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:${name.toLowerCase()}`;
+
+const buildReferenceCacheKey = (entityType: string, name: string): string =>
+  `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:reference:${entityType
+    .trim()
+    .toLowerCase()}:${name.trim().toLowerCase()}`;
+
+const findAccountRecordByName = async (
+  accountName: string,
+  context: QuickBooksRequestContext
+): Promise<Record<string, unknown> | null> => {
+  const normalizedName = accountName.trim();
+  if (!normalizedName) {
+    return null;
+  }
+
+  const query =
+    `SELECT Id, Name, AccountType, AccountSubType, Active, CurrencyRef, Classification ` +
+    `FROM Account WHERE Name = '${escapeQueryValue(normalizedName)}'`;
+  const accounts = await queryQuickBooks<Record<string, unknown>>(query, context);
+
+  return (
+    accounts.find((account) => {
+      const name = account?.Name;
+      return typeof name === 'string' && name.trim().toLowerCase() === normalizedName.toLowerCase();
+    }) ?? accounts[0] ?? null
+  );
+};
 
 const configuredRefundAccountName = (() => {
   try {
@@ -2880,38 +3006,27 @@ export const ensureCustomer = async (
   options?: PostOptions
 ): Promise<QuickBooksReference> => {
   const context = await createRequestContext(options);
+  const normalizedDisplayName = truncate(customerName, 99) ?? customerName;
+  const normalizedEmail = normalizeEmail(email);
 
   // If email is provided, try to find customer by email first
-  if (email) {
+  if (normalizedEmail) {
     try {
-      const emailQuery = `SELECT Id, DisplayName FROM Customer WHERE PrimaryEmailAddr = '${email.replace(/'/g, "\\'")}'`;
-      const queryResult = await context.request(
-        `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(emailQuery)}`,
-        {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-          },
-        }
-      );
-
-      const data = await queryResult.json();
-      if (data.QueryResponse?.Customer?.length > 0) {
-        const customer = data.QueryResponse.Customer[0];
+      const customer = await findCustomerByEmail(normalizedEmail, context);
+      const reference = extractReferenceFromRecord(customer, 'Id', 'DisplayName');
+      if (reference) {
+        cacheCustomerReference(reference, normalizedEmail, reference.name ?? normalizedDisplayName);
         logger.info('Found existing customer by email', {
           customerName,
-          email,
-          customerId: customer.Id,
+          email: normalizedEmail,
+          customerId: reference.value,
         });
-        return {
-          value: customer.Id,
-          name: customer.DisplayName,
-        };
+        return reference;
       }
     } catch (error) {
       logger.warn('Failed to query for customer by email, will try by name', {
         customerName,
-        email,
+        email: normalizedEmail,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -2919,29 +3034,15 @@ export const ensureCustomer = async (
 
   // Try to find existing customer by name
   try {
-    const queryResult = await context.request(
-      `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
-        `SELECT Id, DisplayName FROM Customer WHERE DisplayName = '${customerName.replace(/'/g, "\\'")}'`
-      )}`,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-      }
-    );
-
-    const data = await queryResult.json();
-    if (data.QueryResponse?.Customer?.length > 0) {
-      const customer = data.QueryResponse.Customer[0];
+    const customer = await findCustomerByDisplayName(normalizedDisplayName, context);
+    const reference = extractReferenceFromRecord(customer, 'Id', 'DisplayName');
+    if (reference) {
+      cacheCustomerReference(reference, normalizedEmail, normalizedDisplayName);
       logger.info('Found existing customer by name', {
         customerName,
-        customerId: customer.Id,
+        customerId: reference.value,
       });
-      return {
-        value: customer.Id,
-        name: customer.DisplayName,
-      };
+      return reference;
     }
   } catch (error) {
     logger.warn('Failed to query for existing customer, will attempt to create', {
@@ -2951,12 +3052,12 @@ export const ensureCustomer = async (
   }
 
   // Customer doesn't exist, create it
-  logger.info('Creating new customer', { customerName, email });
+  logger.info('Creating new customer', { customerName, email: normalizedEmail });
   const customerData = {
-    DisplayName: customerName,
-    ...(email && {
+    DisplayName: normalizedDisplayName,
+    ...(normalizedEmail && {
       PrimaryEmailAddr: {
-        Address: email,
+        Address: normalizedEmail,
       },
     }),
   };
@@ -2981,15 +3082,18 @@ export const ensureCustomer = async (
   }
 
   const result = await response.json();
+  const createdReference: QuickBooksReference = {
+    value: result.Customer.Id,
+    name: result.Customer.DisplayName || normalizedDisplayName,
+  };
+  cacheCustomerReference(createdReference, normalizedEmail, createdReference.name ?? null);
+
   logger.info('Created new customer', {
     customerName,
-    email,
+    email: normalizedEmail,
     customerId: result.Customer.Id,
   });
-  return {
-    value: result.Customer.Id,
-    name: result.Customer.DisplayName || customerName,
-  };
+  return createdReference;
 };
 
 export const ensureAccount = async (
@@ -3001,26 +3105,27 @@ export const ensureAccount = async (
 
   // First, try to find existing account by name
   try {
-    const queryResult = await context.request(
-      `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
-        `SELECT Id, Name, AccountType, AccountSubType, Active, CurrencyRef, Classification FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`
-      )}`,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-      }
-    );
+    const account = await findAccountRecordByName(accountName, context);
+    if (account) {
+      const accountId = account.Id;
+      const accountResolvedName = account.Name;
+      const resolvedId =
+        typeof accountId === 'number' ? accountId.toString() : typeof accountId === 'string' ? accountId.trim() : null;
+      const resolvedName =
+        typeof accountResolvedName === 'string' && accountResolvedName.trim()
+          ? accountResolvedName.trim()
+          : accountName;
 
-    const data = await queryResult.json();
-    if (data.QueryResponse?.Account?.length > 0) {
-      const account = data.QueryResponse.Account[0];
+      if (!resolvedId) {
+        throw new Error(
+          `Account "${accountName}" exists but does not provide a usable ID. Please verify the account in QuickBooks.`
+        );
+      }
 
       // Log the account type for debugging
       logger.info('Found existing account', {
         accountName,
-        accountId: account.Id,
+        accountId: resolvedId,
         accountType: account.AccountType,
         accountSubType: account.AccountSubType,
         active: account.Active,
@@ -3043,12 +3148,14 @@ export const ensureAccount = async (
       // For bank accounts, check if the subtype is appropriate for deposits
       if (accountType === 'Bank' && account.AccountType === 'Bank') {
         const validBankSubTypes = ['Checking', 'Savings', 'MoneyMarket'];
-        if (!validBankSubTypes.includes(account.AccountSubType)) {
+        const accountSubType =
+          typeof account.AccountSubType === 'string' ? account.AccountSubType : '';
+        if (!validBankSubTypes.includes(accountSubType)) {
           const errorMsg = `Account "${accountName}" is a bank account but has subtype "${account.AccountSubType}". For deposit operations, the account must have a subtype of Checking, Savings, or MoneyMarket. Please use a different bank account or update the account subtype in QuickBooks.`;
           logger.error('Bank account has invalid subtype for deposits', {
             accountName,
             accountId: account.Id,
-            accountSubType: account.AccountSubType,
+            accountSubType,
             validSubTypes: validBankSubTypes,
           });
           throw new Error(errorMsg);
@@ -3068,8 +3175,8 @@ export const ensureAccount = async (
       }
 
       return {
-        value: account.Id,
-        name: account.Name,
+        value: resolvedId,
+        name: resolvedName,
       };
     }
   } catch (error) {
@@ -3208,32 +3315,31 @@ export const queryReference = async (
   name: string,
   options?: PostOptions
 ): Promise<QuickBooksReference | null> => {
+  const cacheKey = buildReferenceCacheKey(entityType, name);
+  const cached = referenceLookupCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const context = await createRequestContext(options);
 
   try {
-    const queryResult = await context.request(
-      `${QBO_BASE_URL[env.quickBooks.environment]}/${env.quickBooks.realmId}/query?query=${encodeURIComponent(
-        `SELECT Id, Name FROM ${entityType} WHERE Name = '${name.replace(/'/g, "\\'")}'`
-      )}`,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-      }
-    );
+    const queryText = `SELECT Id, Name FROM ${entityType} WHERE Name = '${escapeQueryValue(name)}'`;
+    const entities = await queryQuickBooks<Record<string, unknown>>(queryText, context);
+    const entity =
+      entities.find((candidate) => {
+        const candidateName = candidate?.Name;
+        return typeof candidateName === 'string' && candidateName.trim().toLowerCase() === name.trim().toLowerCase();
+      }) ?? entities[0] ?? null;
 
-    const data = await queryResult.json();
-    if (data.QueryResponse?.[entityType]?.length > 0) {
-      const entity = data.QueryResponse[entityType][0];
+    const reference = extractReferenceFromRecord(entity, 'Id', 'Name');
+    if (reference) {
+      referenceLookupCache.set(cacheKey, reference);
       logger.info(`Found existing ${entityType}`, {
         name,
-        id: entity.Id,
+        id: reference.value,
       });
-      return {
-        value: entity.Id,
-        name: entity.Name,
-      };
+      return reference;
     }
   } catch (error) {
     logger.warn(`Failed to query for ${entityType}`, {
@@ -3251,9 +3357,16 @@ export const ensureReference = async (
   createData?: any,
   options?: PostOptions
 ): Promise<QuickBooksReference> => {
+  const cacheKey = buildReferenceCacheKey(entityType, name);
+  const cached = referenceLookupCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   // First, try to find existing entity
   const existing = await queryReference(entityType, name, options);
   if (existing) {
+    referenceLookupCache.set(cacheKey, existing);
     return existing;
   }
 
@@ -3280,23 +3393,28 @@ export const ensureReference = async (
 
   if (!response.ok) {
     const errorText = await response.text();
-    
+
     // Handle duplicate name errors by extracting the existing ID
     if (response.status === 400 && errorText && /Duplicate Name Exists Error/i.test(errorText)) {
       const idMatch = errorText.match(/Id=(\d+)/);
       if (idMatch) {
         const existingId = idMatch[1];
-        logger.warn(`Entity ${entityType} "${name}" already exists with ID ${existingId}, returning existing reference`, {
-          name,
-          existingId,
-        });
-        return {
+        const reference = {
           value: existingId,
           name,
         };
+        referenceLookupCache.set(cacheKey, reference);
+        logger.warn(
+          `Entity ${entityType} "${name}" already exists with ID ${existingId}, returning existing reference`,
+          {
+            name,
+            existingId,
+          }
+        );
+        return reference;
       }
     }
-    
+
     logger.error(`Failed to create ${entityType}`, {
       name,
       status: response.status,
@@ -3309,14 +3427,17 @@ export const ensureReference = async (
 
   const result = await response.json();
   const entity = result[entityType];
+  const createdReference: QuickBooksReference = {
+    value: entity.Id,
+    name: entity.Name || name,
+  };
+  referenceLookupCache.set(cacheKey, createdReference);
+
   logger.info(`Successfully created ${entityType}`, {
     name,
     id: entity.Id,
   });
-  return {
-    value: entity.Id,
-    name: entity.Name || name,
-  };
+  return createdReference;
 };
 
 export default {
