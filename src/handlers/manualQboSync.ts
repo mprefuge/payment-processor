@@ -260,17 +260,6 @@ interface QuickBooksAccount {
   AccountSubType?: string;
 }
 
-// Calculate total amount from document lines
-const calculateTotal = (data: any): number => {
-  if (!data.Line || !Array.isArray(data.Line)) {
-    return 0;
-  }
-
-  return data.Line.reduce((total: number, line: any) => {
-    return total + (line.Amount || 0);
-  }, 0);
-};
-
 // Generate DocNumber in format "MAN-YYYY-MMDDHHMMSS"
 const generateDocNumber = (): string => {
   const now = new Date();
@@ -284,42 +273,6 @@ const generateDocNumber = (): string => {
   return `MAN-${year}-${dateTimeStr}`;
 };
 
-// Check for duplicate documents by DocNumber
-const checkDuplicate = async (docNumber: string, type: QuickBooksDocType): Promise<boolean> => {
-  try {
-    let queryStr: string;
-
-    switch (type) {
-      case 'sales-receipt':
-        queryStr = `SELECT Id FROM SalesReceipt WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
-        break;
-      case 'journal-entry':
-        queryStr = `SELECT Id FROM JournalEntry WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
-        break;
-      case 'bank-deposit':
-        queryStr = `SELECT Id FROM Deposit WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
-        break;
-      default:
-        return false;
-    }
-
-    const result = await query<{ QueryResponse: any }>(queryStr);
-    const responseKey =
-      type === 'sales-receipt'
-        ? 'SalesReceipt'
-        : type === 'journal-entry'
-          ? 'JournalEntry'
-          : 'Deposit';
-
-    return !!(result.QueryResponse?.[responseKey]?.length > 0);
-  } catch (error) {
-    logger.warn(`Failed to check for duplicate ${type} with DocNumber ${docNumber}`, {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    // If we can't check for duplicates, assume it's not a duplicate to avoid blocking
-    return false;
-  }
-};
 
 // Retrieve sales receipt from QBO by ID
 const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> => {
@@ -433,72 +386,6 @@ const getAccountIdByName = async (
   }
 };
 
-// Build bank deposit lines from sales receipt IDs
-const buildBankDepositFromSalesReceipts = async (
-  salesReceiptIds: string[],
-  context: InvocationContext
-): Promise<{ lines: any[]; totalAmount: number }> => {
-  const lines: any[] = [];
-  let totalAmount = 0;
-
-  logger.info('Building bank deposit from sales receipts', {
-    salesReceiptIds,
-    count: salesReceiptIds.length,
-    invocationId: context.invocationId,
-  });
-
-  for (const salesReceiptId of salesReceiptIds) {
-    const salesReceipt = await getSalesReceiptById(salesReceiptId);
-
-    if (!salesReceipt) {
-      throw new Error(`Sales receipt with ID ${salesReceiptId} not found in QuickBooks`);
-    }
-
-    // Verify that the sales receipt is deposited to Undeposited Funds
-    const depositToAccount = salesReceipt.DepositToAccountRef?.name;
-    if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
-      logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
-        salesReceiptId,
-        currentAccount: depositToAccount,
-        invocationId: context.invocationId,
-      });
-    }
-
-    // Get the total amount from the sales receipt
-    const amount = salesReceipt.TotalAmt || 0;
-    totalAmount += amount;
-
-    // Create a deposit line referencing the sales receipt
-    const depositLine: any = {
-      Amount: amount,
-      DetailType: 'DepositLineDetail',
-      DepositLineDetail: {
-        LinkedTxn: [
-          {
-            TxnId: salesReceipt.Id,
-            TxnType: 'SalesReceipt',
-          },
-        ],
-      },
-    };
-
-    lines.push(depositLine);
-
-    logger.info(`Added sales receipt to deposit`, {
-      salesReceiptId,
-      amount,
-      invocationId: context.invocationId,
-    });
-  }
-
-  logger.info('Bank deposit lines built successfully', {
-    lineCount: lines.length,
-    totalAmount,
-    invocationId: context.invocationId,
-  });
-
-  return { lines, totalAmount };
-};
 
 // Validate that required references are resolved
 const validateRequiredReferences = (data: any, type: QuickBooksDocType): void => {

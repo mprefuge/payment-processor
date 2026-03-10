@@ -60,12 +60,6 @@ export type TransactionExternalIdField =
   | 'stripe_credit_note_id__c'
   | 'stripe_payout_id__c';
 
-// list of all fields that are treated as unique identifiers on the Transaction object
-// fields that by themselves are considered unique identifiers for a
-// transaction.  `stripe_payout_id__c` is only unique when the record type is
-// an actual payout; other transaction types (charges, refunds, etc.) may
-// include the payout ID as part of their metadata, so it is not globally
-// unique and must be skipped in those cases.
 const TRANSACTION_EXTERNAL_ID_FIELDS: TransactionExternalIdField[] = [
   'stripe_payment_intent_id__c',
   'stripe_refund_id__c',
@@ -76,7 +70,6 @@ const TRANSACTION_EXTERNAL_ID_FIELDS: TransactionExternalIdField[] = [
   'stripe_subscription_id__c',
   'stripe_invoice_id__c',
   'stripe_credit_note_id__c',
-  // payout id excluded by default; handled specially below
 ];
 
 export interface QuickBooksDocumentReference {
@@ -234,6 +227,8 @@ const mergeStripeCustomerIds = (existingValue: unknown, stripeCustomerId: string
 };
 
 export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): SalesforceSvc => {
+  const recordTypeIdCache = new Map<string, string>();
+
   const resolveExternalIdField = (field: TransactionExternalIdField): string =>
     TRANSACTION_FIELD_API_NAMES[field] ?? field;
 
@@ -256,15 +251,19 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return [];
   };
 
-  /**
-   * Retrieve a record type ID for the provided sObject and record type name.
-   * falls back to TRANSACTION_OBJECT when no object is supplied to maintain
-   * compatibility with existing callers.
-   */
+  const buildInLiteralList = (values: string[]): string =>
+    values.map((value) => `'${escapeForSoqlLiteral(value)}'`).join(',');
+
   const resolveRecordTypeId = async (
     recordTypeName: string,
     sObject: string = TRANSACTION_OBJECT
   ): Promise<string> => {
+    const cacheKey = `${sObject}::${recordTypeName}`;
+    const cachedRecordTypeId = recordTypeIdCache.get(cacheKey);
+    if (cachedRecordTypeId) {
+      return cachedRecordTypeId;
+    }
+
     const escapedName = escapeForSoqlLiteral(recordTypeName);
     const escapedObject = escapeForSoqlLiteral(sObject);
     const soql = `SELECT Id FROM RecordType WHERE SObjectType = '${escapedObject}' AND Name = '${escapedName}' LIMIT 1`;
@@ -281,6 +280,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       throw new Error(`Record type '${recordTypeName}' not found for ${sObject}`);
     }
 
+    recordTypeIdCache.set(cacheKey, recordWithId.Id);
     return recordWithId.Id;
   };
 
@@ -311,15 +311,10 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return recordWithId?.Id ?? null;
   };
 
-  // look through every external id field present on the DTO and return the first
-  // existing Salesforce transaction id that matches. This lets callers avoid
-  // inserting a new record when a different unique identifier has already been
-  // stored on an earlier event.
   const findExistingTransactionIdForDto = async (
     dto: TransactionUpsertDTO,
     recordTypeId: string
   ): Promise<string | null> => {
-    // build list of fields to inspect based on transaction type
     const fields: TransactionExternalIdField[] = [...TRANSACTION_EXTERNAL_ID_FIELDS];
     if (dto.transaction_type__c === 'payout') {
       fields.push('stripe_payout_id__c');
@@ -337,10 +332,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return null;
   };
 
-  // If no matching transaction was found by any external identifier, perform a
-  // last-resort search by contact, amount and received date.  Only return an
-  // ID when exactly one record matches; multiple hits are treated as ambiguous
-  // and we do not override in that case (caller will insert a new row).
   const findExistingByCustomerAmountDate = async (
     dto: TransactionUpsertDTO,
     recordTypeId: string
@@ -366,7 +357,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         soql += ` AND RecordTypeId = '${escapedRecordTypeId}'`;
       }
 
-      // limit 2 so we can detect ambiguity cheaply
       soql += ' LIMIT 2';
 
       const result = await connection.query<TransactionLookupRecord>(soql);
@@ -394,24 +384,16 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         ? options.overrideId.trim()
         : null;
 
-    // Determine record type based on transaction type
     const recordTypeName = dto.transaction_type__c === 'payout' ? 'Payout' : 'General';
     const recordTypeId = await resolveRecordTypeId(recordTypeName);
 
-    // if the caller didn't already give us an override id, attempt to locate
-    // an existing transaction using any of the external ID fields that may be
-    // populated in the DTO.  This prevents creation of duplicates when a later
-    // webhook arrives with a different identifier than the one saved earlier.
     if (!overrideId) {
       const existing = await findExistingTransactionIdForDto(dto, recordTypeId);
       if (existing) {
         overrideId = existing;
       } else {
-        // final safety net - attempt a match on contact/amount/received date
         const byContent = await findExistingByCustomerAmountDate(dto, recordTypeId);
         if (byContent) {
-          // found a record by the secondary key set; treat it as the existing
-          // transaction so the upsert will update rather than insert.
           overrideId = byContent;
         }
       }
@@ -448,7 +430,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         );
 
         if (fallbackId) {
-          // Update existing transaction of the same type
           const fallbackRecords = [
             sanitizeTransactionRecord({
               ...dto,
@@ -473,13 +454,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
           return fallbackResult;
         } else {
-          // No existing transaction with same external ID and record type,
-          // but external ID is used by a different record type.
-          // Create new record without external ID to avoid conflict.
           const newRecord = sanitizeTransactionRecord({
             ...dto,
             RecordTypeId: recordTypeId,
-            // Don't set the external ID field to avoid uniqueness conflict
             [key]: undefined,
           });
 
@@ -496,7 +473,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
             throw new Error(insertMessage);
           }
 
-          // Convert create result to upsert result format
           return {
             ...insertResult,
             created: true,
@@ -524,16 +500,14 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       return [];
     }
 
-    // Query for existing transactions to avoid creating incomplete records
-    const existingQuery = `SELECT Id, Stripe_Balance_Transaction_Id__c FROM ${TRANSACTION_OBJECT} WHERE Stripe_Balance_Transaction_Id__c IN ('${normalizedIds.join("','")}')`;
+    const idList = buildInLiteralList(normalizedIds);
+    const existingQuery = `SELECT Id, Stripe_Balance_Transaction_Id__c FROM ${TRANSACTION_OBJECT} WHERE Stripe_Balance_Transaction_Id__c IN (${idList})`;
     const existingRecords = toLookupRecords(await connection.query(existingQuery));
 
     if (existingRecords.length === 0) {
-      // No existing transactions to link
       return [];
     }
 
-    // Only update existing transactions
     const records = existingRecords.map((existing) => ({
       Id: (existing as any).Id,
       Stripe_Payout_Id__c: normalizedPayoutId,
@@ -642,46 +616,37 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     };
   };
 
-  // cached record type id for Contact so we only query Salesforce once
   let cachedContactRecordTypeId: string | undefined;
 
   const upsertCustomerByStripeId = async (dto: CustomerUpsertDTO): Promise<UpsertResult> => {
     const stripeCustomerId = ensureNonEmpty(dto.stripe_customer_id__c, 'Stripe Customer ID');
     const name = ensureNonEmpty(dto.Name, 'Customer Name');
 
-    // Parse name into FirstName and LastName if not provided
     let firstName = dto.FirstName?.trim() || null;
     let lastName = dto.LastName?.trim() || null;
 
     if (!firstName && !lastName) {
-      // Split the full name
       const nameParts = name.trim().split(/\s+/);
       if (nameParts.length === 1) {
-        // Single name - use as LastName (Salesforce requirement)
         lastName = nameParts[0];
       } else if (nameParts.length >= 2) {
-        // Multiple parts - first is FirstName, rest is LastName
         firstName = nameParts[0];
         lastName = nameParts.slice(1).join(' ');
       }
     }
 
-    // Build SOQL query to search for existing contact
     const whereConditions: string[] = [];
 
-    // Search by Stripe Customer ID
     if (stripeCustomerId) {
       const escapedId = stripeCustomerId.replace(/'/g, "\\'");
       whereConditions.push(`Stripe_Customer_Id__c LIKE '%${escapedId}%'`);
     }
 
-    // Search by email
     if (dto.Email && dto.Email.trim()) {
       const escapedEmail = dto.Email.trim().replace(/'/g, "\\'");
       whereConditions.push(`Email = '${escapedEmail}'`);
     }
 
-    // Search by name combination
     if (firstName && lastName) {
       const escapedFirst = firstName.replace(/'/g, "\\'");
       const escapedLast = lastName.replace(/'/g, "\\'");
@@ -700,8 +665,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       const queryResult = await connection.query(query);
 
       if (queryResult.records && queryResult.records.length > 0) {
-        // Priority matching:
-        // 1. Exact Stripe Customer ID match
         const stripeIdMatch = queryResult.records.find((c: any) =>
           contactHasStripeCustomerId(c.Stripe_Customer_Id__c, stripeCustomerId)
         );
@@ -709,7 +672,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         if (stripeIdMatch) {
           existingContact = stripeIdMatch;
         } else if (firstName && lastName) {
-          // 2. Name match (both first and last name)
           const nameMatch = queryResult.records.find((c: any) => {
             const firstNameMatch =
               c.FirstName && firstName && c.FirstName.toLowerCase() === firstName.toLowerCase();
@@ -722,7 +684,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
             existingContact = nameMatch;
           }
         } else {
-          // 3. Use first result (email match)
           existingContact = queryResult.records[0];
         }
       }
@@ -731,12 +692,10 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     let result: UpsertResult;
 
     if (existingContact) {
-      // Update existing contact
       const updateFields: Record<string, any> = {
         Id: existingContact.Id,
       };
 
-      // Update Stripe Customer ID list if missing this Stripe ID
       if (stripeCustomerId) {
         const mergedStripeIds = mergeStripeCustomerIds(
           existingContact.Stripe_Customer_Id__c,
@@ -748,12 +707,10 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         }
       }
 
-      // Update email if provided and different
       if (dto.Email && dto.Email.trim() && dto.Email.trim() !== existingContact.Email) {
         updateFields.Email = dto.Email.trim();
       }
 
-      // Update name if provided and different
       if (firstName && firstName !== existingContact.FirstName) {
         updateFields.FirstName = firstName;
       }
@@ -761,7 +718,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         updateFields.LastName = lastName;
       }
 
-      // Only update if there are changes beyond the Id
       if (Object.keys(updateFields).length > 1) {
         const updateResult = await connection.sobject('Contact').update(updateFields as any);
 
@@ -780,7 +736,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
           errors: [],
         };
       } else {
-        // No changes needed, return existing contact as success
         result = {
           id: existingContact.Id,
           success: true,
@@ -789,7 +744,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         };
       }
     } else {
-      // Create new contact
       const contactRecord: Record<string, any> = {
         Stripe_Customer_Id__c: stripeCustomerId,
         LastName: lastName || name,
@@ -803,7 +757,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         contactRecord.Email = dto.Email.trim();
       }
 
-      // add record type id on creation
       if (!cachedContactRecordTypeId) {
         cachedContactRecordTypeId = await resolveRecordTypeId('Contact', 'Contact');
       }

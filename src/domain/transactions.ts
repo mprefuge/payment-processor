@@ -69,7 +69,6 @@ export const transactionUpsertHttpBodySchema = z.object({
 });
 
 export type TransactionUpsertDTO = z.infer<typeof transactionUpsertSchema>;
-export type TransactionsUpsertBody = z.infer<typeof transactionUpsertHttpBodySchema>;
 
 const metadataSchema = z.record(z.string(), z.unknown());
 

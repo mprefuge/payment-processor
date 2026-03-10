@@ -199,26 +199,115 @@ const toAmount = (cents) => {
   return cents / 100;
 };
 
-const collectStripePages = async (listFn, initialParams) => {
-  const results = [];
-  let params = { ...initialParams };
-  let hasMore = true;
+const createSummary = () => ({
+  totalPayments: 0,
+  successfulPayments: 0,
+  skippedPayments: 0,
+  paymentTypes: {
+    paid: 0,
+    refunded: 0,
+    disputed: 0,
+  },
+  customers: {
+    withCustomerId: 0,
+    withoutCustomerId: 0,
+    uniqueCustomerCount: 0,
+  },
+  salesforce: {
+    customerUpserts: 0,
+    paymentUpserts: 0,
+  },
+  errors: 0,
+});
 
-  while (hasMore) {
-    const response = await listFn(params);
-    const data = Array.isArray(response?.data) ? response.data : [];
-    results.push(...data);
+const hasReachedRuntimeLimit = (startedAt, maxRuntimeMs) => Date.now() - startedAt >= maxRuntimeMs;
 
-    hasMore = Boolean(response?.has_more && data.length > 0);
-    if (hasMore) {
-      params = {
-        ...params,
-        starting_after: data[data.length - 1].id,
-      };
-    }
+const hasReachedRecordLimit = (processedRecordCount, maxRecords) => processedRecordCount >= maxRecords;
+
+const resolveSyncOptions = ({ query, deps }) => {
+  const requestedDryRun = parseBoolean(query.dryRun, false);
+  const testMode = parseBoolean(deps.testMode, false);
+  const dryRun = testMode ? true : requestedDryRun;
+  const forcedByTestMode = testMode && !requestedDryRun;
+  const exampleLimit = parseExampleLimit(query.exampleLimit);
+  const format = typeof query.format === 'string' ? query.format.trim().toLowerCase() : '';
+  const exportCsv = format === 'csv';
+  const pageSize = parseIntegerWithBounds(
+    query.pageSize,
+    DEFAULT_PAGE_SIZE,
+    1,
+    MAX_PAGE_SIZE
+  );
+  const maxPages = parseIntegerWithBounds(
+    query.maxPages,
+    DEFAULT_MAX_PAGES,
+    1,
+    MAX_MAX_PAGES
+  );
+  const maxRuntimeMs = parseIntegerWithBounds(
+    query.maxRuntimeMs,
+    DEFAULT_MAX_RUNTIME_MS,
+    MIN_MAX_RUNTIME_MS,
+    MAX_MAX_RUNTIME_MS
+  );
+  const maxRecords = parseIntegerWithBounds(
+    query.maxRecords,
+    DEFAULT_MAX_RECORDS,
+    1,
+    MAX_MAX_RECORDS
+  );
+  const includeCustomerLookup = parseBoolean(
+    query.includeCustomerLookup,
+    !dryRun && !exportCsv
+  );
+  const requestedCursor =
+    typeof query.cursor === 'string' && query.cursor.trim().length > 0 ? query.cursor.trim() : null;
+
+  return {
+    dryRun,
+    testMode,
+    forcedByTestMode,
+    exampleLimit,
+    exportCsv,
+    pageSize,
+    maxPages,
+    maxRuntimeMs,
+    maxRecords,
+    includeCustomerLookup,
+    requestedCursor,
+  };
+};
+
+const fetchStripeCustomerSafely = async (stripe, customerId) => {
+  if (!customerId) {
+    return null;
   }
 
-  return results;
+  try {
+    const stripeCustomer = await stripe.customers.retrieve(customerId);
+    if (!stripeCustomer || stripeCustomer.deleted) {
+      return null;
+    }
+
+    return stripeCustomer;
+  } catch (error) {
+    return null;
+  }
+};
+
+const buildSalesforceCustomerPayload = (stripeCustomer) => {
+  if (!stripeCustomer) {
+    return null;
+  }
+
+  const { firstName, lastName } = splitName(stripeCustomer.name);
+  return {
+    stripe_customer_id__c: stripeCustomer.id,
+    Name: stripeCustomer.name || stripeCustomer.email || `Customer ${stripeCustomer.id}`,
+    Email: stripeCustomer.email || null,
+    FirstName: firstName,
+    LastName: lastName,
+  };
 };
 
 const fetchChargesPage = async (stripe, { limit, startingAfter }) => {
@@ -358,7 +447,6 @@ const readQuery = (request) => {
       };
     }
   } catch (error) {
-    // Ignore URL parsing errors and use empty query defaults.
   }
 
   return {};
@@ -378,66 +466,21 @@ const syncSalesforcePayments = async (request, context) => {
 
     const deps = resolveDependencies();
     const query = readQuery(request);
-
-    const requestedDryRun = parseBoolean(query.dryRun, false);
-    const testMode = parseBoolean(deps.testMode, false);
-    const dryRun = testMode ? true : requestedDryRun;
-    const forcedByTestMode = testMode && !requestedDryRun;
-    const exampleLimit = parseExampleLimit(query.exampleLimit);
-    const format = typeof query.format === 'string' ? query.format.trim().toLowerCase() : '';
-    const exportCsv = format === 'csv';
-    const pageSize = parseIntegerWithBounds(
-      query.pageSize,
-      DEFAULT_PAGE_SIZE,
-      1,
-      MAX_PAGE_SIZE
-    );
-    const maxPages = parseIntegerWithBounds(
-      query.maxPages,
-      DEFAULT_MAX_PAGES,
-      1,
-      MAX_MAX_PAGES
-    );
-    const maxRuntimeMs = parseIntegerWithBounds(
-      query.maxRuntimeMs,
-      DEFAULT_MAX_RUNTIME_MS,
-      MIN_MAX_RUNTIME_MS,
-      MAX_MAX_RUNTIME_MS
-    );
-    const maxRecords = parseIntegerWithBounds(
-      query.maxRecords,
-      DEFAULT_MAX_RECORDS,
-      1,
-      MAX_MAX_RECORDS
-    );
-    const includeCustomerLookup = parseBoolean(
-      query.includeCustomerLookup,
-      !dryRun && !exportCsv
-    );
-    const requestedCursor =
-      typeof query.cursor === 'string' && query.cursor.trim().length > 0 ? query.cursor.trim() : null;
+    const {
+      dryRun,
+      testMode,
+      forcedByTestMode,
+      exampleLimit,
+      exportCsv,
+      pageSize,
+      maxPages,
+      maxRuntimeMs,
+      maxRecords,
+      includeCustomerLookup,
+      requestedCursor,
+    } = resolveSyncOptions({ query, deps });
     const startedAt = Date.now();
-
-    const summary = {
-      totalPayments: 0,
-      successfulPayments: 0,
-      skippedPayments: 0,
-      paymentTypes: {
-        paid: 0,
-        refunded: 0,
-        disputed: 0,
-      },
-      customers: {
-        withCustomerId: 0,
-        withoutCustomerId: 0,
-        uniqueCustomerCount: 0,
-      },
-      salesforce: {
-        customerUpserts: 0,
-        paymentUpserts: 0,
-      },
-      errors: 0,
-    };
+    const summary = createSummary();
 
     const uniqueCustomerIds = new Set();
     const examples = [];
@@ -457,12 +500,12 @@ const syncSalesforcePayments = async (request, context) => {
     };
 
     while (pagesProcessed < maxPages) {
-      if (summary.totalPayments >= maxRecords) {
+      if (hasReachedRecordLimit(summary.totalPayments, maxRecords)) {
         stopReason = 'max_records_reached';
         break;
       }
 
-      if (Date.now() - startedAt >= maxRuntimeMs) {
+      if (hasReachedRuntimeLimit(startedAt, maxRuntimeMs)) {
         stopReason = 'max_runtime_reached';
         break;
       }
@@ -513,24 +556,13 @@ const syncSalesforcePayments = async (request, context) => {
           }
 
           const paymentIntent = await fetchPaymentIntentForCharge(deps.stripe, charge);
-
-          // attempt to pull metadata from the Stripe customer as well; this
-          // allows a salesforce_id stored on the customer to be used for the
-          // contact lookup in the transaction record.
-          let stripeCustomerObj = null;
-          if (customerId) {
-            try {
-              stripeCustomerObj = await deps.stripe.customers.retrieve(customerId);
-            } catch (e) {
-              // ignore retrieval errors and continue without customer metadata
-            }
-          }
+          const stripeCustomer = await fetchStripeCustomerSafely(deps.stripe, customerId);
 
           const transactionPayload = mapStripeToTransaction({
             paymentIntent,
             charge,
             balanceTransaction,
-            stripeCustomer: stripeCustomerObj,
+            stripeCustomer,
           });
 
           const paymentType =
@@ -547,21 +579,7 @@ const syncSalesforcePayments = async (request, context) => {
           let customerPayload = null;
 
           if (customerId && includeCustomerLookup) {
-            try {
-              const stripeCustomer = await deps.stripe.customers.retrieve(customerId);
-              if (stripeCustomer && !stripeCustomer.deleted) {
-                const { firstName, lastName } = splitName(stripeCustomer.name);
-                customerPayload = {
-                  stripe_customer_id__c: stripeCustomer.id,
-                  Name: stripeCustomer.name || stripeCustomer.email || `Customer ${stripeCustomer.id}`,
-                  Email: stripeCustomer.email || null,
-                  FirstName: firstName,
-                  LastName: lastName,
-                };
-              }
-            } catch (error) {
-              customerPayload = null;
-            }
+            customerPayload = buildSalesforceCustomerPayload(stripeCustomer);
           }
 
           if (examples.length < exampleLimit) {
@@ -630,12 +648,12 @@ const syncSalesforcePayments = async (request, context) => {
           });
         }
 
-        if (summary.totalPayments >= maxRecords) {
+        if (hasReachedRecordLimit(summary.totalPayments, maxRecords)) {
           stopReason = 'max_records_reached';
           break;
         }
 
-        if (Date.now() - startedAt >= maxRuntimeMs) {
+        if (hasReachedRuntimeLimit(startedAt, maxRuntimeMs)) {
           stopReason = 'max_runtime_reached';
           break;
         }
@@ -646,7 +664,10 @@ const syncSalesforcePayments = async (request, context) => {
         break;
       }
 
-      if (summary.totalPayments >= maxRecords || Date.now() - startedAt >= maxRuntimeMs) {
+      if (
+        hasReachedRecordLimit(summary.totalPayments, maxRecords) ||
+        hasReachedRuntimeLimit(startedAt, maxRuntimeMs)
+      ) {
         break;
       }
 

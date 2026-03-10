@@ -1854,24 +1854,6 @@ const findAccountRecordByName = async (
   );
 };
 
-const configuredRefundAccountName = (() => {
-  try {
-    const parsed = parseReferenceInput(env.quickBooks.accounts.refunds, 'account');
-    if (parsed.lookupName && parsed.lookupName.trim()) {
-      return parsed.lookupName.trim();
-    }
-    if (typeof parsed.reference.name === 'string' && parsed.reference.name.trim()) {
-      return parsed.reference.name.trim();
-    }
-    if (typeof parsed.reference.value === 'string' && parsed.reference.value.trim()) {
-      return parsed.reference.value.trim();
-    }
-  } catch {
-    // configuration validation occurs during env load; ignore here
-  }
-  return null;
-})();
-
 // Helper function to get account configuration by name
 const getAccountConfig = (
   accountName: string

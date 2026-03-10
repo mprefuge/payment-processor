@@ -157,20 +157,6 @@ export interface EventThemeConfig {
 }
 
 /**
- * Complete event configuration
- */
-export interface EventConfig {
-  events: Event[];
-  theme: EventThemeConfig;
-  stripe: {
-    publishableKey: string;
-  };
-  salesforce: {
-    defaultCampaignMemberStatus?: string;
-  };
-}
-
-/**
  * Salesforce Campaign Member data
  */
 export interface CampaignMemberDTO {

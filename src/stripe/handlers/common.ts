@@ -227,9 +227,3 @@ export const handleCheckoutSessionAsyncPaymentSucceeded = async (
 
   await upsertCheckoutSessionStatus(context, session, 'paid', deps);
 };
-
-export type StripeHandler = (
-  context: HttpContext,
-  event: Stripe.Event,
-  deps: StripeWebhookDependencies
-) => Promise<void>;

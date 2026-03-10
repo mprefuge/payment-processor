@@ -148,24 +148,3 @@ export function normalizeTransactionCategory(
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join(' ');
 }
-
-export function generateTransactionName(
-  category: string,
-  config: ContactMatchConfig,
-  metadata: TransactionMetadata = {}
-): string {
-  let name = config.transaction.nameTemplate;
-
-  const transactionType = metadata.transactionType || 'Payment';
-  const amount = metadata.amount || '';
-  const date = metadata.date || '';
-  const id = metadata.id || '';
-
-  name = name.replace(/\{category\}/g, category);
-  name = name.replace(/\{transactionType\}/g, transactionType);
-  name = name.replace(/\{amount\}/g, amount);
-  name = name.replace(/\{date\}/g, date);
-  name = name.replace(/\{id\}/g, id);
-
-  return name;
-}

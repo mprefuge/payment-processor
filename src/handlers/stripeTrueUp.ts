@@ -525,22 +525,6 @@ const resolveCustomerForCharge = async (
   }
 };
 
-const getTransactionNameFromMetadata = (charge: Stripe.Charge): string | null => {
-  const metadata = charge.metadata as Record<string, unknown> | null | undefined;
-  if (!metadata || typeof metadata !== 'object') {
-    return null;
-  }
-
-  // Check for category field (customer categorization, not product type)
-  // Note: transactionType is used for QuickBooks item/product type, not customer categorization
-  const category = metadata.category || metadata.Category;
-  if (typeof category === 'string' && category.trim()) {
-    return category.trim();
-  }
-
-  return null;
-};
-
 const findOrCreateContactInSalesforce = async (
   salesforceSvc: SalesforceSvc,
   customer: Stripe.Customer | Stripe.DeletedCustomer | null,

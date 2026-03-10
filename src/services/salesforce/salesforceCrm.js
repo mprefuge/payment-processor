@@ -1,36 +1,161 @@
 const { logger } = require('../../lib/logger');
 const BaseCrmService = require('./baseCrm');
-// SalesforceService is loaded lazily inside authenticate to avoid requiring a
-// TypeScript module at top-level; tests will often override authenticate so
-// the import may never run.
 
 const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
-/**
- * Salesforce CRM service implementation
- * Handles contact management, task creation, and transaction recording in Salesforce
- */
 class SalesforceCrmService extends BaseCrmService {
   constructor(config) {
     super(config);
     this.conn = null;
     this.salesforceService = null;
-
-    // cached record type id for Contact object (looked up lazily)
     this._contactRecordTypeId = null;
     this._recordTypeIdCache = new Map();
   }
 
-  /**
-   * Initialize Salesforce connection
-   */
+  escapeSoqlLiteral(value) {
+    return String(value).replace(/'/g, "\\'");
+  }
+
+  getQueryRecords(result) {
+    if (!result || !Array.isArray(result.records)) {
+      return [];
+    }
+
+    return result.records;
+  }
+
+  getFirstRecordWithId(records) {
+    if (!Array.isArray(records) || records.length === 0) {
+      return null;
+    }
+
+    const firstRecord = records[0];
+    if (!firstRecord || !firstRecord.Id) {
+      return null;
+    }
+
+    return firstRecord;
+  }
+
+  hasRequiredTransactionFields(transactionData) {
+    return !(
+      transactionData.Status__c == null ||
+      transactionData.Status__c === '' ||
+      transactionData.Amount_Gross__c == null
+    );
+  }
+
+  buildTransactionUniqueFields(transactionData) {
+    const uniqueFields = [
+      'Stripe_Payment_Intent_Id__c',
+      'Stripe_Refund_Id__c',
+      'Stripe_Dispute_Id__c',
+      'Stripe_Balance_Transaction_Id__c',
+      'Stripe_Checkout_Session_Id__c',
+      'Stripe_Charge_Id__c',
+      'Stripe_Subscription_Id__c',
+      'Stripe_Invoice_Id__c',
+      'Stripe_Credit_Note_Id__c',
+    ];
+
+    if (transactionData.Transaction_Type__c === 'payout') {
+      uniqueFields.push('Stripe_Payout_Id__c');
+    }
+
+    return uniqueFields;
+  }
+
+  async findExistingTransactionIdByUniqueFields(transactionData) {
+    const uniqueFields = this.buildTransactionUniqueFields(transactionData);
+
+    for (const field of uniqueFields) {
+      const value = transactionData[field];
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        continue;
+      }
+
+      let soql = `SELECT Id FROM Transaction__c WHERE ${field} = '${this.escapeSoqlLiteral(value)}'`;
+      if (transactionData.RecordTypeId) {
+        soql += ` AND RecordTypeId = '${this.escapeSoqlLiteral(transactionData.RecordTypeId)}'`;
+      }
+      soql += ' LIMIT 1';
+
+      const queryResult = await this.conn.query(soql);
+      const firstRecord = this.getFirstRecordWithId(this.getQueryRecords(queryResult));
+      if (firstRecord) {
+        return firstRecord.Id;
+      }
+    }
+
+    return null;
+  }
+
+  async findExistingTransactionIdByContentSignature(transactionData) {
+    const { Contact__c: contact, Amount_Gross__c: amount, Received_At__c: received } =
+      transactionData;
+
+    if (
+      typeof contact !== 'string' ||
+      contact.trim().length === 0 ||
+      typeof amount !== 'number' ||
+      Number.isNaN(amount) ||
+      typeof received !== 'string' ||
+      received.trim().length === 0
+    ) {
+      return null;
+    }
+
+    let soql =
+      `SELECT Id FROM Transaction__c WHERE Contact__c = '${this.escapeSoqlLiteral(contact)}'` +
+      ` AND Amount_Gross__c = ${amount}` +
+      ` AND Received_At__c = '${this.escapeSoqlLiteral(received)}'`;
+
+    if (transactionData.RecordTypeId) {
+      soql += ` AND RecordTypeId = '${this.escapeSoqlLiteral(transactionData.RecordTypeId)}'`;
+    }
+
+    soql += ' LIMIT 2';
+    const queryResult = await this.conn.query(soql);
+    const records = this.getQueryRecords(queryResult);
+    if (records.length === 1 && records[0].Id) {
+      return records[0].Id;
+    }
+
+    return null;
+  }
+
+  resolveOpportunityStageName(status) {
+    if (status === 'Pending') {
+      return 'Prospecting';
+    }
+
+    if (status === 'Failed' || status === 'Canceled') {
+      return 'Closed Lost';
+    }
+
+    if (status === 'Completed') {
+      return 'Closed Won';
+    }
+
+    return status || 'Closed Won';
+  }
+
+  buildOpportunityDescription({ description, sessionId, transactionId }) {
+    let fullDescription = description || '';
+    if (sessionId) {
+      fullDescription = `${fullDescription}\nCheckout Session: ${sessionId}`.trim();
+    }
+    if (transactionId) {
+      fullDescription = `${fullDescription}\nPayment Intent: ${transactionId}`.trim();
+    }
+    return fullDescription;
+  }
+
   async authenticate() {
     if (this.conn && this.conn.accessToken) {
       return this.conn;
     }
 
-    // require lazily so that tests which never hit authentication don't need
-    // to resolve ../salesforceService (a .ts file which Node cannot load).
     const { SalesforceService, buildSalesforceConfig } = require('../salesforceService');
 
     const defaultConfig = buildSalesforceConfig();
@@ -82,16 +207,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Search for contacts in Salesforce using email, phone, name, or Stripe Customer ID
-   * @param {Object} searchCriteria - Search criteria
-   * @returns {Promise<Array>} Array of matching contacts
-   */
-  /**
-   * Retrieve the Salesforce record type ID for the standard "Contact" record type.
-   * Caches the value once retrieved so we only query Salesforce once per instance.
-   * @returns {Promise<string>} RecordTypeId
-   */
   async getContactRecordTypeId() {
     if (this._contactRecordTypeId) {
       return this._contactRecordTypeId;
@@ -99,7 +214,6 @@ class SalesforceCrmService extends BaseCrmService {
 
     await this.authenticate();
 
-    // name of the record type we care about is literally "Contact" in the org
     const soql = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
     const result = await this.conn.query(soql);
     const records = Array.isArray(result.records) ? result.records : [];
@@ -112,13 +226,6 @@ class SalesforceCrmService extends BaseCrmService {
     return this._contactRecordTypeId;
   }
 
-  /**
-   * Resolve a RecordType Id by sObject API name and record type Name.
-   * Caches lookups for the life of this CRM service instance.
-   * @param {string} sObjectType - Salesforce object API name (e.g. Transaction__c)
-   * @param {string} recordTypeName - Record type label/name (e.g. General)
-   * @returns {Promise<string|null>} RecordType Id or null when not found
-   */
   async getRecordTypeIdByName(sObjectType, recordTypeName) {
     await this.authenticate();
 
@@ -146,11 +253,6 @@ class SalesforceCrmService extends BaseCrmService {
     return recordTypeId;
   }
 
-  /**
-   * Find a campaign Id by campaign Name.
-   * @param {string} campaignName - Campaign name to locate
-   * @returns {Promise<string|null>} Campaign Id or null when not found
-   */
   async findCampaignIdByName(campaignName) {
     await this.authenticate();
 
@@ -176,10 +278,8 @@ class SalesforceCrmService extends BaseCrmService {
     const { email, phone, firstName, lastName, stripeCustomerId } = searchCriteria;
 
     try {
-      // Build SOQL query with multiple search criteria
       let whereConditions = [];
 
-      // Prioritize Stripe Customer ID if provided
       if (stripeCustomerId) {
         whereConditions.push(`Stripe_Customer_ID__c = '${stripeCustomerId.replace(/'/g, "\\'")}'`);
       }
@@ -189,7 +289,7 @@ class SalesforceCrmService extends BaseCrmService {
       }
 
       if (phone) {
-        const cleanPhone = phone.replace(/\D/g, ''); // Remove non-digits
+        const cleanPhone = phone.replace(/\D/g, '');
         whereConditions.push(
           `(Phone = '${phone.replace(/'/g, "\\'")}' OR MobilePhone = '${phone.replace(/'/g, "\\'")}' OR Phone LIKE '%${cleanPhone}%' OR MobilePhone LIKE '%${cleanPhone}%')`
         );
@@ -222,17 +322,11 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Create a new contact in Salesforce
-   * @param {Object} contactData - Contact information
-   * @returns {Promise<Object>} Created contact object
-   */
   async createContact(contactData) {
     await this.authenticate();
 
     const { email, firstName, lastName, phone, address, stripeCustomerId } = contactData;
 
-    // determine the record type id for Contact once per call (cached internally)
     const recordTypeId = await this.getContactRecordTypeId();
 
     const configuredLeadSource =
@@ -256,7 +350,7 @@ class SalesforceCrmService extends BaseCrmService {
       MailingStreet: address?.line1 || null,
       MailingCity: address?.city || null,
       MailingState: address?.state || null,
-      MailingPostalCode: address?.postalCode || address?.postal_code || null, // Handle both normalized and original field names
+      MailingPostalCode: address?.postalCode || address?.postal_code || null,
       MailingCountry: address?.country || 'US',
       ...(stripeCustomerId ? { Stripe_Customer_ID__c: stripeCustomerId } : {}),
       ...(includeLeadSource && leadSource ? { LeadSource: leadSource } : {}),
@@ -320,7 +414,6 @@ class SalesforceCrmService extends BaseCrmService {
 
         logger.info(`Created new Salesforce contact with ID: ${result.id}`);
 
-        // Fetch the created contact to return complete data
         const createdContact = await this.conn.sobject('Contact').retrieve(result.id);
         return createdContact;
       } catch (error) {
@@ -361,21 +454,13 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Update contact information in Salesforce
-   * @param {string} contactId - Salesforce Contact ID
-   * @param {Object} contactData - Contact information to update
-   * @returns {Promise<Object>} Updated contact object
-   */
   async updateContact(contactId, contactData) {
     await this.authenticate();
 
     const { address, email, firstName, lastName, phone, stripeCustomerId } = contactData;
 
-    // Build update record with fields to update
     const updateRecord = {};
 
-    // Update address fields if provided
     if (address) {
       if (address.line1) updateRecord.MailingStreet = address.line1;
       if (address.city) updateRecord.MailingCity = address.city;
@@ -386,23 +471,19 @@ class SalesforceCrmService extends BaseCrmService {
       if (address.country) updateRecord.MailingCountry = address.country;
     }
 
-    // Update contact info fields if provided
     if (email) updateRecord.Email = email;
     if (firstName) updateRecord.FirstName = firstName;
     if (lastName) updateRecord.LastName = lastName;
     if (phone) updateRecord.Phone = phone;
 
-    // Update Stripe Customer ID if provided
     if (stripeCustomerId) updateRecord.Stripe_Customer_ID__c = stripeCustomerId;
 
-    // Remove null/empty values to avoid overwriting existing data
     Object.keys(updateRecord).forEach((key) => {
       if (updateRecord[key] === null || updateRecord[key] === '') {
         delete updateRecord[key];
       }
     });
 
-    // Only proceed if we have at least one field to update
     if (Object.keys(updateRecord).length === 0) {
       logger.info('No meaningful data to update');
       return null;
@@ -417,7 +498,6 @@ class SalesforceCrmService extends BaseCrmService {
       if (result.success) {
         logger.info(`Updated Salesforce contact ${contactId}`, updateRecord);
 
-        // Fetch the updated contact to return complete data
         const updatedContact = await this.conn.sobject('Contact').retrieve(contactId);
         return updatedContact;
       } else {
@@ -429,11 +509,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Find or create a Campaign in Salesforce by name
-   * @param {string} campaignName - Name of the campaign
-   * @returns {Promise<string>} Salesforce Campaign ID
-   */
   async findOrCreateCampaign(campaignName) {
     await this.authenticate();
 
@@ -447,7 +522,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     try {
-      // Search for existing campaign by name
       const query = `SELECT Id, Name FROM Campaign WHERE Name = '${trimmedName.replace(/'/g, "\\'")}' LIMIT 1`;
       logger.info('Searching for existing campaign:', { campaignName: trimmedName });
 
@@ -461,7 +535,6 @@ class SalesforceCrmService extends BaseCrmService {
         return result.records[0].Id;
       }
 
-      // Campaign doesn't exist, create it
       logger.info('Campaign not found, creating new campaign:', { campaignName: trimmedName });
 
       const campaignRecord = {
@@ -489,13 +562,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Add a contact as a campaign member (if not already a member)
-   * @param {string} campaignId - Salesforce Campaign ID
-   * @param {string} contactId - Salesforce Contact ID
-   * @param {string} status - Campaign member status (default: 'Sent')
-   * @returns {Promise<Object>} Campaign member result
-   */
   async addCampaignMember(campaignId, contactId, status = 'Sent') {
     await this.authenticate();
 
@@ -508,7 +574,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     try {
-      // Check if contact is already a member of this campaign
       const query = `SELECT Id, Status FROM CampaignMember WHERE CampaignId = '${campaignId}' AND ContactId = '${contactId}' LIMIT 1`;
       logger.info('Checking for existing campaign member', { campaignId, contactId });
 
@@ -528,7 +593,6 @@ class SalesforceCrmService extends BaseCrmService {
         };
       }
 
-      // Contact is not a member, add them
       logger.info('Adding contact as campaign member', { campaignId, contactId, status });
 
       const campaignMemberRecord = {
@@ -560,12 +624,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Create a completed task in Salesforce
-   * @param {string} contactId - Salesforce Contact ID
-   * @param {Object} taskData - Task information
-   * @returns {Promise<Object>} Created task object
-   */
   async createTask(contactId, taskData) {
     await this.authenticate();
 
@@ -578,7 +636,7 @@ class SalesforceCrmService extends BaseCrmService {
       Type: type,
       Status: status,
       Priority: 'Normal',
-      ActivityDate: new Date().toISOString().split('T')[0], // Today's date
+      ActivityDate: new Date().toISOString().split('T')[0],
     };
 
     try {
@@ -587,7 +645,6 @@ class SalesforceCrmService extends BaseCrmService {
       if (result.success) {
         logger.info(`Created Salesforce task with ID: ${result.id}`);
 
-        // Fetch the created task to return complete data
         const createdTask = await this.conn.sobject('Task').retrieve(result.id);
         return createdTask;
       } else {
@@ -599,16 +656,10 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Find existing transaction by Stripe payment intent ID
-   * @param {string} stripeId - Stripe payment intent ID
-   * @returns {Promise<Object|null>} Existing transaction or null if not found
-   */
   async findTransactionByStripeId(stripeId) {
     await this.authenticate();
 
     try {
-      // First try custom Transaction object
       const query = `SELECT Id, Name, Transaction_ID__c, Status__c FROM Transaction__c WHERE Transaction_ID__c = '${stripeId}' LIMIT 1`;
       logger.info(`Executing Salesforce query: ${query}`);
 
@@ -622,8 +673,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     try {
-      // Fallback to Opportunity records (if using them as transaction fallback)
-      // Search in Description field for "Payment Intent: {stripeId}"
       const query = `SELECT Id, Name, Description, StageName FROM Opportunity WHERE Description LIKE '%${stripeId}%' LIMIT 1`;
       logger.info(`Executing Salesforce query: ${query}`);
 
@@ -639,14 +688,6 @@ class SalesforceCrmService extends BaseCrmService {
     return null;
   }
 
-  /**
-   * Create a transaction record in Salesforce
-   * Note: This assumes a custom Transaction object exists in Salesforce
-   * If it doesn't exist, you'll need to create it or use Opportunity instead
-   * @param {string} contactId - Salesforce Contact ID
-   * @param {Object} transactionData - Transaction information
-   * @returns {Promise<Object>} Created transaction object
-   */
   async createTransaction(contactId, transactionData) {
     await this.authenticate();
 
@@ -660,18 +701,16 @@ class SalesforceCrmService extends BaseCrmService {
       frequency,
       category,
       transactionType,
-      name, // New field for proper transaction naming
-      sessionId, // New field for checkout session ID
+      name,
+      sessionId,
     } = transactionData;
 
-    // Try creating a custom Transaction record first
-    // If it fails, fall back to creating an Opportunity
     try {
       const transactionRecord = {
         Name:
-          name || description || `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`, // Add Name field
-        Contact__c: contactId, // Assuming custom lookup field
-        Amount_Gross__c: amount / 100, // Convert cents to dollars
+          name || description || `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`,
+        Contact__c: contactId,
+        Amount_Gross__c: amount / 100,
         Currency__c: currency,
         Payment_Method__c: paymentMethod,
         Transaction_ID__c: transactionId,
@@ -682,12 +721,10 @@ class SalesforceCrmService extends BaseCrmService {
         Transaction_Date__c: new Date().toISOString(),
       };
 
-      // Add session ID if provided (for tracking pending transactions)
       if (sessionId) {
         transactionRecord.Session_ID__c = sessionId;
       }
 
-      // Validate required fields before creating
       if (status == null || status === '' || amount == null) {
         logger.warn(
           '[SalesforceCrm] Skipping transaction creation due to missing required fields',
@@ -713,17 +750,10 @@ class SalesforceCrmService extends BaseCrmService {
     } catch (error) {
       logger.info('Custom Transaction object not available, falling back to Opportunity');
 
-      // Fallback to Opportunity record
       return await this.createOpportunityAsTransaction(contactId, transactionData);
     }
   }
 
-  /**
-   * Upsert a transaction record in Salesforce
-   * @param {Object} transactionData - Transaction information
-   * @param {string} externalIdField - External ID field for upsert
-   * @returns {Promise<Object>} Upsert result
-   */
   async upsertTransactionsRecord(
     transactionData,
     externalIdField = 'Stripe_Checkout_Session_Id__c'
@@ -734,12 +764,7 @@ class SalesforceCrmService extends BaseCrmService {
       throw new Error('External ID field is required for transaction upsert');
     }
 
-    // Validate required fields before upserting
-    if (
-      transactionData.Status__c == null ||
-      transactionData.Status__c === '' ||
-      transactionData.Amount_Gross__c == null
-    ) {
+    if (!this.hasRequiredTransactionFields(transactionData)) {
       logger.warn('[SalesforceCrm] Skipping transaction upsert due to missing required fields', {
         externalIdField,
         status: transactionData.Status__c,
@@ -749,89 +774,18 @@ class SalesforceCrmService extends BaseCrmService {
       return null;
     }
 
-    // before sending anything to Salesforce we try to find an existing record by
-    // any of the known unique keys that may already be present on the DTO.  If
-    // we discover a matching record, we'll upsert by Id rather than by the
-    // supplied external id field, which prevents creation of duplicate
-    // transactions when a later event carries a different identifier.
-    let uniqueFields = [
-      'Stripe_Payment_Intent_Id__c',
-      'Stripe_Refund_Id__c',
-      'Stripe_Dispute_Id__c',
-      'Stripe_Balance_Transaction_Id__c',
-      'Stripe_Checkout_Session_Id__c',
-      'Stripe_Charge_Id__c',
-      'Stripe_Subscription_Id__c',
-      'Stripe_Invoice_Id__c',
-      'Stripe_Credit_Note_Id__c',
-      // do not include payout id here; see note below
-    ];
-    if (transactionData.Transaction_Type__c === 'payout') {
-      uniqueFields.push('Stripe_Payout_Id__c');
-    }
-
     let overrideId = null;
     try {
-      for (const field of uniqueFields) {
-        const value = transactionData[field];
-        if (typeof value === 'string' && value.trim().length > 0) {
-          // build a simple query to check for an existing record
-          let soql = `SELECT Id FROM Transaction__c WHERE ${field} = '${value.replace(/'/g, "\\'")}'`;
-          if (transactionData.RecordTypeId) {
-            soql += ` AND RecordTypeId = '${transactionData.RecordTypeId}'`;
-          }
-          soql += ' LIMIT 1';
-          const queryResult = await this.conn.query(soql);
-          if (
-            queryResult &&
-            Array.isArray(queryResult.records) &&
-            queryResult.records.length > 0 &&
-            queryResult.records[0].Id
-          ) {
-            overrideId = queryResult.records[0].Id;
-            break;
-          }
-        }
-      }
+      overrideId = await this.findExistingTransactionIdByUniqueFields(transactionData);
     } catch (err) {
-      // if anything goes wrong while checking for duplicates, log but continue;
-      // we'll simply fall back to the normal upsert behaviour and risk a
-      // duplicate rather than failing the entire operation.
       logger.warn('[SalesforceCrm] duplicate lookup failed, proceeding with upsert', {
         error: err.message,
       });
     }
 
-    // final defensive check: if we still haven't found a record, try matching on
-    // contact + amount + received date. only use the result when exactly one
-    // record matches; multiple hits are ambiguous and therefore ignored.
     if (!overrideId) {
       try {
-        const { Contact__c: contact, Amount_Gross__c: amount, Received_At__c: received } =
-          transactionData;
-        if (
-          typeof contact === 'string' && contact.trim().length > 0 &&
-          typeof amount === 'number' && !Number.isNaN(amount) &&
-          typeof received === 'string' && received.trim().length > 0
-        ) {
-          let soql =
-            `SELECT Id FROM Transaction__c WHERE Contact__c = '${contact.replace(/'/g, "\\'")}'` +
-            ` AND Amount_Gross__c = ${amount}` +
-            ` AND Received_At__c = '${received.replace(/'/g, "\\'")}'`;
-          if (transactionData.RecordTypeId) {
-            soql += ` AND RecordTypeId = '${transactionData.RecordTypeId}'`;
-          }
-          soql += ' LIMIT 2';
-          const queryResult = await this.conn.query(soql);
-          if (
-            queryResult &&
-            Array.isArray(queryResult.records) &&
-            queryResult.records.length === 1 &&
-            queryResult.records[0].Id
-          ) {
-            overrideId = queryResult.records[0].Id;
-          }
-        }
+        overrideId = await this.findExistingTransactionIdByContentSignature(transactionData);
       } catch (err) {
         logger.warn('[SalesforceCrm] content lookup failed, proceeding with upsert', {
           error: err.message,
@@ -841,9 +795,6 @@ class SalesforceCrmService extends BaseCrmService {
 
     try {
       if (overrideId) {
-        // if we found an existing record use its Id and make sure the incoming
-        // external id field is included in the payload so future lookups can
-        // benefit from it
         transactionData.Id = overrideId;
         externalIdField = 'Id';
       }
@@ -874,12 +825,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Create an Opportunity record as a fallback for transaction tracking
-   * @param {string} contactId - Salesforce Contact ID
-   * @param {Object} transactionData - Transaction information
-   * @returns {Promise<Object>} Created opportunity object
-   */
   async createOpportunityAsTransaction(contactId, transactionData) {
     const {
       amount,
@@ -888,12 +833,11 @@ class SalesforceCrmService extends BaseCrmService {
       frequency,
       category,
       transactionType,
-      name, // New field for proper transaction naming
-      sessionId, // New field for checkout session ID
+      name,
+      sessionId,
       status = 'Completed',
     } = transactionData;
 
-    // Validate required fields before creating
     if (status == null || status === '' || amount == null) {
       logger.warn('[SalesforceCrm] Skipping opportunity creation due to missing required fields', {
         contactId,
@@ -904,28 +848,18 @@ class SalesforceCrmService extends BaseCrmService {
       return null;
     }
 
-    // Map status to Opportunity StageName
-    let stageName = 'Closed Won';
-    if (status === 'Pending') {
-      stageName = 'Prospecting';
-    } else if (status === 'Failed') {
-      stageName = 'Closed Lost';
-    }
-
-    // Include session ID and transaction ID in description if provided
-    let fullDescription = description || '';
-    if (sessionId) {
-      fullDescription = `${fullDescription}\nCheckout Session: ${sessionId}`.trim();
-    }
-    if (transactionId) {
-      fullDescription = `${fullDescription}\nPayment Intent: ${transactionId}`.trim();
-    }
+    const stageName = this.resolveOpportunityStageName(status);
+    const fullDescription = this.buildOpportunityDescription({
+      description,
+      sessionId,
+      transactionId,
+    });
 
     const opportunityRecord = {
       Name:
-        name || description || `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`, // Use new naming format
+        name || description || `${category || 'Uncategorized'} - ${transactionType || 'Payment'}`,
       ContactId: contactId,
-      Amount: amount / 100, // Convert cents to dollars
+      Amount: amount / 100,
       StageName: stageName,
       CloseDate: new Date().toISOString().split('T')[0],
       Description: fullDescription,
@@ -949,18 +883,11 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Update an existing transaction record in Salesforce
-   * @param {string} transactionId - Salesforce Transaction ID
-   * @param {Object} transactionData - Transaction information to update
-   * @returns {Promise<Object>} Updated transaction object
-   */
   async updateTransaction(transactionId, transactionData) {
     await this.authenticate();
 
     const { status, paymentMethod, transactionId: stripeTransactionId } = transactionData;
 
-    // Build update record with only provided fields
     const updateRecord = {};
 
     if (status !== undefined) {
@@ -975,14 +902,12 @@ class SalesforceCrmService extends BaseCrmService {
       updateRecord.Transaction_ID__c = stripeTransactionId;
     }
 
-    // Only proceed if we have at least one field to update
     if (Object.keys(updateRecord).length === 0) {
       logger.info('No transaction data to update');
       return null;
     }
 
     try {
-      // Try updating custom Transaction object first
       const result = await this.conn.sobject('Transaction__c').update({
         Id: transactionId,
         ...updateRecord,
@@ -1000,19 +925,8 @@ class SalesforceCrmService extends BaseCrmService {
     } catch (error) {
       logger.info('Custom Transaction object not available, trying Opportunity');
 
-      // Fallback to Opportunity record
       try {
-        // Map status to Opportunity StageName
-        let stageName = updateRecord.Status__c;
-        if (stageName === 'Completed') {
-          stageName = 'Closed Won';
-        } else if (stageName === 'Pending') {
-          stageName = 'Prospecting';
-        } else if (stageName === 'Failed') {
-          stageName = 'Closed Lost';
-        } else if (stageName === 'Canceled') {
-          stageName = 'Closed Lost';
-        }
+        const stageName = this.resolveOpportunityStageName(updateRecord.Status__c);
 
         const oppUpdateRecord = {};
         if (stageName) {
@@ -1038,17 +952,13 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Find a transaction by checkout session ID
-   * @param {string} sessionId - Stripe checkout session ID
-   * @returns {Promise<Object|null>} Existing transaction or null if not found
-   */
   async findTransactionBySessionId(sessionId) {
     await this.authenticate();
 
+    const escapedSessionId = this.escapeSoqlLiteral(sessionId);
+
     try {
-      // First try custom Transaction object
-      const query = `SELECT Id, Name, Transaction_ID__c, Status__c, Session_ID__c FROM Transaction__c WHERE Session_ID__c = '${sessionId}' LIMIT 1`;
+      const query = `SELECT Id, Name, Transaction_ID__c, Status__c, Session_ID__c FROM Transaction__c WHERE Session_ID__c = '${escapedSessionId}' LIMIT 1`;
       logger.info(`Executing Salesforce query: ${query}`);
 
       const result = await this.conn.query(query);
@@ -1063,10 +973,7 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     try {
-      // Fallback to Opportunity records
-      // Note: Opportunities don't have a standard field for session ID,
-      // so we'll look in the Description field
-      const query = `SELECT Id, Name, StageName, Description FROM Opportunity WHERE Description LIKE '%${sessionId}%' LIMIT 1`;
+      const query = `SELECT Id, Name, StageName, Description FROM Opportunity WHERE Description LIKE '%${escapedSessionId}%' LIMIT 1`;
       logger.info(`Executing Salesforce query: ${query}`);
 
       const result = await this.conn.query(query);
@@ -1081,12 +988,6 @@ class SalesforceCrmService extends BaseCrmService {
     return null;
   }
 
-  /**
-   * Create a payout record in Salesforce
-   * Note: This assumes a custom Payout object exists in Salesforce
-   * @param {Object} payoutData - Payout information
-   * @returns {Promise<Object>} Created payout object
-   */
   async createPayout(payoutData) {
     await this.authenticate();
 
@@ -1104,20 +1005,18 @@ class SalesforceCrmService extends BaseCrmService {
       metadata,
     } = payoutData;
 
-    // Try creating a custom Payout record first
     try {
       const payoutRecord = {
         Name: `Payout - ${new Date(arrivalDate * 1000).toISOString().split('T')[0]}`,
         Payout_ID__c: payoutId,
         Stripe_Account_ID__c: stripeAccountId || 'default',
-        Amount__c: amount / 100, // Convert cents to dollars
+        Amount__c: amount / 100,
         Currency__c: currency,
         Arrival_Date__c: new Date(arrivalDate * 1000).toISOString(),
         Created_Date__c: new Date(createdDate * 1000).toISOString(),
         Status__c: status,
         Description__c: description || `Stripe payout ${payoutId}`,
 
-        // Summary fields
         Charge_Count__c: summary?.charges?.count || 0,
         Charge_Amount__c: summary?.charges?.grossAmount ? summary.charges.grossAmount / 100 : 0,
         Refund_Count__c: summary?.refunds?.count || 0,
@@ -1128,12 +1027,10 @@ class SalesforceCrmService extends BaseCrmService {
         Dispute_Count__c: summary?.disputes?.count || 0,
         Dispute_Amount__c: summary?.disputes?.amount ? summary.disputes.amount / 100 : 0,
 
-        // Accounting integration fields
         Accounting_Journal_Entry_ID__c: providerDocIds?.journalEntry || null,
         Accounting_Transfer_ID__c: providerDocIds?.transfer || null,
         Accounting_Deposit_ID__c: providerDocIds?.deposit || null,
 
-        // Metadata
         Metadata__c: metadata ? JSON.stringify(metadata) : null,
       };
 
@@ -1149,7 +1046,6 @@ class SalesforceCrmService extends BaseCrmService {
     } catch (error) {
       logger.error('Error creating Salesforce payout:', error);
 
-      // If custom Payout object doesn't exist, log and return null gracefully
       if (error.message.includes('sObject type') || error.message.includes('Payout__c')) {
         logger.info(
           'Custom Payout__c object not available in Salesforce - skipping payout storage in CRM'
@@ -1161,13 +1057,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  /**
-   * Enhanced contact matching logic for Salesforce
-   * Requires name to match when email or phone matches to prevent wrong contact updates
-   * @param {Array} contacts - Array of Salesforce contacts
-   * @param {Object} searchCriteria - Original search criteria
-   * @returns {Object} Best matching contact
-   */
   selectBestMatch(contacts, searchCriteria) {
     if (!contacts || contacts.length === 0) {
       return null;
@@ -1175,7 +1064,6 @@ class SalesforceCrmService extends BaseCrmService {
 
     const { email, firstName, lastName, phone } = searchCriteria;
 
-    // Helper function to check if name matches
     const nameMatches = (contact) => {
       if (!firstName || !lastName || !contact.FirstName || !contact.LastName) {
         return false;
@@ -1186,34 +1074,26 @@ class SalesforceCrmService extends BaseCrmService {
       );
     };
 
-    // Filter contacts to only those with matching names
-    // This prevents updating wrong contacts when email/phone match but name differs
     const contactsWithMatchingNames = contacts.filter(nameMatches);
 
-    // If no contacts have matching names, return null to create new contact
     if (contactsWithMatchingNames.length === 0) {
       logger.info('No contacts found with matching name, will create new contact');
       return null;
     }
 
-    // If only one contact with matching name, return it
     if (contactsWithMatchingNames.length === 1) {
       return contactsWithMatchingNames[0];
     }
 
-    // Score contacts based on matching criteria (among those with matching names)
     const scoredContacts = contactsWithMatchingNames.map((contact) => {
       let score = 0;
 
-      // Exact email match gets highest priority
       if (email && contact.Email && contact.Email.toLowerCase() === email.toLowerCase()) {
         score += 10;
       }
 
-      // Name already matches (filtered above), give base score
       score += 8;
 
-      // Phone match (allowing for formatting differences)
       if (phone && (contact.Phone || contact.MobilePhone)) {
         const cleanSearchPhone = phone.replace(/\D/g, '');
         const cleanContactPhone = (contact.Phone || '').replace(/\D/g, '');
@@ -1227,7 +1107,6 @@ class SalesforceCrmService extends BaseCrmService {
       return { contact, score };
     });
 
-    // Sort by score (highest first) and return best match
     const bestMatch = scoredContacts.sort((a, b) => b.score - a.score)[0];
 
     logger.info(
