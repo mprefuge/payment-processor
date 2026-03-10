@@ -35,7 +35,8 @@
     "jsforce": "^3.10.7",
     "node-quickbooks": "^2.0.46",
     "stripe": "^14.7.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "azure-functions-openapi": "^1.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
