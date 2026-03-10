@@ -108,7 +108,7 @@ class SalesforceCrmService extends BaseCrmService {
     let soql =
       `SELECT Id FROM Transaction__c WHERE Contact__c = '${this.escapeSoqlLiteral(contact)}'` +
       ` AND Amount_Gross__c = ${amount}` +
-      ` AND Received_At__c = '${this.escapeSoqlLiteral(received)}'`;
+      ` AND Received_At__c = ${this.escapeSoqlLiteral(received)}`;
 
     if (transactionData.RecordTypeId) {
       soql += ` AND RecordTypeId = '${this.escapeSoqlLiteral(transactionData.RecordTypeId)}'`;

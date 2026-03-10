@@ -350,7 +350,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       let soql =
         `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
         ` AND Amount_Gross__c = ${amount}` +
-        ` AND Received_At__c = '${escapedReceived}'`;
+        ` AND Received_At__c = ${escapedReceived}`;
 
       if (recordTypeId) {
         const escapedRecordTypeId = escapeForSoqlLiteral(recordTypeId);

@@ -1237,7 +1237,12 @@ const processPayments = async (
             });
 
             if (stripeCustomer && contactId) {
-              await ensureSalesforceIdOnCustomer(stripe, stripeCustomer.id, contactId, context.log);
+              await ensureSalesforceIdOnCustomer(
+                stripe,
+                stripeCustomer.id,
+                contactId,
+                (...args: unknown[]) => context.log(...args)
+              );
             }
           } catch (error) {
             context.log('[StripeTrueUp] Failed to upsert contact in Salesforce', {
@@ -1646,7 +1651,12 @@ const processRefunds = async (
               contactId = customerUpsertResult?.id ?? null;
 
               if (stripeCustomer && contactId) {
-                await ensureSalesforceIdOnCustomer(stripe, stripeCustomer.id, contactId, context.log);
+                await ensureSalesforceIdOnCustomer(
+                  stripe,
+                  stripeCustomer.id,
+                  contactId,
+                  (...args: unknown[]) => context.log(...args)
+                );
               }
 
               context.log('[StripeTrueUp] Contact upsert completed for refund', {
