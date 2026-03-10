@@ -94,7 +94,6 @@ export const handleInvoicePaidNoPI = async (
     memo,
   });
 
-  // Validate required fields before upserting
   if (
     transaction.status__c == null ||
     (transaction as any).status__c === '' ||

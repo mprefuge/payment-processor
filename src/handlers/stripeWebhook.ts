@@ -39,13 +39,12 @@ const createInMemoryStore = (): IdempotencyStore => {
       return fn();
     },
     async flush(): Promise<void> {
-      // no-op
+      return;
     },
   };
 };
 
 const createStripeServices = (): StripeWebhookDependencies['stripe'] => {
-  // If TEST_MODE is enabled, use mock services instead of real Stripe API
   if (env.testMode) {
     return createMockStripeServices();
   }
@@ -63,6 +62,16 @@ const createStripeServices = (): StripeWebhookDependencies['stripe'] => {
 };
 
 let defaultSalesforceSvcPromise: Promise<SalesforceSvc> | null = null;
+type CrmService = {
+  findOrCreateCampaign: (name: string) => Promise<string>;
+  authenticate?: () => Promise<void>;
+};
+
+const createDisabledCrmSvc = (): CrmService => ({
+  async findOrCreateCampaign(name: string): Promise<string> {
+    return `701000000000000_${name}`;
+  },
+});
 
 const createDisabledSalesforceSvc = (): SalesforceSvc => {
   const disabledUpsertResult = { success: true, id: '', errors: [] } as unknown as UpsertResult;
@@ -106,12 +115,6 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
           return createSalesforceSvc({ connection });
         } catch (error) {
           defaultSalesforceSvcPromise = null;
-
-          const message =
-            error instanceof Error ? error.message : 'Unknown Salesforce initialization error';
-          // Falling back to disabled Salesforce service on initialization error
-          // This prevents the webhook from failing when Salesforce is misconfigured
-
           return disabledSvc;
         }
       })();
@@ -121,24 +124,20 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
   };
 };
 
-let defaultCrmSvcPromise: any = null;
+let defaultCrmSvcPromise: Promise<CrmService> | null = null;
 
-const createCrmGetter = (): (() => Promise<any>) => {
+const createCrmGetter = (): (() => Promise<CrmService>) => {
+  const disabledCrmSvc = createDisabledCrmSvc();
+
   if (env.salesforce.authMode === 'disabled') {
-    // Return a disabled/mock CRM service
-    return async () => ({
-      async findOrCreateCampaign(name: string): Promise<string> {
-        // In test/disabled mode, just return a fake ID
-        return `701000000000000_${name}`;
-      },
-    });
+    return async () => disabledCrmSvc;
   }
 
   if (env.salesforce.authMode !== 'client-credentials') {
     throw new Error(`Unsupported Salesforce auth mode for CRM: ${env.salesforce.authMode}`);
   }
 
-  return async (): Promise<any> => {
+  return async (): Promise<CrmService> => {
     if (!defaultCrmSvcPromise) {
       defaultCrmSvcPromise = (async () => {
         try {
@@ -160,13 +159,7 @@ const createCrmGetter = (): (() => Promise<any>) => {
           const message =
             error instanceof Error ? error.message : 'Unknown CRM initialization error';
           logger.error('[StripeWebhook] CRM initialization failed:', message);
-
-          // Return disabled service on error
-          return {
-            async findOrCreateCampaign(name: string): Promise<string> {
-              return `701000000000000_${name}`;
-            },
-          };
+          return disabledCrmSvc;
         }
       })();
     }
@@ -206,7 +199,7 @@ const createPayoutAdapter = (): PayoutAccountingAdapter => ({
       amount: amountCents,
       memo: input.memo,
       date: input.txnDate,
-      payoutId: input.payout?.id, // Include payout ID for duplicate detection
+      payoutId: input.payout?.id,
     });
 
     return { id: result.qboId, type: result.type };
@@ -258,7 +251,8 @@ const setDependencies = (overrides?: DependencyOverrides) => {
 
 const resetDependencies = (): void => {
   defaultSalesforceSvcPromise = null;
-  dependencies = null; // Reset to null so it's recreated on next call
+  defaultCrmSvcPromise = null;
+  dependencies = null;
 };
 
 const stripeWebhook = async (request: StripeWebhookRequest, context: HttpContext): Promise<any> => {

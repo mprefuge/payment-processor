@@ -25,77 +25,57 @@ import { handlePayoutEvent } from '../../stripe/handlers/payouts';
 import { handleDisputeClosed } from '../../stripe/handlers/disputes';
 import { handleCreditNoteEvent } from '../../stripe/handlers/creditNotes';
 
+type StripeEventHandler = (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies
+) => Promise<void>;
+
+const stripeEventHandlers: Record<string, StripeEventHandler> = {
+  'checkout.session.completed': handleCheckoutSessionCompleted,
+  'checkout.session.expired': handleCheckoutSessionExpired,
+  'checkout.session.async_payment_failed': handleCheckoutSessionAsyncPaymentFailed,
+  'checkout.session.async_payment_succeeded': handleCheckoutSessionAsyncPaymentSucceeded,
+  'payment_intent.succeeded': handlePaymentIntentSucceeded,
+  'payment_intent.payment_failed': handlePaymentIntentFailed,
+  'payment_intent.canceled': handlePaymentIntentCanceled,
+  'payment_intent.requires_action': handlePaymentIntentActionRequired,
+  'charge.refunded': handleChargeRefunded,
+  'refund.created': handleRefundEvent,
+  'refund.updated': handleRefundEvent,
+  'refund.failed': handleRefundEvent,
+  'charge.dispute.closed': handleDisputeClosed,
+  'invoice.paid': handleInvoicePaid,
+  'invoice.payment_succeeded': handleInvoicePaid,
+  'invoice.payment_failed': handleInvoicePaymentFailed,
+  'invoice.payment_action_required': handleInvoicePaymentActionRequired,
+  'payout.created': handlePayoutEvent,
+  'payout.updated': handlePayoutEvent,
+  'payout.paid': handlePayoutEvent,
+  'payout.failed': handlePayoutEvent,
+  'payout.canceled': handlePayoutEvent,
+  'payout.reconciliation_completed': handlePayoutEvent,
+  'credit_note.created': handleCreditNoteEvent,
+  'credit_note.updated': handleCreditNoteEvent,
+  'credit_note.voided': handleCreditNoteEvent,
+};
+
 export class StripeEventRouter implements EventRouter {
   async route(
     event: Stripe.Event,
     deps: StripeWebhookDependencies,
     context: HttpContext
   ): Promise<void> {
-    const eventType = event.type as string;
+    const eventType = event.type;
+    const handler = stripeEventHandlers[eventType];
 
-    switch (eventType) {
-      case 'checkout.session.completed':
-        await handleCheckoutSessionCompleted(context, event, deps);
-        return;
-      case 'checkout.session.expired':
-        await handleCheckoutSessionExpired(context, event, deps);
-        return;
-      case 'checkout.session.async_payment_failed':
-        await handleCheckoutSessionAsyncPaymentFailed(context, event, deps);
-        return;
-      case 'checkout.session.async_payment_succeeded':
-        await handleCheckoutSessionAsyncPaymentSucceeded(context, event, deps);
-        return;
-      case 'payment_intent.succeeded':
-        await handlePaymentIntentSucceeded(context, event, deps);
-        return;
-      case 'payment_intent.payment_failed':
-        await handlePaymentIntentFailed(context, event, deps);
-        return;
-      case 'payment_intent.canceled':
-        await handlePaymentIntentCanceled(context, event, deps);
-        return;
-      case 'payment_intent.requires_action':
-        await handlePaymentIntentActionRequired(context, event, deps);
-        return;
-      case 'charge.refunded':
-        await handleChargeRefunded(context, event, deps);
-        return;
-      case 'refund.created':
-      case 'refund.updated':
-      case 'refund.failed':
-        await handleRefundEvent(context, event, deps);
-        return;
-      case 'charge.dispute.closed':
-        await handleDisputeClosed(context, event, deps);
-        return;
-      case 'invoice.paid':
-      case 'invoice.payment_succeeded':
-        await handleInvoicePaid(context, event, deps);
-        return;
-      case 'invoice.payment_failed':
-        await handleInvoicePaymentFailed(context, event, deps);
-        return;
-      case 'invoice.payment_action_required':
-        await handleInvoicePaymentActionRequired(context, event, deps);
-        return;
-      case 'payout.created':
-      case 'payout.updated':
-      case 'payout.paid':
-      case 'payout.failed':
-      case 'payout.canceled':
-      case 'payout.reconciliation_completed':
-        await handlePayoutEvent(context, event, deps);
-        return;
-      case 'credit_note.created':
-      case 'credit_note.updated':
-      case 'credit_note.voided':
-        await handleCreditNoteEvent(context, event, deps);
-        return;
-      default:
-        logger.info('[StripeWebhook] Ignoring unsupported event type', {
-          eventType,
-        });
+    if (!handler) {
+      logger.info('[StripeWebhook] Ignoring unsupported event type', {
+        eventType,
+      });
+      return;
     }
+
+    await handler(context, event, deps);
   }
 }

@@ -9,6 +9,22 @@ const toTrimmed = (value) => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
+const toNormalizedName = (value) => {
+  const trimmed = toTrimmed(value);
+  return trimmed ? trimmed.toLowerCase() : null;
+};
+
+const buildFullName = (customerData) => {
+  const firstName = toTrimmed(customerData?.firstname);
+  const lastName = toTrimmed(customerData?.lastname);
+
+  if (firstName && lastName) {
+    return `${firstName} ${lastName}`;
+  }
+
+  return firstName || lastName || null;
+};
+
 const normalizeAddressInput = (customerData) => {
   const nestedAddress =
     customerData?.address && typeof customerData.address === 'object' ? customerData.address : null;
@@ -42,6 +58,11 @@ const toComparableAddress = (address) => ({
   country: toComparableValue(address?.country),
 });
 
+const toComparableName = (value) => {
+  const comparableValue = toComparableValue(value);
+  return typeof comparableValue === 'string' ? comparableValue.toLowerCase() : comparableValue;
+};
+
 const addressesMatch = (left, right) => {
   const comparableLeft = toComparableAddress(left);
   const comparableRight = toComparableAddress(right);
@@ -57,7 +78,7 @@ const addressesMatch = (left, right) => {
 
 const buildStripeCustomerPayload = (customerData) => ({
   email: customerData.email,
-  name: `${customerData.firstname} ${customerData.lastname}`,
+  name: buildFullName(customerData),
   phone: customerData.phone || null,
   address: normalizeAddressInput(customerData),
 });
@@ -72,14 +93,21 @@ const escapeStripeQueryValue = (value) => {
 
 const searchStripeCustomer = async (stripe, email, fullName) => {
   try {
+    const normalizedSearchName = toNormalizedName(fullName);
+    if (!normalizedSearchName) {
+      return [];
+    }
+
     const sanitizedEmail = escapeStripeQueryValue(email);
     const customers = await stripe.customers.search({
       query: `email:'${sanitizedEmail}'`,
       limit: 20,
     });
 
-    return customers.data.filter(
-      (customer) => customer.name && customer.name.toLowerCase() === fullName.toLowerCase()
+    const customerRecords = Array.isArray(customers?.data) ? customers.data : [];
+
+    return customerRecords.filter(
+      (customer) => toNormalizedName(customer?.name) === normalizedSearchName
     );
   } catch (error) {
     logger.error('Error searching Stripe customer:', error);
@@ -98,11 +126,11 @@ const createStripeCustomer = async (stripe, customerData) => {
 
 const shouldUpdateStripeCustomer = (existingCustomer, customerData) => {
   const payload = buildStripeCustomerPayload(customerData);
-  const existingName = toComparableValue(existingCustomer?.name);
+  const existingName = toComparableName(existingCustomer?.name);
   const existingPhone = toComparableValue(existingCustomer?.phone);
   const existingAddress = toComparableAddress(existingCustomer?.address || null);
 
-  if (existingName !== toComparableValue(payload.name)) {
+  if (existingName !== toComparableName(payload.name)) {
     return true;
   }
 

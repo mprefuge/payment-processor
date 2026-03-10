@@ -11,6 +11,16 @@ export class DefaultWebhookResponseFormatter implements WebhookResponseFormatter
     };
   }
 
+  duplicate(eventType: string): any {
+    return {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      jsonBody: { duplicate: true, eventType },
+    };
+  }
+
   error(error: string): any {
     return {
       status: 400,

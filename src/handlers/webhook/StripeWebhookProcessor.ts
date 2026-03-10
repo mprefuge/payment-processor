@@ -39,13 +39,7 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
       const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
       if (isProcessed) {
         logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
-        return {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          jsonBody: { duplicate: true, eventType: event.type },
-        };
+        return this.responseFormatter.duplicate(event.type);
       }
 
       try {
@@ -88,16 +82,11 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
   private async getRawBody(req: StripeWebhookRequest): Promise<string> {
     const raw = (req as unknown as { rawBody?: string | Buffer }).rawBody;
 
-    // Try rawBody first (for compatibility)
-    if (typeof raw === 'string') {
-      return raw;
+    const rawBody = this.toRawBodyString(raw);
+    if (rawBody !== null) {
+      return rawBody;
     }
 
-    if (Buffer.isBuffer(raw)) {
-      return raw.toString('utf8');
-    }
-
-    // Azure Functions v4: Use the text() method to get raw body
     if (typeof req.text === 'function') {
       try {
         const text = await req.text();
@@ -108,22 +97,32 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
       }
     }
 
-    // Fallback: try req.body as string
     if (typeof req.body === 'string') {
       return req.body;
     }
 
-    // Last resort: stringify the parsed body (may not work for webhooks)
     if (req.body && typeof req.body === 'object') {
       try {
         const result = JSON.stringify(req.body);
         logger.warn('[StripeWebhook] WARNING: Using stringified parsed body for webhook payload');
         return result;
-      } catch (error) {
+      } catch {
         return '';
       }
     }
 
     return '';
+  }
+
+  private toRawBodyString(rawBody: string | Buffer | undefined): string | null {
+    if (typeof rawBody === 'string') {
+      return rawBody;
+    }
+
+    if (Buffer.isBuffer(rawBody)) {
+      return rawBody.toString('utf8');
+    }
+
+    return null;
   }
 }

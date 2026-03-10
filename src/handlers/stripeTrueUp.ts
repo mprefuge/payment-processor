@@ -1,7 +1,6 @@
 import type { InvocationContext, HttpRequest } from '@azure/functions';
 import Stripe from 'stripe';
 
-// Try to import env config, but don't fail if it's incomplete
 let env: any = { stripe: { secret: '' } };
 try {
   env = require('../config/env').default;
@@ -25,7 +24,6 @@ import {
   getFrequencyFromSubscription,
 } from '../stripe/utils';
 
-// Import types only, not the actual implementations (to avoid env.ts loading)
 import type { PostChargeToQboResult } from '../services/qboSvc';
 
 import { AzureIdempotencyStore, type IdempotencyStore } from '../services/idempotencyStore';
@@ -62,8 +60,13 @@ interface FetchServices {
   payoutBalance: typeof fetchBalanceTransactionsForPayout;
 }
 
-// Lazy-load QBO functions to avoid importing env.ts at module load time
 let qboFunctions: any = null;
+const createNoopAccountingServices = (): AccountingServices => ({
+  postChargeToQbo: async () => ({ success: false, error: 'QBO service not available' } as any),
+  postRefundToQbo: async () => ({ success: false, error: 'QBO service not available' }),
+  postPayoutToQbo: async () => ({ success: false, error: 'QBO service not available' }),
+});
+
 const getQboFunctions = () => {
   if (!qboFunctions) {
     try {
@@ -75,12 +78,7 @@ const getQboFunctions = () => {
       };
     } catch (error) {
       console.warn('[StripeTrueUp] Could not load qboSvc, QBO posting will be disabled:', error);
-      // Return no-op functions
-      qboFunctions = {
-        postChargeToQbo: async () => ({ success: false, error: 'QBO service not available' }),
-        postRefundToQbo: async () => ({ success: false, error: 'QBO service not available' }),
-        postPayoutToQbo: async () => ({ success: false, error: 'QBO service not available' }),
-      };
+      qboFunctions = createNoopAccountingServices();
     }
   }
   return qboFunctions;
@@ -139,7 +137,7 @@ const createInMemoryStore = (): IdempotencyStore => {
       return fn();
     },
     async flush(): Promise<void> {
-      // no-op
+      return;
     },
   };
 };
@@ -169,7 +167,6 @@ const createStripeServices = (): StripeServices => {
 let defaultSalesforceSvcPromise: Promise<SalesforceSvc> | null = null;
 let salesforceConnection: any = null;
 
-// helper used in unit tests so we can stub the connection object
 export const __setSalesforceConnection = (conn: any) => {
   salesforceConnection = conn;
 };
@@ -189,9 +186,23 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
 };
 
 let defaultCrmSvcPromise: Promise<any> | null = null;
+type CrmService = {
+  findOrCreateCampaign: (name: string) => Promise<string>;
+  authenticate?: () => Promise<void>;
+  searchContact?: (input: { stripeCustomerId: string }) => Promise<Array<{ Id: string }>>;
+  addCampaignMember?: (...args: any[]) => Promise<any>;
+};
 
-const createCrmGetter = (): (() => Promise<any>) => {
-  return async (): Promise<any> => {
+const createDisabledCrmService = (): CrmService => ({
+  async findOrCreateCampaign(name: string): Promise<string> {
+    return `701000000000000_${name}`;
+  },
+});
+
+const createCrmGetter = (): (() => Promise<CrmService>) => {
+  const disabledCrmService = createDisabledCrmService();
+
+  return async (): Promise<CrmService> => {
     if (!defaultCrmSvcPromise) {
       defaultCrmSvcPromise = (async () => {
         try {
@@ -213,13 +224,7 @@ const createCrmGetter = (): (() => Promise<any>) => {
           const message =
             error instanceof Error ? error.message : 'Unknown CRM initialization error';
           console.error('[StripeTrueUp] CRM initialization failed:', message);
-
-          // Return disabled service on error
-          return {
-            async findOrCreateCampaign(name: string): Promise<string> {
-              return `701000000000000_${name}`;
-            },
-          };
+          return disabledCrmService;
         }
       })();
     }
@@ -227,6 +232,8 @@ const createCrmGetter = (): (() => Promise<any>) => {
     return defaultCrmSvcPromise;
   };
 };
+
+const getCrmSvc = createCrmGetter();
 
 const createDefaultDependencies = (): Dependencies => ({
   stripe: createStripeServices(),
@@ -239,7 +246,7 @@ const createDefaultDependencies = (): Dependencies => ({
   idempotencyStore:
     process.env.DISABLE_AZURE_TABLES === '1' ? createInMemoryStore() : new AzureIdempotencyStore(),
   getSalesforceSvc: createSalesforceGetter(),
-  accounting: getQboFunctions(), // Lazy-load QBO functions
+  accounting: getQboFunctions(),
 });
 
 let dependencies: Dependencies = createDefaultDependencies();
@@ -277,6 +284,7 @@ const setDependencies = (overrides: DependencyOverrides = {}): void => {
 
 const resetDependencies = (): void => {
   defaultSalesforceSvcPromise = null;
+  defaultCrmSvcPromise = null;
   salesforceConnection = null;
   dependencies = createDefaultDependencies();
 };
@@ -443,6 +451,175 @@ const parseLimit = (value: unknown): number | null => {
   throw new Error('Query parameter "limit" must be a positive integer.');
 };
 
+const skipUpsertWhenRequiredFieldsMissing = (
+  context: HttpContext,
+  summary: ProcessSummary,
+  options: {
+    message: string;
+    idKey: string;
+    idValue: string;
+    transaction: { status__c?: unknown; amount_gross__c?: unknown };
+  }
+): boolean => {
+  if (options.transaction.status__c && options.transaction.amount_gross__c) {
+    return false;
+  }
+
+  context.log(options.message, {
+    [options.idKey]: options.idValue,
+    status: options.transaction.status__c,
+    amountGross: options.transaction.amount_gross__c,
+    transaction: options.transaction,
+  });
+
+  summary.skipped += 1;
+  return true;
+};
+
+const shouldSkipForResubmitOrIdempotency = async (options: {
+  resubmit: boolean;
+  idempotencyKey: string;
+  checkResubmit: () => Promise<boolean>;
+}): Promise<boolean> => {
+  if (options.resubmit) {
+    return options.checkResubmit();
+  }
+
+  return dependencies.idempotencyStore.isProcessed(options.idempotencyKey);
+};
+
+const resolveContactIdForCampaignMembership = async (
+  context: HttpContext,
+  crm: CrmService,
+  stripeCustomerId: string
+): Promise<string | null> => {
+  if (typeof crm.searchContact !== 'function') {
+    return null;
+  }
+
+  try {
+    context.log('[StripeTrueUp] Resolving contact from Stripe customer ID', {
+      stripeCustomerId,
+    });
+
+    const contacts = await crm.searchContact({ stripeCustomerId });
+    if (Array.isArray(contacts) && contacts.length > 0) {
+      const contactId = contacts[0].Id;
+      context.log('[StripeTrueUp] Resolved contact from Stripe customer ID', {
+        stripeCustomerId,
+        contactId,
+      });
+      return contactId;
+    }
+
+    context.log('[StripeTrueUp] No contact found for Stripe customer ID', {
+      stripeCustomerId,
+    });
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    context.log('[StripeTrueUp] Failed to resolve contact from Stripe customer ID', {
+      stripeCustomerId,
+      error: message,
+    });
+    return null;
+  }
+};
+
+const addCampaignMembership = async (
+  context: HttpContext,
+  crm: CrmService,
+  campaignId: string,
+  contactId: string
+): Promise<void> => {
+  if (typeof crm.addCampaignMember !== 'function') {
+    return;
+  }
+
+  try {
+    context.log('[StripeTrueUp] Adding contact as campaign member', {
+      campaignId,
+      contactId,
+    });
+
+    const membershipResult =
+      crm.addCampaignMember.length >= 2
+        ? await crm.addCampaignMember(campaignId, contactId)
+        : await crm.addCampaignMember({ campaignId, contactId });
+    if (membershipResult?.isNew) {
+      context.log('[StripeTrueUp] Contact added as new campaign member', {
+        campaignId,
+        contactId,
+        campaignMemberId: membershipResult.id,
+      });
+      return;
+    }
+
+    context.log('[StripeTrueUp] Contact is already a campaign member', {
+      campaignId,
+      contactId,
+      campaignMemberId: membershipResult?.id,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    context.log('[StripeTrueUp] Failed to add contact as campaign member', {
+      campaignId,
+      contactId,
+      error: message,
+    });
+  }
+};
+
+const applyCampaignFromCategory = async (
+  context: HttpContext,
+  transaction: TransactionUpsertDTO,
+  categoryName: string,
+  chargeId: string
+): Promise<void> => {
+  if (transaction.campaign__c) {
+    return;
+  }
+
+  try {
+    context.log('[StripeTrueUp] Associating category with campaign', {
+      category: categoryName,
+      chargeId,
+    });
+
+    const crm = await getCrmSvc();
+    const campaignId = await crm.findOrCreateCampaign(categoryName);
+    if (!campaignId || typeof campaignId !== 'string' || campaignId.trim().length === 0) {
+      return;
+    }
+
+    transaction.campaign__c = campaignId;
+    context.log('[StripeTrueUp] Category associated with campaign', {
+      category: categoryName,
+      campaignId,
+      chargeId,
+    });
+
+    let campaignContactId = transaction.contact__c;
+    if (!campaignContactId && transaction.stripe_customer_id__c) {
+      campaignContactId = await resolveContactIdForCampaignMembership(
+        context,
+        crm,
+        transaction.stripe_customer_id__c
+      );
+    }
+
+    if (campaignContactId && campaignContactId.trim().length > 0) {
+      await addCampaignMembership(context, crm, campaignId, campaignContactId);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    context.log(
+      '[StripeTrueUp] Failed to associate category with campaign; continuing without campaign',
+      { category: categoryName, error: message, chargeId }
+    );
+  }
+};
+
 const markPosted = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown,
@@ -525,27 +702,27 @@ const resolveCustomerForCharge = async (
   }
 };
 
-const findOrCreateContactInSalesforce = async (
-  salesforceSvc: SalesforceSvc,
-  customer: Stripe.Customer | Stripe.DeletedCustomer | null,
-  transactionName: string | null,
-  contextLog: typeof console.log
-): Promise<{ id: string } | null> => {
-  // cache record type id to avoid repeated lookups
-  let cachedContactRecordTypeId: string | undefined;
-  if (!customer || customer.deleted) {
-    return null;
-  }
+type SalesforceContactRecord = {
+  Id: string;
+  FirstName?: string | null;
+  LastName?: string | null;
+  Email?: string | null;
+  Stripe_Customer_Id__c?: string | null;
+};
 
-  const stripeCustomer = customer as Stripe.Customer;
+const escapeSoqlString = (value: string): string => value.replace(/'/g, "\\'");
 
-  // Use transaction name as customer category/name, fallback to customer name or email
-  let customerName = transactionName;
-  if (!customerName) {
-    customerName = stripeCustomer.name || stripeCustomer.email || `Customer ${stripeCustomer.id}`;
-  }
+const buildContactIdentity = (
+  stripeCustomer: Stripe.Customer,
+  transactionName: string | null
+): {
+  customerName: string;
+  firstName: string | null;
+  lastName: string;
+} => {
+  const fallbackName = transactionName || stripeCustomer.name || stripeCustomer.email;
+  const customerName = fallbackName || `Customer ${stripeCustomer.id}`;
 
-  // Parse name into first and last name
   let firstName: string | null = null;
   let lastName: string | null = null;
 
@@ -559,10 +736,135 @@ const findOrCreateContactInSalesforce = async (
     }
   }
 
-  // If we still don't have a lastName, use the customer name as lastName (required by Salesforce)
-  if (!lastName) {
-    lastName = customerName;
+  return {
+    customerName,
+    firstName,
+    lastName: lastName || customerName,
+  };
+};
+
+const buildContactSearchConditions = (
+  stripeCustomer: Stripe.Customer,
+  firstName: string | null,
+  lastName: string
+): string[] => {
+  const whereConditions: string[] = [];
+
+  if (stripeCustomer.id) {
+    whereConditions.push(`Stripe_Customer_Id__c = '${escapeSoqlString(stripeCustomer.id)}'`);
   }
+
+  if (stripeCustomer.email) {
+    whereConditions.push(`Email = '${escapeSoqlString(stripeCustomer.email)}'`);
+  }
+
+  if (firstName && lastName) {
+    whereConditions.push(
+      `(FirstName = '${escapeSoqlString(firstName)}' AND LastName = '${escapeSoqlString(lastName)}')`
+    );
+  }
+
+  return whereConditions;
+};
+
+const selectBestMatchingContact = (
+  candidates: SalesforceContactRecord[],
+  stripeCustomer: Stripe.Customer,
+  firstName: string | null,
+  lastName: string
+): SalesforceContactRecord | null => {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  const stripeIdMatch = candidates.find((contact) => contact.Stripe_Customer_Id__c === stripeCustomer.id);
+  if (stripeIdMatch) {
+    return stripeIdMatch;
+  }
+
+  if (firstName && lastName) {
+    const nameMatch = candidates.find((contact) => {
+      const firstMatches =
+        typeof contact.FirstName === 'string' && contact.FirstName.toLowerCase() === firstName.toLowerCase();
+      const lastMatches =
+        typeof contact.LastName === 'string' && contact.LastName.toLowerCase() === lastName.toLowerCase();
+      return firstMatches && lastMatches;
+    });
+
+    if (nameMatch) {
+      return nameMatch;
+    }
+  }
+
+  return candidates[0] ?? null;
+};
+
+const buildContactUpdateFields = (
+  existingContact: SalesforceContactRecord,
+  stripeCustomer: Stripe.Customer,
+  firstName: string | null,
+  lastName: string
+): Record<string, unknown> => {
+  const updateFields: Record<string, unknown> = { Id: existingContact.Id };
+
+  if (!existingContact.Stripe_Customer_Id__c && stripeCustomer.id) {
+    updateFields.Stripe_Customer_Id__c = stripeCustomer.id;
+  }
+
+  if (stripeCustomer.email && stripeCustomer.email !== existingContact.Email) {
+    updateFields.Email = stripeCustomer.email;
+  }
+
+  if (firstName && firstName !== existingContact.FirstName) {
+    updateFields.FirstName = firstName;
+  }
+
+  if (lastName && lastName !== existingContact.LastName) {
+    updateFields.LastName = lastName;
+  }
+
+  return updateFields;
+};
+
+const ensureContactRecordTypeId = async (
+  connection: any,
+  currentRecordTypeId: string | undefined,
+  contextLog: typeof console.log
+): Promise<string | undefined> => {
+  if (currentRecordTypeId) {
+    return currentRecordTypeId;
+  }
+
+  try {
+    const queryResult: any = await connection.query(
+      "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1"
+    );
+    const records = Array.isArray(queryResult?.records) ? queryResult.records : [];
+    if (records.length > 0 && records[0].Id) {
+      return records[0].Id;
+    }
+  } catch (error) {
+    contextLog('[StripeTrueUp] Failed to lookup Contact record type id', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return undefined;
+};
+
+const findOrCreateContactInSalesforce = async (
+  salesforceSvc: SalesforceSvc,
+  customer: Stripe.Customer | Stripe.DeletedCustomer | null,
+  transactionName: string | null,
+  contextLog: typeof console.log
+): Promise<{ id: string } | null> => {
+  let cachedContactRecordTypeId: string | undefined;
+  if (!customer || customer.deleted) {
+    return null;
+  }
+
+  const stripeCustomer = customer as Stripe.Customer;
+  const { customerName, firstName, lastName } = buildContactIdentity(stripeCustomer, transactionName);
 
   contextLog('[StripeTrueUp] Starting contact find/create process', {
     customerId: stripeCustomer.id,
@@ -573,7 +875,6 @@ const findOrCreateContactInSalesforce = async (
   });
 
   try {
-    // Get the jsforce connection - use the global one or create a new one
     const connection = salesforceConnection || (await createSalesforceConnection());
 
     if (!connection) {
@@ -583,29 +884,8 @@ const findOrCreateContactInSalesforce = async (
 
     contextLog('[StripeTrueUp] Salesforce connection established');
 
-    // Step 1: Search for existing contact using SOQL
-    const whereConditions: string[] = [];
-
-    // Priority 1: Search by Stripe Customer ID
-    if (stripeCustomer.id) {
-      const escapedId = stripeCustomer.id.replace(/'/g, "\\'");
-      whereConditions.push(`Stripe_Customer_Id__c = '${escapedId}'`);
-    }
-
-    // Priority 2: Search by email
-    if (stripeCustomer.email) {
-      const escapedEmail = stripeCustomer.email.replace(/'/g, "\\'");
-      whereConditions.push(`Email = '${escapedEmail}'`);
-    }
-
-    // Priority 3: Search by name combination
-    if (firstName && lastName) {
-      const escapedFirst = firstName.replace(/'/g, "\\'");
-      const escapedLast = lastName.replace(/'/g, "\\'");
-      whereConditions.push(`(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`);
-    }
-
-    let existingContact: any = null;
+    const whereConditions = buildContactSearchConditions(stripeCustomer, firstName, lastName);
+    let existingContact: SalesforceContactRecord | null = null;
 
     if (whereConditions.length > 0) {
       const query = `SELECT Id, FirstName, LastName, Email, Stripe_Customer_Id__c 
@@ -620,45 +900,35 @@ const findOrCreateContactInSalesforce = async (
       });
 
       const result = await connection.query(query);
+      const records = Array.isArray(result?.records)
+        ? (result.records as SalesforceContactRecord[])
+        : [];
 
       contextLog('[StripeTrueUp] SOQL query completed', {
-        recordCount: result.records?.length || 0,
+        recordCount: records.length,
       });
 
-      if (result.records && result.records.length > 0) {
-        // Priority matching:
-        // 1. Exact Stripe Customer ID match
-        const stripeIdMatch = result.records.find(
-          (c: any) => c.Stripe_Customer_Id__c === stripeCustomer.id
-        );
+      if (records.length > 0) {
+        existingContact = selectBestMatchingContact(records, stripeCustomer, firstName, lastName);
 
-        if (stripeIdMatch) {
-          existingContact = stripeIdMatch;
+        if (existingContact?.Stripe_Customer_Id__c === stripeCustomer.id) {
           contextLog('[StripeTrueUp] Found contact by Stripe Customer ID', {
-            contactId: existingContact.Id,
+            contactId: existingContact?.Id,
             stripeCustomerId: stripeCustomer.id,
           });
-        } else if (firstName && lastName) {
-          // 2. Name match (to prevent updating wrong contact)
-          const nameMatch = result.records.find((c: any) => {
-            const firstNameMatch =
-              c.FirstName && firstName && c.FirstName.toLowerCase() === firstName.toLowerCase();
-            const lastNameMatch =
-              c.LastName && lastName && c.LastName.toLowerCase() === lastName.toLowerCase();
-            return firstNameMatch && lastNameMatch;
+        } else if (
+          existingContact?.FirstName &&
+          existingContact?.LastName &&
+          firstName &&
+          existingContact.FirstName.toLowerCase() === firstName.toLowerCase() &&
+          existingContact.LastName.toLowerCase() === lastName.toLowerCase()
+        ) {
+          contextLog('[StripeTrueUp] Found contact by name match', {
+            contactId: existingContact.Id,
+            firstName,
+            lastName,
           });
-
-          if (nameMatch) {
-            existingContact = nameMatch;
-            contextLog('[StripeTrueUp] Found contact by name match', {
-              contactId: existingContact.Id,
-              firstName,
-              lastName,
-            });
-          }
-        } else {
-          // 3. Use first result (email match)
-          existingContact = result.records[0];
+        } else if (existingContact) {
           contextLog('[StripeTrueUp] Found contact by email', {
             contactId: existingContact.Id,
             email: stripeCustomer.email,
@@ -669,36 +939,21 @@ const findOrCreateContactInSalesforce = async (
       contextLog('[StripeTrueUp] No search conditions available, will create new contact');
     }
 
-    // Step 2: Update existing contact or create new one
     if (existingContact) {
-      // Update existing contact
-      const updateFields: Record<string, any> = {
-        Id: existingContact.Id,
-      };
+      const updateFields = buildContactUpdateFields(
+        existingContact,
+        stripeCustomer,
+        firstName,
+        lastName
+      );
 
-      // Update Stripe Customer ID if not set
       if (!existingContact.Stripe_Customer_Id__c && stripeCustomer.id) {
-        updateFields.Stripe_Customer_Id__c = stripeCustomer.id;
         contextLog('[StripeTrueUp] Adding Stripe Customer ID to existing contact', {
           contactId: existingContact.Id,
           stripeCustomerId: stripeCustomer.id,
         });
       }
 
-      // Update email if provided and different
-      if (stripeCustomer.email && stripeCustomer.email !== existingContact.Email) {
-        updateFields.Email = stripeCustomer.email;
-      }
-
-      // Update name if provided and different
-      if (firstName && firstName !== existingContact.FirstName) {
-        updateFields.FirstName = firstName;
-      }
-      if (lastName && lastName !== existingContact.LastName) {
-        updateFields.LastName = lastName;
-      }
-
-      // Only update if there are changes beyond the Id
       if (Object.keys(updateFields).length > 1) {
         const updateResult = await connection.sobject('Contact').update(updateFields);
 
@@ -716,64 +971,52 @@ const findOrCreateContactInSalesforce = async (
       }
 
       return { id: existingContact.Id };
-    } else {
-      // Create new contact
-      const contactRecord: Record<string, any> = {
-        FirstName: firstName,
-        LastName: lastName,
-        Email: stripeCustomer.email || null,
-        Stripe_Customer_Id__c: stripeCustomer.id,
-      };
-
-      // lookup record type id if we haven't yet
-      if (!cachedContactRecordTypeId) {
-        try {
-          const rtQuery = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
-          const rtRes: any = await connection.query(rtQuery);
-          const rtRecs = Array.isArray(rtRes.records) ? rtRes.records : [];
-          if (rtRecs.length > 0 && rtRecs[0].Id) {
-            cachedContactRecordTypeId = rtRecs[0].Id;
-          }
-        } catch (err) {
-          // if lookup fails, we simply omit the field
-          contextLog('[StripeTrueUp] Failed to lookup Contact record type id', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      if (cachedContactRecordTypeId) {
-        contactRecord.RecordTypeId = cachedContactRecordTypeId;
-      }
-
-      contextLog('[StripeTrueUp] Creating new contact', {
-        stripeCustomerId: stripeCustomer.id,
-        firstName,
-        lastName,
-        email: stripeCustomer.email,
-      });
-
-      const createResult = await connection.sobject('Contact').create(contactRecord);
-
-      if (!createResult.success) {
-        contextLog('[StripeTrueUp] Failed to create contact', {
-          errors: createResult.errors,
-        });
-        return null;
-      }
-
-      contextLog('[StripeTrueUp] Created new contact', {
-        contactId: createResult.id,
-        stripeCustomerId: stripeCustomer.id,
-      });
-
-      return { id: createResult.id };
     }
+
+    const contactRecord: Record<string, any> = {
+      FirstName: firstName,
+      LastName: lastName,
+      Email: stripeCustomer.email || null,
+      Stripe_Customer_Id__c: stripeCustomer.id,
+    };
+
+    cachedContactRecordTypeId = await ensureContactRecordTypeId(
+      connection,
+      cachedContactRecordTypeId,
+      contextLog
+    );
+
+    if (cachedContactRecordTypeId) {
+      contactRecord.RecordTypeId = cachedContactRecordTypeId;
+    }
+
+    contextLog('[StripeTrueUp] Creating new contact', {
+      stripeCustomerId: stripeCustomer.id,
+      firstName,
+      lastName,
+      email: stripeCustomer.email,
+    });
+
+    const createResult = await connection.sobject('Contact').create(contactRecord);
+
+    if (!createResult.success) {
+      contextLog('[StripeTrueUp] Failed to create contact', {
+        errors: createResult.errors,
+      });
+      return null;
+    }
+
+    contextLog('[StripeTrueUp] Created new contact', {
+      contactId: createResult.id,
+      stripeCustomerId: stripeCustomer.id,
+    });
+
+    return { id: createResult.id };
   } catch (error) {
     contextLog('[StripeTrueUp] Failed to find/create contact in Salesforce', {
       customerId: stripeCustomer.id,
       error: error instanceof Error ? error.message : String(error),
     });
-    // Don't throw - continue processing even if customer upsert fails
     return null;
   }
 };
@@ -820,7 +1063,6 @@ const processPayments = async (
 
   for (const charge of recordsToProcess) {
     try {
-      // Only process successful charges
       if (charge.status !== 'succeeded') {
         context.log('[StripeTrueUp] Skipping charge with non-successful status', {
           chargeId: charge.id,
@@ -845,30 +1087,31 @@ const processPayments = async (
 
       const key = `bt_${balanceTransaction.id}`;
 
-      // Check if already processed
-      let shouldSkip = false;
       let existingTransactionId: string | null = null;
-      if (resubmit) {
-        // In resubmit mode, check Salesforce for existing transaction
-        const salesforce = await ensureSalesforce();
-        if (typeof salesforce.findTransactionRecordByExternalId === 'function') {
-          const existingRecord = await salesforce.findTransactionRecordByExternalId(
-            'stripe_charge_id__c',
-            charge.id,
-            'General'
-          );
+      const shouldSkip = await shouldSkipForResubmitOrIdempotency({
+        resubmit,
+        idempotencyKey: key,
+        checkResubmit: async () => {
+          const salesforce = await ensureSalesforce();
+          if (typeof salesforce.findTransactionRecordByExternalId === 'function') {
+            const existingRecord = await salesforce.findTransactionRecordByExternalId(
+              'stripe_charge_id__c',
+              charge.id,
+              'General'
+            );
 
-          if (existingRecord?.id) {
-            existingTransactionId = existingRecord.id;
+            if (existingRecord?.id) {
+              existingTransactionId = existingRecord.id;
 
-            if (existingRecord.contactId) {
-              context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
-                chargeId: charge.id,
-                salesforceId: existingRecord.id,
-                contactId: existingRecord.contactId,
-              });
-              shouldSkip = true;
-            } else {
+              if (existingRecord.contactId) {
+                context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
+                  chargeId: charge.id,
+                  salesforceId: existingRecord.id,
+                  contactId: existingRecord.contactId,
+                });
+                return true;
+              }
+
               context.log(
                 '[StripeTrueUp] Existing Salesforce transaction has no contact; attempting reassociation',
                 {
@@ -877,8 +1120,10 @@ const processPayments = async (
                 }
               );
             }
+
+            return false;
           }
-        } else {
+
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             charge.id,
@@ -889,16 +1134,12 @@ const processPayments = async (
               chargeId: charge.id,
               salesforceId: existingId,
             });
-            shouldSkip = true;
+            return true;
           }
-        }
-      } else {
-        // Normal mode: check idempotency store
-        const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
-        if (alreadyProcessed) {
-          shouldSkip = true;
-        }
-      }
+
+          return false;
+        },
+      });
 
       if (shouldSkip) {
         summary.skipped += 1;
@@ -1011,23 +1252,20 @@ const processPayments = async (
           });
         }
 
-        // Build transaction with contact link if we have a contact ID
         const paymentIntentId =
           typeof chargeObj.payment_intent === 'string'
             ? chargeObj.payment_intent
             : chargeObj.payment_intent?.id;
 
         const transaction = mapStripeToTransaction({
-          paymentIntent: null, // We'll get the ID from the charge itself in the mapping
+          paymentIntent: null,
           charge: chargeObj,
           balanceTransaction,
           stripeCustomer,
         });
 
-        // Extract frequency from subscription if charge has invoice and no frequency is set
         if (!transaction.frequency__c && chargeObj.invoice) {
           try {
-            // Get invoice to find subscription
             const invoice = await stripe.invoices.retrieve(chargeObj.invoice as string);
             if (invoice.subscription) {
               const subscriptionId =
@@ -1065,7 +1303,6 @@ const processPayments = async (
           }
         }
 
-        // Generate transaction name
         const config = loadConfig();
         const metadata = chargeObj.metadata || {};
 
@@ -1078,7 +1315,6 @@ const processPayments = async (
           paymentIntentId: paymentIntentId,
         });
 
-        // Try to get product name from payment intent first
         let productName: string | null = null;
         if (paymentIntentId) {
           try {
@@ -1094,7 +1330,6 @@ const processPayments = async (
           }
         }
 
-        // Use product name, then metadata, then default
         const category =
           productName ||
           metadata.category ||
@@ -1102,99 +1337,9 @@ const processPayments = async (
           config.transaction.defaultCategory;
         const normalizedCategory = normalizeTransactionCategory(category, config);
 
-        // Associate category with campaign if no campaign is already set
         if (!transaction.campaign__c && productName) {
-          try {
-            context.log('[StripeTrueUp] Associating category with campaign', {
-              category: productName,
-              chargeId: charge.id,
-            });
-            const crm = await createCrmGetter()();
-            const campaignId = await crm.findOrCreateCampaign(productName);
-            if (campaignId && typeof campaignId === 'string' && campaignId.trim().length > 0) {
-              transaction.campaign__c = campaignId;
-              context.log('[StripeTrueUp] Category associated with campaign', {
-                category: productName,
-                campaignId,
-                chargeId: charge.id,
-              });
-
-              // Add contact as campaign member if contact is available
-              let contactId = transaction.contact__c;
-
-              // If contact ID is not available from metadata, try to resolve from Stripe customer ID
-              if (!contactId && transaction.stripe_customer_id__c) {
-                try {
-                  context.log('[StripeTrueUp] Resolving contact from Stripe customer ID', {
-                    stripeCustomerId: transaction.stripe_customer_id__c,
-                  });
-
-                  // Search for contact by Stripe customer ID
-                  const contacts = await crm.searchContact({
-                    stripeCustomerId: transaction.stripe_customer_id__c,
-                  });
-
-                  if (contacts && contacts.length > 0) {
-                    contactId = contacts[0].Id;
-                    context.log('[StripeTrueUp] Resolved contact from Stripe customer ID', {
-                      stripeCustomerId: transaction.stripe_customer_id__c,
-                      contactId,
-                    });
-                  } else {
-                    context.log('[StripeTrueUp] No contact found for Stripe customer ID', {
-                      stripeCustomerId: transaction.stripe_customer_id__c,
-                    });
-                  }
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : 'Unknown error';
-                  context.log('[StripeTrueUp] Failed to resolve contact from Stripe customer ID', {
-                    stripeCustomerId: transaction.stripe_customer_id__c,
-                    error: message,
-                  });
-                }
-              }
-
-              if (contactId && typeof contactId === 'string' && contactId.trim().length > 0) {
-                try {
-                  context.log('[StripeTrueUp] Adding contact as campaign member', {
-                    campaignId,
-                    contactId,
-                  });
-                  const memberResult = await crm.addCampaignMember(campaignId, contactId);
-                  if (memberResult.isNew) {
-                    context.log('[StripeTrueUp] Contact added as new campaign member', {
-                      campaignId,
-                      contactId,
-                      campaignMemberId: memberResult.id,
-                    });
-                  } else {
-                    context.log('[StripeTrueUp] Contact is already a campaign member', {
-                      campaignId,
-                      contactId,
-                      campaignMemberId: memberResult.id,
-                    });
-                  }
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : 'Unknown error';
-                  context.log('[StripeTrueUp] Failed to add contact as campaign member', {
-                    campaignId,
-                    contactId,
-                    error: message,
-                  });
-                }
-              }
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : 'Unknown error';
-            context.log(
-              '[StripeTrueUp] Failed to associate category with campaign; continuing without campaign',
-              { category: productName, error: message, chargeId: charge.id }
-            );
-          }
+          await applyCampaignFromCategory(context, transaction, productName, charge.id);
         }
-
-        // Use Salesforce autonumber for transaction names instead of generating custom names
-        // transaction.Name will be auto-generated by Salesforce
 
         if (contactId) {
           transaction.contact__c = contactId;
@@ -1214,15 +1359,14 @@ const processPayments = async (
           hasContact: !!transaction.contact__c,
         });
 
-        // Validate required fields before upserting
-        if (!transaction.status__c || !transaction.amount_gross__c) {
-          context.log('[StripeTrueUp] Skipping transaction upsert due to missing required fields', {
-            chargeId: charge.id,
-            status: transaction.status__c,
-            amountGross: transaction.amount_gross__c,
+        if (
+          skipUpsertWhenRequiredFieldsMissing(context, summary, {
+            message: '[StripeTrueUp] Skipping transaction upsert due to missing required fields',
+            idKey: 'chargeId',
+            idValue: charge.id,
             transaction,
-          });
-          summary.skipped += 1;
+          })
+        ) {
           continue;
         }
 
@@ -1233,7 +1377,6 @@ const processPayments = async (
         );
         summary.salesforceUpdates += 1;
 
-        // Create a minimal checkout session object with metadata for QBO customer naming
         const chargeMetadata = (charge as Stripe.Charge).metadata as
           | Record<string, unknown>
           | null
@@ -1252,7 +1395,6 @@ const processPayments = async (
             chargeId: charge.id,
           });
         } else {
-          // Validate gross amount before QBO posting
           if (grossAmount === 0) {
             context.log('[StripeTrueUp] Skipping QBO charge posting due to zero gross amount', {
               chargeId: charge.id,
@@ -1333,7 +1475,6 @@ const processRefunds = async (
 
   for (const refund of recordsToProcess) {
     try {
-      // Only process successful refunds
       if (refund.status !== 'succeeded') {
         context.log('[StripeTrueUp] Skipping refund with non-successful status', {
           refundId: refund.id,
@@ -1358,30 +1499,27 @@ const processRefunds = async (
 
       const key = `bt_${balanceTransaction.id}`;
 
-      // Check if already processed
-      let shouldSkip = false;
-      if (resubmit) {
-        // In resubmit mode, check Salesforce for existing transaction
-        const salesforce = await ensureSalesforce();
-        const existingId = await salesforce.findTransactionIdByExternalId(
-          'stripe_refund_id__c',
-          refund.id,
-          'General'
-        );
-        if (existingId) {
-          context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
-            refundId: refund.id,
-            salesforceId: existingId,
-          });
-          shouldSkip = true;
-        }
-      } else {
-        // Normal mode: check idempotency store
-        const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
-        if (alreadyProcessed) {
-          shouldSkip = true;
-        }
-      }
+      const shouldSkip = await shouldSkipForResubmitOrIdempotency({
+        resubmit,
+        idempotencyKey: key,
+        checkResubmit: async () => {
+          const salesforce = await ensureSalesforce();
+          const existingId = await salesforce.findTransactionIdByExternalId(
+            'stripe_refund_id__c',
+            refund.id,
+            'General'
+          );
+          if (existingId) {
+            context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
+              refundId: refund.id,
+              salesforceId: existingId,
+            });
+            return true;
+          }
+
+          return false;
+        },
+      });
 
       if (shouldSkip) {
         summary.skipped += 1;
@@ -1408,7 +1546,6 @@ const processRefunds = async (
         if (typeof refund.charge === 'object' && refund.charge) {
           chargeFragment = refund.charge as Stripe.Charge;
         } else if (chargeId) {
-          // Retrieve the full charge to get customer info
           try {
             chargeFragment = await stripe.charges.retrieve(chargeId);
           } catch (error) {
@@ -1424,12 +1561,7 @@ const processRefunds = async (
         const chargeMetadata =
           (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined;
 
-        // Upsert customer first to get the Contact ID
-        // Note: Customer sync for refunds is for Salesforce only
-        // QBO refunds are posted as journal entries without customer association
         let contactId: string | null = null;
-        // make stripeCustomer available throughout this block (including later
-        // when we build the refund transaction) by declaring it here.
         let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
 
         if (chargeFragment && chargeFragment.customer) {
@@ -1550,7 +1682,6 @@ const processRefunds = async (
           stripeCustomer,
         });
 
-        // Generate transaction name
         const config = loadConfig();
         const metadata = chargeFragment?.metadata || {};
 
@@ -1563,7 +1694,6 @@ const processRefunds = async (
           paymentIntentId: paymentIntentIdRefund,
         });
 
-        // Try to get product name from payment intent first
         let productName: string | null = null;
         if (paymentIntentIdRefund && chargeFragment) {
           try {
@@ -1580,9 +1710,6 @@ const processRefunds = async (
             });
           }
         }
-
-        // Use Salesforce autonumber for transaction names instead of generating custom names
-        // transaction.Name will be auto-generated by Salesforce
 
         if (parentId) {
           transaction.parent_transaction__c = parentId;
@@ -1606,18 +1733,15 @@ const processRefunds = async (
           hasContact: !!transaction.contact__c,
         });
 
-        // Validate required fields before upserting
-        if (!transaction.status__c || !transaction.amount_gross__c) {
-          context.log(
-            '[StripeTrueUp] Skipping refund transaction upsert due to missing required fields',
-            {
-              refundId: refund.id,
-              status: transaction.status__c,
-              amountGross: transaction.amount_gross__c,
-              transaction,
-            }
-          );
-          summary.skipped += 1;
+        if (
+          skipUpsertWhenRequiredFieldsMissing(context, summary, {
+            message:
+              '[StripeTrueUp] Skipping refund transaction upsert due to missing required fields',
+            idKey: 'refundId',
+            idValue: refund.id,
+            transaction,
+          })
+        ) {
           continue;
         }
 
@@ -1634,7 +1758,6 @@ const processRefunds = async (
             refundId: refund.id,
           });
         } else {
-          // Validate refund amount before QBO posting
           if (refundAmount === 0) {
             context.log('[StripeTrueUp] Skipping QBO refund posting due to zero refund amount', {
               refundId: refund.id,
@@ -1713,7 +1836,6 @@ const processPayouts = async (
         continue;
       }
 
-      // Only process successful payouts (paid status)
       if (payout.status !== 'paid') {
         context.log('[StripeTrueUp] Skipping payout with non-paid status', {
           payoutId: payout.id,
@@ -1725,39 +1847,35 @@ const processPayouts = async (
 
       const key = `payout_${payout.id}`;
 
-      // Check if already processed
-      let shouldSkip = false;
-      if (resubmit) {
-        // In resubmit mode, check if any transactions already have this payout linked
-        const salesforce = await ensureSalesforce();
-        // Query for any payout-type transaction with this payout ID
-        try {
-          const existingId = await salesforce.findTransactionIdByExternalId(
-            'stripe_payout_id__c',
-            payout.id,
-            'Payout'
-          );
-          if (existingId) {
-            context.log('[StripeTrueUp] Skipping payout already linked in Salesforce', {
+      const shouldSkip = await shouldSkipForResubmitOrIdempotency({
+        resubmit,
+        idempotencyKey: key,
+        checkResubmit: async () => {
+          const salesforce = await ensureSalesforce();
+          try {
+            const existingId = await salesforce.findTransactionIdByExternalId(
+              'stripe_payout_id__c',
+              payout.id,
+              'Payout'
+            );
+            if (existingId) {
+              context.log('[StripeTrueUp] Skipping payout already linked in Salesforce', {
+                payoutId: payout.id,
+                salesforceId: existingId,
+              });
+              return true;
+            }
+
+            return false;
+          } catch (error) {
+            context.log('[StripeTrueUp] Failed to check payout in Salesforce, will process', {
               payoutId: payout.id,
-              salesforceId: existingId,
+              error: error instanceof Error ? error.message : String(error),
             });
-            shouldSkip = true;
+            return false;
           }
-        } catch (error) {
-          // If query fails, log but continue processing
-          context.log('[StripeTrueUp] Failed to check payout in Salesforce, will process', {
-            payoutId: payout.id,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      } else {
-        // Normal mode: check idempotency store
-        const alreadyProcessed = await dependencies.idempotencyStore.isProcessed(key);
-        if (alreadyProcessed) {
-          shouldSkip = true;
-        }
-      }
+        },
+      });
 
       if (shouldSkip) {
         summary.skipped += 1;
@@ -1767,8 +1885,6 @@ const processPayouts = async (
       if (!dryRun) {
         const salesforce = await ensureSalesforce();
 
-        // Fetch balance transactions for automatic payouts
-        // Manual payouts don't support balance transaction filtering
         let balanceTransactions: any[] = [];
         if (payout.automatic) {
           try {
@@ -1786,7 +1902,6 @@ const processPayouts = async (
           }
         }
 
-        // Build payout transaction for Salesforce
         const transactionName = 'Payout';
         const payoutAmount = Math.abs(payout.amount ?? 0);
 
@@ -1814,20 +1929,16 @@ const processPayouts = async (
           posting_error__c: null,
         };
 
-        // Upsert payout transaction in Salesforce
         try {
-          // Validate required fields before upserting
-          if (!payoutTransaction.status__c || !payoutTransaction.amount_gross__c) {
-            context.log(
-              '[StripeTrueUp] Skipping payout transaction upsert due to missing required fields',
-              {
-                payoutId: payout.id,
-                status: payoutTransaction.status__c,
-                amountGross: payoutTransaction.amount_gross__c,
-                payoutTransaction,
-              }
-            );
-            summary.skipped += 1;
+          if (
+            skipUpsertWhenRequiredFieldsMissing(context, summary, {
+              message:
+                '[StripeTrueUp] Skipping payout transaction upsert due to missing required fields',
+              idKey: 'payoutId',
+              idValue: payout.id,
+              transaction: payoutTransaction,
+            })
+          ) {
             continue;
           }
 
@@ -1844,7 +1955,6 @@ const processPayouts = async (
           });
         }
 
-        // Link balance transactions if available
         if (
           balanceTransactions.length > 0 &&
           typeof salesforce.linkPayoutOnTransactions === 'function'
@@ -1864,16 +1974,14 @@ const processPayouts = async (
             payoutId: payout.id,
           });
         } else {
-          // Post to QuickBooks
           const posting = await dependencies.accounting.postPayoutToQbo({
             amount: payoutAmount,
             memo: `Stripe payout ${payout.id}`,
             date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
-            payoutId: payout.id, // Include payout ID for duplicate detection
+            payoutId: payout.id,
           });
           summary.qboPosts += 1;
 
-          // Mark Salesforce transaction as posted to QBO
           if (posting && posting.qboId) {
             try {
               const payoutTxnId = await salesforce.findTransactionIdByExternalId(
@@ -1932,7 +2040,6 @@ const validateEnvironment = (bypassQbo: boolean): { valid: boolean; errors: stri
   const errors: string[] = [];
   const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
-  // Check Stripe credentials
   if (liveMode) {
     if (!process.env.STRIPE_LIVE_SECRET_KEY && !env.stripe.secret) {
       errors.push('STRIPE_LIVE_SECRET_KEY is not configured for live mode');
@@ -1943,7 +2050,6 @@ const validateEnvironment = (bypassQbo: boolean): { valid: boolean; errors: stri
     }
   }
 
-  // Check Salesforce credentials
   if (!process.env.SF_CLIENT_ID) {
     errors.push('SF_CLIENT_ID is not configured (Salesforce sync will fail)');
   }
@@ -1951,7 +2057,6 @@ const validateEnvironment = (bypassQbo: boolean): { valid: boolean; errors: stri
     errors.push('SF_CLIENT_SECRET is not configured (Salesforce sync will fail)');
   }
 
-  // Check QBO credentials (using the actual variable names from env.ts)
   if (!bypassQbo) {
     if (!process.env.QBO_CLIENT_ID) {
       errors.push('QBO_CLIENT_ID is not configured (QuickBooks sync will fail)');
@@ -1985,7 +2090,6 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
       query.bypassQbo ?? query.skipQbo ?? getHeader(req, 'x-bypass-qbo') ?? getHeader(req, 'x-skip-qbo');
     const bypassQbo = parseBoolean(bypassQboParam, bypassQboDefault);
 
-    // Validate environment after resolving runtime overrides
     const envCheck = validateEnvironment(bypassQbo);
     if (!envCheck.valid) {
       context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
@@ -2097,7 +2201,6 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
       );
     }
 
-    // Flush idempotency store to ensure all processed keys are persisted
     if (!dryRun) {
       await dependencies.idempotencyStore.flush();
       context.log('[StripeTrueUp] Idempotency store flushed successfully');

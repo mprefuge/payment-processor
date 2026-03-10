@@ -27,7 +27,6 @@ const resolveDisputeBalanceTransactions = async (
       const balanceTransaction = await stripe.balanceTransactions.retrieve(id);
       results.push(balanceTransaction);
     } catch (error) {
-      // Ignore missing balance transactions
     }
   }
 
@@ -104,7 +103,6 @@ export const handleDisputeClosed = async (
     chargeId,
   });
 
-  // Validate required fields before upserting
   if (
     transaction.status__c == null ||
     (transaction as any).status__c === '' ||

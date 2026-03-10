@@ -28,10 +28,6 @@ export const markPosted = async (
 export const ensureStripeClient = (deps: StripeWebhookDependencies, event: Stripe.Event): Stripe =>
   deps.stripe.getClient(Boolean(event.livemode));
 
-/**
- * Resolve campaign name from metadata to Salesforce Campaign ID
- * Looks for 'campaign', 'campaign__c', or 'Campaign__c' keys in metadata
- */
 const resolveCampaignId = async (
   metadata: Record<string, string | null> | null | undefined,
   crm: any,
@@ -41,7 +37,6 @@ const resolveCampaignId = async (
     return null;
   }
 
-  // Check for campaign in metadata (case-insensitive priority order)
   const campaignName = metadata.campaign__c || metadata.Campaign__c || metadata.campaign;
 
   if (!campaignName || typeof campaignName !== 'string' || campaignName.trim().length === 0) {
@@ -50,7 +45,6 @@ const resolveCampaignId = async (
 
   const trimmedName = campaignName.trim();
 
-  // Check if it's already a Salesforce ID (18-char starting with '701')
   if (trimmedName.match(/^701[a-zA-Z0-9]{15}$/)) {
     context.log('[StripeWebhook] Campaign metadata is already a Salesforce ID', {
       campaignId: trimmedName,
@@ -58,7 +52,6 @@ const resolveCampaignId = async (
     return trimmedName;
   }
 
-  // It's a campaign name, resolve to ID via CRM
   try {
     context.log('[StripeWebhook] Resolving campaign name to Salesforce ID', {
       campaignName: trimmedName,
@@ -96,7 +89,6 @@ export const handleCheckoutSessionCompleted = async (
     paymentIntent: normalizeStripeId(session.payment_intent),
   });
 
-  // Resolve campaign name to Salesforce ID if present in metadata
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
 
   const transaction: TransactionUpsertDTO = {
@@ -108,7 +100,6 @@ export const handleCheckoutSessionCompleted = async (
     sessionId: session.id,
   });
 
-  // Validate required fields before upserting
   if (
     transaction.status__c == null ||
     (transaction as any).status__c === '' ||

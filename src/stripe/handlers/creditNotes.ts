@@ -412,7 +412,6 @@ export const handleCreditNoteEvent = async (
     invoice,
   });
 
-  // Validate required fields before upserting
   if (
     transaction.status__c == null ||
     (transaction as any).status__c === '' ||

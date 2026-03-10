@@ -57,6 +57,29 @@ interface RefundBalanceTransactionContext {
   balanceTransaction: Stripe.BalanceTransaction | null;
 }
 
+const hasRequiredTransactionFields = (
+  status: TransactionUpsertDTO['status__c'] | null | undefined,
+  amountGross: number | null | undefined
+): boolean => status != null && amountGross != null;
+
+const fetchChargeById = async (
+  stripe: Stripe,
+  context: HttpContext,
+  chargeId: string,
+  metadata: Record<string, unknown>
+): Promise<Stripe.Charge | null> => {
+  try {
+    return (await stripe.charges.retrieve(chargeId)) as Stripe.Charge;
+  } catch (error) {
+    context.log('[StripeWebhook] Failed to retrieve charge for refund', {
+      chargeId,
+      ...metadata,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
+
 const toSafeInteger = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
@@ -350,12 +373,7 @@ const updateChargeTransaction = async (
     posted_to_qbo__c: false,
   };
 
-  // Validate required fields before upserting
-  if (
-    transaction.status__c == null ||
-    (transaction as any).status__c === '' ||
-    transaction.amount_gross__c == null
-  ) {
+  if (!hasRequiredTransactionFields(transaction.status__c, transaction.amount_gross__c)) {
     context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
       chargeId,
       status: transaction.status__c,
@@ -731,26 +749,15 @@ const markRefundPosted = async (
 
 const loadStripeContext = async (
   context: HttpContext,
-  event: Stripe.Event,
-  deps: StripeWebhookDependencies,
+  stripe: Stripe,
   refund: Stripe.Refund,
   existingCharge?: Stripe.Charge | null
 ): Promise<StripeContext> => {
-  const stripe = ensureStripeClient(deps, event);
-
   let charge: Stripe.Charge | null = existingCharge ?? null;
   const chargeId = normalizeStripeId(refund.charge);
 
   if (!charge && chargeId) {
-    try {
-      charge = (await stripe.charges.retrieve(chargeId)) as Stripe.Charge;
-    } catch (error) {
-      context.log('[StripeWebhook] Failed to retrieve charge for refund', {
-        refundId: refund.id,
-        chargeId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    charge = await fetchChargeById(stripe, context, chargeId, { refundId: refund.id });
   }
 
   let paymentIntent: Stripe.PaymentIntent | null = null;
@@ -851,12 +858,7 @@ const upsertSalesforceTransaction = async (
     refundId: refund.id,
   });
 
-  // Validate required fields before upserting
-  if (
-    transaction.status__c == null ||
-    (transaction as any).status__c === '' ||
-    transaction.amount_gross__c == null
-  ) {
+  if (!hasRequiredTransactionFields(transaction.status__c, transaction.amount_gross__c)) {
     context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
       refundId: refund.id,
       status: transaction.status__c,
@@ -883,7 +885,7 @@ const processRefund = async (
 ): Promise<void> => {
   const stripe = ensureStripeClient(deps, event);
   const salesforce = await deps.getSalesforceSvc();
-  const stripeContext = await loadStripeContext(context, event, deps, refund, chargeHint ?? null);
+  const stripeContext = await loadStripeContext(context, stripe, refund, chargeHint ?? null);
 
   const balanceTransaction = await resolveBalanceTransaction(stripe, stripeContext.charge, refund);
 
@@ -1007,17 +1009,7 @@ export const handleRefundEvent = async (
   }
 
   const stripe = ensureStripeClient(deps, event);
-
-  let charge: Stripe.Charge | null = null;
-  try {
-    charge = (await stripe.charges.retrieve(chargeId)) as Stripe.Charge;
-  } catch (error) {
-    context.log('[StripeWebhook] Failed to load charge for refund', {
-      refundId: refund.id,
-      chargeId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  const charge = await fetchChargeById(stripe, context, chargeId, { refundId: refund.id });
 
   await processRefund(context, event, deps, refund, charge);
 };

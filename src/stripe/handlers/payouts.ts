@@ -33,6 +33,47 @@ const toCents = (value: unknown): number => {
   return 0;
 };
 
+const hasRequiredPayoutTransactionFields = (
+  status: unknown,
+  amountGross: unknown
+): boolean => status != null && status !== '' && amountGross != null;
+
+const upsertPayoutTransaction = async (
+  context: HttpContext,
+  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+  payoutId: string,
+  payoutTransaction: any,
+  successMessage: string,
+  successPayload: Record<string, unknown>,
+  failureMessage: string,
+  failurePayload: Record<string, unknown>
+): Promise<void> => {
+  try {
+    if (
+      !hasRequiredPayoutTransactionFields(
+        payoutTransaction.status__c,
+        payoutTransaction.amount_gross__c
+      )
+    ) {
+      context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+        payoutId,
+        status: payoutTransaction.status__c,
+        amountGross: payoutTransaction.amount_gross__c,
+        payoutTransaction,
+      });
+      return;
+    }
+
+    await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
+    context.log(successMessage, successPayload);
+  } catch (error) {
+    context.log(failureMessage, {
+      ...failurePayload,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
 const listPayoutTransactions = async (
   stripe: Stripe,
   payoutId: string
@@ -346,7 +387,6 @@ const buildDepositInput = async (
   transactions: Stripe.BalanceTransaction[],
   eventId: string
 ): Promise<UpsertPayoutDepositInput | null> => {
-  // For manual payouts or payouts without transactions, create a simple deposit
   if (!Array.isArray(transactions) || transactions.length === 0) {
     context.log('[StripeWebhook] Creating simple payout deposit without transaction details', {
       payoutId: payout.id,
@@ -354,8 +394,6 @@ const buildDepositInput = async (
     });
 
     const payoutAmount = toCents(payout.amount);
-
-    // Create a simple deposit line with just the payout amount
     const lines: PayoutDepositLineInput[] = [
       {
         type: 'charge',
@@ -442,7 +480,6 @@ const buildPayoutTransaction = async (
   logger: Logger
 ) => {
   if (!depositInput) {
-    // For created/updated events or manual payouts without transactions
     return {
       transaction_type__c: 'payout' as 'payout',
       status__c: (payout.status === 'paid'
@@ -472,7 +509,6 @@ const buildPayoutTransaction = async (
     };
   }
 
-  // For paid events with transaction details
   const chargeTotal = depositInput.lines
     .filter((line) => line.type === 'charge')
     .reduce((sum, line) => sum + line.amountCents, 0);
@@ -491,8 +527,6 @@ const buildPayoutTransaction = async (
 
   const grossAmount = chargeTotal + adjustmentTotal;
   const netAmount = depositInput.totalAmountCents;
-
-  // Build memo with transaction breakdown
   const memoLines = [
     `Stripe Payout ${payout.id}`,
     `Charges: $${(chargeTotal / 100).toFixed(2)}`,
@@ -572,7 +606,6 @@ export const handlePayoutEvent = async (
   const salesforce = await deps.getSalesforceSvc();
   const eventType = event.type;
 
-  // For created and updated events, only track in Salesforce - don't sync to QBO
   if (eventType === 'payout.created' || eventType === 'payout.updated') {
     context.log('[StripeWebhook] Tracking payout lifecycle event in Salesforce', {
       payoutId: payout.id,
@@ -581,7 +614,6 @@ export const handlePayoutEvent = async (
       automatic: payout.automatic,
     });
 
-    // Build and upsert payout transaction using consistent helper with idempotency lock
     await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
       const payoutTransaction = await buildPayoutTransaction(
         stripe,
@@ -591,45 +623,28 @@ export const handlePayoutEvent = async (
         context.log
       );
 
-      try {
-        // Validate required fields before upserting
-        if (
-          payoutTransaction.status__c == null ||
-          (payoutTransaction as any).status__c === '' ||
-          payoutTransaction.amount_gross__c == null
-        ) {
-          context.log(
-            '[StripeWebhook] Skipping transaction upsert due to missing required fields',
-            {
-              payoutId: payout.id,
-              status: payoutTransaction.status__c,
-              amountGross: payoutTransaction.amount_gross__c,
-              payoutTransaction,
-            }
-          );
-          return;
-        }
-
-        await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
-        context.log('[StripeWebhook] Tracked payout in Salesforce', {
+      await upsertPayoutTransaction(
+        context,
+        salesforce,
+        payout.id,
+        payoutTransaction,
+        '[StripeWebhook] Tracked payout in Salesforce',
+        {
           payoutId: payout.id,
           eventType,
           amount: payoutTransaction.amount_net__c,
-        });
-      } catch (error) {
-        context.log('[StripeWebhook] Failed to track payout in Salesforce', {
+        },
+        '[StripeWebhook] Failed to track payout in Salesforce',
+        {
           payoutId: payout.id,
           eventType,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+        }
+      );
     });
 
     return;
   }
 
-  // For paid/failed/canceled/reconciliation events, fetch transactions
-  // Skip transaction fetching for manual payouts as they don't have balance transaction history
   let transactions: Stripe.BalanceTransaction[] = [];
   const isManualPayout = payout.automatic === false;
 
@@ -648,7 +663,6 @@ export const handlePayoutEvent = async (
         error: errorMessage,
       });
 
-      // If error mentions manual payouts, log more detail
       if (errorMessage.includes('manual')) {
         context.log('[StripeWebhook] Error indicates manual payout without transaction history', {
           payoutId: payout.id,
@@ -663,7 +677,6 @@ export const handlePayoutEvent = async (
 
   const adapter = getPayoutAdapter(deps);
 
-  // Only sync to QBO when the payout is paid or reconciliation is completed
   if (eventType === 'payout.paid' || eventType === 'payout.reconciliation_completed') {
     if (!env.accounting.syncEnabled) {
       context.log('[StripeWebhook] Accounting sync disabled, skipping payout posting', {
@@ -683,10 +696,8 @@ export const handlePayoutEvent = async (
       return;
     }
 
-    // Build deposit input - will create simple deposit for manual payouts
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
 
-    // Build and upsert payout transaction in Salesforce with idempotency lock
     await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
       const payoutTransaction = await buildPayoutTransaction(
         stripe,
@@ -696,42 +707,26 @@ export const handlePayoutEvent = async (
         context.log
       );
 
-      try {
-        // Validate required fields before upserting
-        if (
-          payoutTransaction.status__c == null ||
-          (payoutTransaction as any).status__c === '' ||
-          payoutTransaction.amount_gross__c == null
-        ) {
-          context.log(
-            '[StripeWebhook] Skipping transaction upsert due to missing required fields',
-            {
-              payoutId: payout.id,
-              status: payoutTransaction.status__c,
-              amountGross: payoutTransaction.amount_gross__c,
-              payoutTransaction,
-            }
-          );
-          return;
-        }
-
-        await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
-        context.log('[StripeWebhook] Upserted payout transaction in Salesforce', {
+      await upsertPayoutTransaction(
+        context,
+        salesforce,
+        payout.id,
+        payoutTransaction,
+        '[StripeWebhook] Upserted payout transaction in Salesforce',
+        {
           payoutId: payout.id,
           eventType,
           hasTransactions: !!depositInput,
           amount: payoutTransaction.amount_net__c,
-        });
-      } catch (error) {
-        context.log('[StripeWebhook] Failed to upsert payout transaction in Salesforce', {
+        },
+        '[StripeWebhook] Failed to upsert payout transaction in Salesforce',
+        {
           payoutId: payout.id,
           eventType,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+        }
+      );
     });
 
-    // depositInput should always exist now (even for manual payouts)
     if (!depositInput) {
       context.log('[StripeWebhook] No deposit input created, skipping QBO sync', {
         payoutId: payout.id,
@@ -739,7 +734,6 @@ export const handlePayoutEvent = async (
       return;
     }
 
-    // Post deposit to QuickBooks
     let qboDocId: string | null = null;
     let qboDocType: string | null = null;
     await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
@@ -750,7 +744,6 @@ export const handlePayoutEvent = async (
       }
     });
 
-    // Mark Salesforce transaction as posted to QBO
     if (qboDocId && qboDocType) {
       try {
         const payoutTxnId = await salesforce.findTransactionIdByExternalId(
@@ -791,7 +784,6 @@ export const handlePayoutEvent = async (
   if (eventType === 'payout.failed' || eventType === 'payout.canceled') {
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
 
-    // Upsert payout transaction in Salesforce with failed/canceled status with idempotency lock
     await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
       const payoutTransaction = await buildPayoutTransaction(
         stripe,
@@ -801,38 +793,23 @@ export const handlePayoutEvent = async (
         context.log
       );
 
-      try {
-        // Validate required fields before upserting
-        if (
-          payoutTransaction.status__c == null ||
-          (payoutTransaction as any).status__c === '' ||
-          payoutTransaction.amount_gross__c == null
-        ) {
-          context.log(
-            '[StripeWebhook] Skipping transaction upsert due to missing required fields',
-            {
-              payoutId: payout.id,
-              status: payoutTransaction.status__c,
-              amountGross: payoutTransaction.amount_gross__c,
-              payoutTransaction,
-            }
-          );
-          return;
-        }
-
-        await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
-        context.log('[StripeWebhook] Updated payout transaction status in Salesforce', {
+      await upsertPayoutTransaction(
+        context,
+        salesforce,
+        payout.id,
+        payoutTransaction,
+        '[StripeWebhook] Updated payout transaction status in Salesforce',
+        {
           payoutId: payout.id,
           eventType,
           status: payoutTransaction.status__c,
-        });
-      } catch (error) {
-        context.log('[StripeWebhook] Failed to update payout transaction in Salesforce', {
+        },
+        '[StripeWebhook] Failed to update payout transaction in Salesforce',
+        {
           payoutId: payout.id,
           eventType,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+        }
+      );
     });
 
     const markForReview = adapter?.markDepositForReview;
