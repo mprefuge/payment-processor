@@ -6,6 +6,13 @@ const { ensureSalesforceIdOnCustomer } = require('../stripe/utils');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const { AzureIdempotencyStore } = require('../services/idempotencyStore');
+const {
+  createStripeCustomer,
+  escapeStripeQueryValue,
+  searchStripeCustomer,
+  shouldUpdateStripeCustomer,
+  updateStripeCustomer,
+} = require('./processTransaction/stripeCustomerWorkflow');
 
 // Create in-memory idempotency store
 const createInMemoryStore = () => {
@@ -880,6 +887,33 @@ const resolveTransactionRecordTypeId = async (crmService) => {
   }
 };
 
+const getCrmTransactionService = async (operationName) => {
+  const crmConfig = getCrmConfig();
+
+  if (!crmConfig) {
+    console.log(`CRM integration disabled - skipping ${operationName}`);
+    return null;
+  }
+
+  const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
+  if (!validation.isValid) {
+    console.log(`CRM configuration invalid: ${validation.error}`);
+    return null;
+  }
+
+  const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
+  if (typeof crmService.authenticate === 'function') {
+    await crmService.authenticate();
+  }
+
+  if (typeof crmService.upsertTransactionsRecord !== 'function') {
+    console.log(`CRM service does not support transaction upsert - skipping ${operationName}`);
+    return null;
+  }
+
+  return crmService;
+};
+
 const createPendingTransaction = async (context, session, contactId, transactionData) => {
   try {
     if (!contactId) {
@@ -887,30 +921,8 @@ const createPendingTransaction = async (context, session, contactId, transaction
       return null;
     }
 
-    const crmConfig = getCrmConfig();
-
-    if (!crmConfig) {
-      console.log('CRM integration disabled - skipping pending transaction creation');
-      return null;
-    }
-
-    // Validate CRM configuration
-    const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
-    if (!validation.isValid) {
-      console.log(`CRM configuration invalid: ${validation.error}`);
-      return null;
-    }
-
-    // Create CRM service
-    const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
-    if (typeof crmService.authenticate === 'function') {
-      await crmService.authenticate();
-    }
-
-    if (typeof crmService.upsertTransactionsRecord !== 'function') {
-      console.log(
-        'CRM service does not support transaction upsert - skipping pending transaction creation'
-      );
+    const crmService = await getCrmTransactionService('pending transaction creation');
+    if (!crmService) {
       return null;
     }
 
@@ -1009,26 +1021,8 @@ const createPendingTransaction = async (context, session, contactId, transaction
 
 const upsertSalesforceTransaction = async (context, session, requestData) => {
   try {
-    const crmConfig = getCrmConfig();
-
-    if (!crmConfig) {
-      console.log('CRM integration disabled - skipping transaction upsert');
-      return null;
-    }
-
-    const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
-    if (!validation.isValid) {
-      console.log(`CRM configuration invalid: ${validation.error}`);
-      return null;
-    }
-
-    const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
-    if (typeof crmService.authenticate === 'function') {
-      await crmService.authenticate();
-    }
-
-    if (typeof crmService.upsertTransactionsRecord !== 'function') {
-      console.log('CRM service does not support transaction upsert');
+    const crmService = await getCrmTransactionService('transaction upsert');
+    if (!crmService) {
       return null;
     }
 
@@ -1118,118 +1112,6 @@ const validateRequest = (body) => {
       isValid: false,
       error: error.message || 'Invalid request body',
     };
-  }
-};
-
-// Escape values for safe usage in Stripe search queries
-const escapeStripeQueryValue = (value) => {
-  if (value === null || value === undefined) {
-    return '';
-  }
-
-  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-};
-
-// Search for existing Stripe customer
-const searchStripeCustomer = async (stripe, email, fullName) => {
-  try {
-    const sanitizedEmail = escapeStripeQueryValue(email);
-    const sanitizedFullName = escapeStripeQueryValue(fullName);
-
-    // query by e‑mail only – searching on name is unreliable and can
-    // return zero results even for a perfectly‑matched customer.  we
-    // still check the name locally so we don't falsely return somebody
-    // with the same email but a different name.
-    const customers = await stripe.customers.search({
-      query: `email:'${sanitizedEmail}'`,
-      limit: 20,
-    });
-
-    const validCustomers = customers.data.filter((customer) => {
-      return (
-        customer.name &&
-        customer.name.toLowerCase() === fullName.toLowerCase()
-      );
-    });
-
-    return validCustomers;
-  } catch (error) {
-    logger.error('Error searching Stripe customer:', error);
-    throw error;
-  }
-};
-
-// Create new Stripe customer
-const createStripeCustomer = async (stripe, customerData) => {
-  try {
-    // Handle both nested address object and flat address fields
-    const addressData =
-      customerData.address && typeof customerData.address === 'object'
-        ? {
-            line1: customerData.address.line1 || null,
-            city: customerData.address.city || null,
-            state: customerData.address.state || null,
-            postal_code: customerData.address.postal_code || null,
-            country: customerData.address.country || 'US',
-          }
-        : {
-            line1: customerData.address || null,
-            city: customerData.city || null,
-            state: customerData.state || null,
-            postal_code: customerData.zipcode || null,
-            country: 'US',
-          };
-
-    const customer = await stripe.customers.create({
-      email: customerData.email,
-      name: `${customerData.firstname} ${customerData.lastname}`,
-      phone: customerData.phone || null,
-      address: addressData,
-    });
-    return customer;
-  } catch (error) {
-    logger.error('Error creating Stripe customer:', error);
-    throw error;
-  }
-};
-
-// Update existing Stripe customer
-const updateStripeCustomer = async (stripe, customerId, customerData) => {
-  try {
-    const updateData = {
-      name: `${customerData.firstname} ${customerData.lastname}`,
-      phone: customerData.phone || null,
-    };
-
-    // Handle both nested address object and flat address fields
-    const hasNestedAddress = customerData.address && typeof customerData.address === 'object';
-    const hasFlatAddress =
-      customerData.address || customerData.city || customerData.state || customerData.zipcode;
-
-    // Only include address if at least one field is provided
-    if (hasNestedAddress || hasFlatAddress) {
-      updateData.address = hasNestedAddress
-        ? {
-            line1: customerData.address.line1 || null,
-            city: customerData.address.city || null,
-            state: customerData.address.state || null,
-            postal_code: customerData.address.postal_code || null,
-            country: customerData.address.country || 'US',
-          }
-        : {
-            line1: customerData.address || null,
-            city: customerData.city || null,
-            state: customerData.state || null,
-            postal_code: customerData.zipcode || null,
-            country: 'US',
-          };
-    }
-
-    const customer = await stripe.customers.update(customerId, updateData);
-    return customer;
-  } catch (error) {
-    logger.error('Error updating Stripe customer:', error);
-    throw error;
   }
 };
 
@@ -1499,11 +1381,15 @@ module.exports = async function (request, context) {
       customerId = newCustomer.id;
     } else {
       log('Using existing Stripe customer');
-      customerId = existingCustomers[0].id;
+      const existingCustomer = existingCustomers[0];
+      customerId = existingCustomer.id;
 
-      // Update existing customer with latest information
-      log('Updating existing Stripe customer with latest information');
-      await updateStripeCustomer(stripe, customerId, customerDetails);
+      if (shouldUpdateStripeCustomer(existingCustomer, customerDetails)) {
+        log('Updating existing Stripe customer with latest information');
+        await updateStripeCustomer(stripe, customerId, customerDetails);
+      } else {
+        log('Skipping Stripe customer update; no profile changes detected');
+      }
     }
 
     // Add Stripe Customer ID to customerDetails for CRM sync
