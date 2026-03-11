@@ -7,7 +7,6 @@ import {
   OpenAPIObjectConfig,
 } from 'azure-functions-openapi';
 import { z } from 'zod';
-import { transactionUpsertHttpBodySchema } from './domain/transactions';
 
 import './preflight';
 
@@ -57,6 +56,124 @@ const functionCodeQuerySecurity = registerApiKeySecuritySchema('code', 'query');
 const functionKeyHeaderSecurity = registerApiKeySecuritySchema('x-functions-key', 'header');
 const functionAuthSecurity = [functionCodeQuerySecurity, functionKeyHeaderSecurity];
 
+const BoolLikeQuerySchema = z.enum(['true', 'false', '1', '0', 'yes', 'no', 'on', 'off']);
+const PositiveIntLikeSchema = z.string().regex(/^\d+$/);
+
+const TransactionFrequencySchema = z.enum(['onetime', 'week', 'biweek', 'month', 'year']);
+const AmountSchema = z.union([z.number().int().positive(), PositiveIntLikeSchema]);
+const OptionalFeeAmountSchema = z
+  .union([z.number().int().nonnegative(), PositiveIntLikeSchema])
+  .optional();
+
+const TransactionAddressSchema = z
+  .object({
+    line1: z.string().optional(),
+    line2: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    postal_code: z.string().optional(),
+    postalCode: z.string().optional(),
+    country: z.string().optional(),
+  })
+  .passthrough();
+
+const TransactionCustomerSchema = z
+  .object({
+    email: z.string().email(),
+    firstname: z.string().optional(),
+    lastname: z.string().optional(),
+    firstName: z.string().optional(),
+    lastName: z.string().optional(),
+    phone: z.string().optional(),
+    address: z.union([TransactionAddressSchema, z.string()]).optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    zipcode: z.string().optional(),
+    postalCode: z.string().optional(),
+  })
+  .passthrough();
+
+const CommonTransactionFieldsSchema = {
+  amount: AmountSchema,
+  frequency: TransactionFrequencySchema,
+  metadata: z.record(z.unknown()).optional(),
+  attribution: z.string().optional(),
+  coverFee: z.boolean().optional(),
+  feeAmount: OptionalFeeAmountSchema,
+  paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
+  category: z.string().optional(),
+  transactionType: z.string().optional(),
+};
+
+const ProcessTransactionRequestSchema = z.union([
+  z
+    .object({
+      ...CommonTransactionFieldsSchema,
+      customer: TransactionCustomerSchema,
+    })
+    .passthrough(),
+  z
+    .object({
+      ...CommonTransactionFieldsSchema,
+      email: z.string().email(),
+      firstname: z.string().min(1),
+      lastname: z.string().min(1),
+      phone: z.string().optional(),
+      address: z.union([TransactionAddressSchema, z.string()]).optional(),
+      city: z.string().optional(),
+      state: z.string().optional(),
+      zipcode: z.string().optional(),
+      postalCode: z.string().optional(),
+    })
+    .passthrough(),
+]);
+
+const StripeWebhookHeadersSchema = z
+  .object({
+    'stripe-signature': z.string().min(1),
+  })
+  .passthrough();
+
+const PayoutSyncQuerySchema = z
+  .object({
+    lookbackDays: PositiveIntLikeSchema.optional(),
+  })
+  .passthrough();
+
+const StripeTrueUpQuerySchema = z
+  .object({
+    from: z.string().min(1),
+    to: z.string().optional(),
+    type: z.enum(['payments', 'refunds', 'payouts']).optional(),
+    dryRun: BoolLikeQuerySchema.optional(),
+    resubmit: BoolLikeQuerySchema.optional(),
+    bypassQbo: BoolLikeQuerySchema.optional(),
+    skipQbo: BoolLikeQuerySchema.optional(),
+    limit: PositiveIntLikeSchema.optional(),
+  })
+  .passthrough();
+
+const ManualQboSyncRequestSchema = z
+  .object({
+    type: z.enum(['sales-receipt', 'journal-entry', 'bank-deposit']),
+    data: z.record(z.unknown()),
+  })
+  .passthrough();
+
+const SalesforcePaymentsSyncQuerySchema = z
+  .object({
+    dryRun: BoolLikeQuerySchema.optional(),
+    exampleLimit: PositiveIntLikeSchema.optional(),
+    format: z.enum(['csv']).optional(),
+    cursor: z.string().optional(),
+    pageSize: PositiveIntLikeSchema.optional(),
+    maxPages: PositiveIntLikeSchema.optional(),
+    maxRuntimeMs: PositiveIntLikeSchema.optional(),
+    maxRecords: PositiveIntLikeSchema.optional(),
+    includeCustomerLookup: BoolLikeQuerySchema.optional(),
+  })
+  .passthrough();
+
 const documents = [
   registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'json'),
   registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'yaml'),
@@ -91,13 +208,14 @@ registerFunction('processTransaction', 'Process a payment transaction', {
   request: {
     body: {
       content: {
-        'application/json': { schema: transactionUpsertHttpBodySchema },
+        'application/json': { schema: ProcessTransactionRequestSchema },
       },
     },
   },
   responses: {
-    200: { description: 'Transaction processed' },
+    200: { description: 'Transaction processed (checkout session created)' },
     400: { description: 'Invalid transaction payload' },
+    500: { description: 'Processing error' },
   },
 });
 
@@ -110,7 +228,18 @@ registerFunction('stripeWebhook', 'Stripe webhook receiver', {
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
   route: 'stripe/webhook',
-  responses: { 200: { description: 'Webhook received' } },
+  request: {
+    headers: StripeWebhookHeadersSchema,
+    body: {
+      content: {
+        'application/json': { schema: z.record(z.unknown()) },
+      },
+    },
+  },
+  responses: {
+    200: { description: 'Webhook processed or duplicate acknowledged' },
+    400: { description: 'Missing/invalid Stripe signature or invalid payload' },
+  },
 });
 
 registerFunction('payoutSyncTrigger', 'Trigger payout sync with Stripe', {
@@ -122,7 +251,14 @@ registerFunction('payoutSyncTrigger', 'Trigger payout sync with Stripe', {
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
   route: 'stripe/payout-sync',
-  responses: { 200: { description: 'Sync initiated' } },
+  request: {
+    query: PayoutSyncQuerySchema,
+  },
+  responses: {
+    200: { description: 'Sync completed' },
+    207: { description: 'Sync completed with partial errors' },
+    500: { description: 'Sync failed' },
+  },
 });
 
 registerFunction('stripeTrueUp', 'Stripe true‑up support', {
@@ -134,7 +270,14 @@ registerFunction('stripeTrueUp', 'Stripe true‑up support', {
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
   route: 'stripe/true-up',
-  responses: { 200: { description: 'True‑up operation complete' } },
+  request: {
+    query: StripeTrueUpQuerySchema,
+  },
+  responses: {
+    200: { description: 'True‑up operation complete' },
+    400: { description: 'Invalid or missing query parameters' },
+    500: { description: 'True‑up operation failed' },
+  },
 });
 
 registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
@@ -146,7 +289,18 @@ registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
   route: 'qbo/manual-sync',
-  responses: { 200: { description: 'Sync started' } },
+  request: {
+    body: {
+      content: {
+        'application/json': { schema: ManualQboSyncRequestSchema },
+      },
+    },
+  },
+  responses: {
+    200: { description: 'QuickBooks manual sync succeeded' },
+    400: { description: 'Invalid manual sync request' },
+    500: { description: 'QuickBooks sync failure' },
+  },
 });
 
 registerFunction('salesforcePaymentsSync', 'Salesforce payments synchronization', {
@@ -158,19 +312,35 @@ registerFunction('salesforcePaymentsSync', 'Salesforce payments synchronization'
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
   route: 'stripe/salesforce-payments-sync',
-  responses: { 200: { description: 'Sync success' } },
+  request: {
+    query: SalesforcePaymentsSyncQuerySchema,
+  },
+  responses: {
+    200: { description: 'Sync succeeded' },
+    500: { description: 'Sync failed' },
+  },
 });
 
 // define simple event registration schema
 const EventRegistrationSchema = z.object({
   eventId: z.string(),
-  contact: z.object({
-    email: z.string().email(),
-    firstName: z.string(),
-    lastName: z.string(),
-  }).passthrough(),
+  contact: z
+    .object({
+      email: z.string().email(),
+      firstName: z.string(),
+      lastName: z.string(),
+      phone: z.string().optional(),
+      company: z.string().optional(),
+      mailingStreet: z.string().optional(),
+      mailingCity: z.string().optional(),
+      mailingState: z.string().optional(),
+      mailingPostalCode: z.string().optional(),
+      mailingCountry: z.string().optional(),
+      customFields: z.record(z.unknown()).optional(),
+    })
+    .passthrough(),
   paymentMethodId: z.string().optional(),
-  customFields: z.record(z.any()).optional(),
+  customFields: z.record(z.unknown()).optional(),
   notes: z.string().optional(),
 });
 
