@@ -198,11 +198,13 @@ Create a Stripe checkout session for payment processing.
 
 Interactive API documentation is available once the function is running locally or in Azure:
 
-- **JSON**: `GET /api/swagger.json` (OpenAPI 3.1 document)
-- **YAML**: `GET /api/swagger.yaml`
+- **JSON**: `GET /api/openapi-3.1.0.json`
+- **YAML**: `GET /api/openapi-3.1.0.yaml`
 - **Swagger UI**: open `GET /api/swagger-ui.html` in your browser to explore and exercise endpoints.
 
 You can also download the raw schema to generate client libraries or SDKs.
+
+For endpoints configured with Azure Functions `authLevel: function`, click **Authorize** in Swagger UI and provide your function key using the `x-functions-key` value.
 
 ### Stripe Webhook
 

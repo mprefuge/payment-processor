@@ -1,5 +1,11 @@
 import { app } from '@azure/functions';
-import { registerFunction, registerOpenAPIHandler, registerSwaggerUIHandler, OpenAPIObjectConfig } from 'azure-functions-openapi';
+import {
+  registerApiKeySecuritySchema,
+  registerFunction,
+  registerOpenAPIHandler,
+  registerSwaggerUIHandler,
+  OpenAPIObjectConfig,
+} from 'azure-functions-openapi';
 import { z } from 'zod';
 import { transactionUpsertHttpBodySchema } from './domain/transactions';
 
@@ -51,6 +57,10 @@ const openAPIConfig: OpenAPIObjectConfig = {
   ],
 };
 
+const functionCodeQuerySecurity = registerApiKeySecuritySchema('code', 'query');
+const functionKeyHeaderSecurity = registerApiKeySecuritySchema('x-functions-key', 'header');
+const functionAuthSecurity = [functionCodeQuerySecurity, functionKeyHeaderSecurity];
+
 const documents = [
   registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'json'),
   registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'yaml'),
@@ -61,6 +71,9 @@ registerSwaggerUIHandler('anonymous', 'api', documents);
 // Register HTTP-triggered functions
 registerFunction('healthCheck', 'Returns overall health and integration statuses', {
   handler: healthCheck,
+  description:
+    'Use to validate connectivity to configured downstream dependencies and verify runtime health.',
+  tags: ['Health'],
   methods: ['GET'],
   authLevel: 'anonymous',
   azureFunctionRoutePrefix: 'api',
@@ -73,6 +86,8 @@ registerFunction('healthCheck', 'Returns overall health and integration statuses
 // transaction endpoint expects a request body matching transactionUpsertHttpBodySchema
 registerFunction('processTransaction', 'Process a payment transaction', {
   handler: processTransaction,
+  description: 'Creates and processes a transaction request into downstream payment/CRM workflows.',
+  tags: ['Transactions'],
   methods: ['POST'],
   authLevel: 'anonymous',
   azureFunctionRoutePrefix: 'api',
@@ -92,6 +107,9 @@ registerFunction('processTransaction', 'Process a payment transaction', {
 
 registerFunction('stripeWebhook', 'Stripe webhook receiver', {
   handler: stripeWebhook,
+  description: 'Receives Stripe webhook events and routes them to the appropriate domain handlers.',
+  tags: ['Stripe'],
+  security: functionAuthSecurity,
   methods: ['POST'],
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
@@ -101,6 +119,9 @@ registerFunction('stripeWebhook', 'Stripe webhook receiver', {
 
 registerFunction('payoutSyncTrigger', 'Trigger payout sync with Stripe', {
   handler: payoutSyncTrigger,
+  description: 'Manually triggers payout synchronization and reconciliation flow with Stripe/QBO.',
+  tags: ['Stripe'],
+  security: functionAuthSecurity,
   methods: ['POST'],
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
@@ -110,6 +131,9 @@ registerFunction('payoutSyncTrigger', 'Trigger payout sync with Stripe', {
 
 registerFunction('stripeTrueUp', 'Stripe true‑up support', {
   handler: stripeTrueUp,
+  description: 'Runs Stripe true-up operations for payment reconciliation.',
+  tags: ['Stripe'],
+  security: functionAuthSecurity,
   methods: ['GET', 'POST'],
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
@@ -119,6 +143,9 @@ registerFunction('stripeTrueUp', 'Stripe true‑up support', {
 
 registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
   handler: manualQboSync,
+  description: 'Starts an on-demand QuickBooks Online synchronization cycle.',
+  tags: ['QBO'],
+  security: functionAuthSecurity,
   methods: ['POST'],
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
@@ -128,6 +155,9 @@ registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
 
 registerFunction('salesforcePaymentsSync', 'Salesforce payments synchronization', {
   handler: salesforcePaymentsSync,
+  description: 'Triggers synchronization of payments from Stripe into Salesforce records.',
+  tags: ['Salesforce'],
+  security: functionAuthSecurity,
   methods: ['GET', 'POST'],
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
@@ -150,6 +180,8 @@ const EventRegistrationSchema = z.object({
 
 registerFunction('eventRegistration', 'Register for an event', {
   handler: eventRegistration,
+  description: 'Creates an event registration, including optional payment setup when required.',
+  tags: ['Events'],
   methods: ['POST'],
   authLevel: 'anonymous',
   azureFunctionRoutePrefix: 'api',
@@ -179,6 +211,9 @@ const EventCheckInSchema = z
 
 registerFunction('eventCheckIn', 'Check in an event attendee', {
   handler: eventCheckIn,
+  description: 'Checks in an event registrant by registrationId or by email+eventId lookup.',
+  tags: ['Events'],
+  security: functionAuthSecurity,
   methods: ['POST'],
   authLevel: 'function',
   azureFunctionRoutePrefix: 'api',
@@ -245,6 +280,8 @@ registerFunction('eventConfig', 'Retrieve event configuration with theme', {
       };
     }
   },
+  description: 'Returns currently active events and front-end theme/payment configuration.',
+  tags: ['Events'],
   azureFunctionRoutePrefix: 'api',
   methods: ['GET'],
   authLevel: 'anonymous',
@@ -266,6 +303,8 @@ registerFunction('eventLandingPage', 'Serve static event landing page html', {
       body: html,
     };
   },
+  description: 'Serves the event registration landing page HTML document.',
+  tags: ['Events'],
   azureFunctionRoutePrefix: 'api',
   methods: ['GET'],
   authLevel: 'anonymous',

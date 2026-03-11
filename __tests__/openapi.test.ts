@@ -15,17 +15,20 @@ describe('OpenAPI/Swagger setup', () => {
     expect(healthTag).toBeDefined();
   });
 
-  it('registers at least one OpenAPI document', () => {
+  it('registers OpenAPI JSON and YAML documents', () => {
     expect(Array.isArray(documents)).toBe(true);
-    expect(documents.length).toBeGreaterThan(0);
+    expect(documents.length).toBeGreaterThanOrEqual(2);
+
+    const urls = (documents as OpenAPIDocumentInfo[]).map((doc) => doc.url);
+    expect(urls.some((url) => url.endsWith('openapi-3.1.0.json'))).toBe(true);
+    expect(urls.some((url) => url.endsWith('openapi-3.1.0.yaml'))).toBe(true);
   });
 
   it('document entries look sensible', () => {
-    // we should at least have a non-empty document info object
-    const first = (documents as OpenAPIDocumentInfo[])[0];
-    expect(first).toBeDefined();
-    expect(first.title).toBeTruthy();
-    expect(typeof first.url).toBe('string');
-    expect(first.title).toMatch(/Payment Processor/i);
+    (documents as OpenAPIDocumentInfo[]).forEach((doc) => {
+      expect(doc.title).toMatch(/Payment Processor/i);
+      expect(typeof doc.url).toBe('string');
+      expect(doc.url).toMatch(/openapi-3\.1\.0\.(json|yaml)$/);
+    });
   });
 });
