@@ -51,12 +51,69 @@ const createStripeServices = (): StripeWebhookDependencies['stripe'] => {
 
   const defaultClient = stripeClientFactory.getDefaultClient({ apiVersion: STRIPE_API_VERSION });
 
+  const collectWebhookSecrets = (): string[] => {
+    const secrets: string[] = [];
+
+    const add = (value: unknown) => {
+      if (typeof value !== 'string') {
+        return;
+      }
+
+      const trimmed = value.trim();
+      if (!trimmed || secrets.includes(trimmed)) {
+        return;
+      }
+
+      secrets.push(trimmed);
+    };
+
+    add(env.stripe.webhookSecret);
+    add(process.env.STRIPE_WEBHOOK_SECRET);
+    add(process.env.STRIPE_WEBHOOK_SECRET_TEST);
+    add(process.env.STRIPE_WEBHOOK_SECRET_LIVE);
+
+    const accountSecrets = process.env.STRIPE_WEBHOOK_SECRETS;
+    if (typeof accountSecrets === 'string' && accountSecrets.trim().length > 0) {
+      const entries = accountSecrets.split(',');
+      for (const entry of entries) {
+        const trimmedEntry = entry.trim();
+        if (!trimmedEntry) {
+          continue;
+        }
+
+        const segments = trimmedEntry.split(':').map((segment) => segment.trim());
+        if (segments.length >= 2) {
+          add(segments[1]);
+        } else {
+          add(segments[0]);
+        }
+      }
+    }
+
+    return secrets;
+  };
+
   const getClient = (livemode: boolean): Stripe =>
     stripeClientFactory.getClient(livemode, { apiVersion: STRIPE_API_VERSION });
 
   return {
-    verifyEvent: (payload, signature) =>
-      defaultClient.webhooks.constructEvent(payload, signature, env.stripe.webhookSecret),
+    verifyEvent: (payload, signature) => {
+      const secrets = collectWebhookSecrets();
+      if (secrets.length === 0) {
+        throw new Error('No Stripe webhook secret configured.');
+      }
+
+      let lastError: unknown;
+      for (const secret of secrets) {
+        try {
+          return defaultClient.webhooks.constructEvent(payload, signature, secret);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      throw (lastError as Error) || new Error('Stripe webhook signature verification failed.');
+    },
     getClient,
   };
 };
