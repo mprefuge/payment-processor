@@ -328,6 +328,29 @@ const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
   return defaultValue;
 };
 
+const parseModeToggle = (
+  value: unknown
+): { isValid: boolean; isLiveMode?: boolean; message?: string } => {
+  if (value === undefined || value === null || value === '') {
+    return { isValid: true };
+  }
+
+  if (typeof value !== 'string') {
+    return { isValid: false, message: 'Mode must be a string value: test or live.' };
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'live') {
+    return { isValid: true, isLiveMode: true };
+  }
+
+  if (normalized === 'test' || normalized === 'sandbox') {
+    return { isValid: true, isLiveMode: false };
+  }
+
+  return { isValid: false, message: 'Query parameter "mode" must be either "test" or "live".' };
+};
+
 const toTrimmedString = (value: unknown): string | null => {
   if (typeof value !== 'string') {
     return null;
@@ -2046,9 +2069,11 @@ const respond = (status: number, body: Record<string, unknown>) => {
   };
 };
 
-const validateEnvironment = (bypassQbo: boolean): { valid: boolean; errors: string[] } => {
+const validateEnvironment = (
+  bypassQbo: boolean,
+  liveMode: boolean
+): { valid: boolean; errors: string[] } => {
   const errors: string[] = [];
-  const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
   if (liveMode) {
     if (!process.env.STRIPE_LIVE_SECRET_KEY && !env.stripe.secret) {
@@ -2100,7 +2125,18 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
       query.bypassQbo ?? query.skipQbo ?? getHeader(req, 'x-bypass-qbo') ?? getHeader(req, 'x-skip-qbo');
     const bypassQbo = parseBoolean(bypassQboParam, bypassQboDefault);
 
-    const envCheck = validateEnvironment(bypassQbo);
+    const defaultLiveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
+    const requestedMode = parseModeToggle(query.mode ?? getHeader(req, 'x-stripe-mode'));
+    if (!requestedMode.isValid) {
+      return respond(400, {
+        error: 'bad_request',
+        message: requestedMode.message,
+      });
+    }
+    const liveMode =
+      typeof requestedMode.isLiveMode === 'boolean' ? requestedMode.isLiveMode : defaultLiveMode;
+
+    const envCheck = validateEnvironment(bypassQbo, liveMode);
     if (!envCheck.valid) {
       context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
       return respond(500, {
@@ -2171,7 +2207,6 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    const liveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
 
     const stripe = dependencies.stripe.getClient(liveMode);
 

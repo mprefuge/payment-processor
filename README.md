@@ -161,6 +161,9 @@ Returns the health status of all configured integrations.
 
 Create a Stripe checkout session for payment processing.
 
+- Use `?mode=test` or `?mode=live` to switch Stripe mode per request.
+- You can also pass `livemode=true|false` (or header `x-stripe-mode`) when testing through Swagger/cURL.
+
 **Request Body**:
 
 ```json
@@ -228,6 +231,8 @@ Supported events:
 
 Manually trigger synchronization of Stripe payouts to QuickBooks.
 
+- Use `?mode=test` or `?mode=live` to select which Stripe environment to read payouts from.
+
 ### Manual QBO Sync
 
 `POST /api/qbo/manual-sync`
@@ -240,11 +245,15 @@ Manually synchronize transactions to QuickBooks Online.
 
 Reconcile Stripe transactions with QuickBooks records.
 
+- Use `?mode=test` or `?mode=live` to choose the Stripe environment for reconciliation.
+
 ### Salesforce Payment Sync
 
 `GET|POST /api/stripe/salesforce-payments-sync`
 
 Synchronize all successful Stripe payments to Salesforce.
+
+- Use `?mode=test` or `?mode=live` to choose which Stripe environment is synced.
 
 - In `TEST_MODE=true`, this endpoint automatically runs as dry-run only.
 - Dry-run returns payment counts, payment type counts, customer counts, and example Salesforce payloads.

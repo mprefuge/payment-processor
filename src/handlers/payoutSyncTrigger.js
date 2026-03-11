@@ -134,6 +134,35 @@ const defaultStripeSecret = () => {
   );
 };
 
+const stripeSecretForMode = (isLiveMode) => {
+  if (isLiveMode) {
+    return process.env.STRIPE_LIVE_SECRET_KEY || process.env.STRIPE_SECRET || null;
+  }
+
+  return process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_SECRET || null;
+};
+
+const parseModeToggle = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return { isValid: true };
+  }
+
+  if (typeof value !== 'string') {
+    return { isValid: false, message: 'mode must be a string value: test or live.' };
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'live') {
+    return { isValid: true, isLiveMode: true };
+  }
+
+  if (normalized === 'test' || normalized === 'sandbox') {
+    return { isValid: true, isLiveMode: false };
+  }
+
+  return { isValid: false, message: 'mode must be either "test" or "live".' };
+};
+
 const createProcessedStore = (namespace) => {
   const { idempotencyStore } = createPersistentStorageClients(namespace);
 
@@ -416,6 +445,41 @@ const handler = async (request, context) => {
 
   try {
     const url = new URL(request.url);
+    const modeToggle = parseModeToggle(
+      url.searchParams.get('mode') ||
+        request?.headers?.get?.('x-stripe-mode') ||
+        request?.headers?.['x-stripe-mode']
+    );
+    if (!modeToggle.isValid) {
+      return {
+        status: 400,
+        jsonBody: {
+          error: 'bad_request',
+          message: modeToggle.message,
+        },
+      };
+    }
+
+    if (typeof modeToggle.isLiveMode === 'boolean') {
+      const modeSecret = stripeSecretForMode(modeToggle.isLiveMode);
+      if (!modeSecret) {
+        return {
+          status: 500,
+          jsonBody: {
+            error: 'configuration_error',
+            message: modeToggle.isLiveMode
+              ? 'STRIPE_LIVE_SECRET_KEY (or STRIPE_SECRET) is not configured.'
+              : 'STRIPE_TEST_SECRET_KEY (or STRIPE_SECRET) is not configured.',
+          },
+        };
+      }
+
+      deps = {
+        ...deps,
+        stripe: new Stripe(modeSecret, { apiVersion: STRIPE_API_VERSION }),
+      };
+    }
+
     const lookbackFromRequest = Number(url.searchParams.get('lookbackDays'));
     const lookbackDays = clampLookbackDays(
       Number.isFinite(lookbackFromRequest)

@@ -102,6 +102,27 @@ const parseBoolean = (value, defaultValue = false) => {
   return defaultValue;
 };
 
+const parseModeToggle = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return { isValid: true };
+  }
+
+  if (typeof value !== 'string') {
+    return { isValid: false, message: 'mode must be a string value: test or live.' };
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'test' || normalized === 'sandbox') {
+    return { isValid: true, testMode: true };
+  }
+
+  if (normalized === 'live') {
+    return { isValid: true, testMode: false };
+  }
+
+  return { isValid: false, message: 'mode must be either "test" or "live".' };
+};
+
 const parseExampleLimit = (value) => {
   if (value === undefined || value === null) {
     return DEFAULT_EXAMPLE_LIMIT;
@@ -413,8 +434,22 @@ const resolveDependencies = () => {
 };
 
 const readQuery = (request) => {
+  const readHeader = (name) => {
+    const headers = request?.headers;
+    if (!headers) {
+      return undefined;
+    }
+
+    if (typeof headers.get === 'function') {
+      return headers.get(name) || undefined;
+    }
+
+    return headers[name] || headers[name?.toLowerCase?.()] || headers[name?.toUpperCase?.()];
+  };
+
   if (request?.query && typeof request.query.get === 'function') {
     return {
+      mode: request.query.get('mode') || readHeader('x-stripe-mode') || undefined,
       dryRun: request.query.get('dryRun') || undefined,
       exampleLimit: request.query.get('exampleLimit') || undefined,
       format: request.query.get('format') || undefined,
@@ -428,13 +463,17 @@ const readQuery = (request) => {
   }
 
   if (request?.query && typeof request.query === 'object') {
-    return request.query;
+    return {
+      ...request.query,
+      mode: request.query.mode || readHeader('x-stripe-mode') || undefined,
+    };
   }
 
   try {
     if (typeof request?.url === 'string') {
       const parsed = new URL(request.url);
       return {
+        mode: parsed.searchParams.get('mode') || readHeader('x-stripe-mode') || undefined,
         dryRun: parsed.searchParams.get('dryRun') || undefined,
         exampleLimit: parsed.searchParams.get('exampleLimit') || undefined,
         format: parsed.searchParams.get('format') || undefined,
@@ -466,6 +505,40 @@ const syncSalesforcePayments = async (request, context) => {
 
     const deps = resolveDependencies();
     const query = readQuery(request);
+
+    const modeToggle = parseModeToggle(query.mode);
+    if (!modeToggle.isValid) {
+      return {
+        status: 400,
+        jsonBody: {
+          error: 'bad_request',
+          message: modeToggle.message,
+        },
+      };
+    }
+
+    let runtimeDeps = deps;
+    if (typeof modeToggle.testMode === 'boolean') {
+      const stripeSecret = resolveStripeSecret(modeToggle.testMode);
+      if (!stripeSecret) {
+        return {
+          status: 500,
+          jsonBody: {
+            error: 'configuration_error',
+            message: modeToggle.testMode
+              ? 'STRIPE_TEST_SECRET_KEY (or STRIPE_SECRET) is not configured.'
+              : 'STRIPE_LIVE_SECRET_KEY (or STRIPE_SECRET) is not configured.',
+          },
+        };
+      }
+
+      runtimeDeps = {
+        ...deps,
+        testMode: modeToggle.testMode,
+        stripe: new Stripe(stripeSecret, { apiVersion: STRIPE_API_VERSION }),
+      };
+    }
+
     const {
       dryRun,
       testMode,
@@ -478,7 +551,7 @@ const syncSalesforcePayments = async (request, context) => {
       maxRecords,
       includeCustomerLookup,
       requestedCursor,
-    } = resolveSyncOptions({ query, deps });
+    } = resolveSyncOptions({ query, deps: runtimeDeps });
     const startedAt = Date.now();
     const summary = createSummary();
 
@@ -510,7 +583,7 @@ const syncSalesforcePayments = async (request, context) => {
         break;
       }
 
-      const page = await fetchChargesPage(deps.stripe, {
+      const page = await fetchChargesPage(runtimeDeps.stripe, {
         limit: pageSize,
         startingAfter: nextCursor,
       });
@@ -549,14 +622,14 @@ const syncSalesforcePayments = async (request, context) => {
           const balanceTransactionId = normalizeStripeId(charge.balance_transaction);
           if (balanceTransactionId) {
             try {
-              balanceTransaction = await deps.stripe.balanceTransactions.retrieve(balanceTransactionId);
+              balanceTransaction = await runtimeDeps.stripe.balanceTransactions.retrieve(balanceTransactionId);
             } catch (error) {
               balanceTransaction = null;
             }
           }
 
-          const paymentIntent = await fetchPaymentIntentForCharge(deps.stripe, charge);
-          const stripeCustomer = await fetchStripeCustomerSafely(deps.stripe, customerId);
+              const paymentIntent = await fetchPaymentIntentForCharge(runtimeDeps.stripe, charge);
+              const stripeCustomer = await fetchStripeCustomerSafely(runtimeDeps.stripe, customerId);
 
           const transactionPayload = mapStripeToTransaction({
             paymentIntent,

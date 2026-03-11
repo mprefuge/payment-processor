@@ -58,6 +58,7 @@ const functionAuthSecurity = [functionCodeQuerySecurity, functionKeyHeaderSecuri
 
 const BoolLikeQuerySchema = z.enum(['true', 'false', '1', '0', 'yes', 'no', 'on', 'off']);
 const PositiveIntLikeSchema = z.string().regex(/^\d+$/);
+const ModeQuerySchema = z.enum(['test', 'live']);
 
 const TransactionFrequencySchema = z.enum(['onetime', 'week', 'biweek', 'month', 'year']);
 const AmountSchema = z.union([z.number().int().positive(), PositiveIntLikeSchema]);
@@ -137,6 +138,7 @@ const StripeWebhookHeadersSchema = z
 const PayoutSyncQuerySchema = z
   .object({
     lookbackDays: PositiveIntLikeSchema.optional(),
+    mode: ModeQuerySchema.optional(),
   })
   .passthrough();
 
@@ -145,6 +147,7 @@ const StripeTrueUpQuerySchema = z
     from: z.string().min(1),
     to: z.string().optional(),
     type: z.enum(['payments', 'refunds', 'payouts']).optional(),
+    mode: ModeQuerySchema.optional(),
     dryRun: BoolLikeQuerySchema.optional(),
     resubmit: BoolLikeQuerySchema.optional(),
     bypassQbo: BoolLikeQuerySchema.optional(),
@@ -162,6 +165,7 @@ const ManualQboSyncRequestSchema = z
 
 const SalesforcePaymentsSyncQuerySchema = z
   .object({
+    mode: ModeQuerySchema.optional(),
     dryRun: BoolLikeQuerySchema.optional(),
     exampleLimit: PositiveIntLikeSchema.optional(),
     format: z.enum(['csv']).optional(),
@@ -206,6 +210,12 @@ registerFunction('processTransaction', 'Process a payment transaction', {
   azureFunctionRoutePrefix: 'api',
   route: 'transaction',
   request: {
+    query: z
+      .object({
+        mode: ModeQuerySchema.optional(),
+        livemode: BoolLikeQuerySchema.optional(),
+      })
+      .passthrough(),
     body: {
       content: {
         'application/json': { schema: ProcessTransactionRequestSchema },

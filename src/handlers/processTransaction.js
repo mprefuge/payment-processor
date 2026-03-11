@@ -88,7 +88,93 @@ const parseBooleanFlag = (value) => {
   return Boolean(value);
 };
 
-const getConfiguredMode = (context) => {
+const normalizeModeToggle = (value) => {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+
+    if (normalized === 'live') {
+      return true;
+    }
+
+    if (normalized === 'test' || normalized === 'sandbox') {
+      return false;
+    }
+
+    if (TRUTHY_VALUES.has(normalized)) {
+      return true;
+    }
+
+    if (FALSY_VALUES.has(normalized)) {
+      return false;
+    }
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  return null;
+};
+
+const readModeToggleFromRequest = (request) => {
+  if (!request || typeof request !== 'object') {
+    return null;
+  }
+
+  const headers = request.headers;
+  const readHeader = (name) => {
+    if (!headers) {
+      return null;
+    }
+
+    if (typeof headers.get === 'function') {
+      const value = headers.get(name);
+      return value == null ? null : value;
+    }
+
+    const direct = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
+    return direct == null ? null : direct;
+  };
+
+  const candidates = [];
+
+  if (request.query && typeof request.query.get === 'function') {
+    candidates.push(request.query.get('mode'));
+    candidates.push(request.query.get('livemode'));
+  }
+
+  if (typeof request.url === 'string') {
+    try {
+      const parsed = new URL(request.url);
+      candidates.push(parsed.searchParams.get('mode'));
+      candidates.push(parsed.searchParams.get('livemode'));
+    } catch (error) {
+      // ignore URL parse errors
+    }
+  }
+
+  candidates.push(readHeader('x-stripe-mode'));
+  candidates.push(readHeader('x-livemode'));
+
+  for (const candidate of candidates) {
+    const normalized = normalizeModeToggle(candidate);
+    if (normalized !== null) {
+      return normalized;
+    }
+  }
+
+  return null;
+};
+
+const getConfiguredMode = (requestOrContext, maybeContext) => {
+  const request = maybeContext ? requestOrContext : null;
+  const context = maybeContext || requestOrContext;
+
+  const requestMode = readModeToggleFromRequest(request);
+  if (requestMode !== null) {
+    return requestMode;
+  }
+
   if (context?.bindingData && typeof context.bindingData.livemode !== 'undefined') {
     return parseBooleanFlag(context.bindingData.livemode);
   }
@@ -780,7 +866,7 @@ module.exports = async function (request, context) {
     const customerDetails = requestData.customer;
 
     // Initialize services
-    const isLiveMode = getConfiguredMode(actualContext);
+    const isLiveMode = getConfiguredMode(actualRequest, actualContext);
     const { stripe } = initializeServices(isLiveMode);
 
     // Search for existing customer
