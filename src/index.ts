@@ -40,11 +40,7 @@ const openAPIConfig: OpenAPIObjectConfig = {
   },
   servers: [
     {
-      url: '{protocol}://{host}/api',
-      variables: {
-        protocol: { default: 'https' },
-        host: { default: 'localhost:7071' },
-      },
+      url: '/',
     },
   ],
   tags: [

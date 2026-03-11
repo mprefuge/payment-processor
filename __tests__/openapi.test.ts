@@ -13,6 +13,9 @@ describe('OpenAPI/Swagger setup', () => {
     expect(Array.isArray(openAPIConfig.tags)).toBe(true);
     const healthTag = openAPIConfig.tags.find((t) => t.name === 'Health');
     expect(healthTag).toBeDefined();
+
+    const serverUrl = openAPIConfig.servers?.[0]?.url;
+    expect(serverUrl).toBe('/');
   });
 
   it('registers OpenAPI JSON and YAML documents', () => {
