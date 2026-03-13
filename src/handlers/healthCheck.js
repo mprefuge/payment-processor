@@ -277,7 +277,7 @@ const checkAccountingConnection = async () => {
       typeof provider.refreshTokens === 'function'
     ) {
       try {
-        tokenExchangeResult = await provider.refreshTokens({ persist: false });
+        tokenExchangeResult = await provider.refreshTokens();
       } catch (error) {
         tokenExchangeError = error;
       }
@@ -294,9 +294,9 @@ const checkAccountingConnection = async () => {
     }
 
     if (tokenExchangeError) {
-      messageParts.push(`Token exchange failed: ${tokenExchangeError.message}`);
+      messageParts.push(`Token refresh failed: ${tokenExchangeError.message}`);
     } else if (tokenExchangeResult) {
-      messageParts.push('Token exchange successful');
+      messageParts.push('Token refresh confirmed (tokens persisted)');
     }
 
     const details = {
@@ -305,7 +305,7 @@ const checkAccountingConnection = async () => {
       tokenExchange: tokenExchangeError
         ? { success: false, error: tokenExchangeError.message }
         : tokenExchangeResult
-          ? { success: true }
+          ? { success: true, mode: 'persisted-refresh', refreshedAt: new Date().toISOString() }
           : undefined,
     };
 

@@ -42,8 +42,8 @@ describe('healthCheck', () => {
     process.env.SF_CLIENT_SECRET = 'sf_client_secret';
     process.env.ACCOUNTING_SYNC_ENABLED = 'true';
     process.env.ACCOUNTING_PROVIDER = 'quickbooks';
-    process.env.QBO_ACCESS_TOKEN = 'access';
-    process.env.QBO_REFRESH_TOKEN = 'refresh';
+    process.env.QBO_ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.test-access';
+    process.env.QBO_REFRESH_TOKEN = 'AB11xyz9testRefreshToken987654321';
     process.env.QBO_COMPANY_ID = '12345';
     process.env.QBO_CLIENT_ID = 'client';
     process.env.QBO_CLIENT_SECRET = 'secret';
@@ -136,7 +136,7 @@ describe('healthCheck', () => {
     expect(crmHealthCheck).toHaveBeenCalled();
     expect(accountingProviderFactory.createProvider).toHaveBeenCalled();
     expect(providerHealthCheck).toHaveBeenCalled();
-    expect(providerTokenExchange).toHaveBeenCalledWith({ persist: false });
+    expect(providerTokenExchange).toHaveBeenCalledWith();
 
     const environmentComponent = result.jsonBody.components.find(
       (component) => component.component === 'environment'
@@ -146,7 +146,7 @@ describe('healthCheck', () => {
     const quickBooksConnection = result.jsonBody.connections.find(
       (connection) => connection.name === 'accounting_quickbooks'
     );
-    expect(quickBooksConnection?.details?.tokenExchange).toEqual({ success: true });
+    expect(quickBooksConnection?.details?.tokenExchange).toMatchObject({ success: true, mode: 'persisted-refresh', refreshedAt: expect.any(String) });
   });
 
   it('flags missing environment configuration', async () => {
