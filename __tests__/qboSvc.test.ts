@@ -432,6 +432,112 @@ describe('postChargeToQbo', () => {
     });
   });
 
+  it('applies user-specified sales receipt line overrides from Stripe metadata', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-override', DisplayName: 'Donor Example' } }, // Customer create
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-override' } } // Sales receipt create
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 9_050,
+      fee: 0,
+      memo: 'Fallback memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext(
+        {},
+        {
+          metadata: {
+            qbo_product_service: 'Custom Product|QBO_ITEM_CUSTOM',
+            qbo_description: 'Custom donation line',
+            qbo_quantity: '2',
+            qbo_rate: '45.25',
+            qbo_amount: '90.50',
+            qbo_service_date: '2024-02-15',
+            qbo_class_ref: 'Events|QBO_CLASS_EVENTS',
+          },
+        }
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-override', type: 'sales-receipt' });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    expect(salesReceiptRequest).toBeDefined();
+
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.ClassRef).toMatchObject({
+      value: 'QBO_CLASS_EVENTS',
+      name: 'Events',
+    });
+    expect(salesReceiptBody.Line[0]).toMatchObject({
+      Amount: 90.5,
+      Description: 'Custom donation line',
+      SalesItemLineDetail: {
+        ItemRef: {
+          value: 'QBO_ITEM_CUSTOM',
+          name: 'Custom Product',
+        },
+        Qty: 2,
+        UnitPrice: 45.25,
+        ServiceDate: '2024-02-15',
+        ClassRef: {
+          value: 'QBO_CLASS_EVENTS',
+          name: 'Events',
+        },
+      },
+    });
+  });
+
+  it('resolves qbo_product_service by item name when no ID is provided', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-item-name', DisplayName: 'Donor Example' } }, // Customer create
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_FROM_NAME', Name: 'Named Item' },
+        },
+      }, // Item lookup by name
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-item-name' } } // Sales receipt create
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 4_000,
+      fee: 0,
+      memo: 'Name only item test',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext(
+        {},
+        {
+          metadata: {
+            qbo_product_service: '{"name":"Named Item"}',
+          },
+        }
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-item-name', type: 'sales-receipt' });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    expect(salesReceiptRequest).toBeDefined();
+
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: 'QBO_ITEM_FROM_NAME',
+      name: 'Named Item',
+    });
+  });
+
   it('ignores cover fees when metadata amount is >= gross charge', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const gross = 5_000; // $50.00

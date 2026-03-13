@@ -188,6 +188,71 @@ Create a Stripe checkout session for payment processing.
 }
 ```
 
+### QBO Sales Receipt Override Schema (Metadata)
+
+When `ACCOUNTING_POSTING_STRATEGY=sales-receipt`, you can provide metadata to control how the primary QuickBooks sales receipt line is populated.
+
+**Supported metadata keys** (snake_case or camelCase where listed):
+
+```json
+{
+  "metadata": {
+    "qbo_product_service": "Custom Product|QBO_ITEM_CUSTOM",
+    "qbo_description": "Custom donation line",
+    "qbo_quantity": "2",
+    "qbo_rate": "45.25",
+    "qbo_amount": "90.50",
+    "qbo_service_date": "2024-02-15",
+    "qbo_class_ref": "Events|QBO_CLASS_EVENTS"
+  }
+}
+```
+
+**Field mapping into QuickBooks SalesReceipt payload**:
+
+```json
+{
+  "DocNumber": "CHG-20240301-...",
+  "TxnDate": "2024-03-01",
+  "ClassRef": {
+    "value": "QBO_CLASS_EVENTS",
+    "name": "Events"
+  },
+  "Line": [
+    {
+      "Amount": 90.5,
+      "DetailType": "SalesItemLineDetail",
+      "Description": "Custom donation line",
+      "SalesItemLineDetail": {
+        "ItemRef": {
+          "value": "QBO_ITEM_CUSTOM",
+          "name": "Custom Product"
+        },
+        "Qty": 2,
+        "UnitPrice": 45.25,
+        "ServiceDate": "2024-02-15",
+        "ClassRef": {
+          "value": "QBO_CLASS_EVENTS",
+          "name": "Events"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Notes**:
+
+- `qbo_product_service` accepts a QuickBooks reference format like `Name|Id`, `Name::Id`, JSON (`{"value":"Id","name":"Name"}`), numeric ID, or name-only (including JSON like `{"name":"My Item"}`).
+- If only a name is provided for `qbo_product_service`, the integration automatically looks up the matching QuickBooks Item by name (and creates it when configured to auto-create missing items).
+- `qbo_description` overrides the default line description.
+- `qbo_quantity` maps to `Line[0].SalesItemLineDetail.Qty`.
+- `qbo_rate` maps to `Line[0].SalesItemLineDetail.UnitPrice`.
+- `qbo_amount` (dollars) or `qbo_amount_cents` (cents) sets `Line[0].Amount`.
+- `qbo_service_date` maps to `Line[0].SalesItemLineDetail.ServiceDate` (must be parseable as a date).
+- `qbo_class_ref` maps to both top-level `ClassRef` and line-level `SalesItemLineDetail.ClassRef`.
+- For each field, camelCase aliases are also accepted (for example `qboProductService`, `qboQuantity`, `qboRate`, `qboAmount`, `qboServiceDate`, `qboClassRef`).
+
 **Response**:
 
 ```json

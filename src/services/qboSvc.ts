@@ -90,6 +90,10 @@ interface QuickBooksPhysicalAddress {
 
 interface QuickBooksSalesItemLineDetail {
   ItemRef: QuickBooksReference;
+  Qty?: number;
+  UnitPrice?: number;
+  ServiceDate?: string;
+  ClassRef?: QuickBooksReference;
   ItemAccountRef?: QuickBooksReference;
   TaxCodeRef?: QuickBooksReference;
 }
@@ -180,6 +184,11 @@ interface BuildSalesReceiptInput {
   customer?: SalesReceiptCustomerDetails | null;
   description?: string;
   coverFeesAmountCents?: number;
+  lineQuantity?: number;
+  lineRate?: number;
+  lineAmountCents?: number;
+  lineServiceDate?: string;
+  lineClassRef?: string;
 } 
 
 type StripeCustomerContext = {
@@ -674,7 +683,17 @@ const normalizeDate = (value: string | Date): string => {
   return date.toISOString().slice(0, 10);
 };
 
-type ReferenceType = 'account' | 'item';
+type ReferenceType = 'account' | 'item' | 'class';
+
+type SalesReceiptLineOverrides = {
+  productService?: string;
+  description?: string;
+  quantity?: number;
+  rate?: number;
+  amountCents?: number;
+  serviceDate?: string;
+  classRef?: string;
+};
 
 const ensureReferenceValue = <T extends QuickBooksReference>(
   ref: T,
@@ -1377,6 +1396,214 @@ const createItemRef = (input: string): ItemRefWithMetadata => {
   return itemRef;
 };
 
+const createClassRef = (input: string): QuickBooksReference => {
+  const { reference, hasExplicitId } = parseReferenceInput(input, 'class');
+  if (!hasExplicitId) {
+    throw new Error(
+      'QuickBooks class reference must include an ID (for example "Class Name|123" or a JSON value with a "value" field).'
+    );
+  }
+
+  return reference;
+};
+
+const readMetadataString = (
+  metadata: Record<string, unknown>,
+  keys: string[]
+): string | undefined => {
+  for (const key of keys) {
+    const value = toTrimmed(metadata[key]);
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+};
+
+const readMetadataNumber = (
+  metadata: Record<string, unknown>,
+  keys: string[]
+): number | undefined => {
+  for (const key of keys) {
+    const raw = metadata[key];
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return raw;
+    }
+
+    if (typeof raw === 'string') {
+      const parsed = Number.parseFloat(raw.trim());
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
+};
+
+const readMergedStripeMetadata = (
+  stripeContext: StripeCustomerContext | null | undefined
+): Record<string, unknown> => {
+  const metadata: Record<string, unknown> = {};
+
+  if (!stripeContext) {
+    return metadata;
+  }
+
+  const add = (value: unknown) => {
+    if (value && typeof value === 'object') {
+      Object.assign(metadata, value as Record<string, unknown>);
+    }
+  };
+
+  add(stripeContext.checkoutSession?.metadata);
+  add(stripeContext.paymentIntent?.metadata);
+  add(stripeContext.charge?.metadata);
+
+  return metadata;
+};
+
+const getSalesReceiptLineOverrides = (
+  stripeContext: StripeCustomerContext | null | undefined
+): SalesReceiptLineOverrides => {
+  const metadata = readMergedStripeMetadata(stripeContext);
+  if (Object.keys(metadata).length === 0) {
+    return {};
+  }
+
+  const overrides: SalesReceiptLineOverrides = {};
+
+  const productService = readMetadataString(metadata, [
+    'qbo_product_service',
+    'qboProductService',
+    'qbo_item_ref',
+    'qboItemRef',
+    'qbo_item',
+    'qboItem',
+  ]);
+  if (productService) {
+    overrides.productService = productService;
+  }
+
+  const description = readMetadataString(metadata, ['qbo_description', 'qboDescription']);
+  if (description) {
+    overrides.description = description;
+  }
+
+  const quantity = readMetadataNumber(metadata, [
+    'qbo_quantity',
+    'qboQuantity',
+    'qbo_qty',
+    'qboQty',
+  ]);
+  if (quantity !== undefined) {
+    if (quantity <= 0) {
+      throw new Error('QuickBooks sales receipt quantity must be greater than zero when provided.');
+    }
+    overrides.quantity = quantity;
+  }
+
+  const rate = readMetadataNumber(metadata, [
+    'qbo_rate',
+    'qboRate',
+    'qbo_unit_price',
+    'qboUnitPrice',
+  ]);
+  if (rate !== undefined) {
+    if (rate < 0) {
+      throw new Error('QuickBooks sales receipt rate cannot be negative when provided.');
+    }
+    overrides.rate = rate;
+  }
+
+  const amountCents = readMetadataNumber(metadata, ['qbo_amount_cents', 'qboAmountCents']);
+  if (amountCents !== undefined) {
+    if (amountCents <= 0) {
+      throw new Error('QuickBooks sales receipt amount must be greater than zero when provided.');
+    }
+    overrides.amountCents = Math.round(amountCents);
+  } else {
+    const amountDollars = readMetadataNumber(metadata, ['qbo_amount', 'qboAmount']);
+    if (amountDollars !== undefined) {
+      if (amountDollars <= 0) {
+        throw new Error('QuickBooks sales receipt amount must be greater than zero when provided.');
+      }
+      overrides.amountCents = Math.round(amountDollars * 100);
+    }
+  }
+
+  const serviceDate = readMetadataString(metadata, [
+    'qbo_service_date',
+    'qboServiceDate',
+    'qbo_serviceDate',
+  ]);
+  if (serviceDate) {
+    overrides.serviceDate = normalizeDate(serviceDate);
+  }
+
+  const classRef = readMetadataString(metadata, [
+    'qbo_class_ref',
+    'qboClassRef',
+    'qbo_class',
+    'qboClass',
+  ]);
+  if (classRef) {
+    overrides.classRef = classRef;
+  }
+
+  return overrides;
+};
+
+const resolveRevenueItemReference = async (
+  configuredValue: string,
+  context: QuickBooksRequestContext
+): Promise<QuickBooksReference> => {
+  const trimmed = configuredValue.trim();
+  if (!trimmed) {
+    throw new Error('QuickBooks product/service override is empty.');
+  }
+
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const value = toTrimmed(parsed?.value);
+      const name = toTrimmed(parsed?.name);
+
+      if (value) {
+        return {
+          value,
+          ...(name ? { name } : {}),
+        };
+      }
+
+      if (name) {
+        return await ensureSalesReceiptItem(name, context);
+      }
+
+      throw new Error('JSON item reference must include either "value" (item ID) or "name".');
+    } catch (error) {
+      throw new Error(
+        error instanceof Error
+          ? `Unable to parse QuickBooks product/service override: ${error.message}`
+          : 'Unable to parse QuickBooks product/service override.'
+      );
+    }
+  }
+
+  const parsedItemRef = parseReferenceInput(trimmed, 'item');
+  if (parsedItemRef.hasExplicitId) {
+    const reference = parsedItemRef.reference;
+    if (parsedItemRef.lookupName && !reference.name) {
+      reference.name = parsedItemRef.lookupName;
+    }
+    return reference;
+  }
+
+  const lookupName = parsedItemRef.lookupName ?? parsedItemRef.reference.name ?? trimmed;
+  return await ensureSalesReceiptItem(lookupName, context);
+};
+
 const buildDocNumber = (
   prefix: string,
   date: string | Date,
@@ -1419,6 +1646,11 @@ export const buildSalesReceipt = ({
   customer = null,
   description,
   coverFeesAmountCents = 0,
+  lineQuantity,
+  lineRate,
+  lineAmountCents,
+  lineServiceDate,
+  lineClassRef,
 }: BuildSalesReceiptInput): QuickBooksSalesReceipt => {
   const amount = ensurePositiveAmount(amountCents, 'Sales receipt amount');
   if (amount === 0) {
@@ -1447,9 +1679,39 @@ export const buildSalesReceipt = ({
 
   const lineDescription = description || memo;
   const lines: QuickBooksSalesReceiptLine[] = [];
+  const classRef = toTrimmed(lineClassRef) ? createClassRef(lineClassRef!) : undefined;
+
+  let resolvedLineAmountCents: number | null = null;
+  if (lineAmountCents !== undefined) {
+    const normalized = ensurePositiveAmount(lineAmountCents, 'Sales receipt line amount');
+    if (normalized === 0) {
+      throw new Error('Sales receipt line amount must be greater than zero when provided.');
+    }
+    resolvedLineAmountCents = normalized;
+  }
+
+  let resolvedLineQty: number | undefined;
+  if (lineQuantity !== undefined) {
+    if (!Number.isFinite(lineQuantity) || lineQuantity <= 0) {
+      throw new Error('Sales receipt quantity must be a positive finite number when provided.');
+    }
+    resolvedLineQty = lineQuantity;
+  }
+
+  let resolvedLineRate: number | undefined;
+  if (lineRate !== undefined) {
+    if (!Number.isFinite(lineRate) || lineRate < 0) {
+      throw new Error('Sales receipt rate must be a non-negative finite number when provided.');
+    }
+    resolvedLineRate = lineRate;
+  }
+
+  const resolvedServiceDate = lineServiceDate ? normalizeDate(lineServiceDate) : undefined;
 
   // Main line item (base amount if cover fees exist, otherwise full amount)
-  const mainAmount = centsToDollars(baseAmount > 0 ? baseAmount : amount);
+  const mainAmount = centsToDollars(
+    resolvedLineAmountCents ?? (baseAmount > 0 ? baseAmount : amount)
+  );
   if (!Number.isFinite(mainAmount)) {
     throw new Error(
       `Invalid amount calculated for sales receipt: ${mainAmount} (from ${baseAmount > 0 ? baseAmount : amount} cents)`
@@ -1462,6 +1724,10 @@ export const buildSalesReceipt = ({
     Description: lineDescription,
     SalesItemLineDetail: {
       ItemRef: createItemRef(itemReference),
+      ...(resolvedLineQty !== undefined ? { Qty: resolvedLineQty } : {}),
+      ...(resolvedLineRate !== undefined ? { UnitPrice: resolvedLineRate } : {}),
+      ...(resolvedServiceDate ? { ServiceDate: resolvedServiceDate } : {}),
+      ...(classRef ? { ClassRef: classRef } : {}),
     },
   });
 
@@ -1480,6 +1746,7 @@ export const buildSalesReceipt = ({
       Description: 'Processing Fee Coverage',
       SalesItemLineDetail: {
         ItemRef: createItemRef(itemReference),
+        ...(classRef ? { ClassRef: classRef } : {}),
       },
     });
   }
@@ -1503,6 +1770,7 @@ export const buildSalesReceipt = ({
       Description: 'Stripe Processing Fee',
       SalesItemLineDetail: {
         ItemRef: createItemRef(itemReference),
+        ...(classRef ? { ClassRef: classRef } : {}),
         ...(feeItemAccountRef ? { ItemAccountRef: feeItemAccountRef } : {}),
       },
     });
@@ -1539,6 +1807,10 @@ export const buildSalesReceipt = ({
   const shippingAddress = sanitizeAddress(customer?.shippingAddress);
   if (shippingAddress) {
     receipt.ShipAddr = shippingAddress;
+  }
+
+  if (classRef) {
+    receipt.ClassRef = classRef;
   }
 
   try {
@@ -2743,7 +3015,10 @@ export const postChargeToQbo = async ({
       );
     }
 
-    const transactionTypeName = getCheckoutTransactionType(stripe?.checkoutSession);
+    const lineOverrides = getSalesReceiptLineOverrides(stripe);
+
+    const transactionTypeName =
+      lineOverrides.productService ?? getCheckoutTransactionType(stripe?.checkoutSession);
     if (!transactionTypeName) {
       throw new Error(
         'Stripe Checkout Session metadata.transactionType is required to determine the QuickBooks item for sales receipts.'
@@ -2752,7 +3027,7 @@ export const postChargeToQbo = async ({
 
     let revenueItemReference: QuickBooksReference;
     try {
-      revenueItemReference = await ensureSalesReceiptItem(transactionTypeName, context);
+      revenueItemReference = await resolveRevenueItemReference(transactionTypeName, context);
     } catch (error) {
       throw new Error(
         `Failed to ensure QuickBooks item "${transactionTypeName}" for sales receipt: ${
@@ -2768,7 +3043,9 @@ export const postChargeToQbo = async ({
 
     // Build description as "Category - TransactionType"
     const category = getCheckoutCategory(stripe?.checkoutSession);
-    const description = category ? `${category} - ${transactionTypeName}` : transactionTypeName;
+    const description =
+      lineOverrides.description ??
+      (category ? `${category} - ${transactionTypeName}` : transactionTypeName);
 
     // Get cover fees information from any available Stripe object metadata
     const coverFeesInfo = getCoverFeesInfo(stripe as any);
@@ -2808,6 +3085,11 @@ export const postChargeToQbo = async ({
       customer: receiptCustomer,
       description,
       coverFeesAmountCents,
+      lineQuantity: lineOverrides.quantity,
+      lineRate: lineOverrides.rate,
+      lineAmountCents: lineOverrides.amountCents,
+      lineServiceDate: lineOverrides.serviceDate,
+      lineClassRef: lineOverrides.classRef,
     });
 
     const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
