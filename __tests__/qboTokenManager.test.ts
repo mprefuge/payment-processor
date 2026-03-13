@@ -15,7 +15,9 @@ describe('QBO Token Manager - invalid refresh handling', () => {
 
   afterEach(() => {
     vi.resetAllMocks();
+    vi.useRealTimers();
     delete process.env.QBO_REFRESH_TOKEN;
+    delete process.env.QBO_ACCESS_TOKEN;
   });
 
   it('clears stored tokens and throws when introspection returns invalid_grant', async () => {
@@ -59,5 +61,22 @@ describe('QBO Token Manager - invalid refresh handling', () => {
     (tokenManager as any).autoRefreshInterval = setInterval(() => {}, 1000) as any;
     await tokenManager.clearTokens();
     expect((tokenManager as any).autoRefreshInterval).toBeNull();
+  });
+
+  it('setTokens schedules refresh shortly before access-token expiry', async () => {
+    vi.useFakeTimers();
+
+    const refreshSpy = vi
+      .spyOn(tokenManager, 'refreshTokens')
+      .mockResolvedValue({ accessToken: 'refreshed-access', refreshToken: 'refreshed-refresh' } as any);
+
+    await tokenManager.setTokens('new-access', 'new-refresh');
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect((tokenManager as any).refreshTimer).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(55 * 60 * 1000);
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
 });

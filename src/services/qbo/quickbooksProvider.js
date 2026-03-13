@@ -78,6 +78,68 @@ class QuickBooksProvider extends BaseAccountingProvider {
     return this.qbo;
   }
 
+  async _loadPersistedTokens() {
+    if (!tokenManager || typeof tokenManager.getTokens !== 'function') {
+      return false;
+    }
+
+    try {
+      const storedTokens = await tokenManager.getTokens();
+      if (!storedTokens || typeof storedTokens !== 'object') {
+        return false;
+      }
+
+      const storedAccessToken =
+        typeof storedTokens.accessToken === 'string' ? storedTokens.accessToken.trim() : '';
+      const storedRefreshToken =
+        typeof storedTokens.refreshToken === 'string' ? storedTokens.refreshToken.trim() : '';
+
+      if (!storedAccessToken && !storedRefreshToken) {
+        return false;
+      }
+
+      const currentAccessToken =
+        typeof this.oauthTokens.accessToken === 'string' ? this.oauthTokens.accessToken.trim() : '';
+      const currentRefreshToken =
+        typeof this.oauthTokens.refreshToken === 'string' ? this.oauthTokens.refreshToken.trim() : '';
+
+      const shouldUpdate =
+        (!!storedAccessToken && !currentAccessToken) ||
+        (!!storedRefreshToken && !currentRefreshToken) ||
+        (!!storedRefreshToken && storedRefreshToken !== currentRefreshToken);
+
+      if (!shouldUpdate) {
+        return false;
+      }
+
+      this.oauthTokens = {
+        ...this.oauthTokens,
+        accessToken: storedAccessToken || this.oauthTokens.accessToken,
+        refreshToken: storedRefreshToken || this.oauthTokens.refreshToken,
+      };
+
+      if (storedAccessToken) {
+        process.env.QBO_ACCESS_TOKEN = storedAccessToken;
+      }
+      if (storedRefreshToken) {
+        process.env.QBO_REFRESH_TOKEN = storedRefreshToken;
+      }
+
+      if (this.companyId && this.oauthTokens.accessToken) {
+        this._initializeClient();
+      }
+
+      this.logger.info('[QBO] Loaded latest OAuth tokens from persistent storage');
+      return true;
+    } catch (error) {
+      this.logger.warn(
+        '[QBO] Failed to load persisted OAuth tokens: ' +
+          (error && error.message ? error.message : String(error))
+      );
+      return false;
+    }
+  }
+
   async _callQbo(methodName, ...args) {
     const qboClient = this._ensureQboClient();
     const method = qboClient[methodName];
@@ -917,6 +979,8 @@ class QuickBooksProvider extends BaseAccountingProvider {
    */
   async healthCheck() {
     try {
+      await this._loadPersistedTokens();
+
       if (!this.companyId) {
         return {
           healthy: false,
@@ -1060,6 +1124,8 @@ class QuickBooksProvider extends BaseAccountingProvider {
   async refreshTokens(options = {}) {
     const { persist = true } = options;
     this.logger.info(`[QBO] Refreshing OAuth tokens${persist ? '' : ' (validation only)'}`);
+
+    await this._loadPersistedTokens();
 
     if (!this.oauthTokens.refreshToken) {
       throw new Error('No refresh token available');

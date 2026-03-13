@@ -21,6 +21,7 @@ interface OAuthTokensResult {
 
 const ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_LIFETIME_MS = 100 * 24 * 60 * 60 * 1000; // 100 days
+const ACCESS_TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000; // 5 minutes
 const QBO_OAUTH_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
 
 type OAuthFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -260,9 +261,9 @@ class QBOTokenManager {
       this.refreshTimer = null;
     }
 
-    // Schedule refresh one hour before expiry
-    const oneHourMs = 60 * 60 * 1000;
-    const refreshAt = accessTokenExpiresAt - oneHourMs;
+    // Schedule refresh shortly before expiry so a newly-issued one-hour token
+    // does not trigger an immediate refresh loop.
+    const refreshAt = accessTokenExpiresAt - ACCESS_TOKEN_REFRESH_LEAD_MS;
     const now = Date.now();
 
     // If refreshAt already passed, refresh immediately (but guard against frequent refreshes)
