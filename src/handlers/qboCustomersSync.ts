@@ -532,39 +532,7 @@ const findSalesforceMatch = async (
 ): Promise<MatchResult> => {
   const marker = markerForQboCustomer(customer.id);
 
-  const whereClauses: string[] = [];
-
-  if (customer.email) {
-    whereClauses.push(`Email = '${escapeSoqlLiteral(customer.email)}'`);
-  }
-
-  if (customer.phone) {
-    whereClauses.push(`Phone = '${escapeSoqlLiteral(customer.phone)}'`);
-  }
-
-  if (customer.mobilePhone) {
-    whereClauses.push(`MobilePhone = '${escapeSoqlLiteral(customer.mobilePhone)}'`);
-  }
-
-  if (customer.firstName) {
-    whereClauses.push(
-      `(FirstName = '${escapeSoqlLiteral(customer.firstName)}' AND LastName = '${escapeSoqlLiteral(
-        customer.lastName
-      )}')`
-    );
-  } else if (customer.lastName) {
-    whereClauses.push(`LastName = '${escapeSoqlLiteral(customer.lastName)}'`);
-  }
-
-  if (whereClauses.length === 0) {
-    return { status: 'not-found' };
-  }
-
-  const matchQuery =
-    'SELECT Id, Salutation, FirstName, LastName, Email, OtherEmail, Phone, MobilePhone, OtherPhone, Fax, Department, MailingStreet, MailingCity, MailingState, MailingPostalCode, MailingCountry, OtherStreet, OtherCity, OtherState, OtherPostalCode, OtherCountry, Description ' +
-    `FROM Contact WHERE ${whereClauses.join(' OR ')} ORDER BY CreatedDate DESC LIMIT 25`;
-
-  const candidates = toRecords(await connection.query<SalesforceContact>(matchQuery));
+  const candidates = await executeContactQueryWithFieldFallback(connection, customer);
 
   if (candidates.length === 0) {
     return { status: 'not-found' };
@@ -607,6 +575,174 @@ const parseSyncMode = (value: unknown): SyncMode => {
   }
 
   return 'create-and-update';
+};
+
+const parseUnsupportedContactField = (error: unknown): string | null => {
+  const message = error instanceof Error ? error.message : String(error);
+  const patterns = [
+    /No such column '([A-Za-z0-9_]+)' on entity 'Contact'/i,
+    /No such column '([A-Za-z0-9_]+)' on sobject of type Contact/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+};
+
+const executeContactQueryWithFieldFallback = async (
+  connection: SalesforceConnectionLike,
+  customer: NormalizedQboCustomer
+): Promise<SalesforceContact[]> => {
+  const selectFields = [
+    'Id',
+    'Salutation',
+    'FirstName',
+    'LastName',
+    'Email',
+    'OtherEmail',
+    'Phone',
+    'MobilePhone',
+    'OtherPhone',
+    'Fax',
+    'Department',
+    'MailingStreet',
+    'MailingCity',
+    'MailingState',
+    'MailingPostalCode',
+    'MailingCountry',
+    'OtherStreet',
+    'OtherCity',
+    'OtherState',
+    'OtherPostalCode',
+    'OtherCountry',
+    'Description',
+  ];
+
+  while (selectFields.length > 2) {
+    const whereClauses: string[] = [];
+
+    if (customer.email && selectFields.includes('Email')) {
+      whereClauses.push(`Email = '${escapeSoqlLiteral(customer.email)}'`);
+    }
+
+    if (customer.phone && selectFields.includes('Phone')) {
+      whereClauses.push(`Phone = '${escapeSoqlLiteral(customer.phone)}'`);
+    }
+
+    if (customer.mobilePhone && selectFields.includes('MobilePhone')) {
+      whereClauses.push(`MobilePhone = '${escapeSoqlLiteral(customer.mobilePhone)}'`);
+    }
+
+    if (customer.firstName && selectFields.includes('FirstName') && selectFields.includes('LastName')) {
+      whereClauses.push(
+        `(FirstName = '${escapeSoqlLiteral(customer.firstName)}' AND LastName = '${escapeSoqlLiteral(
+          customer.lastName
+        )}')`
+      );
+    } else if (customer.lastName && selectFields.includes('LastName')) {
+      whereClauses.push(`LastName = '${escapeSoqlLiteral(customer.lastName)}'`);
+    }
+
+    if (whereClauses.length === 0) {
+      return [];
+    }
+
+    const soql =
+      `SELECT ${selectFields.join(', ')} FROM Contact ` +
+      `WHERE ${whereClauses.join(' OR ')} ORDER BY CreatedDate DESC LIMIT 25`;
+
+    try {
+      return toRecords(await connection.query<SalesforceContact>(soql));
+    } catch (error) {
+      const unsupportedField = parseUnsupportedContactField(error);
+      if (!unsupportedField) {
+        throw error;
+      }
+
+      const index = selectFields.findIndex(
+        (field) => field.toLowerCase() === unsupportedField.toLowerCase()
+      );
+
+      if (index === -1) {
+        throw error;
+      }
+
+      const [removedField] = selectFields.splice(index, 1);
+      logger.warn('[qboCustomersSync] Salesforce contact field unsupported; retrying query without field', {
+        removedField,
+      });
+    }
+  }
+
+  return [];
+};
+
+const getSaveResultErrorMessage = (saveResult: SaveResult & { errors?: unknown[] }): string => {
+  const errors = Array.isArray(saveResult.errors) ? saveResult.errors : [];
+  const messages = errors
+    .map((entry) => {
+      if (entry && typeof entry === 'object' && 'message' in (entry as Record<string, unknown>)) {
+        const message = (entry as { message?: unknown }).message;
+        return typeof message === 'string' ? message : null;
+      }
+
+      return typeof entry === 'string' ? entry : null;
+    })
+    .filter((message): message is string => Boolean(message));
+
+  return messages.join('; ');
+};
+
+const executeContactSaveWithFieldFallback = async (
+  connection: SalesforceConnectionLike,
+  operation: 'create' | 'update',
+  payload: Record<string, unknown>
+): Promise<SaveResult> => {
+  const workingPayload: Record<string, unknown> = { ...payload };
+
+  while (Object.keys(workingPayload).length > (operation === 'update' ? 1 : 0)) {
+    try {
+      const rawResult =
+        operation === 'create'
+          ? await connection.sobject('Contact').create(workingPayload)
+          : await connection.sobject('Contact').update(workingPayload);
+
+      const saveResult = toSaveResult(rawResult) as SaveResult & { errors?: unknown[] };
+      if (saveResult?.success) {
+        return saveResult;
+      }
+
+      const details = getSaveResultErrorMessage(saveResult);
+      const unsupportedField = parseUnsupportedContactField(details);
+      if (!unsupportedField || !(unsupportedField in workingPayload) || unsupportedField === 'Id') {
+        throw new Error(details || `Failed to ${operation} Salesforce contact.`);
+      }
+
+      delete workingPayload[unsupportedField];
+      logger.warn('[qboCustomersSync] Salesforce contact field unsupported; retrying save without field', {
+        operation,
+        removedField: unsupportedField,
+      });
+    } catch (error) {
+      const unsupportedField = parseUnsupportedContactField(error);
+      if (!unsupportedField || !(unsupportedField in workingPayload) || unsupportedField === 'Id') {
+        throw error;
+      }
+
+      delete workingPayload[unsupportedField];
+      logger.warn('[qboCustomersSync] Salesforce contact field unsupported; retrying save without field', {
+        operation,
+        removedField: unsupportedField,
+      });
+    }
+  }
+
+  throw new Error(`Unable to ${operation} Salesforce contact with available fields.`);
 };
 
 const parseUnsupportedCustomerField = (error: unknown): string | null => {
@@ -888,7 +1024,11 @@ const syncQboCustomersToSalesforce = async (
             }
 
             if (!dryRun && updatePayload) {
-              const saveResult = toSaveResult(await salesforce.sobject('Contact').update(updatePayload));
+              const saveResult = await executeContactSaveWithFieldFallback(
+                salesforce,
+                'update',
+                updatePayload
+              );
               if (!saveResult?.success) {
                 throw new Error(`Failed to update Salesforce contact ${String(match.contact.Id ?? '')}`);
               }
@@ -920,7 +1060,11 @@ const syncQboCustomersToSalesforce = async (
 
           if (!dryRun) {
             const createPayload = buildCreatePayload(normalized, contactRecordTypeId);
-            const saveResult = toSaveResult(await salesforce.sobject('Contact').create(createPayload));
+            const saveResult = await executeContactSaveWithFieldFallback(
+              salesforce,
+              'create',
+              createPayload
+            );
             if (!saveResult?.success) {
               throw new Error(`Failed to create Salesforce contact for QBO customer ${normalized.id}`);
             }
