@@ -318,6 +318,45 @@ Reconcile Stripe transactions with QuickBooks records.
 
 Synchronize all successful Stripe payments to Salesforce.
 
+### QBO Customer Sync to Salesforce
+
+`GET|POST /api/qbo/customers-salesforce-sync`
+
+Synchronize QuickBooks Online customers to Salesforce Contacts with dry-run, duplicate detection, and configurable create/update behavior.
+
+Query parameters:
+
+- `dryRun=true|false` (default: `true`)
+- `syncMode=create-and-update|create-only|update-only` (default: `create-and-update`)
+- `overwrite=true|false` (default: `false`)
+- `includeInactive=true|false` (default: `true`)
+- `pageSize=<int>`
+- `maxPages=<int>`
+- `maxRuntimeMs=<int>`
+- `exampleLimit=<int>`
+
+Behavior details:
+
+- `syncMode=create-only`: only creates missing contacts, skips updates to existing contacts.
+- `syncMode=update-only`: only updates matched contacts, skips new contact creation.
+- `overwrite=false`: only fills blank Salesforce fields; existing non-empty fields are preserved.
+- `overwrite=true`: allows replacing existing Salesforce values with QBO values.
+
+Record type behavior for created contacts:
+
+- The sync looks up Salesforce Contact record type where name/developer name is `Contact`.
+- If found, new contacts are created with that `RecordTypeId`.
+- If not found, it falls back to Salesforce default record type assignment.
+
+Examples:
+
+- Dry run, no modifications:
+  - `/api/qbo/customers-salesforce-sync?dryRun=true`
+- Create only, preserve existing data:
+  - `/api/qbo/customers-salesforce-sync?dryRun=false&syncMode=create-only&overwrite=false`
+- Update only, force overwrite with QBO values:
+  - `/api/qbo/customers-salesforce-sync?dryRun=false&syncMode=update-only&overwrite=true`
+
 - Use `?mode=test` or `?mode=live` to choose which Stripe environment is synced.
 
 - In `TEST_MODE=true`, this endpoint automatically runs as dry-run only.

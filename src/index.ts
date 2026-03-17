@@ -183,6 +183,8 @@ const SalesforcePaymentsSyncQuerySchema = z
 const QboCustomersSyncQuerySchema = z
   .object({
     dryRun: BoolLikeQuerySchema.optional(),
+    syncMode: z.enum(['create-and-update', 'create-only', 'update-only']).optional(),
+    overwrite: BoolLikeQuerySchema.optional(),
     pageSize: PositiveIntLikeSchema.optional(),
     maxPages: PositiveIntLikeSchema.optional(),
     maxRuntimeMs: PositiveIntLikeSchema.optional(),

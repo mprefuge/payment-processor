@@ -6,24 +6,63 @@ import { SalesforceService, buildSalesforceConfig } from '../services/salesforce
 
 type QboEmailAddress = { Address?: string | null };
 type QboPhone = { FreeFormNumber?: string | null };
+type QboAddress = {
+  Line1?: string | null;
+  Line2?: string | null;
+  Line3?: string | null;
+  Line4?: string | null;
+  City?: string | null;
+  CountrySubDivisionCode?: string | null;
+  PostalCode?: string | null;
+  Country?: string | null;
+};
+
+type QboWebAddress = { URI?: string | null };
 
 type QboCustomer = {
   Id?: string | number | null;
   DisplayName?: string | null;
   GivenName?: string | null;
+  MiddleName?: string | null;
   FamilyName?: string | null;
+  Title?: string | null;
+  Suffix?: string | null;
   CompanyName?: string | null;
+  Notes?: string | null;
   PrimaryEmailAddr?: QboEmailAddress | null;
+  AlternateEmailAddr?: QboEmailAddress | null;
   PrimaryPhone?: QboPhone | null;
+  Mobile?: QboPhone | null;
+  AlternatePhone?: QboPhone | null;
+  Fax?: QboPhone | null;
+  BillAddr?: QboAddress | null;
+  ShipAddr?: QboAddress | null;
+  WebAddr?: QboWebAddress | null;
   Active?: boolean | null;
 };
 
 type SalesforceContact = {
   Id?: string;
+  Salutation?: string | null;
   FirstName?: string | null;
   LastName?: string | null;
   Email?: string | null;
+  OtherEmail?: string | null;
   Phone?: string | null;
+  MobilePhone?: string | null;
+  OtherPhone?: string | null;
+  Fax?: string | null;
+  Department?: string | null;
+  MailingStreet?: string | null;
+  MailingCity?: string | null;
+  MailingState?: string | null;
+  MailingPostalCode?: string | null;
+  MailingCountry?: string | null;
+  OtherStreet?: string | null;
+  OtherCity?: string | null;
+  OtherState?: string | null;
+  OtherPostalCode?: string | null;
+  OtherCountry?: string | null;
   Description?: string | null;
 };
 
@@ -31,34 +70,66 @@ type QueryResult<T> = {
   records?: T[];
 };
 
+type SaveResult = { success: boolean; id?: string };
+
 type SalesforceConnectionLike = {
   query: <T = unknown>(soql: string) => Promise<QueryResult<T> | T[]>;
   sobject: (
     name: string
   ) => {
-    create: (record: Record<string, unknown>) => Promise<{ success: boolean; id?: string } | Array<{ success: boolean; id?: string }>>;
-    update: (record: Record<string, unknown>) => Promise<{ success: boolean; id?: string } | Array<{ success: boolean; id?: string }>>;
+    create: (record: Record<string, unknown>) => Promise<SaveResult | SaveResult[]>;
+    update: (record: Record<string, unknown>) => Promise<SaveResult | SaveResult[]>;
   };
 };
 
 type SyncDependencies = {
-  fetchQboCustomersPage: (input: { startPosition: number; maxResults: number; includeInactive: boolean }) => Promise<QboCustomer[]>;
+  fetchQboCustomersPage: (input: {
+    startPosition: number;
+    maxResults: number;
+    includeInactive: boolean;
+  }) => Promise<QboCustomer[]>;
   getSalesforceConnection: () => Promise<SalesforceConnectionLike>;
+};
+
+type RecordTypeLookup = {
+  Id?: string;
+};
+
+type NormalizedAddress = {
+  street: string | null;
+  city: string | null;
+  state: string | null;
+  postalCode: string | null;
+  country: string | null;
 };
 
 type NormalizedQboCustomer = {
   id: string;
   displayName: string;
+  salutation: string | null;
   firstName: string | null;
+  middleName: string | null;
   lastName: string;
+  suffix: string | null;
   email: string | null;
+  otherEmail: string | null;
   phone: string | null;
+  mobilePhone: string | null;
+  otherPhone: string | null;
+  fax: string | null;
+  companyName: string | null;
+  notes: string | null;
+  website: string | null;
+  mailingAddress: NormalizedAddress;
+  otherAddress: NormalizedAddress;
 };
 
 type MatchResult =
   | { status: 'matched'; contact: SalesforceContact }
   | { status: 'not-found' }
   | { status: 'duplicate'; reason: string; candidates: SalesforceContact[] };
+
+type SyncMode = 'create-and-update' | 'create-only' | 'update-only';
 
 const DEFAULT_PAGE_SIZE = 250;
 const MAX_PAGE_SIZE = 1000;
@@ -88,7 +159,8 @@ const toRecords = <T>(result: QueryResult<T> | T[] | null | undefined): T[] => {
   return [];
 };
 
-const escapeSoqlLiteral = (value: string): string => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+const escapeSoqlLiteral = (value: string): string =>
+  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
   if (typeof value === 'boolean') {
@@ -130,6 +202,7 @@ const parseIntWithBounds = (
   if (rounded < min) {
     return min;
   }
+
   if (rounded > max) {
     return max;
   }
@@ -168,6 +241,20 @@ const splitDisplayName = (name: string): { firstName: string | null; lastName: s
   };
 };
 
+const normalizeAddress = (address: QboAddress | null | undefined): NormalizedAddress => {
+  const lines = [address?.Line1, address?.Line2, address?.Line3, address?.Line4]
+    .map((line) => toTrimmed(line))
+    .filter((line): line is string => Boolean(line));
+
+  return {
+    street: lines.length > 0 ? lines.join('\n') : null,
+    city: toTrimmed(address?.City),
+    state: toTrimmed(address?.CountrySubDivisionCode),
+    postalCode: toTrimmed(address?.PostalCode),
+    country: toTrimmed(address?.Country),
+  };
+};
+
 const normalizeQboCustomer = (customer: QboCustomer): NormalizedQboCustomer | null => {
   const idRaw = customer.Id;
   const id =
@@ -183,16 +270,26 @@ const normalizeQboCustomer = (customer: QboCustomer): NormalizedQboCustomer | nu
     `QuickBooks Customer ${id}`;
 
   const split = splitDisplayName(displayName);
-  const firstName = toTrimmed(customer.GivenName) || split.firstName;
-  const lastName = toTrimmed(customer.FamilyName) || split.lastName || `Customer ${id}`;
 
   return {
     id,
     displayName,
-    firstName,
-    lastName,
+    salutation: toTrimmed(customer.Title),
+    firstName: toTrimmed(customer.GivenName) || split.firstName,
+    middleName: toTrimmed(customer.MiddleName),
+    lastName: toTrimmed(customer.FamilyName) || split.lastName || `Customer ${id}`,
+    suffix: toTrimmed(customer.Suffix),
     email: normalizeEmail(customer.PrimaryEmailAddr?.Address),
+    otherEmail: normalizeEmail(customer.AlternateEmailAddr?.Address),
     phone: toTrimmed(customer.PrimaryPhone?.FreeFormNumber),
+    mobilePhone: toTrimmed(customer.Mobile?.FreeFormNumber),
+    otherPhone: toTrimmed(customer.AlternatePhone?.FreeFormNumber),
+    fax: toTrimmed(customer.Fax?.FreeFormNumber),
+    companyName: toTrimmed(customer.CompanyName),
+    notes: toTrimmed(customer.Notes),
+    website: toTrimmed(customer.WebAddr?.URI),
+    mailingAddress: normalizeAddress(customer.BillAddr),
+    otherAddress: normalizeAddress(customer.ShipAddr),
   };
 };
 
@@ -206,7 +303,10 @@ const hasMarker = (description: string | null | undefined, marker: string): bool
   return description.includes(marker);
 };
 
-const mergeDescriptionWithMarker = (description: string | null | undefined, marker: string): string => {
+const mergeDescriptionWithMarker = (
+  description: string | null | undefined,
+  marker: string
+): string => {
   if (!description || !description.trim()) {
     return marker;
   }
@@ -220,7 +320,10 @@ const mergeDescriptionWithMarker = (description: string | null | undefined, mark
   return `${base}${separator}${marker}`;
 };
 
-const equalsIgnoreCase = (a: string | null | undefined, b: string | null | undefined): boolean => {
+const equalsIgnoreCase = (
+  a: string | null | undefined,
+  b: string | null | undefined
+): boolean => {
   const left = a?.trim().toLowerCase();
   const right = b?.trim().toLowerCase();
   return Boolean(left && right && left === right);
@@ -256,6 +359,173 @@ const selectBestCandidate = (
   return candidates;
 };
 
+const shouldUpdateField = (
+  existing: string | null | undefined,
+  incoming: string | null | undefined,
+  overwrite: boolean
+): boolean => {
+  const next = toTrimmed(incoming);
+  if (!next) {
+    return false;
+  }
+
+  const current = toTrimmed(existing);
+  if (!current) {
+    return true;
+  }
+
+  if (!overwrite) {
+    return false;
+  }
+
+  return current !== next;
+};
+
+const toSaveResult = (result: SaveResult | SaveResult[]): SaveResult => {
+  return Array.isArray(result) ? result[0] : result;
+};
+
+const compactObject = (input: Record<string, unknown>): Record<string, unknown> => {
+  const output: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value === null || value === undefined) {
+      continue;
+    }
+
+    if (typeof value === 'string' && value.trim().length === 0) {
+      continue;
+    }
+
+    output[key] = value;
+  }
+
+  return output;
+};
+
+const buildQboDescription = (customer: NormalizedQboCustomer): string | null => {
+  const lines: string[] = [];
+  if (customer.companyName) {
+    lines.push(`QBO Company: ${customer.companyName}`);
+  }
+  if (customer.notes) {
+    lines.push(`QBO Notes: ${customer.notes}`);
+  }
+  if (customer.website) {
+    lines.push(`QBO Website: ${customer.website}`);
+  }
+
+  return lines.length > 0 ? lines.join(' | ') : null;
+};
+
+const buildCreatePayload = (
+  customer: NormalizedQboCustomer,
+  contactRecordTypeId: string | null
+): Record<string, unknown> => {
+  const marker = markerForQboCustomer(customer.id);
+  const description = mergeDescriptionWithMarker(buildQboDescription(customer), marker);
+
+  return compactObject({
+    RecordTypeId: contactRecordTypeId,
+    Salutation: customer.salutation,
+    FirstName: customer.firstName,
+    LastName: customer.lastName,
+    Email: customer.email,
+    OtherEmail: customer.otherEmail,
+    Phone: customer.phone,
+    MobilePhone: customer.mobilePhone,
+    OtherPhone: customer.otherPhone,
+    Fax: customer.fax,
+    Department: customer.companyName,
+    MailingStreet: customer.mailingAddress.street,
+    MailingCity: customer.mailingAddress.city,
+    MailingState: customer.mailingAddress.state,
+    MailingPostalCode: customer.mailingAddress.postalCode,
+    MailingCountry: customer.mailingAddress.country,
+    OtherStreet: customer.otherAddress.street,
+    OtherCity: customer.otherAddress.city,
+    OtherState: customer.otherAddress.state,
+    OtherPostalCode: customer.otherAddress.postalCode,
+    OtherCountry: customer.otherAddress.country,
+    Description: description,
+  });
+};
+
+let cachedContactRecordTypeId: string | null | undefined;
+
+const resolveContactRecordTypeId = async (
+  connection: SalesforceConnectionLike
+): Promise<string | null> => {
+  if (cachedContactRecordTypeId !== undefined) {
+    return cachedContactRecordTypeId;
+  }
+
+  const soql =
+    "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND (Name = 'Contact' OR DeveloperName = 'Contact') AND IsActive = true ORDER BY IsDefaultRecordTypeMapping DESC LIMIT 1";
+
+  const result = toRecords(await connection.query<RecordTypeLookup>(soql));
+  const found = result.find((record) => typeof record.Id === 'string' && record.Id.trim().length > 0);
+
+  cachedContactRecordTypeId = found?.Id?.trim() ?? null;
+  return cachedContactRecordTypeId;
+};
+
+const buildUpdatePayload = (
+  existing: SalesforceContact,
+  customer: NormalizedQboCustomer,
+  overwrite: boolean
+): Record<string, unknown> | null => {
+  if (!existing.Id) {
+    return null;
+  }
+
+  const payload: Record<string, unknown> = { Id: existing.Id };
+
+  const setField = (
+    field: keyof SalesforceContact,
+    incoming: string | null | undefined,
+    existingValue?: string | null
+  ) => {
+    if (shouldUpdateField(existingValue, incoming, overwrite)) {
+      payload[field as string] = toTrimmed(incoming);
+    }
+  };
+
+  setField('Salutation', customer.salutation, existing.Salutation);
+  setField('FirstName', customer.firstName, existing.FirstName);
+  setField('LastName', customer.lastName, existing.LastName);
+  setField('Email', customer.email, existing.Email);
+  setField('OtherEmail', customer.otherEmail, existing.OtherEmail);
+  setField('Phone', customer.phone, existing.Phone);
+  setField('MobilePhone', customer.mobilePhone, existing.MobilePhone);
+  setField('OtherPhone', customer.otherPhone, existing.OtherPhone);
+  setField('Fax', customer.fax, existing.Fax);
+  setField('Department', customer.companyName, existing.Department);
+
+  setField('MailingStreet', customer.mailingAddress.street, existing.MailingStreet);
+  setField('MailingCity', customer.mailingAddress.city, existing.MailingCity);
+  setField('MailingState', customer.mailingAddress.state, existing.MailingState);
+  setField('MailingPostalCode', customer.mailingAddress.postalCode, existing.MailingPostalCode);
+  setField('MailingCountry', customer.mailingAddress.country, existing.MailingCountry);
+
+  setField('OtherStreet', customer.otherAddress.street, existing.OtherStreet);
+  setField('OtherCity', customer.otherAddress.city, existing.OtherCity);
+  setField('OtherState', customer.otherAddress.state, existing.OtherState);
+  setField('OtherPostalCode', customer.otherAddress.postalCode, existing.OtherPostalCode);
+  setField('OtherCountry', customer.otherAddress.country, existing.OtherCountry);
+
+  const marker = markerForQboCustomer(customer.id);
+  const baseDescription = overwrite
+    ? buildQboDescription(customer) ?? existing.Description ?? null
+    : existing.Description ?? null;
+  const nextDescription = mergeDescriptionWithMarker(baseDescription, marker);
+
+  if (nextDescription !== (existing.Description ?? null)) {
+    payload.Description = nextDescription;
+  }
+
+  return Object.keys(payload).length > 1 ? payload : null;
+};
+
 const findSalesforceMatch = async (
   connection: SalesforceConnectionLike,
   customer: NormalizedQboCustomer
@@ -268,9 +538,19 @@ const findSalesforceMatch = async (
     whereClauses.push(`Email = '${escapeSoqlLiteral(customer.email)}'`);
   }
 
+  if (customer.phone) {
+    whereClauses.push(`Phone = '${escapeSoqlLiteral(customer.phone)}'`);
+  }
+
+  if (customer.mobilePhone) {
+    whereClauses.push(`MobilePhone = '${escapeSoqlLiteral(customer.mobilePhone)}'`);
+  }
+
   if (customer.firstName) {
     whereClauses.push(
-      `(FirstName = '${escapeSoqlLiteral(customer.firstName)}' AND LastName = '${escapeSoqlLiteral(customer.lastName)}')`
+      `(FirstName = '${escapeSoqlLiteral(customer.firstName)}' AND LastName = '${escapeSoqlLiteral(
+        customer.lastName
+      )}')`
     );
   } else if (customer.lastName) {
     whereClauses.push(`LastName = '${escapeSoqlLiteral(customer.lastName)}'`);
@@ -281,8 +561,8 @@ const findSalesforceMatch = async (
   }
 
   const matchQuery =
-    `SELECT Id, FirstName, LastName, Email, Phone, Description FROM Contact ` +
-    `WHERE ${whereClauses.join(' OR ')} ORDER BY CreatedDate DESC LIMIT 10`;
+    'SELECT Id, Salutation, FirstName, LastName, Email, OtherEmail, Phone, MobilePhone, OtherPhone, Fax, Department, MailingStreet, MailingCity, MailingState, MailingPostalCode, MailingCountry, OtherStreet, OtherCity, OtherState, OtherPostalCode, OtherCountry, Description ' +
+    `FROM Contact WHERE ${whereClauses.join(' OR ')} ORDER BY CreatedDate DESC LIMIT 25`;
 
   const candidates = toRecords(await connection.query<SalesforceContact>(matchQuery));
 
@@ -312,52 +592,21 @@ const findSalesforceMatch = async (
   };
 };
 
-const toSaveResult = (result: { success: boolean; id?: string } | Array<{ success: boolean; id?: string }>) => {
-  return Array.isArray(result) ? result[0] : result;
-};
-
-const buildCreatePayload = (customer: NormalizedQboCustomer): Record<string, unknown> => ({
-  FirstName: customer.firstName,
-  LastName: customer.lastName,
-  Email: customer.email,
-  Phone: customer.phone,
-  Description: markerForQboCustomer(customer.id),
-});
-
-const buildUpdatePayload = (
-  existing: SalesforceContact,
-  customer: NormalizedQboCustomer
-): Record<string, unknown> | null => {
-  if (!existing.Id) {
-    return null;
+const parseSyncMode = (value: unknown): SyncMode => {
+  if (typeof value !== 'string') {
+    return 'create-and-update';
   }
 
-  const marker = markerForQboCustomer(customer.id);
-  const nextDescription = mergeDescriptionWithMarker(existing.Description, marker);
-
-  const payload: Record<string, unknown> = { Id: existing.Id };
-
-  if (customer.email && !equalsIgnoreCase(existing.Email, customer.email)) {
-    payload.Email = customer.email;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'create-only' || normalized === 'create') {
+    return 'create-only';
   }
 
-  if (customer.phone && toTrimmed(existing.Phone) !== customer.phone) {
-    payload.Phone = customer.phone;
+  if (normalized === 'update-only' || normalized === 'update') {
+    return 'update-only';
   }
 
-  if (customer.firstName && !equalsIgnoreCase(existing.FirstName, customer.firstName)) {
-    payload.FirstName = customer.firstName;
-  }
-
-  if (customer.lastName && !equalsIgnoreCase(existing.LastName, customer.lastName)) {
-    payload.LastName = customer.lastName;
-  }
-
-  if (nextDescription !== (existing.Description ?? null)) {
-    payload.Description = nextDescription;
-  }
-
-  return Object.keys(payload).length > 1 ? payload : null;
+  return 'create-and-update';
 };
 
 const readQuery = (request: HttpRequest): Record<string, string | undefined> => {
@@ -369,6 +618,8 @@ const readQuery = (request: HttpRequest): Record<string, string | undefined> => 
       maxRuntimeMs: request.query.get('maxRuntimeMs') || undefined,
       includeInactive: request.query.get('includeInactive') || undefined,
       exampleLimit: request.query.get('exampleLimit') || undefined,
+      overwrite: request.query.get('overwrite') || undefined,
+      syncMode: request.query.get('syncMode') || undefined,
     };
   }
 
@@ -381,6 +632,8 @@ const readQuery = (request: HttpRequest): Record<string, string | undefined> => 
     includeInactive:
       typeof fallback?.includeInactive === 'string' ? fallback.includeInactive : undefined,
     exampleLimit: typeof fallback?.exampleLimit === 'string' ? fallback.exampleLimit : undefined,
+    overwrite: typeof fallback?.overwrite === 'string' ? fallback.overwrite : undefined,
+    syncMode: typeof fallback?.syncMode === 'string' ? fallback.syncMode : undefined,
   };
 };
 
@@ -388,7 +641,7 @@ const createDefaultDependencies = (): SyncDependencies => ({
   fetchQboCustomersPage: async ({ startPosition, maxResults, includeInactive }) => {
     const whereClause = includeInactive ? '' : ' WHERE Active = true';
     const queryText =
-      'SELECT Id, DisplayName, GivenName, FamilyName, CompanyName, PrimaryEmailAddr, PrimaryPhone, Active FROM Customer' +
+      'SELECT Id, DisplayName, GivenName, MiddleName, FamilyName, Title, Suffix, CompanyName, Notes, PrimaryEmailAddr, AlternateEmailAddr, PrimaryPhone, Mobile, AlternatePhone, Fax, BillAddr, ShipAddr, WebAddr, Active FROM Customer' +
       whereClause +
       ` STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
 
@@ -444,9 +697,21 @@ const syncQboCustomersToSalesforce = async (
       1,
       MAX_EXAMPLE_LIMIT
     );
+    const overwrite = parseBoolean(query.overwrite, false);
+    const syncMode = parseSyncMode(query.syncMode);
 
     const deps = resolveDependencies();
     const salesforce = await deps.getSalesforceConnection();
+    let contactRecordTypeId: string | null = null;
+
+    try {
+      contactRecordTypeId = await resolveContactRecordTypeId(salesforce);
+    } catch (error) {
+      contactRecordTypeId = null;
+      logger.warn('[qboCustomersSync] Unable to resolve Contact record type; defaulting to org default', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     const startedAt = Date.now();
 
@@ -455,9 +720,11 @@ const syncQboCustomersToSalesforce = async (
       alreadyExistInSalesforce: 0,
       notInSalesforce: 0,
       willBeCreated: 0,
+      wouldUpdate: 0,
       duplicateConflicts: 0,
       created: 0,
       updated: 0,
+      skippedByMode: 0,
       errors: 0,
     };
 
@@ -535,7 +802,10 @@ const syncQboCustomersToSalesforce = async (
 
           if (match.status === 'matched') {
             counts.alreadyExistInSalesforce += 1;
-            const updatePayload = buildUpdatePayload(match.contact, normalized);
+            const updatePayload = buildUpdatePayload(match.contact, normalized, overwrite);
+            if (updatePayload) {
+              counts.wouldUpdate += 1;
+            }
 
             if (samples.matched.length < exampleLimit) {
               samples.matched.push({
@@ -544,6 +814,11 @@ const syncQboCustomersToSalesforce = async (
                 salesforceContactId: match.contact.Id,
                 wouldUpdate: Boolean(updatePayload),
               });
+            }
+
+            if (syncMode === 'create-only') {
+              counts.skippedByMode += 1;
+              continue;
             }
 
             if (!dryRun && updatePayload) {
@@ -565,11 +840,20 @@ const syncQboCustomersToSalesforce = async (
               qboCustomerId: normalized.id,
               qboDisplayName: normalized.displayName,
               email: normalized.email,
+              phone: normalized.phone,
+              mobilePhone: normalized.mobilePhone,
+              hasBillingAddress: Boolean(normalized.mailingAddress.street),
+              hasShippingAddress: Boolean(normalized.otherAddress.street),
             });
           }
 
+          if (syncMode === 'update-only') {
+            counts.skippedByMode += 1;
+            continue;
+          }
+
           if (!dryRun) {
-            const createPayload = buildCreatePayload(normalized);
+            const createPayload = buildCreatePayload(normalized, contactRecordTypeId);
             const saveResult = toSaveResult(await salesforce.sobject('Contact').create(createPayload));
             if (!saveResult?.success) {
               throw new Error(`Failed to create Salesforce contact for QBO customer ${normalized.id}`);
@@ -615,6 +899,8 @@ const syncQboCustomersToSalesforce = async (
       jsonBody: {
         success: true,
         dryRun,
+        syncMode,
+        overwrite,
         pagination: {
           pageSize,
           maxPages,
@@ -647,9 +933,11 @@ const syncQboCustomersToSalesforce = async (
 (syncQboCustomersToSalesforce as any).__internals = {
   setDependencies(overrides: Partial<SyncDependencies> | null = null) {
     dependencyOverrides = overrides;
+    cachedContactRecordTypeId = undefined;
   },
   resetDependencies() {
     dependencyOverrides = null;
+    cachedContactRecordTypeId = undefined;
   },
 };
 
