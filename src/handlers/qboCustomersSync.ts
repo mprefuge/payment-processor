@@ -609,6 +609,79 @@ const parseSyncMode = (value: unknown): SyncMode => {
   return 'create-and-update';
 };
 
+const parseUnsupportedCustomerField = (error: unknown): string | null => {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/Property\s+([A-Za-z0-9_]+)\s+not\s+found\s+for\s+Entity\s+Customer/i);
+  if (!match) {
+    return null;
+  }
+
+  return match[1] ?? null;
+};
+
+const queryQboCustomersWithFieldFallback = async (
+  startPosition: number,
+  maxResults: number,
+  includeInactive: boolean
+): Promise<QboCustomer[]> => {
+  const whereClause = includeInactive ? '' : ' WHERE Active = true';
+
+  // Some QBO companies expose a narrower Customer schema.
+  const selectFields = [
+    'Id',
+    'DisplayName',
+    'GivenName',
+    'MiddleName',
+    'FamilyName',
+    'Title',
+    'Suffix',
+    'CompanyName',
+    'Notes',
+    'PrimaryEmailAddr',
+    'AlternateEmailAddr',
+    'PrimaryPhone',
+    'Mobile',
+    'AlternatePhone',
+    'Fax',
+    'BillAddr',
+    'ShipAddr',
+    'WebAddr',
+    'Active',
+  ];
+
+  while (selectFields.length > 1) {
+    const queryText =
+      `SELECT ${selectFields.join(', ')} FROM Customer` +
+      whereClause +
+      ` STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+
+    try {
+      const records = await qboQuery<QboCustomer[]>(queryText);
+      return Array.isArray(records) ? records : [];
+    } catch (error) {
+      const unsupportedField = parseUnsupportedCustomerField(error);
+      if (!unsupportedField) {
+        throw error;
+      }
+
+      const index = selectFields.findIndex((field) =>
+        field.toLowerCase() === unsupportedField.toLowerCase()
+      );
+
+      if (index === -1) {
+        throw error;
+      }
+
+      const [removedField] = selectFields.splice(index, 1);
+      logger.warn('[qboCustomersSync] QBO customer field unsupported; retrying without field', {
+        removedField,
+      });
+    }
+  }
+
+  throw new Error('Unable to query QBO customers with the available customer fields.');
+};
+
 const readQuery = (request: HttpRequest): Record<string, string | undefined> => {
   if (request.query && typeof request.query.get === 'function') {
     return {
@@ -639,14 +712,7 @@ const readQuery = (request: HttpRequest): Record<string, string | undefined> => 
 
 const createDefaultDependencies = (): SyncDependencies => ({
   fetchQboCustomersPage: async ({ startPosition, maxResults, includeInactive }) => {
-    const whereClause = includeInactive ? '' : ' WHERE Active = true';
-    const queryText =
-      'SELECT Id, DisplayName, GivenName, MiddleName, FamilyName, Title, Suffix, CompanyName, Notes, PrimaryEmailAddr, AlternateEmailAddr, PrimaryPhone, Mobile, AlternatePhone, Fax, BillAddr, ShipAddr, WebAddr, Active FROM Customer' +
-      whereClause +
-      ` STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
-
-    const records = await qboQuery<QboCustomer[]>(queryText);
-    return Array.isArray(records) ? records : [];
+    return queryQboCustomersWithFieldFallback(startPosition, maxResults, includeInactive);
   },
   getSalesforceConnection: async () => {
     const service = new SalesforceService(buildSalesforceConfig());
