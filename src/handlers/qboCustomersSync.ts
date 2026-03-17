@@ -261,24 +261,6 @@ const findSalesforceMatch = async (
   customer: NormalizedQboCustomer
 ): Promise<MatchResult> => {
   const marker = markerForQboCustomer(customer.id);
-  const escapedMarker = escapeSoqlLiteral(marker);
-
-  const markerQuery =
-    `SELECT Id, FirstName, LastName, Email, Phone, Description FROM Contact ` +
-    `WHERE Description LIKE '%${escapedMarker}%' ORDER BY CreatedDate DESC LIMIT 10`;
-  const markerCandidates = toRecords(await connection.query<SalesforceContact>(markerQuery));
-
-  if (markerCandidates.length === 1) {
-    return { status: 'matched', contact: markerCandidates[0] };
-  }
-
-  if (markerCandidates.length > 1) {
-    return {
-      status: 'duplicate',
-      reason: 'multiple_contacts_with_qbo_marker',
-      candidates: markerCandidates,
-    };
-  }
 
   const whereClauses: string[] = [];
 
@@ -309,6 +291,15 @@ const findSalesforceMatch = async (
   }
 
   const selected = selectBestCandidate(candidates, customer, marker);
+
+  const markerMatches = selected.filter((candidate) => hasMarker(candidate.Description, marker));
+  if (markerMatches.length > 1) {
+    return {
+      status: 'duplicate',
+      reason: 'multiple_contacts_with_qbo_marker',
+      candidates: markerMatches,
+    };
+  }
 
   if (selected.length === 1) {
     return { status: 'matched', contact: selected[0] };

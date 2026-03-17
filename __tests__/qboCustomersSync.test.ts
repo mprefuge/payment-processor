@@ -53,7 +53,10 @@ describe('qboCustomersSync', () => {
       .mockResolvedValueOnce([]);
 
     const query = vi.fn(async (soql: string) => {
-      if (soql.includes("[QBO_CUSTOMER_ID:c1]")) {
+      if (
+        soql.includes("Email = 'ada@example.com'") ||
+        soql.includes("FirstName = 'Ada'")
+      ) {
         return {
           records: [
             {
@@ -67,19 +70,24 @@ describe('qboCustomersSync', () => {
         };
       }
 
-      if (soql.includes("[QBO_CUSTOMER_ID:c2]")) {
-        return { records: [] };
-      }
-
-      if (soql.includes("[QBO_CUSTOMER_ID:c3]")) {
-        return { records: [] };
-      }
-
       if (soql.includes("Email = 'ben@example.com'")) {
         return { records: [] };
       }
 
       if (soql.includes("Email = 'dup@example.com'")) {
+        return {
+          records: [
+            { Id: '003_dup1', FirstName: 'Dup', LastName: 'Email', Email: 'dup@example.com' },
+            { Id: '003_dup2', FirstName: 'Dup', LastName: 'Email', Email: 'dup@example.com' },
+          ],
+        };
+      }
+
+      if (soql.includes("FirstName = 'Ben'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FirstName = 'Dup'")) {
         return {
           records: [
             { Id: '003_dup1', FirstName: 'Dup', LastName: 'Email', Email: 'dup@example.com' },
@@ -156,7 +164,10 @@ describe('qboCustomersSync', () => {
       .mockResolvedValueOnce([]);
 
     const query = vi.fn(async (soql: string) => {
-      if (soql.includes("[QBO_CUSTOMER_ID:c1]")) {
+      if (
+        soql.includes("Email = 'ada@example.com'") ||
+        soql.includes("FirstName = 'Ada'")
+      ) {
         return {
           records: [
             {
@@ -171,11 +182,11 @@ describe('qboCustomersSync', () => {
         };
       }
 
-      if (soql.includes("[QBO_CUSTOMER_ID:c2]")) {
+      if (soql.includes("Email = 'ben@example.com'")) {
         return { records: [] };
       }
 
-      if (soql.includes("Email = 'ben@example.com'")) {
+      if (soql.includes("FirstName = 'Ben'")) {
         return { records: [] };
       }
 
