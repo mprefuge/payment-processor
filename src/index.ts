@@ -22,6 +22,8 @@ const manualQboSync = manualQboSyncModule.default || manualQboSyncModule;
 const salesforcePaymentsSyncModule = require('./handlers/salesforcePaymentsSync');
 const salesforcePaymentsSync =
   salesforcePaymentsSyncModule.default || salesforcePaymentsSyncModule;
+const qboCustomersSyncModule = require('./handlers/qboCustomersSync');
+const qboCustomersSync = qboCustomersSyncModule.default || qboCustomersSyncModule;
 const eventRegistrationModule = require('./handlers/eventRegistration');
 const eventRegistration = eventRegistrationModule.default || eventRegistrationModule;
 const eventCheckInModule = require('./handlers/eventCheckIn');
@@ -178,6 +180,17 @@ const SalesforcePaymentsSyncQuerySchema = z
   })
   .passthrough();
 
+const QboCustomersSyncQuerySchema = z
+  .object({
+    dryRun: BoolLikeQuerySchema.optional(),
+    pageSize: PositiveIntLikeSchema.optional(),
+    maxPages: PositiveIntLikeSchema.optional(),
+    maxRuntimeMs: PositiveIntLikeSchema.optional(),
+    includeInactive: BoolLikeQuerySchema.optional(),
+    exampleLimit: PositiveIntLikeSchema.optional(),
+  })
+  .passthrough();
+
 const documents = [
   registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'json'),
   registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'yaml'),
@@ -328,6 +341,25 @@ registerFunction('salesforcePaymentsSync', 'Salesforce payments synchronization'
   responses: {
     200: { description: 'Sync succeeded' },
     500: { description: 'Sync failed' },
+  },
+});
+
+registerFunction('qboCustomersSync', 'QBO customer sync to Salesforce contacts', {
+  handler: qboCustomersSync,
+  description:
+    'Synchronizes QuickBooks Online customers into Salesforce Contacts with dry-run and duplicate checks.',
+  tags: ['QBO', 'Salesforce'],
+  security: functionAuthSecurity,
+  methods: ['GET', 'POST'],
+  authLevel: 'function',
+  azureFunctionRoutePrefix: 'api',
+  route: 'qbo/customers-salesforce-sync',
+  request: {
+    query: QboCustomersSyncQuerySchema,
+  },
+  responses: {
+    200: { description: 'Customer sync completed' },
+    500: { description: 'Customer sync failed' },
   },
 });
 
@@ -497,6 +529,7 @@ export {
   stripeTrueUp,
   manualQboSync,
   salesforcePaymentsSync,
+  qboCustomersSync,
   eventRegistration,
   eventCheckIn,
 };
