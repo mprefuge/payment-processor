@@ -113,6 +113,7 @@ export interface SalesforceSvc {
   ) => Promise<{ id: string; contactId: string | null } | null>;
   upsertCustomerByStripeId: (dto: CustomerUpsertDTO) => Promise<UpsertResult>;
   findContactIdById?: (contactId: string) => Promise<string | null>;
+  findAccountIdById?: (accountId: string) => Promise<string | null>;
 }
 
 type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -341,9 +342,12 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const received = dto.received_at__c;
 
     if (
-      typeof contact === 'string' && contact.trim().length > 0 &&
-      typeof amount === 'number' && !Number.isNaN(amount) &&
-      typeof received === 'string' && received.trim().length > 0
+      typeof contact === 'string' &&
+      contact.trim().length > 0 &&
+      typeof amount === 'number' &&
+      !Number.isNaN(amount) &&
+      typeof received === 'string' &&
+      received.trim().length > 0
     ) {
       const escapedContact = escapeForSoqlLiteral(contact.trim());
       const escapedReceived = escapeForSoqlLiteral(received.trim());
@@ -800,6 +804,20 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return record?.Id ?? null;
   };
 
+  const findAccountIdById = async (accountId: string): Promise<string | null> => {
+    const normalizedId = ensureNonEmpty(accountId, 'Account ID');
+    const escapedId = escapeForSoqlLiteral(normalizedId);
+    const result = await connection.query<{ Id?: string }>(
+      `SELECT Id FROM Account WHERE Id = '${escapedId}' LIMIT 1`
+    );
+    const records = toLookupRecords(result);
+    const record = records.find(
+      (candidate): candidate is { Id: string } =>
+        typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
+    );
+    return record?.Id ?? null;
+  };
+
   return {
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
@@ -808,6 +826,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     findTransactionRecordByExternalId,
     upsertCustomerByStripeId,
     findContactIdById,
+    findAccountIdById,
   };
 };
 

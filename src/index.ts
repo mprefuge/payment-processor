@@ -20,10 +20,12 @@ const stripeTrueUp = stripeTrueUpModule.default || stripeTrueUpModule;
 const manualQboSyncModule = require('./handlers/manualQboSync');
 const manualQboSync = manualQboSyncModule.default || manualQboSyncModule;
 const salesforcePaymentsSyncModule = require('./handlers/salesforcePaymentsSync');
-const salesforcePaymentsSync =
-  salesforcePaymentsSyncModule.default || salesforcePaymentsSyncModule;
+const salesforcePaymentsSync = salesforcePaymentsSyncModule.default || salesforcePaymentsSyncModule;
 const qboCustomersSyncModule = require('./handlers/qboCustomersSync');
 const qboCustomersSync = qboCustomersSyncModule.default || qboCustomersSyncModule;
+const salesforceRecordQboSyncModule = require('./handlers/salesforceRecordQboSync');
+const salesforceRecordQboSync =
+  salesforceRecordQboSyncModule.default || salesforceRecordQboSyncModule;
 const eventRegistrationModule = require('./handlers/eventRegistration');
 const eventRegistration = eventRegistrationModule.default || eventRegistrationModule;
 const eventCheckInModule = require('./handlers/eventCheckIn');
@@ -190,6 +192,13 @@ const QboCustomersSyncQuerySchema = z
     maxRuntimeMs: PositiveIntLikeSchema.optional(),
     includeInactive: BoolLikeQuerySchema.optional(),
     exampleLimit: PositiveIntLikeSchema.optional(),
+  })
+  .passthrough();
+
+const SalesforceRecordQboSyncQuerySchema = z
+  .object({
+    salesforceId: z.string(),
+    dryRun: BoolLikeQuerySchema.optional(),
   })
   .passthrough();
 
@@ -365,6 +374,32 @@ registerFunction('qboCustomersSync', 'QBO customer sync to Salesforce contacts',
   },
 });
 
+registerFunction(
+  'salesforceRecordQboSync',
+  'Sync QuickBooks and Salesforce for one Salesforce record',
+  {
+    handler: salesforceRecordQboSync,
+    description:
+      'Resolves a Salesforce Contact or Account by Id, links the matching QuickBooks customer, and syncs supported transactions with a dry-run summary.',
+    tags: ['QBO', 'Salesforce'],
+    security: functionAuthSecurity,
+    methods: ['GET', 'POST'],
+    authLevel: 'function',
+    azureFunctionRoutePrefix: 'api',
+    route: 'qbo/salesforce-record-sync',
+    request: {
+      query: SalesforceRecordQboSyncQuerySchema,
+    },
+    responses: {
+      200: { description: 'Single-record sync completed' },
+      400: { description: 'Invalid sync request' },
+      404: { description: 'Salesforce record not found' },
+      409: { description: 'Link conflict or unresolved customer' },
+      500: { description: 'Single-record sync failed' },
+    },
+  }
+);
+
 // define simple event registration schema
 const EventRegistrationSchema = z.object({
   eventId: z.string(),
@@ -412,12 +447,9 @@ const EventCheckInSchema = z
     email: z.string().email().optional(),
     eventId: z.string().optional(),
   })
-  .refine(
-    (data) => !!data.registrationId || (data.email && data.eventId),
-    {
-      message: 'registrationId or both email and eventId must be supplied',
-    }
-  );
+  .refine((data) => !!data.registrationId || (data.email && data.eventId), {
+    message: 'registrationId or both email and eventId must be supplied',
+  });
 
 registerFunction('eventCheckIn', 'Check in an event attendee', {
   handler: eventCheckIn,
@@ -532,6 +564,7 @@ export {
   manualQboSync,
   salesforcePaymentsSync,
   qboCustomersSync,
+  salesforceRecordQboSync,
   eventRegistration,
   eventCheckIn,
 };
