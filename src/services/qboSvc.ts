@@ -77,6 +77,13 @@ interface QuickBooksEmailAddress {
   Address: string;
 }
 
+interface QuickBooksCustomField {
+  DefinitionId?: string;
+  Name?: string;
+  Type?: string;
+  StringValue?: string;
+}
+
 interface QuickBooksPhysicalAddress {
   Line1?: string;
   Line2?: string;
@@ -117,7 +124,7 @@ export interface QuickBooksSalesReceipt {
   ShipAddr?: QuickBooksPhysicalAddress;
   ClassRef?: QuickBooksReference;
   Line: QuickBooksSalesReceiptLine[];
-} 
+}
 
 interface QuickBooksJournalEntryLineDetail {
   PostingType: 'Debit' | 'Credit';
@@ -160,6 +167,14 @@ export interface QuickBooksBankDeposit {
 interface PostOptions {
   fetcher?: Fetcher;
   accessToken?: string;
+  debugLogger?: (event: {
+    operation: string;
+    stage: 'request' | 'response' | 'error';
+    request?: Record<string, unknown>;
+    response?: unknown;
+    status?: number;
+    error?: string;
+  }) => void;
 }
 
 interface PostResult {
@@ -189,7 +204,7 @@ interface BuildSalesReceiptInput {
   lineAmountCents?: number;
   lineServiceDate?: string;
   lineClassRef?: string;
-} 
+}
 
 type StripeCustomerContext = {
   charge?: Stripe.Charge | null;
@@ -857,14 +872,16 @@ const findCustomerByDisplayName = async (
     customers.find((customer) => {
       const name = customer?.DisplayName;
       return (
-        typeof name === 'string' && name.trim().toLowerCase() === normalizedDisplayName.toLowerCase()
+        typeof name === 'string' &&
+        name.trim().toLowerCase() === normalizedDisplayName.toLowerCase()
       );
     }) ?? null;
 
   const reference = extractReferenceFromRecord(existing, 'Id', 'DisplayName');
   if (reference) {
     const recordEmail = (existing?.PrimaryEmailAddr as { Address?: string } | undefined)?.Address;
-    const normalizedEmail = typeof recordEmail === 'string' ? recordEmail.trim().toLowerCase() : null;
+    const normalizedEmail =
+      typeof recordEmail === 'string' ? recordEmail.trim().toLowerCase() : null;
     cacheCustomerReference(reference, normalizedEmail, normalizedDisplayName);
   }
 
@@ -873,14 +890,24 @@ const findCustomerByDisplayName = async (
 
 const fetchQuickBooksCustomer = async (
   id: string,
-  context: QuickBooksRequestContext
+  context: QuickBooksRequestContext,
+  debugLogger?: PostOptions['debugLogger']
 ): Promise<Record<string, unknown>> => {
   const trimmedId = id.trim();
   if (!trimmedId) {
     throw new Error('QuickBooks customer ID is required to load customer details.');
   }
 
-  const url = `${buildQboUrl('customer')}/${encodeURIComponent(trimmedId)}`;
+  const url = buildQboCustomerReadUrl(trimmedId);
+  debugLogger?.({
+    operation: 'getQuickBooksCustomerById',
+    stage: 'request',
+    request: {
+      method: 'GET',
+      url,
+      customerId: trimmedId,
+    },
+  });
   const response = await context.request(url, {
     method: 'GET',
     headers: { Accept: 'application/json' },
@@ -888,6 +915,17 @@ const fetchQuickBooksCustomer = async (
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    debugLogger?.({
+      operation: 'getQuickBooksCustomerById',
+      stage: 'error',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        customerId: trimmedId,
+      },
+      error: errorText ?? response.statusText,
+    });
     throw new Error(
       `Failed to load QuickBooks customer "${trimmedId}" (status ${response.status}): ${
         errorText ?? response.statusText
@@ -905,15 +943,36 @@ const fetchQuickBooksCustomer = async (
     throw new Error('QuickBooks customer response did not include a Customer record.');
   }
 
+  debugLogger?.({
+    operation: 'getQuickBooksCustomerById',
+    stage: 'response',
+    status: response.status,
+    request: {
+      method: 'GET',
+      url,
+      customerId: trimmedId,
+    },
+    response: customer,
+  });
+
   return customer;
+};
+
+export const getQuickBooksCustomerById = async (
+  id: string,
+  options?: PostOptions
+): Promise<Record<string, unknown>> => {
+  const context = await createRequestContext(options);
+  return fetchQuickBooksCustomer(id, context, options?.debugLogger);
 };
 
 const updateQuickBooksCustomer = async (
   id: string,
   updates: Record<string, unknown>,
-  context: QuickBooksRequestContext
+  context: QuickBooksRequestContext,
+  debugLogger?: PostOptions['debugLogger']
 ): Promise<Record<string, unknown>> => {
-  const customer = await fetchQuickBooksCustomer(id, context);
+  const customer = await fetchQuickBooksCustomer(id, context, debugLogger);
   const syncTokenRaw = customer.SyncToken;
   const syncToken =
     typeof syncTokenRaw === 'number'
@@ -934,6 +993,16 @@ const updateQuickBooksCustomer = async (
   };
 
   const url = `${buildQboUrl('customer')}?operation=update`;
+  debugLogger?.({
+    operation: 'updateQuickBooksCustomer',
+    stage: 'request',
+    request: {
+      method: 'POST',
+      url,
+      customerId: id,
+      payload,
+    },
+  });
   const response = await context.request(url, {
     method: 'POST',
     headers: {
@@ -945,6 +1014,18 @@ const updateQuickBooksCustomer = async (
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    debugLogger?.({
+      operation: 'updateQuickBooksCustomer',
+      stage: 'error',
+      status: response.status,
+      request: {
+        method: 'POST',
+        url,
+        customerId: id,
+        payload,
+      },
+      error: errorText ?? response.statusText,
+    });
     throw new Error(
       `Failed to update QuickBooks customer "${id}" (status ${response.status}): ${
         errorText ?? response.statusText
@@ -962,7 +1043,60 @@ const updateQuickBooksCustomer = async (
     throw new Error('QuickBooks customer update response did not include a Customer record.');
   }
 
+  debugLogger?.({
+    operation: 'updateQuickBooksCustomer',
+    stage: 'response',
+    status: response.status,
+    request: {
+      method: 'POST',
+      url,
+      customerId: id,
+      payload,
+    },
+    response: updated,
+  });
+
   return updated;
+};
+
+export const updateQuickBooksCustomerSalesforceId = async (
+  id: string,
+  salesforceId: string,
+  options?: PostOptions
+): Promise<Record<string, unknown>> => {
+  const trimmedSalesforceId = salesforceId.trim();
+  if (!trimmedSalesforceId) {
+    throw new Error('Salesforce ID is required to update the QuickBooks customer.');
+  }
+
+  const context = await createRequestContext(options);
+  const customer = await fetchQuickBooksCustomer(id, context, options?.debugLogger);
+  const customFields = Array.isArray(customer.CustomField)
+    ? (customer.CustomField as QuickBooksCustomField[])
+    : [];
+  const salesforceField = customFields.find((field) => field?.Name === 'Salesforce ID');
+
+  if (!salesforceField?.DefinitionId) {
+    throw new Error(
+      'QuickBooks customer does not expose a "Salesforce ID" custom field definition.'
+    );
+  }
+
+  return updateQuickBooksCustomer(
+    id,
+    {
+      CustomField: [
+        {
+          DefinitionId: salesforceField.DefinitionId,
+          Name: salesforceField.Name,
+          Type: salesforceField.Type,
+          StringValue: trimmedSalesforceId,
+        } satisfies QuickBooksCustomField,
+      ],
+    },
+    context,
+    options?.debugLogger
+  );
 };
 
 const ensureSalesReceiptCustomer = async (
@@ -1757,12 +1891,15 @@ export const buildSalesReceipt = ({
   if (stripeFee > 0) {
     const stripeFeeAmount = -centsToDollars(stripeFee);
     if (!Number.isFinite(stripeFeeAmount)) {
-      throw new Error(`Invalid stripe fee amount calculated for sales receipt: ${stripeFeeAmount} (from ${stripeFee} cents)`);
+      throw new Error(
+        `Invalid stripe fee amount calculated for sales receipt: ${stripeFeeAmount} (from ${stripeFee} cents)`
+      );
     }
 
-    const feeItemAccountRef = typeof feesAccountName === 'string' && feesAccountName.trim()
-      ? createAccountRef(feesAccountName)
-      : undefined;
+    const feeItemAccountRef =
+      typeof feesAccountName === 'string' && feesAccountName.trim()
+        ? createAccountRef(feesAccountName)
+        : undefined;
 
     lines.push({
       Amount: stripeFeeAmount,
@@ -1841,10 +1978,12 @@ export const buildSalesReceipt = ({
       receipt.CustomerMemo = { value: truncated };
     }
   } catch (e) {
-    logger.debug('Failed to build CustomerMemo for sales receipt', { error: e instanceof Error ? e.message : String(e) });
+    logger.debug('Failed to build CustomerMemo for sales receipt', {
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 
-  return receipt; 
+  return receipt;
 };
 
 const createJournalEntryLine = (
@@ -2005,6 +2144,13 @@ const buildQboUrl = (entity: string): string => {
   return `${base}/${encodeURIComponent(realmId)}/${entity}`;
 };
 
+const buildQboCustomerReadUrl = (customerId: string): string => {
+  const url = new URL(`${buildQboUrl('customer')}/${encodeURIComponent(customerId)}`);
+  url.searchParams.set('minorversion', '75');
+  url.searchParams.set('include', 'enhancedAllCustomFields');
+  return url.toString();
+};
+
 const accountLookupCache = new Map<string, string>();
 const itemLookupCache = new Map<string, string>();
 const customerLookupCache = new Map<string, QuickBooksReference>();
@@ -2122,7 +2268,9 @@ const findAccountRecordByName = async (
     accounts.find((account) => {
       const name = account?.Name;
       return typeof name === 'string' && name.trim().toLowerCase() === normalizedName.toLowerCase();
-    }) ?? accounts[0] ?? null
+    }) ??
+    accounts[0] ??
+    null
   );
 };
 
@@ -3079,9 +3227,13 @@ export const postChargeToQbo = async ({
       feesAccountName: feesAccountRef.value,
       stripeFeeAmountCents: feeAmount,
       stripeChargeId: stripe?.charge?.id ?? null,
-      stripeInvoiceId: typeof stripe?.charge?.invoice === 'string' ? (stripe as any).charge.invoice : null,
+      stripeInvoiceId:
+        typeof stripe?.charge?.invoice === 'string' ? (stripe as any).charge.invoice : null,
       stripeInvoiceNumber: (stripe?.checkoutSession as any)?.invoice?.number ?? null,
-      stripeSubscriptionId: (stripe?.checkoutSession as any)?.subscription ?? (stripe?.paymentIntent as any)?.subscription ?? null,
+      stripeSubscriptionId:
+        (stripe?.checkoutSession as any)?.subscription ??
+        (stripe?.paymentIntent as any)?.subscription ??
+        null,
       customer: receiptCustomer,
       description,
       coverFeesAmountCents,
@@ -3396,7 +3548,11 @@ export const ensureAccount = async (
       const accountId = account.Id;
       const accountResolvedName = account.Name;
       const resolvedId =
-        typeof accountId === 'number' ? accountId.toString() : typeof accountId === 'string' ? accountId.trim() : null;
+        typeof accountId === 'number'
+          ? accountId.toString()
+          : typeof accountId === 'string'
+            ? accountId.trim()
+            : null;
       const resolvedName =
         typeof accountResolvedName === 'string' && accountResolvedName.trim()
           ? accountResolvedName.trim()
@@ -3450,7 +3606,11 @@ export const ensureAccount = async (
 
       // If account type is specified and doesn't match, throw an error
       // Special case: allow "Undeposited Funds" to be used even if type doesn't match
-      if (accountType && account.AccountType !== accountType && accountName !== 'Undeposited Funds') {
+      if (
+        accountType &&
+        account.AccountType !== accountType &&
+        accountName !== 'Undeposited Funds'
+      ) {
         const errorMsg = `Account "${accountName}" exists but is type "${account.AccountType}". For this operation, a "${accountType}" account is required. Please use a different account or create a new one with the correct type.`;
         logger.error('Account type mismatch - operation cannot proceed', {
           accountName,
@@ -3561,6 +3721,15 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
 
   const url = buildQboQueryUrl(trimmedQuery);
   const context = await createRequestContext(options);
+  options?.debugLogger?.({
+    operation: 'query',
+    stage: 'request',
+    request: {
+      method: 'GET',
+      url,
+      query: trimmedQuery,
+    },
+  });
   const response = await context.request(url, {
     method: 'GET',
     headers: {
@@ -3570,6 +3739,17 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    options?.debugLogger?.({
+      operation: 'query',
+      stage: 'error',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        query: trimmedQuery,
+      },
+      error: errorText ?? response.statusText,
+    });
     throw new Error(
       `QuickBooks query failed (status ${response.status}): ${errorText ?? response.statusText}`
     );
@@ -3582,6 +3762,17 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
       : undefined;
 
   if (!queryResponse) {
+    options?.debugLogger?.({
+      operation: 'query',
+      stage: 'response',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        query: trimmedQuery,
+      },
+      response: data,
+    });
     return data as T;
   }
 
@@ -3590,9 +3781,31 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
   );
 
   if (!values) {
+    options?.debugLogger?.({
+      operation: 'query',
+      stage: 'response',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        query: trimmedQuery,
+      },
+      response: [],
+    });
     return [] as T;
   }
 
+  options?.debugLogger?.({
+    operation: 'query',
+    stage: 'response',
+    status: response.status,
+    request: {
+      method: 'GET',
+      url,
+      query: trimmedQuery,
+    },
+    response: values,
+  });
   return values as T;
 };
 
@@ -3615,8 +3828,13 @@ export const queryReference = async (
     const entity =
       entities.find((candidate) => {
         const candidateName = candidate?.Name;
-        return typeof candidateName === 'string' && candidateName.trim().toLowerCase() === name.trim().toLowerCase();
-      }) ?? entities[0] ?? null;
+        return (
+          typeof candidateName === 'string' &&
+          candidateName.trim().toLowerCase() === name.trim().toLowerCase()
+        );
+      }) ??
+      entities[0] ??
+      null;
 
     const reference = extractReferenceFromRecord(entity, 'Id', 'Name');
     if (reference) {
@@ -3743,5 +3961,7 @@ export default {
   ensureAccount,
   queryReference,
   ensureReference,
+  getQuickBooksCustomerById,
+  updateQuickBooksCustomerSalesforceId,
   query,
 };

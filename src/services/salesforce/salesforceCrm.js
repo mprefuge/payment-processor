@@ -16,6 +16,20 @@ class SalesforceCrmService extends BaseCrmService {
     return String(value).replace(/'/g, "\\'");
   }
 
+  toSoqlDateTimeLiteral(value) {
+    const normalizedValue = String(value ?? '').trim();
+    if (!normalizedValue) {
+      return null;
+    }
+
+    const parsedDate = new Date(normalizedValue);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return null;
+    }
+
+    return parsedDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+
   getQueryRecords(result) {
     if (!result || !Array.isArray(result.records)) {
       return [];
@@ -105,10 +119,15 @@ class SalesforceCrmService extends BaseCrmService {
       return null;
     }
 
+    const receivedAtLiteral = this.toSoqlDateTimeLiteral(received);
+    if (!receivedAtLiteral) {
+      return null;
+    }
+
     let soql =
       `SELECT Id FROM Transaction__c WHERE Contact__c = '${this.escapeSoqlLiteral(contact)}'` +
       ` AND Amount_Gross__c = ${amount}` +
-      ` AND Received_At__c = ${this.escapeSoqlLiteral(received)}`;
+      ` AND Received_At__c = ${receivedAtLiteral}`;
 
     if (transactionData.RecordTypeId) {
       soql += ` AND RecordTypeId = '${this.escapeSoqlLiteral(transactionData.RecordTypeId)}'`;

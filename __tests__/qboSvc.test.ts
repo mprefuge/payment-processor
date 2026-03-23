@@ -270,103 +270,107 @@ afterEach(() => {
 });
 
 describe('postChargeToQbo', () => {
-  it('posts sales receipt to clearing account and creates fee journal entry when using sales receipt strategy', async () => {
-    baseEnv.accounting.postingStrategy = 'sales-receipt';
-    const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Customer email lookup
-      { QueryResponse: {} }, // Customer name lookup
-      { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } }, // Customer create
-      {
-        QueryResponse: {
-          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
-        },
-      }, // Item lookup
-      { QueryResponse: {} }, // Duplicate check for sales receipt
-      { SalesReceipt: { Id: 'sr-1' } }, // Sales receipt create
-      { QueryResponse: {} }, // Duplicate check for fee journal entry
-      { JournalEntry: { Id: 'fee-je-1' } } // Fee journal entry create
-    );
-    const { postChargeToQbo } = await importQboSvc();
+  it(
+    'posts sales receipt to clearing account and creates fee journal entry when using sales receipt strategy',
+    async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: {} }, // Customer email lookup
+        { QueryResponse: {} }, // Customer name lookup
+        { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } }, // Customer create
+        {
+          QueryResponse: {
+            Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+          },
+        }, // Item lookup
+        { QueryResponse: {} }, // Duplicate check for sales receipt
+        { SalesReceipt: { Id: 'sr-1' } }, // Sales receipt create
+        { QueryResponse: {} }, // Duplicate check for fee journal entry
+        { JournalEntry: { Id: 'fee-je-1' } } // Fee journal entry create
+      );
+      const { postChargeToQbo } = await importQboSvc();
 
-    const result = await postChargeToQbo({
-      gross: 10_000,
-      fee: 325,
-      memo: 'Charge memo',
-      date: new Date('2024-03-01'),
-      stripe: buildStripeContext(),
-      options: { fetcher, accessToken: 'token' },
-    });
+      const result = await postChargeToQbo({
+        gross: 10_000,
+        fee: 325,
+        memo: 'Charge memo',
+        date: new Date('2024-03-01'),
+        stripe: buildStripeContext(),
+        options: { fetcher, accessToken: 'token' },
+      });
 
-    expect(result).toEqual({ qboId: 'sr-1', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(6); // Customer lookups (2), customer create, item lookup, duplicate check, sales receipt
+      expect(result).toEqual({ qboId: 'sr-1', type: 'sales-receipt' });
+      expect(fetcher).toHaveBeenCalledTimes(6); // Customer lookups (2), customer create, item lookup, duplicate check, sales receipt
 
-    const [emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
-    expect(emailLookupRequest.url).toContain('/query?query=');
-    expect(nameLookupRequest.url).toContain('/query?query=');
-    expect(customerCreateRequest.url).toContain('/customer');
-    expect(customerCreateRequest.init?.method).toBe('POST');
+      const [emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
+      expect(emailLookupRequest.url).toContain('/query?query=');
+      expect(nameLookupRequest.url).toContain('/query?query=');
+      expect(customerCreateRequest.url).toContain('/customer');
+      expect(customerCreateRequest.init?.method).toBe('POST');
 
-    const itemLookupRequest = requests.find(
-      (request) =>
-        request !== emailLookupRequest &&
-        request !== nameLookupRequest &&
-        request !== customerCreateRequest &&
-        request.url.includes('/query?query=')
-    );
-    expect(itemLookupRequest?.url).toContain('/query?query=');
-    expect(itemLookupRequest?.init?.method ?? 'GET').toBe('GET');
+      const itemLookupRequest = requests.find(
+        (request) =>
+          request !== emailLookupRequest &&
+          request !== nameLookupRequest &&
+          request !== customerCreateRequest &&
+          request.url.includes('/query?query=')
+      );
+      expect(itemLookupRequest?.url).toContain('/query?query=');
+      expect(itemLookupRequest?.init?.method ?? 'GET').toBe('GET');
 
-    const customerBody = JSON.parse((customerCreateRequest.init?.body ?? '{}') as string);
-    expect(customerBody).toMatchObject({
-      DisplayName: 'Donor Example',
-      PrimaryEmailAddr: { Address: 'donor@example.com' },
-      BillAddr: expect.objectContaining({ Line1: '123 Donation Ave', City: 'Givington' }),
-    });
+      const customerBody = JSON.parse((customerCreateRequest.init?.body ?? '{}') as string);
+      expect(customerBody).toMatchObject({
+        DisplayName: 'Donor Example',
+        PrimaryEmailAddr: { Address: 'donor@example.com' },
+        BillAddr: expect.objectContaining({ Line1: '123 Donation Ave', City: 'Givington' }),
+      });
 
-    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
-    const feeJournalRequest = requests.find((request) => request.url.includes('journalentry'));
+      const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+      const feeJournalRequest = requests.find((request) => request.url.includes('journalentry'));
 
-    expect(salesReceiptRequest).toBeDefined();
-    expect(feeJournalRequest).toBeUndefined();
+      expect(salesReceiptRequest).toBeDefined();
+      expect(feeJournalRequest).toBeUndefined();
 
-    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
-    expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
-      value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-      name: 'Stripe Clearing',
-    });
-    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
-      value: 'QBO_ITEM_REVENUE',
-      name: 'Stripe Sales Item',
-    });
-    expect(salesReceiptBody.CustomerRef).toMatchObject({
-      value: 'cust-1',
-      name: 'Donor Example',
-    });
-    expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
-    expect(salesReceiptBody.BillAddr).toMatchObject({
-      Line1: '123 Donation Ave',
-      City: 'Givington',
-      PostalCode: '94105',
-    });
-    expect(salesReceiptBody.ShipAddr).toMatchObject({
-      Line1: '123 Donation Ave',
-      City: 'Givington',
-    });
+      const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+      expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
+        value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+        name: 'Stripe Clearing',
+      });
+      expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+        value: 'QBO_ITEM_REVENUE',
+        name: 'Stripe Sales Item',
+      });
+      expect(salesReceiptBody.CustomerRef).toMatchObject({
+        value: 'cust-1',
+        name: 'Donor Example',
+      });
+      expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
+      expect(salesReceiptBody.BillAddr).toMatchObject({
+        Line1: '123 Donation Ave',
+        City: 'Givington',
+        PostalCode: '94105',
+      });
+      expect(salesReceiptBody.ShipAddr).toMatchObject({
+        Line1: '123 Donation Ave',
+        City: 'Givington',
+      });
 
-    // Fee should be present as the second line on the sales receipt with the fees account referenced
-    expect(salesReceiptBody.Line[1].Amount).toBe(-3.25);
-    expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
-      value: 'QBO_ACCOUNT_FEES',
-      name: 'Stripe Fees',
-    });
+      // Fee should be present as the second line on the sales receipt with the fees account referenced
+      expect(salesReceiptBody.Line[1].Amount).toBe(-3.25);
+      expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
+        value: 'QBO_ACCOUNT_FEES',
+        name: 'Stripe Fees',
+      });
 
-    // Verify CustomerMemo (statement message) includes amounts and stripe charge id
-    expect(salesReceiptBody.CustomerMemo).toBeDefined();
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 100.00');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 3.25');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 96.75');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
-  }, { timeout: 20000 });
+      // Verify CustomerMemo (statement message) includes amounts and stripe charge id
+      expect(salesReceiptBody.CustomerMemo).toBeDefined();
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 100.00');
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 3.25');
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 96.75');
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
+    },
+    { timeout: 20000 }
+  );
 
   it('prefers donor name over checkout category when deriving QuickBooks payee/customer', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
@@ -564,7 +568,10 @@ describe('postChargeToQbo', () => {
       fee: 0,
       memo: 'Charge memo',
       date: new Date('2024-03-01'),
-      stripe: buildStripeContext({}, { metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) } }),
+      stripe: buildStripeContext(
+        {},
+        { metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) } }
+      ),
       options: { fetcher, accessToken: 'token' },
     });
 
@@ -576,7 +583,7 @@ describe('postChargeToQbo', () => {
     // only the main line should exist; cover fees should have been ignored
     expect(salesReceiptBody.Line.length).toBe(1);
     expect(salesReceiptBody.Line[0].Amount).toBe(50.0);
-    expect(salesReceiptBody.Line.find((l:any) => l.Amount < 0)).toBeUndefined();
+    expect(salesReceiptBody.Line.find((l: any) => l.Amount < 0)).toBeUndefined();
   });
 
   it('reads cover fees from paymentIntent/charge metadata when session unavailable', async () => {
@@ -664,48 +671,59 @@ describe('postChargeToQbo', () => {
     });
   });
 
-  it('includes invoice and subscription details in CustomerMemo when available', async () => {
-    baseEnv.accounting.postingStrategy = 'sales-receipt';
-    const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Customer email lookup
-      { QueryResponse: {} }, // Customer name lookup
-      { Customer: { Id: 'cust-2', DisplayName: 'Donor Example' } }, // Customer create
-      {
-        QueryResponse: {
-          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
-        },
-      }, // Item lookup
-      { QueryResponse: {} }, // Duplicate check for sales receipt
-      { SalesReceipt: { Id: 'sr-2' } }, // Sales receipt create
-      { QueryResponse: {} }, // Duplicate check for fee journal entry (unused)
-      { JournalEntry: { Id: 'fee-je-2' } } // Fee journal entry create (unused)
-    );
-    const { postChargeToQbo } = await importQboSvc();
+  it(
+    'includes invoice and subscription details in CustomerMemo when available',
+    async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: {} }, // Customer email lookup
+        { QueryResponse: {} }, // Customer name lookup
+        { Customer: { Id: 'cust-2', DisplayName: 'Donor Example' } }, // Customer create
+        {
+          QueryResponse: {
+            Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+          },
+        }, // Item lookup
+        { QueryResponse: {} }, // Duplicate check for sales receipt
+        { SalesReceipt: { Id: 'sr-2' } }, // Sales receipt create
+        { QueryResponse: {} }, // Duplicate check for fee journal entry (unused)
+        { JournalEntry: { Id: 'fee-je-2' } } // Fee journal entry create (unused)
+      );
+      const { postChargeToQbo } = await importQboSvc();
 
-    const result = await postChargeToQbo({
-      gross: 2_585, // $25.85
-      fee: 87, // $0.87
-      memo: 'Charge memo',
-      date: new Date('2024-03-01'),
-      stripe: buildStripeContext({ invoice: 'in_1SlBuhBJf9YYVP9mdUcoaPkw' }, { invoice: { number: '3OKSMZT1-0002' }, subscription: 'sub_1SZx7kBJf9YYVP9mCJ3HXqDy' }),
-      options: { fetcher, accessToken: 'token' },
-    });
+      const result = await postChargeToQbo({
+        gross: 2_585, // $25.85
+        fee: 87, // $0.87
+        memo: 'Charge memo',
+        date: new Date('2024-03-01'),
+        stripe: buildStripeContext(
+          { invoice: 'in_1SlBuhBJf9YYVP9mdUcoaPkw' },
+          { invoice: { number: '3OKSMZT1-0002' }, subscription: 'sub_1SZx7kBJf9YYVP9mCJ3HXqDy' }
+        ),
+        options: { fetcher, accessToken: 'token' },
+      });
 
-    expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
+      expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
 
-    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
-    expect(salesReceiptRequest).toBeDefined();
-    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+      const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+      expect(salesReceiptRequest).toBeDefined();
+      const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
 
-    expect(salesReceiptBody.CustomerMemo).toBeDefined();
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 25.85');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 0.87');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 24.98');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Invoice ID: in_1SlBuhBJf9YYVP9mdUcoaPkw');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Invoice Number: 3OKSMZT1-0002');
-    expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Subscription ID: sub_1SZx7kBJf9YYVP9mCJ3HXqDy');
-  }, { timeout: 20000 });
+      expect(salesReceiptBody.CustomerMemo).toBeDefined();
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 25.85');
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 0.87');
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 24.98');
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
+      expect(salesReceiptBody.CustomerMemo.value).toContain(
+        'Stripe Invoice ID: in_1SlBuhBJf9YYVP9mdUcoaPkw'
+      );
+      expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Invoice Number: 3OKSMZT1-0002');
+      expect(salesReceiptBody.CustomerMemo.value).toContain(
+        'Stripe Subscription ID: sub_1SZx7kBJf9YYVP9mCJ3HXqDy'
+      );
+    },
+    { timeout: 20000 }
+  );
 
   it('uses default sales item when checkout metadata is missing', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
@@ -822,6 +840,45 @@ describe('postChargeToQbo', () => {
       name: 'Donor Example',
     });
     expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
+  });
+
+  it('requests enhanced custom fields when loading a QuickBooks customer by id', async () => {
+    const { fetcher, requests } = createFetchMock({
+      Customer: {
+        Id: '1205',
+        DisplayName: 'Debug Customer',
+        SyncToken: '1',
+        CustomField: [
+          {
+            DefinitionId: '1000000002',
+            Name: 'Salesforce ID',
+            Type: 'StringType',
+            StringValue: '003UQ00000gBJolYAG',
+          },
+        ],
+      },
+    });
+
+    const { getQuickBooksCustomerById } = await importQboSvc();
+    const result = await getQuickBooksCustomerById('1205', {
+      fetcher,
+      accessToken: 'token',
+    });
+
+    expect(result).toMatchObject({
+      Id: '1205',
+      CustomField: [
+        expect.objectContaining({
+          Name: 'Salesforce ID',
+          StringValue: '003UQ00000gBJolYAG',
+        }),
+      ],
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toContain('/customer/1205?');
+    expect(requests[0].url).toContain('minorversion=75');
+    expect(requests[0].url).toContain('include=enhancedAllCustomFields');
   });
 
   it.skip('prefers the Stripe customer name over billing details when refreshing QuickBooks customers', async () => {

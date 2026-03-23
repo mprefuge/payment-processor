@@ -80,6 +80,10 @@ describe('SalesforceCrmService (JS)', () => {
       'Id'
     );
     expect(result).toEqual({ success: true, id: 'match_id' });
+    expect(conn.query).toHaveBeenCalledWith(
+      expect.stringContaining('Received_At__c = 2025-03-03T00:00:00Z')
+    );
+    expect(conn.query).not.toHaveBeenCalledWith(expect.stringContaining("Received_At__c = '"));
   });
 
   it('does not override when content match is ambiguous', async () => {
@@ -110,6 +114,34 @@ describe('SalesforceCrmService (JS)', () => {
     const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
 
     expect(upsertMock).toHaveBeenCalledWith(expect.any(Object), 'Stripe_Payment_Intent_Id__c');
+    expect(result).toEqual({ success: true, id: 'new' });
+  });
+
+  it('skips content match lookup when Received_At__c is not a valid datetime', async () => {
+    const conn = makeMockConnection();
+
+    const transactionData = {
+      Status__c: 'paid',
+      Amount_Gross__c: 41.57,
+      Contact__c: '003abc',
+      Received_At__c: 'definitely-not-a-datetime',
+      Stripe_Payment_Intent_Id__c: 'pi_invalid_date',
+    };
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'new' });
+    conn.sobject.mockReturnValue({ upsert: upsertMock });
+
+    const service = new SalesforceCrmService({});
+    service.conn = conn;
+    service.authenticate = async () => conn;
+
+    const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+
+    expect(conn.query).not.toHaveBeenCalledWith(expect.stringContaining('Received_At__c ='));
+    expect(upsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({ Received_At__c: 'definitely-not-a-datetime' }),
+      'Stripe_Payment_Intent_Id__c'
+    );
     expect(result).toEqual({ success: true, id: 'new' });
   });
 

@@ -42,9 +42,7 @@ describe('stripeTrueUp contact helper', () => {
     const result = await findOrCreateContactInSalesforce({} as any, customer, null, noopLog);
 
     expect(result).toEqual({ id: '003abc' });
-    expect(createMock).toHaveBeenCalledWith(
-      expect.objectContaining({ RecordTypeId: 'rt-999' })
-    );
+    expect(createMock).toHaveBeenCalledWith(expect.objectContaining({ RecordTypeId: 'rt-999' }));
     // should have performed two queries
     expect(connection.query).toHaveBeenCalledTimes(2);
   });
@@ -163,7 +161,11 @@ describe('stripeTrueUp handler overrides', () => {
     });
 
     const { context } = createContext();
-    const req = createQueryRequest({ from: '2026-01-01T00:00:00Z', type: 'payments', bypassQbo: 'true' });
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'payments',
+      bypassQbo: 'true',
+    });
 
     const response = await (stripeTrueUpHandler as any)(req, context);
     const body = JSON.parse(response.body);
@@ -181,7 +183,9 @@ describe('stripeTrueUp handler overrides', () => {
     const internals = (stripeTrueUpHandler as any).__internals;
     const store = createIdempotencyStore();
     const salesforce = {
-      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_existing', success: true }),
+      upsertTransactionByExternalId: vi
+        .fn()
+        .mockResolvedValue({ id: 'a01_existing', success: true }),
       linkPayoutOnTransactions: vi.fn(),
       markPostedToQbo: vi.fn(),
       findTransactionIdByExternalId: vi.fn().mockResolvedValue('a01_existing'),
@@ -383,7 +387,9 @@ describe('stripeTrueUp handler overrides', () => {
     const internals = (stripeTrueUpHandler as any).__internals;
     const store = createIdempotencyStore();
     const salesforce = {
-      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_txn_meta', success: true }),
+      upsertTransactionByExternalId: vi
+        .fn()
+        .mockResolvedValue({ id: 'a01_txn_meta', success: true }),
       linkPayoutOnTransactions: vi.fn(),
       markPostedToQbo: vi.fn(),
       findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
@@ -477,11 +483,15 @@ describe('stripeTrueUp handler overrides', () => {
     const internals = (stripeTrueUpHandler as any).__internals;
     const store = createIdempotencyStore();
     const salesforce = {
-      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_txn_cmeta', success: true }),
+      upsertTransactionByExternalId: vi
+        .fn()
+        .mockResolvedValue({ id: 'a01_txn_cmeta', success: true }),
       linkPayoutOnTransactions: vi.fn(),
       markPostedToQbo: vi.fn(),
       findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
-      upsertCustomerByStripeId: vi.fn().mockResolvedValue({ id: '003_created_again', success: true }),
+      upsertCustomerByStripeId: vi
+        .fn()
+        .mockResolvedValue({ id: '003_created_again', success: true }),
       findContactIdById: vi.fn().mockResolvedValue('003FromCustomerMetaAAA'),
     };
 
@@ -564,6 +574,101 @@ describe('stripeTrueUp handler overrides', () => {
       'stripe_charge_id__c',
       undefined
     );
+
+    internals.resetDependencies();
+  });
+
+  it('checks Account after no Contact match for Stripe salesforce_id metadata', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const salesforce = {
+      upsertTransactionByExternalId: vi
+        .fn()
+        .mockResolvedValue({ id: 'a01_txn_account', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      upsertCustomerByStripeId: vi.fn(),
+      findContactIdById: vi.fn().mockResolvedValue(null),
+      findAccountIdById: vi.fn().mockResolvedValue('001StripeAccountAAA'),
+    };
+
+    const stripe = {
+      customers: {
+        retrieve: vi.fn(),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([
+          {
+            id: 'ch_account_meta',
+            status: 'succeeded',
+            customer: null,
+            currency: 'usd',
+            created: 1_700_000_000,
+            metadata: {
+              salesforce_id: '001StripeAccountAAA',
+            },
+            balance_transaction: {
+              id: 'bt_account_meta',
+              amount: 1500,
+              fee: 45,
+              type: 'charge',
+              currency: 'usd',
+              created: 1_700_000_000,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postChargeToQbo: vi.fn(),
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'payments',
+      bypassQbo: 'true',
+    });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.counts.processed).toBe(1);
+    expect(salesforce.findContactIdById).toHaveBeenCalledWith('001StripeAccountAAA');
+    expect(salesforce.findAccountIdById).toHaveBeenCalledWith('001StripeAccountAAA');
+    expect(salesforce.upsertCustomerByStripeId).not.toHaveBeenCalled();
+    const [transactionPayload, externalIdField, upsertOptions] =
+      salesforce.upsertTransactionByExternalId.mock.calls[0];
+    expect(transactionPayload).toMatchObject({
+      stripe_charge_id__c: 'ch_account_meta',
+      account__c: '001StripeAccountAAA',
+    });
+    expect(transactionPayload.contact__c).toBeUndefined();
+    expect(externalIdField).toBe('stripe_charge_id__c');
+    expect(upsertOptions).toBeUndefined();
 
     internals.resetDependencies();
   });

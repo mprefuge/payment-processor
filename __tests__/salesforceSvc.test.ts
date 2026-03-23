@@ -126,6 +126,23 @@ describe('createSalesforceSvc', () => {
     expect(result).toBe('sf_1');
   });
 
+  it('drops Name from transaction upserts so auto-number Name fields are never written', async () => {
+    const { upsert, sobject, query } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, sobject, query } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.Name = 'Should not be sent';
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    const [, records] = upsert.mock.calls[0];
+    expect(records[0]).not.toHaveProperty('Name');
+  });
+
   it('normalizes payout linkage upserts to Salesforce API names', async () => {
     const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
@@ -257,6 +274,112 @@ describe('createSalesforceSvc', () => {
     expect(fields).toContain('Id');
     // final result should be the successful record from second invocation
     expect(result).toEqual({ success: true, id: 'a1', errors: [] });
+  });
+
+  it('falls back to create when the upsert key is not an external-id field', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    const create = vi.fn().mockResolvedValue([{ success: true, id: 'a01_created', errors: [] }]);
+    sobject.mockReturnValue({ create });
+
+    upsert.mockResolvedValue([
+      {
+        success: false,
+        id: undefined,
+        errors: [
+          {
+            message:
+              'Field name provided, QBO_Doc_Id__c does not match an External ID, Salesforce Id, or indexed field for Transaction__c',
+          },
+        ],
+      },
+    ]);
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes("QBO_Doc_Id__c = '7764'")) {
+        return Promise.resolve({ records: [] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = null;
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.qbo_doc_id__c = '7764';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'qbo_doc_id__c');
+
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      [expect.objectContaining({ QBO_Doc_Id__c: '7764' })],
+      'QBO_Doc_Id__c',
+      { allOrNone: true }
+    );
+    expect(query).toHaveBeenCalledWith(
+      "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '7764' AND RecordTypeId = '012000000000000AAA' LIMIT 1"
+    );
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ QBO_Doc_Id__c: '7764' }),
+      { allOrNone: true }
+    );
+    expect(result).toEqual({ success: true, id: 'a01_created', errors: [], created: true });
+  });
+
+  it('falls back to Salesforce Id update when the upsert key is not an external-id field but a record exists', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+
+    upsert
+      .mockResolvedValueOnce([
+        {
+          success: false,
+          id: undefined,
+          errors: [
+            {
+              message:
+                'Field name provided, QBO_Doc_Id__c does not match an External ID, Salesforce Id, or indexed field for Transaction__c',
+            },
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([{ success: true, id: 'a01_existing', errors: [] }]);
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes("QBO_Doc_Id__c = '7764'")) {
+        return Promise.resolve({ records: [{ Id: 'a01_existing' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = null;
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.qbo_doc_id__c = '7764';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'qbo_doc_id__c');
+
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(upsert.mock.calls[1]).toEqual([
+      'Transaction__c',
+      [expect.objectContaining({ Id: 'a01_existing', QBO_Doc_Id__c: '7764' })],
+      'Id',
+      { allOrNone: true },
+    ]);
+    expect(result).toEqual({ success: true, id: 'a01_existing', errors: [] });
   });
 
   it('prevents duplicate creation by checking other external ids when upserting', async () => {
@@ -394,6 +517,10 @@ describe('createSalesforceSvc', () => {
     );
 
     expect(result).toEqual({ success: true, id: 'content_match', errors: [] });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('Received_At__c = 2025-02-02T12:00:00Z')
+    );
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining("Received_At__c = '"));
   });
 
   it('does not treat ambiguous content matches as existing', async () => {
@@ -436,6 +563,33 @@ describe('createSalesforceSvc', () => {
       { allOrNone: true }
     );
     expect(result).toEqual({ success: true, id: 'new', errors: [] });
+  });
+
+  it('skips content-signature lookup when received_at__c is not a valid datetime', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'new', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = 'pi_invalid_date';
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.contact__c = '003cust';
+    dto.amount_gross__c = 41.57;
+    dto.received_at__c = 'not-a-datetime';
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('Received_At__c ='));
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      [expect.objectContaining({ Received_At__c: 'not-a-datetime' })],
+      TRANSACTION_FIELD_API_NAMES.stripe_payment_intent_id__c,
+      { allOrNone: true }
+    );
   });
 
   it('matches existing contact when Stripe customer ID is in a delimited Stripe_Customer_Id__c list', async () => {
