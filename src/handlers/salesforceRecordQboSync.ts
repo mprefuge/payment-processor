@@ -458,6 +458,68 @@ const findQuickBooksCustomersBySalesforceId = async (
   return matches;
 };
 
+const findQuickBooksCustomersBySalesforceRecord = async (
+  resolvedRecord: ResolvedSalesforceRecord,
+  queryFn: typeof qboQuery
+): Promise<QboCustomer[]> => {
+  const normalizedNames = new Set<string>();
+  const normalizedEmails = new Set<string>();
+
+  if (resolvedRecord.objectType === 'Account') {
+    const accountName = toTrimmed(resolvedRecord.record.Name)?.toLowerCase();
+    if (accountName) {
+      normalizedNames.add(accountName);
+    }
+  } else {
+    const fullName = [toTrimmed(resolvedRecord.record.FirstName), toTrimmed(resolvedRecord.record.LastName)]
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+      .toLowerCase();
+    if (fullName) {
+      normalizedNames.add(fullName);
+    }
+
+    const email = toTrimmed(resolvedRecord.record.Email)?.toLowerCase();
+    if (email) {
+      normalizedEmails.add(email);
+    }
+  }
+
+  if (!normalizedNames.size && !normalizedEmails.size) {
+    return [];
+  }
+
+  const matches: QboCustomer[] = [];
+  let startPosition = 1;
+
+  while (true) {
+    const page = await queryQboCustomersPage(startPosition, queryFn);
+    if (!page.length) {
+      break;
+    }
+
+    matches.push(
+      ...page.filter((customer) => {
+        const displayName = toTrimmed(customer.DisplayName)?.toLowerCase();
+        const email = toTrimmed(customer.PrimaryEmailAddr?.Address)?.toLowerCase();
+        return (
+          (!!displayName && normalizedNames.has(displayName)) ||
+          (!!email && normalizedEmails.has(email))
+        );
+      })
+    );
+
+    if (page.length < DEFAULT_QBO_PAGE_SIZE) {
+      break;
+    }
+
+    startPosition += page.length;
+  }
+
+  return matches;
+};
+
 const updateSalesforceQuickBooksId = async (
   connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
   objectType: SalesforceObjectType,
@@ -871,11 +933,23 @@ const salesforceRecordQboSync = async (
       salesforceLookupCandidateIds,
       qboQueryWithDebug
     );
+    const qboCustomersByIdentity = await findQuickBooksCustomersBySalesforceRecord(
+      resolvedRecord,
+      qboQueryWithDebug
+    );
 
     if (qboCustomersBySalesforceId.length > 1) {
       summary.conflicts.push({
         code: 'multiple_qbo_customers_for_salesforce_id',
         message: `Multiple QuickBooks customers reference Salesforce ID ${salesforceId}.`,
+      });
+    }
+
+    if (qboCustomersByIdentity.length > 1) {
+      summary.conflicts.push({
+        code: 'multiple_qbo_customers_for_salesforce_identity',
+        message:
+          `Multiple QuickBooks customers exactly match Salesforce ${resolvedRecord.objectType} ${salesforceId} by name or email.`,
       });
     }
 
@@ -911,6 +985,7 @@ const salesforceRecordQboSync = async (
     const qboCustomerFromSalesforceIdValue = normalizeQboCustomerId(
       qboCustomerFromSalesforceId?.Id
     );
+    const qboCustomerFromIdentity = qboCustomersByIdentity.length === 1 ? qboCustomersByIdentity[0] : null;
 
     if (
       qboCustomer &&
@@ -936,6 +1011,21 @@ const salesforceRecordQboSync = async (
           objectType: resolvedRecord.objectType,
           fieldName: 'QuickBooks_ID__c',
           reason: 'determined_from_quickbooks_salesforce_id',
+        });
+      }
+    }
+
+    if (!qboCustomer && qboCustomerFromIdentity) {
+      qboCustomer = qboCustomerFromIdentity;
+      const qboCustomerId = normalizeQboCustomerId(qboCustomer.Id);
+      if (resolvedRecord.quickBooksFieldSupported && qboCustomerId && !salesforceQboId) {
+        summary.plannedBackfills.push({
+          type: 'backfill_salesforce_quickbooks_id',
+          salesforceId,
+          qboCustomerId,
+          objectType: resolvedRecord.objectType,
+          fieldName: 'QuickBooks_ID__c',
+          reason: 'determined_from_salesforce_identity',
         });
       }
     }

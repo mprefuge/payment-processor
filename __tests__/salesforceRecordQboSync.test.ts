@@ -531,6 +531,72 @@ describe('salesforceRecordQboSync', () => {
     expect(body.summary.resolvedQuickBooksCustomerId).toBe('411');
   });
 
+  it('resolves an Account by exact QuickBooks customer display name when no IDs are available', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '001ACCOUNTBYNAME'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001ACCOUNTBYNAME'")) {
+        return {
+          records: [{ Id: '001ACCOUNTBYNAME', Name: 'Acme Foundation' }],
+        };
+      }
+
+      if (soql.includes("FROM Contact WHERE AccountId = '001ACCOUNTBYNAME'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Account__c = '001ACCOUNTBYNAME'")) {
+        return { records: [] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [{ Id: '412', DisplayName: 'Acme Foundation' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '412'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '412',
+        DisplayName: 'Acme Foundation',
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=001ACCOUNTBYNAME&dryRun=true',
+          query: new URLSearchParams({
+            salesforceId: '001ACCOUNTBYNAME',
+            dryRun: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('412');
+  });
+
   it('backfills QuickBooks Salesforce ID when the linked customer is missing it', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003BACKFILL'")) {
