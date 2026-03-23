@@ -386,6 +386,151 @@ describe('salesforceRecordQboSync', () => {
     ]);
   });
 
+  it('resolves an Account using a child Contact QuickBooks_ID__c when the account itself has no QuickBooks lookup field', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '001ACCOUNTVIAQBOLOOKUP'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001ACCOUNTVIAQBOLOOKUP'")) {
+        return { records: [{ Id: '001ACCOUNTVIAQBOLOOKUP', Name: 'Account Via QBO Lookup' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE AccountId = '001ACCOUNTVIAQBOLOOKUP'")) {
+        return {
+          records: [{ Id: '003CONTACTWITHQBO', QuickBooks_ID__c: '410' }],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Account__c = '001ACCOUNTVIAQBOLOOKUP'")) {
+        return { records: [] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '410'")) {
+        return [{ Id: '410', DisplayName: 'Account Via QBO Lookup' }];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '410'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '410',
+        DisplayName: 'Account Via QBO Lookup',
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=001ACCOUNTVIAQBOLOOKUP&dryRun=true',
+          query: new URLSearchParams({
+            salesforceId: '001ACCOUNTVIAQBOLOOKUP',
+            dryRun: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('410');
+  });
+
+  it('resolves a Contact using the parent Account QuickBooks_ID__c when the contact itself has no QuickBooks lookup field', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003CONTACTVIAQBOLOOKUP'")) {
+        return {
+          records: [
+            {
+              Id: '003CONTACTVIAQBOLOOKUP',
+              FirstName: 'Lookup',
+              LastName: 'Contact',
+              AccountId: '001ACCOUNTWITHQBO',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001ACCOUNTWITHQBO'")) {
+        return {
+          records: [{ Id: '001ACCOUNTWITHQBO', Name: 'Account With QBO', QuickBooks_ID__c: '411' }],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003CONTACTVIAQBOLOOKUP'")) {
+        return { records: [] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '411'")) {
+        return [{ Id: '411', DisplayName: 'Contact Via Account QBO Lookup' }];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '411'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '411',
+        DisplayName: 'Contact Via Account QBO Lookup',
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003CONTACTVIAQBOLOOKUP&dryRun=true',
+          query: new URLSearchParams({
+            salesforceId: '003CONTACTVIAQBOLOOKUP',
+            dryRun: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Contact');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('411');
+  });
+
   it('backfills QuickBooks Salesforce ID when the linked customer is missing it', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003BACKFILL'")) {

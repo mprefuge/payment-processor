@@ -159,6 +159,11 @@ type ResolvedSalesforceRecord = {
   quickBooksFieldSupported: boolean;
 };
 
+type SalesforceLookupCandidates = {
+  salesforceIds: string[];
+  quickBooksIds: string[];
+};
+
 const DEFAULT_QBO_PAGE_SIZE = 200;
 let dependencyOverrides: Partial<Dependencies> | null = null;
 
@@ -337,41 +342,58 @@ const resolveSalesforceRecord = async (
   return null;
 };
 
-const collectSalesforceLookupCandidateIds = async (
+const collectSalesforceLookupCandidates = async (
   connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
   resolvedRecord: ResolvedSalesforceRecord
-): Promise<string[]> => {
+): Promise<SalesforceLookupCandidates> => {
   const ids = new Set<string>();
+  const quickBooksIds = new Set<string>();
   const primaryId = toTrimmed(resolvedRecord.record.Id);
   if (primaryId) {
     ids.add(primaryId);
+  }
+
+  const primaryQuickBooksId = toTrimmed(resolvedRecord.record.QuickBooks_ID__c);
+  if (primaryQuickBooksId) {
+    quickBooksIds.add(primaryQuickBooksId);
   }
 
   if (resolvedRecord.objectType === 'Contact') {
     const accountId = toTrimmed(resolvedRecord.record.AccountId);
     if (accountId) {
       ids.add(accountId);
+
+      const account = await fetchSalesforceRecordById(connection, 'Account', accountId);
+      const accountQuickBooksId = toTrimmed(account.record?.QuickBooks_ID__c);
+      if (accountQuickBooksId) {
+        quickBooksIds.add(accountQuickBooksId);
+      }
     }
 
-    return [...ids];
+    return { salesforceIds: [...ids], quickBooksIds: [...quickBooksIds] };
   }
 
   if (!primaryId) {
-    return [...ids];
+    return { salesforceIds: [...ids], quickBooksIds: [...quickBooksIds] };
   }
 
   const query =
-    `SELECT Id FROM Contact WHERE AccountId = '${escapeSoqlLiteral(primaryId)}' ` +
+    `SELECT Id, QuickBooks_ID__c FROM Contact WHERE AccountId = '${escapeSoqlLiteral(primaryId)}' ` +
     'ORDER BY CreatedDate ASC LIMIT 200';
-  const contacts = toRecords(await connection.query<{ Id?: string }>(query));
+  const contacts = toRecords(await connection.query<SalesforceRecord>(query));
   for (const contact of contacts) {
     const contactId = toTrimmed(contact.Id);
     if (contactId) {
       ids.add(contactId);
     }
+
+    const contactQuickBooksId = toTrimmed(contact.QuickBooks_ID__c);
+    if (contactQuickBooksId) {
+      quickBooksIds.add(contactQuickBooksId);
+    }
   }
 
-  return [...ids];
+  return { salesforceIds: [...ids], quickBooksIds: [...quickBooksIds] };
 };
 
 const queryQboCustomersPage = async (
@@ -837,10 +859,11 @@ const salesforceRecordQboSync = async (
       toTrimmed(resolvedRecord.record.QuickBooks_ID__c) ?? null;
 
     const salesforceQboId = toTrimmed(resolvedRecord.record.QuickBooks_ID__c);
-    const salesforceLookupCandidateIds = await collectSalesforceLookupCandidateIds(
+    const salesforceLookupCandidates = await collectSalesforceLookupCandidates(
       connection,
       resolvedRecord
     );
+    const salesforceLookupCandidateIds = salesforceLookupCandidates.salesforceIds;
     const normalizedSalesforceLookupCandidateIds = new Set(
       salesforceLookupCandidateIds.map((value) => value.toLowerCase())
     );
@@ -857,6 +880,9 @@ const salesforceRecordQboSync = async (
     }
 
     let qboCustomer: QboCustomer | null = null;
+    const relatedQuickBooksIds = salesforceLookupCandidates.quickBooksIds.filter(
+      (value) => value !== salesforceQboId
+    );
 
     if (salesforceQboId) {
       qboCustomer = await findQuickBooksCustomerById(salesforceQboId, qboQueryWithDebug);
@@ -866,6 +892,18 @@ const salesforceRecordQboSync = async (
           message: `Salesforce ${resolvedRecord.objectType} ${salesforceId} references QuickBooks customer ${salesforceQboId}, but that customer was not found.`,
         });
       }
+    }
+
+    if (!qboCustomer && relatedQuickBooksIds.length > 1) {
+      summary.conflicts.push({
+        code: 'multiple_related_salesforce_quickbooks_ids',
+        message:
+          `Related Salesforce records for ${salesforceId} reference multiple QuickBooks customer IDs (${relatedQuickBooksIds.join(', ')}).`,
+      });
+    }
+
+    if (!qboCustomer && relatedQuickBooksIds.length === 1) {
+      qboCustomer = await findQuickBooksCustomerById(relatedQuickBooksIds[0], qboQueryWithDebug);
     }
 
     const qboCustomerFromSalesforceId =
