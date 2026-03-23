@@ -564,6 +564,14 @@ describe('salesforceRecordQboSync', () => {
         return { records: [] };
       }
 
+      if (soql.includes("FROM Campaign WHERE Class__c = 'UNRESTRICTED FUNDS:General'")) {
+        return { records: [{ Id: '701CLASSMATCH' }] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GENERAL' }] };
+      }
+
       return { records: [] };
     });
 
@@ -580,6 +588,7 @@ describe('salesforceRecordQboSync', () => {
             TxnDate: '2026-03-22',
             TotalAmt: 125,
             PrivateNote: 'Imported from QBO',
+            ClassRef: { name: 'UNRESTRICTED FUNDS:General' },
           },
         ];
       }
@@ -646,13 +655,254 @@ describe('salesforceRecordQboSync', () => {
         amount_fee__c: 0,
         amount_net__c: 125,
         currency_iso_code__c: 'USD',
+        campaign__c: '701CLASSMATCH',
         qbo_doc_type__c: 'sales-receipt',
         qbo_doc_id__c: '7301',
         posted_to_qbo__c: true,
       }),
       'qbo_doc_id__c'
     );
+    expect(upsertTransactionByExternalId.mock.calls[0][0]).not.toHaveProperty('Name');
     expect(body.summary.manualReviewItems).toEqual([]);
+  });
+
+  it('defaults imported QBO sales receipts to the General Giving campaign when class matching is unknown', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003GENERAL'")) {
+        return {
+          records: [
+            { Id: '003GENERAL', FirstName: 'General', LastName: 'Giving', QuickBooks_ID__c: '518' },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003GENERAL'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Class__c = 'UNKNOWN:Class'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GENERAL' }] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '518'")) {
+        return [{ Id: '518', DisplayName: 'General Giving Contact' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '518'")) {
+        return [
+          {
+            Id: '7303',
+            DocNumber: '7303',
+            TxnDate: '2026-03-24',
+            TotalAmt: 65,
+            PrivateNote: 'Imported from QBO',
+            ClassRef: { name: 'UNKNOWN:Class' },
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const upsertTransactionByExternalId = vi
+      .fn()
+      .mockResolvedValue({ success: true, id: 'a01GeneralCampaign' });
+    const getQuickBooksCustomerById = vi.fn(async () => ({
+      Id: '518',
+      DisplayName: 'General Giving Contact',
+      CurrencyRef: { value: 'USD' },
+      CustomField: [{ Name: 'Salesforce ID', StringValue: '003GENERAL' }],
+    }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () =>
+        ({ markPostedToQbo: vi.fn(), upsertTransactionByExternalId }) as any,
+      qboQuery,
+      getQuickBooksCustomerById,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003GENERAL&dryRun=false&importQboReceipts=true',
+          query: new URLSearchParams({
+            salesforceId: '003GENERAL',
+            dryRun: 'false',
+            importQboReceipts: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        qbo_doc_id__c: '7303',
+        campaign__c: '701GENERAL',
+      }),
+      'qbo_doc_id__c'
+    );
+    expect(body.summary.manualReviewItems).toEqual([]);
+  });
+
+  it('defaults imported QBO sales receipts to General Giving campaign and skips duplicate transaction imports', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003DUPLICATE'")) {
+        return {
+          records: [
+            {
+              Id: '003DUPLICATE',
+              FirstName: 'Duplicate',
+              LastName: 'Check',
+              QuickBooks_ID__c: '517',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003DUPLICATE'")) {
+        return {
+          records: [
+            {
+              Id: 'a01Existing',
+              Transaction_Type__c: 'charge',
+              Amount_Gross__c: 125,
+              Received_At__c: '2026-03-22T00:00:00.000Z',
+              QBO_Doc_Id__c: null,
+              QBO_Doc_Type__c: null,
+              Posted_to_QBO__c: false,
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Class__c = 'UNKNOWN:Class'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GENERAL' }] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '517'")) {
+        return [
+          {
+            Id: '517',
+            DisplayName: 'QBO Duplicate Contact',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '003DUPLICATE' }],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '517'")) {
+        return [
+          {
+            Id: '7301',
+            DocNumber: '7301',
+            TxnDate: '2026-03-22',
+            TotalAmt: 125,
+            PrivateNote: 'Imported from QBO',
+            ClassRef: { name: 'UNKNOWN:Class' },
+          },
+          {
+            Id: '7302',
+            DocNumber: '7302',
+            TxnDate: '2026-03-23',
+            TotalAmt: 55,
+            PrivateNote: 'Imported from QBO 2',
+            ClassRef: { name: 'UNKNOWN:Class' },
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const getQuickBooksCustomerById = vi.fn(async () => ({
+      Id: '517',
+      DisplayName: 'QBO Duplicate Contact',
+      CurrencyRef: { value: 'USD' },
+      CustomField: [{ Name: 'Salesforce ID', StringValue: '003DUPLICATE' }],
+    }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () =>
+        ({ markPostedToQbo: vi.fn(), upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById,
+      updateQuickBooksCustomerSalesforceId: vi.fn(),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003DUPLICATE&dryRun=true&importQboReceipts=true',
+          query: new URLSearchParams({
+            salesforceId: '003DUPLICATE',
+            dryRun: 'true',
+            importQboReceipts: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.plannedCreates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'create_salesforce_transaction_from_qbo_sales_receipt',
+          qboDocId: '7302',
+        }),
+      ])
+    );
+    expect(body.summary.plannedCreates).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'create_salesforce_transaction_from_qbo_sales_receipt',
+          qboDocId: '7301',
+        }),
+      ])
+    );
+    expect(body.summary.plannedUpdates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'mark_salesforce_posted_to_qbo',
+          salesforceTransactionId: 'a01Existing',
+          qboDocId: '7301',
+          qboDocType: 'sales-receipt',
+        }),
+      ])
+    );
   });
 
   it('passes debug logging hooks into QuickBooks reads and updates when debug=true', async () => {
