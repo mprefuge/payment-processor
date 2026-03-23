@@ -212,6 +212,180 @@ describe('salesforceRecordQboSync', () => {
     ]);
   });
 
+  it('resolves an Account when the QuickBooks customer is linked to a child Contact Salesforce ID', async () => {
+    const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
+    const connection = createConnection(
+      async (soql: string) => {
+        if (soql.includes("FROM Contact WHERE Id = '001ACCOUNTVIACONTACT'")) {
+          return { records: [] };
+        }
+
+        if (soql.includes("FROM Account WHERE Id = '001ACCOUNTVIACONTACT'")) {
+          return {
+            records: [{ Id: '001ACCOUNTVIACONTACT', Name: 'Account Via Contact', QuickBooks_ID__c: null }],
+          };
+        }
+
+        if (soql.includes("FROM Contact WHERE AccountId = '001ACCOUNTVIACONTACT'")) {
+          return { records: [{ Id: '003CHILDCONTACT' }] };
+        }
+
+        if (soql.includes("FROM Transaction__c WHERE Account__c = '001ACCOUNTVIACONTACT'")) {
+          return { records: [] };
+        }
+
+        return { records: [] };
+      },
+      async (objectName: string, payload: Record<string, unknown>) => {
+        updateCalls.push({ objectName, payload });
+        return { success: true, id: String(payload.Id ?? 'updated') };
+      }
+    );
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [
+          {
+            Id: '346',
+            DisplayName: 'Account Via Contact',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '003CHILDCONTACT' }],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '346'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '346',
+        DisplayName: 'Account Via Contact',
+        CustomField: [{ Name: 'Salesforce ID', StringValue: '003CHILDCONTACT' }],
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=001ACCOUNTVIACONTACT&dryRun=false',
+          query: new URLSearchParams({
+            salesforceId: '001ACCOUNTVIACONTACT',
+            dryRun: 'false',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('346');
+    expect(body.summary.linkingFields.quickbooksSalesforceFieldValue).toBe('003CHILDCONTACT');
+    expect(updateCalls).toEqual([
+      {
+        objectName: 'Account',
+        payload: { Id: '001ACCOUNTVIACONTACT', QuickBooks_ID__c: '346' },
+      },
+    ]);
+  });
+
+  it('resolves a Contact when the QuickBooks customer is linked to the parent Account Salesforce ID', async () => {
+    const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
+    const connection = createConnection(
+      async (soql: string) => {
+        if (soql.includes("FROM Contact WHERE Id = '003CONTACTVIAACCOUNT'")) {
+          return {
+            records: [
+              {
+                Id: '003CONTACTVIAACCOUNT',
+                FirstName: 'Contact',
+                LastName: 'Via Account',
+                AccountId: '001PARENTACCOUNT',
+                QuickBooks_ID__c: null,
+              },
+            ],
+          };
+        }
+
+        if (soql.includes("FROM Transaction__c WHERE Contact__c = '003CONTACTVIAACCOUNT'")) {
+          return { records: [] };
+        }
+
+        return { records: [] };
+      },
+      async (objectName: string, payload: Record<string, unknown>) => {
+        updateCalls.push({ objectName, payload });
+        return { success: true, id: String(payload.Id ?? 'updated') };
+      }
+    );
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [
+          {
+            Id: '347',
+            DisplayName: 'Contact Via Account',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '001PARENTACCOUNT' }],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '347'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '347',
+        DisplayName: 'Contact Via Account',
+        CustomField: [{ Name: 'Salesforce ID', StringValue: '001PARENTACCOUNT' }],
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003CONTACTVIAACCOUNT&dryRun=false',
+          query: new URLSearchParams({
+            salesforceId: '003CONTACTVIAACCOUNT',
+            dryRun: 'false',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Contact');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('347');
+    expect(body.summary.linkingFields.quickbooksSalesforceFieldValue).toBe('001PARENTACCOUNT');
+    expect(updateCalls).toEqual([
+      {
+        objectName: 'Contact',
+        payload: { Id: '003CONTACTVIAACCOUNT', QuickBooks_ID__c: '347' },
+      },
+    ]);
+  });
+
   it('backfills QuickBooks Salesforce ID when the linked customer is missing it', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003BACKFILL'")) {

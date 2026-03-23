@@ -26,6 +26,7 @@ type SalesforceRecord = {
   LastName?: string | null;
   Email?: string | null;
   Name?: string | null;
+  AccountId?: string | null;
   QuickBooks_ID__c?: string | null;
 };
 
@@ -276,7 +277,8 @@ const fetchSalesforceRecordById = async (
   objectType: SalesforceObjectType,
   salesforceId: string
 ): Promise<{ record: SalesforceRecord | null; quickBooksFieldSupported: boolean }> => {
-  const baseFields = objectType === 'Contact' ? 'Id, FirstName, LastName, Email' : 'Id, Name';
+  const baseFields =
+    objectType === 'Contact' ? 'Id, FirstName, LastName, Email, AccountId' : 'Id, Name';
   const withQuickBooksField = `${baseFields}, QuickBooks_ID__c`;
   const escapedId = escapeSoqlLiteral(salesforceId);
 
@@ -335,6 +337,43 @@ const resolveSalesforceRecord = async (
   return null;
 };
 
+const collectSalesforceLookupCandidateIds = async (
+  connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
+  resolvedRecord: ResolvedSalesforceRecord
+): Promise<string[]> => {
+  const ids = new Set<string>();
+  const primaryId = toTrimmed(resolvedRecord.record.Id);
+  if (primaryId) {
+    ids.add(primaryId);
+  }
+
+  if (resolvedRecord.objectType === 'Contact') {
+    const accountId = toTrimmed(resolvedRecord.record.AccountId);
+    if (accountId) {
+      ids.add(accountId);
+    }
+
+    return [...ids];
+  }
+
+  if (!primaryId) {
+    return [...ids];
+  }
+
+  const query =
+    `SELECT Id FROM Contact WHERE AccountId = '${escapeSoqlLiteral(primaryId)}' ` +
+    'ORDER BY CreatedDate ASC LIMIT 200';
+  const contacts = toRecords(await connection.query<{ Id?: string }>(query));
+  for (const contact of contacts) {
+    const contactId = toTrimmed(contact.Id);
+    if (contactId) {
+      ids.add(contactId);
+    }
+  }
+
+  return [...ids];
+};
+
 const queryQboCustomersPage = async (
   startPosition: number,
   queryFn: typeof qboQuery
@@ -359,9 +398,16 @@ const findQuickBooksCustomerById = async (
 };
 
 const findQuickBooksCustomersBySalesforceId = async (
-  salesforceId: string,
+  salesforceIds: string[],
   queryFn: typeof qboQuery
 ): Promise<QboCustomer[]> => {
+  const normalizedIds = new Set(
+    salesforceIds.map((value) => value.trim().toLowerCase()).filter((value) => value.length > 0)
+  );
+  if (!normalizedIds.size) {
+    return [];
+  }
+
   const matches: QboCustomer[] = [];
   let startPosition = 1;
 
@@ -373,7 +419,10 @@ const findQuickBooksCustomersBySalesforceId = async (
 
     matches.push(
       ...page.filter(
-        (customer) => getQboSalesforceId(customer)?.toLowerCase() === salesforceId.toLowerCase()
+        (customer) => {
+          const qboSalesforceId = getQboSalesforceId(customer)?.toLowerCase();
+          return !!qboSalesforceId && normalizedIds.has(qboSalesforceId);
+        }
       )
     );
 
@@ -788,8 +837,15 @@ const salesforceRecordQboSync = async (
       toTrimmed(resolvedRecord.record.QuickBooks_ID__c) ?? null;
 
     const salesforceQboId = toTrimmed(resolvedRecord.record.QuickBooks_ID__c);
+    const salesforceLookupCandidateIds = await collectSalesforceLookupCandidateIds(
+      connection,
+      resolvedRecord
+    );
+    const normalizedSalesforceLookupCandidateIds = new Set(
+      salesforceLookupCandidateIds.map((value) => value.toLowerCase())
+    );
     const qboCustomersBySalesforceId = await findQuickBooksCustomersBySalesforceId(
-      salesforceId,
+      salesforceLookupCandidateIds,
       qboQueryWithDebug
     );
 
@@ -875,7 +931,7 @@ const salesforceRecordQboSync = async (
       summary.resolvedQuickBooksCustomerId = authoritativeQboCustomerId;
       summary.linkingFields.quickbooksSalesforceFieldValue = qboSalesforceId;
 
-      if (qboSalesforceId && qboSalesforceId !== salesforceId) {
+      if (qboSalesforceId && !normalizedSalesforceLookupCandidateIds.has(qboSalesforceId.toLowerCase())) {
         summary.conflicts.push({
           code: 'quickbooks_salesforce_id_conflict',
           message:
