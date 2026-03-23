@@ -299,6 +299,12 @@ const getComparableSalesforceIds = (value: string | null | undefined): string[] 
   return [...ids];
 };
 
+const hasMatchingSalesforceId = (
+  salesforceId: string | null | undefined,
+  normalizedIds: Set<string>
+): boolean =>
+  getComparableSalesforceIds(salesforceId).some((value) => normalizedIds.has(value.toLowerCase()));
+
 const fetchSalesforceRecordById = async (
   connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
   objectType: SalesforceObjectType,
@@ -449,7 +455,8 @@ const findQuickBooksCustomerById = async (
 
 const findQuickBooksCustomersBySalesforceId = async (
   salesforceIds: string[],
-  queryFn: typeof qboQuery
+  queryFn: typeof qboQuery,
+  getCustomerByIdFn: typeof getQuickBooksCustomerById
 ): Promise<QboCustomer[]> => {
   const normalizedIds = new Set(
     salesforceIds
@@ -471,12 +478,27 @@ const findQuickBooksCustomersBySalesforceId = async (
     }
 
     matches.push(
-      ...page.filter(
-        (customer) => {
-          const qboSalesforceId = getQboSalesforceId(customer)?.toLowerCase();
-          return !!qboSalesforceId && normalizedIds.has(qboSalesforceId);
-        }
-      )
+      ...(await Promise.all(
+        page.map(async (customer) => {
+          if (hasMatchingSalesforceId(getQboSalesforceId(customer), normalizedIds)) {
+            return customer;
+          }
+
+          const customerId = normalizeQboCustomerId(customer.Id);
+          if (Array.isArray(customer.CustomField) || !customerId) {
+            return null;
+          }
+
+          try {
+            const authoritativeCustomer = (await getCustomerByIdFn(customerId)) as QboCustomer | null;
+            return hasMatchingSalesforceId(getQboSalesforceId(authoritativeCustomer), normalizedIds)
+              ? authoritativeCustomer
+              : null;
+          } catch {
+            return null;
+          }
+        })
+      )).filter((customer): customer is QboCustomer => !!customer)
     );
 
     if (page.length < DEFAULT_QBO_PAGE_SIZE) {
@@ -919,7 +941,12 @@ const salesforceRecordQboSync = async (
     );
     const qboCustomersBySalesforceId = await findQuickBooksCustomersBySalesforceId(
       salesforceLookupCandidateIds,
-      qboQueryWithDebug
+      qboQueryWithDebug,
+      (customerId) =>
+        dependencies.getQuickBooksCustomerById(
+          customerId,
+          qboDebugLogger ? { debugLogger: qboDebugLogger } : undefined
+        )
     );
     if (qboCustomersBySalesforceId.length > 1) {
       summary.conflicts.push({

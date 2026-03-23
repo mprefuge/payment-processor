@@ -395,6 +395,76 @@ describe('salesforceRecordQboSync', () => {
     ]);
   });
 
+  it('uses an authoritative QuickBooks customer read to match a paged customer by Salesforce ID', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '001UQ00000haZGPYA2'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001UQ00000haZGPYA2'")) {
+        return {
+          records: [{ Id: '001UQ00000haZGPYA2', Name: 'TNND', QuickBooks_ID__c: null }],
+        };
+      }
+
+      if (soql.includes("FROM Contact WHERE AccountId = '001UQ00000haZGPYA2'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Account__c = '001UQ00000haZGPYA2'")) {
+        return { records: [] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [{ Id: '613', DisplayName: 'TNND' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '613'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const getQuickBooksCustomerById = vi.fn(async () => ({
+      Id: '613',
+      DisplayName: 'TNND',
+      CustomField: [{ Name: 'Salesforce ID', StringValue: '001UQ00000haZGP' }],
+    }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=001UQ00000haZGPYA2&dryRun=true',
+          query: new URLSearchParams({
+            salesforceId: '001UQ00000haZGPYA2',
+            dryRun: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('613');
+    expect(body.summary.linkingFields.quickbooksSalesforceFieldValue).toBe('001UQ00000haZGP');
+    expect(getQuickBooksCustomerById).toHaveBeenCalledWith('613', undefined);
+  });
+
   it('resolves a Contact when the QuickBooks customer is linked to the parent Account Salesforce ID', async () => {
     const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
     const connection = createConnection(
