@@ -938,7 +938,7 @@ describe('salesforceRecordQboSync', () => {
     expect(body.summary.plannedBackfills).toEqual([]);
   });
 
-  it('optionally imports Salesforce transactions from QBO-only sales receipts', async () => {
+  it('imports QBO-only sales receipts using a matching line-level Class__c campaign before the General Giving fallback', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003IMPORT'")) {
         return {
@@ -952,8 +952,8 @@ describe('salesforceRecordQboSync', () => {
         return { records: [] };
       }
 
-      if (soql.includes("FROM Campaign WHERE Class__c = 'UNRESTRICTED FUNDS:General'")) {
-        return { records: [{ Id: '701CLASSMATCH' }] };
+      if (soql.includes("FROM Campaign WHERE Class__c = 'Program Income:Volunteer App Processing'")) {
+        return { records: [{ Id: '701PROGRAMCLASS' }] };
       }
 
       if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
@@ -976,7 +976,13 @@ describe('salesforceRecordQboSync', () => {
             TxnDate: '2026-03-22',
             TotalAmt: 125,
             PrivateNote: 'Imported from QBO',
-            ClassRef: { name: 'UNRESTRICTED FUNDS:General' },
+            Line: [
+              {
+                SalesItemLineDetail: {
+                  ClassRef: { name: 'Program Income:Volunteer App Processing' },
+                },
+              },
+            ],
           },
         ];
       }
@@ -1043,7 +1049,7 @@ describe('salesforceRecordQboSync', () => {
         amount_fee__c: 0,
         amount_net__c: 125,
         currency_iso_code__c: 'USD',
-        campaign__c: '701CLASSMATCH',
+        campaign__c: '701PROGRAMCLASS',
         qbo_doc_type__c: 'sales-receipt',
         qbo_doc_id__c: '7301',
         posted_to_qbo__c: true,

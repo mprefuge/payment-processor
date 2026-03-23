@@ -54,6 +54,14 @@ type QboSalesReceipt = {
   PrivateNote?: string | null;
   CustomerRef?: { value?: string | null; name?: string | null } | null;
   ClassRef?: { value?: string | null; name?: string | null } | null;
+  Line?:
+    | Array<{
+        DetailType?: string | null;
+        SalesItemLineDetail?: {
+          ClassRef?: { value?: string | null; name?: string | null } | null;
+        } | null;
+      }>
+    | null;
 };
 
 type SalesforceTransaction = {
@@ -521,9 +529,7 @@ const fetchQuickBooksSalesReceiptsForCustomer = async (
   customerId: string,
   queryFn: typeof qboQuery
 ): Promise<QboSalesReceipt[]> => {
-  const queryText =
-    'SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote, CustomerRef, ClassRef FROM SalesReceipt ' +
-    `WHERE CustomerRef = '${escapeQboLiteral(customerId)}'`;
+  const queryText = `SELECT * FROM SalesReceipt WHERE CustomerRef = '${escapeQboLiteral(customerId)}'`;
   const records = await queryFn<QboSalesReceipt[]>(queryText);
   return Array.isArray(records) ? records : [];
 };
@@ -707,12 +713,33 @@ const fetchCampaignIdByName = async (connection: Connection, name: string): Prom
   return toTrimmed(records[0]?.Id);
 };
 
+const resolveSalesReceiptClassName = (receipt: QboSalesReceipt): string | null => {
+  const headerClassName = toTrimmed(receipt.ClassRef?.name);
+  if (headerClassName) {
+    return headerClassName;
+  }
+
+  const lineClassNames = new Set<string>();
+  for (const line of receipt.Line ?? []) {
+    const lineClassName = toTrimmed(line?.SalesItemLineDetail?.ClassRef?.name);
+    if (lineClassName) {
+      lineClassNames.add(lineClassName);
+    }
+  }
+
+  if (lineClassNames.size === 1) {
+    return [...lineClassNames][0];
+  }
+
+  return null;
+};
+
 const resolveCampaignIdForSalesReceipt = async (
   connection: Connection,
   receipt: QboSalesReceipt
 ): Promise<string | null> => {
   const generalGivingCampaignId = await fetchCampaignIdByName(connection, 'General Giving');
-  const className = toTrimmed(receipt.ClassRef?.name);
+  const className = resolveSalesReceiptClassName(receipt);
   if (!className) {
     return generalGivingCampaignId;
   }
