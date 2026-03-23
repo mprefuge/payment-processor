@@ -898,7 +898,7 @@ const fetchQuickBooksCustomer = async (
     throw new Error('QuickBooks customer ID is required to load customer details.');
   }
 
-  const url = `${buildQboUrl('customer')}/${encodeURIComponent(trimmedId)}`;
+  const url = buildQboCustomerReadUrl(trimmedId);
   debugLogger?.({
     operation: 'getQuickBooksCustomerById',
     stage: 'request',
@@ -2142,6 +2142,13 @@ const buildQboUrl = (entity: string): string => {
   const base = QBO_BASE_URL[env.quickBooks.environment];
   const realmId = getRealmId();
   return `${base}/${encodeURIComponent(realmId)}/${entity}`;
+};
+
+const buildQboCustomerReadUrl = (customerId: string): string => {
+  const url = new URL(`${buildQboUrl('customer')}/${encodeURIComponent(customerId)}`);
+  url.searchParams.set('minorversion', '75');
+  url.searchParams.set('include', 'enhancedAllCustomFields');
+  return url.toString();
 };
 
 const accountLookupCache = new Map<string, string>();
