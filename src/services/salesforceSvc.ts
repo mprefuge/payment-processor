@@ -150,6 +150,10 @@ const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
 const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {
   const record: TransactionRecord = {};
   for (const key of Object.keys(input) as Array<keyof TransactionRecordInput>) {
+    if (key === 'Name') {
+      continue;
+    }
+
     const value = input[key];
     if (value === undefined) {
       continue;

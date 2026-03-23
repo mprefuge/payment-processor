@@ -126,6 +126,23 @@ describe('createSalesforceSvc', () => {
     expect(result).toBe('sf_1');
   });
 
+  it('drops Name from transaction upserts so auto-number Name fields are never written', async () => {
+    const { upsert, sobject, query } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, sobject, query } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.Name = 'Should not be sent';
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    const [, records] = upsert.mock.calls[0];
+    expect(records[0]).not.toHaveProperty('Name');
+  });
+
   it('normalizes payout linkage upserts to Salesforce API names', async () => {
     const { upsert, sobject, query } = createMockConnection();
     upsert.mockResolvedValue([{ success: true, id: 'a1', errors: [] }]);
