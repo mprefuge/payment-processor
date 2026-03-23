@@ -288,7 +288,11 @@ describe('salesforceRecordQboSync', () => {
         }),
       ])
     );
-    expect(updateQuickBooksCustomerSalesforceId).toHaveBeenCalledWith('456', '003BACKFILL');
+    expect(updateQuickBooksCustomerSalesforceId).toHaveBeenCalledWith(
+      '456',
+      '003BACKFILL',
+      undefined
+    );
   });
 
   it('creates a QuickBooks document for a supported Salesforce-only refund transaction', async () => {
@@ -649,5 +653,93 @@ describe('salesforceRecordQboSync', () => {
       'qbo_doc_id__c'
     );
     expect(body.summary.manualReviewItems).toEqual([]);
+  });
+
+  it('passes debug logging hooks into QuickBooks reads and updates when debug=true', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003DEBUG'")) {
+        return {
+          records: [
+            { Id: '003DEBUG', FirstName: 'Debug', LastName: 'Mode', QuickBooks_ID__c: '1205' },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003DEBUG'")) {
+        return { records: [] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '1205'")) {
+        return [{ Id: '1205', DisplayName: 'Debug Customer' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '1205'")) {
+        return [];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const getQuickBooksCustomerById = vi.fn(async () => ({
+      Id: '1205',
+      DisplayName: 'Debug Customer',
+      CustomField: [{ Name: 'Salesforce ID', StringValue: '' }],
+    }));
+    const updateQuickBooksCustomerSalesforceId = vi.fn().mockResolvedValue({});
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () =>
+        ({ markPostedToQbo: vi.fn(), upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById,
+      updateQuickBooksCustomerSalesforceId,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003DEBUG&dryRun=false&debug=true',
+          query: new URLSearchParams({
+            salesforceId: '003DEBUG',
+            dryRun: 'false',
+            debug: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.debug).toBe(true);
+    expect(qboQuery.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        debugLogger: expect.any(Function),
+      })
+    );
+    expect(getQuickBooksCustomerById).toHaveBeenCalledWith(
+      '1205',
+      expect.objectContaining({
+        debugLogger: expect.any(Function),
+      })
+    );
+    expect(updateQuickBooksCustomerSalesforceId).toHaveBeenCalledWith(
+      '1205',
+      '003DEBUG',
+      expect.objectContaining({
+        debugLogger: expect.any(Function),
+      })
+    );
   });
 });

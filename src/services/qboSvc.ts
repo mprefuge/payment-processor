@@ -167,6 +167,14 @@ export interface QuickBooksBankDeposit {
 interface PostOptions {
   fetcher?: Fetcher;
   accessToken?: string;
+  debugLogger?: (event: {
+    operation: string;
+    stage: 'request' | 'response' | 'error';
+    request?: Record<string, unknown>;
+    response?: unknown;
+    status?: number;
+    error?: string;
+  }) => void;
 }
 
 interface PostResult {
@@ -882,7 +890,8 @@ const findCustomerByDisplayName = async (
 
 const fetchQuickBooksCustomer = async (
   id: string,
-  context: QuickBooksRequestContext
+  context: QuickBooksRequestContext,
+  debugLogger?: PostOptions['debugLogger']
 ): Promise<Record<string, unknown>> => {
   const trimmedId = id.trim();
   if (!trimmedId) {
@@ -890,6 +899,15 @@ const fetchQuickBooksCustomer = async (
   }
 
   const url = `${buildQboUrl('customer')}/${encodeURIComponent(trimmedId)}`;
+  debugLogger?.({
+    operation: 'getQuickBooksCustomerById',
+    stage: 'request',
+    request: {
+      method: 'GET',
+      url,
+      customerId: trimmedId,
+    },
+  });
   const response = await context.request(url, {
     method: 'GET',
     headers: { Accept: 'application/json' },
@@ -897,6 +915,17 @@ const fetchQuickBooksCustomer = async (
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    debugLogger?.({
+      operation: 'getQuickBooksCustomerById',
+      stage: 'error',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        customerId: trimmedId,
+      },
+      error: errorText ?? response.statusText,
+    });
     throw new Error(
       `Failed to load QuickBooks customer "${trimmedId}" (status ${response.status}): ${
         errorText ?? response.statusText
@@ -914,6 +943,18 @@ const fetchQuickBooksCustomer = async (
     throw new Error('QuickBooks customer response did not include a Customer record.');
   }
 
+  debugLogger?.({
+    operation: 'getQuickBooksCustomerById',
+    stage: 'response',
+    status: response.status,
+    request: {
+      method: 'GET',
+      url,
+      customerId: trimmedId,
+    },
+    response: customer,
+  });
+
   return customer;
 };
 
@@ -922,15 +963,16 @@ export const getQuickBooksCustomerById = async (
   options?: PostOptions
 ): Promise<Record<string, unknown>> => {
   const context = await createRequestContext(options);
-  return fetchQuickBooksCustomer(id, context);
+  return fetchQuickBooksCustomer(id, context, options?.debugLogger);
 };
 
 const updateQuickBooksCustomer = async (
   id: string,
   updates: Record<string, unknown>,
-  context: QuickBooksRequestContext
+  context: QuickBooksRequestContext,
+  debugLogger?: PostOptions['debugLogger']
 ): Promise<Record<string, unknown>> => {
-  const customer = await fetchQuickBooksCustomer(id, context);
+  const customer = await fetchQuickBooksCustomer(id, context, debugLogger);
   const syncTokenRaw = customer.SyncToken;
   const syncToken =
     typeof syncTokenRaw === 'number'
@@ -951,6 +993,16 @@ const updateQuickBooksCustomer = async (
   };
 
   const url = `${buildQboUrl('customer')}?operation=update`;
+  debugLogger?.({
+    operation: 'updateQuickBooksCustomer',
+    stage: 'request',
+    request: {
+      method: 'POST',
+      url,
+      customerId: id,
+      payload,
+    },
+  });
   const response = await context.request(url, {
     method: 'POST',
     headers: {
@@ -962,6 +1014,18 @@ const updateQuickBooksCustomer = async (
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    debugLogger?.({
+      operation: 'updateQuickBooksCustomer',
+      stage: 'error',
+      status: response.status,
+      request: {
+        method: 'POST',
+        url,
+        customerId: id,
+        payload,
+      },
+      error: errorText ?? response.statusText,
+    });
     throw new Error(
       `Failed to update QuickBooks customer "${id}" (status ${response.status}): ${
         errorText ?? response.statusText
@@ -979,6 +1043,19 @@ const updateQuickBooksCustomer = async (
     throw new Error('QuickBooks customer update response did not include a Customer record.');
   }
 
+  debugLogger?.({
+    operation: 'updateQuickBooksCustomer',
+    stage: 'response',
+    status: response.status,
+    request: {
+      method: 'POST',
+      url,
+      customerId: id,
+      payload,
+    },
+    response: updated,
+  });
+
   return updated;
 };
 
@@ -993,7 +1070,7 @@ export const updateQuickBooksCustomerSalesforceId = async (
   }
 
   const context = await createRequestContext(options);
-  const customer = await fetchQuickBooksCustomer(id, context);
+  const customer = await fetchQuickBooksCustomer(id, context, options?.debugLogger);
   const customFields = Array.isArray(customer.CustomField)
     ? (customer.CustomField as QuickBooksCustomField[])
     : [];
@@ -1017,7 +1094,8 @@ export const updateQuickBooksCustomerSalesforceId = async (
         } satisfies QuickBooksCustomField,
       ],
     },
-    context
+    context,
+    options?.debugLogger
   );
 };
 
@@ -3636,6 +3714,15 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
 
   const url = buildQboQueryUrl(trimmedQuery);
   const context = await createRequestContext(options);
+  options?.debugLogger?.({
+    operation: 'query',
+    stage: 'request',
+    request: {
+      method: 'GET',
+      url,
+      query: trimmedQuery,
+    },
+  });
   const response = await context.request(url, {
     method: 'GET',
     headers: {
@@ -3645,6 +3732,17 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => undefined);
+    options?.debugLogger?.({
+      operation: 'query',
+      stage: 'error',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        query: trimmedQuery,
+      },
+      error: errorText ?? response.statusText,
+    });
     throw new Error(
       `QuickBooks query failed (status ${response.status}): ${errorText ?? response.statusText}`
     );
@@ -3657,6 +3755,17 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
       : undefined;
 
   if (!queryResponse) {
+    options?.debugLogger?.({
+      operation: 'query',
+      stage: 'response',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        query: trimmedQuery,
+      },
+      response: data,
+    });
     return data as T;
   }
 
@@ -3665,9 +3774,31 @@ export const query = async <T = unknown>(query: string, options?: PostOptions): 
   );
 
   if (!values) {
+    options?.debugLogger?.({
+      operation: 'query',
+      stage: 'response',
+      status: response.status,
+      request: {
+        method: 'GET',
+        url,
+        query: trimmedQuery,
+      },
+      response: [],
+    });
     return [] as T;
   }
 
+  options?.debugLogger?.({
+    operation: 'query',
+    stage: 'response',
+    status: response.status,
+    request: {
+      method: 'GET',
+      url,
+      query: trimmedQuery,
+    },
+    response: values,
+  });
   return values as T;
 };
 

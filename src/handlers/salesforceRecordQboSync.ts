@@ -619,6 +619,7 @@ const salesforceRecordQboSync = async (
 ): Promise<HttpResponseInit> => {
   const dryRun = readBooleanQuery(request, 'dryRun', true);
   const importQboReceipts = readBooleanQuery(request, 'importQboReceipts', false);
+  const debug = readBooleanQuery(request, 'debug', false);
   const salesforceId = await readSalesforceId(request);
   const summary = buildSummary();
 
@@ -630,6 +631,7 @@ const salesforceRecordQboSync = async (
         message: 'salesforceId is required.',
         dryRun,
         importQboReceipts,
+        debug,
         summary,
       },
     };
@@ -637,6 +639,32 @@ const salesforceRecordQboSync = async (
 
   try {
     const dependencies = resolveDependencies();
+    const qboDebugLogger = debug
+      ? (event: {
+          operation: string;
+          stage: 'request' | 'response' | 'error';
+          request?: Record<string, unknown>;
+          response?: unknown;
+          status?: number;
+          error?: string;
+        }) => {
+          context.log('[salesforceRecordQboSync][debug][qbo]', event);
+        }
+      : undefined;
+    const qboQueryWithDebug = (<T = unknown>(queryText: string) =>
+      dependencies.qboQuery<T>(
+        queryText,
+        qboDebugLogger ? { debugLogger: qboDebugLogger } : undefined
+      )) as typeof qboQuery;
+
+    if (debug) {
+      context.log('[salesforceRecordQboSync][debug] request', {
+        method: request.method,
+        salesforceId,
+        dryRun,
+        importQboReceipts,
+      });
+    }
     const connection = await dependencies.getSalesforceConnection();
     const salesforceSvc = dependencies.createSalesforceSvc(connection);
 
@@ -649,6 +677,7 @@ const salesforceRecordQboSync = async (
           message: `No Contact or Account was found for Salesforce ID ${salesforceId}.`,
           dryRun,
           importQboReceipts,
+          debug,
           summary,
         },
       };
@@ -664,7 +693,7 @@ const salesforceRecordQboSync = async (
     const salesforceQboId = toTrimmed(resolvedRecord.record.QuickBooks_ID__c);
     const qboCustomersBySalesforceId = await findQuickBooksCustomersBySalesforceId(
       salesforceId,
-      dependencies.qboQuery
+      qboQueryWithDebug
     );
 
     if (qboCustomersBySalesforceId.length > 1) {
@@ -677,7 +706,7 @@ const salesforceRecordQboSync = async (
     let qboCustomer: QboCustomer | null = null;
 
     if (salesforceQboId) {
-      qboCustomer = await findQuickBooksCustomerById(salesforceQboId, dependencies.qboQuery);
+      qboCustomer = await findQuickBooksCustomerById(salesforceQboId, qboQueryWithDebug);
       if (!qboCustomer) {
         summary.conflicts.push({
           code: 'salesforce_quickbooks_id_not_found',
@@ -725,7 +754,8 @@ const salesforceRecordQboSync = async (
       if (qboCustomerId) {
         try {
           const authoritativeCustomer = (await dependencies.getQuickBooksCustomerById(
-            qboCustomerId
+            qboCustomerId,
+            qboDebugLogger ? { debugLogger: qboDebugLogger } : undefined
           )) as QboCustomer;
           if (authoritativeCustomer) {
             qboCustomer = authoritativeCustomer;
@@ -773,6 +803,7 @@ const salesforceRecordQboSync = async (
           message: `Unable to deterministically resolve a QuickBooks customer for Salesforce ID ${salesforceId}.`,
           dryRun,
           importQboReceipts,
+          debug,
           summary,
         },
       };
@@ -786,6 +817,7 @@ const salesforceRecordQboSync = async (
           message: 'Conflicting Salesforce/QuickBooks linking data was found.',
           dryRun,
           importQboReceipts,
+          debug,
           summary,
         },
       };
@@ -809,7 +841,7 @@ const salesforceRecordQboSync = async (
       const qboDocType = toTrimmed(transaction.QBO_Doc_Type__c) as QuickBooksDocType | null;
 
       if (qboDocId && qboDocType) {
-        const qboDoc = await fetchQuickBooksDocument(qboDocType, qboDocId, dependencies.qboQuery);
+        const qboDoc = await fetchQuickBooksDocument(qboDocType, qboDocId, qboQueryWithDebug);
         if (!qboDoc) {
           summary.conflicts.push({
             code: 'linked_qbo_document_missing',
@@ -867,7 +899,7 @@ const salesforceRecordQboSync = async (
     if (qboCustomerId) {
       salesReceipts = await fetchQuickBooksSalesReceiptsForCustomer(
         qboCustomerId,
-        dependencies.qboQuery
+        qboQueryWithDebug
       );
       const linkedQboIds = new Set(
         transactions.map((transaction) => toTrimmed(transaction.QBO_Doc_Id__c)).filter(Boolean)
@@ -905,7 +937,8 @@ const salesforceRecordQboSync = async (
         if (action.type === 'backfill_qbo_salesforce_id') {
           await dependencies.updateQuickBooksCustomerSalesforceId(
             action.qboCustomerId,
-            action.salesforceId
+            action.salesforceId,
+            qboDebugLogger ? { debugLogger: qboDebugLogger } : undefined
           );
           context.log('[salesforceRecordQboSync] Backfilled QuickBooks Salesforce ID', action);
         }
@@ -1003,6 +1036,7 @@ const salesforceRecordQboSync = async (
         success: true,
         dryRun,
         importQboReceipts,
+        debug,
         summary,
       },
     };
@@ -1020,6 +1054,7 @@ const salesforceRecordQboSync = async (
         details: error instanceof Error ? error.message : String(error),
         dryRun,
         importQboReceipts,
+        debug,
         summary,
       },
     };

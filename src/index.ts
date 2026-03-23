@@ -200,6 +200,7 @@ const SalesforceRecordQboSyncQuerySchema = z
     salesforceId: z.string(),
     dryRun: BoolLikeQuerySchema.optional(),
     importQboReceipts: BoolLikeQuerySchema.optional(),
+    debug: BoolLikeQuerySchema.optional(),
   })
   .passthrough();
 
