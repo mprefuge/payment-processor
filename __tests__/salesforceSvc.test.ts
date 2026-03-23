@@ -259,6 +259,112 @@ describe('createSalesforceSvc', () => {
     expect(result).toEqual({ success: true, id: 'a1', errors: [] });
   });
 
+  it('falls back to create when the upsert key is not an external-id field', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    const create = vi.fn().mockResolvedValue([{ success: true, id: 'a01_created', errors: [] }]);
+    sobject.mockReturnValue({ create });
+
+    upsert.mockResolvedValue([
+      {
+        success: false,
+        id: undefined,
+        errors: [
+          {
+            message:
+              'Field name provided, QBO_Doc_Id__c does not match an External ID, Salesforce Id, or indexed field for Transaction__c',
+          },
+        ],
+      },
+    ]);
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes("QBO_Doc_Id__c = '7764'")) {
+        return Promise.resolve({ records: [] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = null;
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.qbo_doc_id__c = '7764';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'qbo_doc_id__c');
+
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      [expect.objectContaining({ QBO_Doc_Id__c: '7764' })],
+      'QBO_Doc_Id__c',
+      { allOrNone: true }
+    );
+    expect(query).toHaveBeenCalledWith(
+      "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '7764' AND RecordTypeId = '012000000000000AAA' LIMIT 1"
+    );
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ QBO_Doc_Id__c: '7764' }),
+      { allOrNone: true }
+    );
+    expect(result).toEqual({ success: true, id: 'a01_created', errors: [], created: true });
+  });
+
+  it('falls back to Salesforce Id update when the upsert key is not an external-id field but a record exists', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+
+    upsert
+      .mockResolvedValueOnce([
+        {
+          success: false,
+          id: undefined,
+          errors: [
+            {
+              message:
+                'Field name provided, QBO_Doc_Id__c does not match an External ID, Salesforce Id, or indexed field for Transaction__c',
+            },
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([{ success: true, id: 'a01_existing', errors: [] }]);
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes("SELECT Id FROM RecordType")) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes("QBO_Doc_Id__c = '7764'")) {
+        return Promise.resolve({ records: [{ Id: 'a01_existing' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = null;
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.qbo_doc_id__c = '7764';
+
+    const result = await service.upsertTransactionByExternalId(dto, 'qbo_doc_id__c');
+
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(upsert.mock.calls[1]).toEqual([
+      'Transaction__c',
+      [expect.objectContaining({ Id: 'a01_existing', QBO_Doc_Id__c: '7764' })],
+      'Id',
+      { allOrNone: true },
+    ]);
+    expect(result).toEqual({ success: true, id: 'a01_existing', errors: [] });
+  });
+
   it('prevents duplicate creation by checking other external ids when upserting', async () => {
     const { upsert, query, sobject } = createMockConnection();
     // The DTO has both a payment intent and a charge id, but we will upsert

@@ -271,6 +271,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const buildInLiteralList = (values: string[]): string =>
     values.map((value) => `'${escapeForSoqlLiteral(value)}'`).join(',');
 
+  const isUnsupportedExternalIdFieldError = (message: string): boolean =>
+    message.includes('does not match an External ID, Salesforce Id, or indexed field');
+
   const resolveRecordTypeId = async (
     recordTypeName: string,
     sObject: string = TRANSACTION_OBJECT
@@ -440,13 +443,17 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       })
     );
     if (!result.success) {
+      const unsupportedExternalIdFieldError = result.errors.find(
+        (error) =>
+          typeof error?.message === 'string' && isUnsupportedExternalIdFieldError(error.message)
+      );
       const duplicateError = result.errors.find(
         (error) =>
           typeof error?.message === 'string' &&
           error.message.includes('more than one record found for external id field')
       );
 
-      if (duplicateError) {
+      if (duplicateError || unsupportedExternalIdFieldError) {
         const fallbackId = await resolveExistingTransactionId(
           key,
           normalizedExternalId,
@@ -481,7 +488,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
           const newRecord = sanitizeTransactionRecord({
             ...dto,
             RecordTypeId: recordTypeId,
-            [key]: undefined,
+            [key]: duplicateError ? undefined : normalizedExternalId,
           });
 
           const [insertResult] = toArray(
