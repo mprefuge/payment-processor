@@ -531,7 +531,7 @@ describe('salesforceRecordQboSync', () => {
     expect(body.summary.resolvedQuickBooksCustomerId).toBe('411');
   });
 
-  it('resolves an Account by exact QuickBooks customer display name when no IDs are available', async () => {
+  it('leaves an Account unresolved when only an exact QuickBooks customer display name matches', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '001ACCOUNTBYNAME'")) {
         return { records: [] };
@@ -592,9 +592,12 @@ describe('salesforceRecordQboSync', () => {
     );
     const body = JSON.parse(response.body);
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(409);
+    expect(body.error).toBe('quickbooks_customer_not_resolved');
     expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
-    expect(body.summary.resolvedQuickBooksCustomerId).toBe('412');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBeNull();
+    expect(body.summary.conflicts).toEqual([]);
+    expect(body.summary.plannedBackfills).toEqual([]);
   });
 
   it('backfills QuickBooks Salesforce ID when the linked customer is missing it', async () => {
