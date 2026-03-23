@@ -394,6 +394,10 @@ describe('createSalesforceSvc', () => {
     );
 
     expect(result).toEqual({ success: true, id: 'content_match', errors: [] });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('Received_At__c = 2025-02-02T12:00:00Z')
+    );
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining("Received_At__c = '"));
   });
 
   it('does not treat ambiguous content matches as existing', async () => {
@@ -436,6 +440,33 @@ describe('createSalesforceSvc', () => {
       { allOrNone: true }
     );
     expect(result).toEqual({ success: true, id: 'new', errors: [] });
+  });
+
+  it('skips content-signature lookup when received_at__c is not a valid datetime', async () => {
+    const { upsert, query, sobject } = createMockConnection();
+    upsert.mockResolvedValue([{ success: true, id: 'new', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.stripe_payment_intent_id__c = 'pi_invalid_date';
+    dto.stripe_charge_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.contact__c = '003cust';
+    dto.amount_gross__c = 41.57;
+    dto.received_at__c = 'not-a-datetime';
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('Received_At__c ='));
+    expect(upsert).toHaveBeenCalledWith(
+      'Transaction__c',
+      [expect.objectContaining({ Received_At__c: 'not-a-datetime' })],
+      TRANSACTION_FIELD_API_NAMES.stripe_payment_intent_id__c,
+      { allOrNone: true }
+    );
   });
 
   it('matches existing contact when Stripe customer ID is in a delimited Stripe_Customer_Id__c list', async () => {

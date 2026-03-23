@@ -238,6 +238,20 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const escapeForSoqlLiteral = (value: string): string =>
     value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
+  const toSoqlDateTimeLiteral = (value: string): string | null => {
+    const normalizedValue = value.trim();
+    if (!normalizedValue) {
+      return null;
+    }
+
+    const parsedDate = new Date(normalizedValue);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return null;
+    }
+
+    return parsedDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  };
+
   const toLookupRecords = (result: unknown): TransactionLookupRecord[] => {
     if (Array.isArray(result)) {
       return result as TransactionLookupRecord[];
@@ -352,11 +366,15 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       received.trim().length > 0
     ) {
       const escapedContact = escapeForSoqlLiteral(contact.trim());
-      const escapedReceived = escapeForSoqlLiteral(received.trim());
+      const receivedAtLiteral = toSoqlDateTimeLiteral(received);
+      if (!receivedAtLiteral) {
+        return null;
+      }
+
       let soql =
         `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
         ` AND Amount_Gross__c = ${amount}` +
-        ` AND Received_At__c = ${escapedReceived}`;
+        ` AND Received_At__c = ${receivedAtLiteral}`;
 
       if (recordTypeId) {
         const escapedRecordTypeId = escapeForSoqlLiteral(recordTypeId);
