@@ -172,7 +172,6 @@ type SalesforceLookupCandidates = {
   quickBooksIds: string[];
 };
 
-const DEFAULT_QBO_PAGE_SIZE = 200;
 let dependencyOverrides: Partial<Dependencies> | null = null;
 
 const toRecords = <T>(result: { records?: T[] } | T[] | null | undefined): T[] => {
@@ -430,17 +429,6 @@ const collectSalesforceLookupCandidates = async (
   return { salesforceIds: [...ids], quickBooksIds: [...quickBooksIds] };
 };
 
-const queryQboCustomersPage = async (
-  startPosition: number,
-  queryFn: typeof qboQuery
-): Promise<QboCustomer[]> => {
-  const queryText =
-    'SELECT Id, DisplayName, PrimaryEmailAddr, Active, CustomField FROM Customer ' +
-    `STARTPOSITION ${startPosition} MAXRESULTS ${DEFAULT_QBO_PAGE_SIZE}`;
-  const records = await queryFn<QboCustomer[]>(queryText);
-  return Array.isArray(records) ? records : [];
-};
-
 const findQuickBooksCustomerById = async (
   customerId: string,
   queryFn: typeof qboQuery
@@ -458,54 +446,44 @@ const findQuickBooksCustomersBySalesforceId = async (
   queryFn: typeof qboQuery,
   getCustomerByIdFn: typeof getQuickBooksCustomerById
 ): Promise<QboCustomer[]> => {
-  const normalizedIds = new Set(
-    salesforceIds
-      .flatMap((value) => getComparableSalesforceIds(value))
-      .map((value) => value.trim().toLowerCase())
-      .filter((value) => value.length > 0)
-  );
-  if (!normalizedIds.size) {
-    return [];
-  }
-
   const matches: QboCustomer[] = [];
-  let startPosition = 1;
+  const seenCustomerIds = new Set<string>();
+  const candidateSalesforceIds = [...new Set(salesforceIds.flatMap((value) => getComparableSalesforceIds(value)))];
+  const normalizedCandidateIds = new Set(candidateSalesforceIds.map((value) => value.toLowerCase()));
 
-  while (true) {
-    const page = await queryQboCustomersPage(startPosition, queryFn);
-    if (!page.length) {
-      break;
+  for (const candidateSalesforceId of candidateSalesforceIds) {
+    const queryText =
+      'SELECT Id, DisplayName, PrimaryEmailAddr, Active, CustomField FROM Customer ' +
+      `WHERE CustomField = '${escapeQboLiteral(candidateSalesforceId)}' MAXRESULTS 10`;
+    const records = await queryFn<QboCustomer[]>(queryText);
+    const list = Array.isArray(records) ? records : [];
+
+    for (const customer of list) {
+      const directMatch = hasMatchingSalesforceId(getQboSalesforceId(customer), normalizedCandidateIds);
+      const customerId = normalizeQboCustomerId(customer.Id);
+      if (directMatch && customerId && !seenCustomerIds.has(customerId)) {
+        seenCustomerIds.add(customerId);
+        matches.push(customer);
+        continue;
+      }
+
+      if (!customerId || seenCustomerIds.has(customerId)) {
+        continue;
+      }
+
+      try {
+        const authoritativeCustomer = (await getCustomerByIdFn(customerId)) as QboCustomer | null;
+        if (
+          authoritativeCustomer &&
+          hasMatchingSalesforceId(getQboSalesforceId(authoritativeCustomer), normalizedCandidateIds)
+        ) {
+          seenCustomerIds.add(customerId);
+          matches.push(authoritativeCustomer);
+        }
+      } catch {
+        continue;
+      }
     }
-
-    matches.push(
-      ...(await Promise.all(
-        page.map(async (customer) => {
-          if (hasMatchingSalesforceId(getQboSalesforceId(customer), normalizedIds)) {
-            return customer;
-          }
-
-          const customerId = normalizeQboCustomerId(customer.Id);
-          if (Array.isArray(customer.CustomField) || !customerId) {
-            return null;
-          }
-
-          try {
-            const authoritativeCustomer = (await getCustomerByIdFn(customerId)) as QboCustomer | null;
-            return hasMatchingSalesforceId(getQboSalesforceId(authoritativeCustomer), normalizedIds)
-              ? authoritativeCustomer
-              : null;
-          } catch {
-            return null;
-          }
-        })
-      )).filter((customer): customer is QboCustomer => !!customer)
-    );
-
-    if (page.length < DEFAULT_QBO_PAGE_SIZE) {
-      break;
-    }
-
-    startPosition += page.length;
   }
 
   return matches;

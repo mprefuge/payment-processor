@@ -73,7 +73,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -151,7 +151,7 @@ describe('salesforceRecordQboSync', () => {
     );
 
     const qboQuery = vi.fn(async (query: string) => {
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [
           {
             Id: '345',
@@ -243,7 +243,7 @@ describe('salesforceRecordQboSync', () => {
     );
 
     const qboQuery = vi.fn(async (query: string) => {
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [
           {
             Id: '346',
@@ -330,7 +330,7 @@ describe('salesforceRecordQboSync', () => {
     );
 
     const qboQuery = vi.fn(async (query: string) => {
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [
           {
             Id: '613',
@@ -419,7 +419,7 @@ describe('salesforceRecordQboSync', () => {
     });
 
     const qboQuery = vi.fn(async (query: string) => {
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [{ Id: '613', DisplayName: 'TNND' }];
       }
 
@@ -496,7 +496,7 @@ describe('salesforceRecordQboSync', () => {
     );
 
     const qboQuery = vi.fn(async (query: string) => {
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [
           {
             Id: '347',
@@ -580,7 +580,7 @@ describe('salesforceRecordQboSync', () => {
         return [{ Id: '410', DisplayName: 'Account Via QBO Lookup' }];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -655,7 +655,7 @@ describe('salesforceRecordQboSync', () => {
         return [{ Id: '411', DisplayName: 'Contact Via Account QBO Lookup' }];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -721,7 +721,7 @@ describe('salesforceRecordQboSync', () => {
     });
 
     const qboQuery = vi.fn(async (query: string) => {
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [{ Id: '412', DisplayName: 'Acme Foundation' }];
       }
 
@@ -794,7 +794,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -891,7 +891,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -985,7 +985,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [
           {
             Id: '200',
@@ -1063,7 +1063,7 @@ describe('salesforceRecordQboSync', () => {
         return [];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -1153,7 +1153,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -1269,7 +1269,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -1396,7 +1396,7 @@ describe('salesforceRecordQboSync', () => {
         ];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
@@ -1491,7 +1491,7 @@ describe('salesforceRecordQboSync', () => {
         return [];
       }
 
-      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+      if (query.includes('FROM Customer WHERE CustomField =')) {
         return [];
       }
 
