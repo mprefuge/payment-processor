@@ -285,6 +285,20 @@ const normalizeQboCustomerId = (value: unknown): string | null => {
   return toTrimmed(value);
 };
 
+const getComparableSalesforceIds = (value: string | null | undefined): string[] => {
+  const trimmed = toTrimmed(value);
+  if (!trimmed) {
+    return [];
+  }
+
+  const ids = new Set<string>([trimmed]);
+  if (trimmed.length >= 15) {
+    ids.add(trimmed.slice(0, 15));
+  }
+
+  return [...ids];
+};
+
 const fetchSalesforceRecordById = async (
   connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
   objectType: SalesforceObjectType,
@@ -358,7 +372,9 @@ const collectSalesforceLookupCandidates = async (
   const quickBooksIds = new Set<string>();
   const primaryId = toTrimmed(resolvedRecord.record.Id);
   if (primaryId) {
-    ids.add(primaryId);
+    for (const variant of getComparableSalesforceIds(primaryId)) {
+      ids.add(variant);
+    }
   }
 
   const primaryQuickBooksId = toTrimmed(resolvedRecord.record.QuickBooks_ID__c);
@@ -369,7 +385,9 @@ const collectSalesforceLookupCandidates = async (
   if (resolvedRecord.objectType === 'Contact') {
     const accountId = toTrimmed(resolvedRecord.record.AccountId);
     if (accountId) {
-      ids.add(accountId);
+      for (const variant of getComparableSalesforceIds(accountId)) {
+        ids.add(variant);
+      }
 
       const account = await fetchSalesforceRecordById(connection, 'Account', accountId);
       const accountQuickBooksId = toTrimmed(account.record?.QuickBooks_ID__c);
@@ -392,7 +410,9 @@ const collectSalesforceLookupCandidates = async (
   for (const contact of contacts) {
     const contactId = toTrimmed(contact.Id);
     if (contactId) {
-      ids.add(contactId);
+      for (const variant of getComparableSalesforceIds(contactId)) {
+        ids.add(variant);
+      }
     }
 
     const contactQuickBooksId = toTrimmed(contact.QuickBooks_ID__c);
@@ -432,7 +452,10 @@ const findQuickBooksCustomersBySalesforceId = async (
   queryFn: typeof qboQuery
 ): Promise<QboCustomer[]> => {
   const normalizedIds = new Set(
-    salesforceIds.map((value) => value.trim().toLowerCase()).filter((value) => value.length > 0)
+    salesforceIds
+      .flatMap((value) => getComparableSalesforceIds(value))
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => value.length > 0)
   );
   if (!normalizedIds.size) {
     return [];
