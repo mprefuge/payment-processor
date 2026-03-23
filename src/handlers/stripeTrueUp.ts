@@ -35,10 +35,7 @@ import {
 import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
 import { ensureSalesforceIdOnCustomer } from '../stripe/utils';
-import {
-  loadConfig,
-  normalizeTransactionCategory,
-} from '../config/contactMatching';
+import { loadConfig, normalizeTransactionCategory } from '../config/contactMatching';
 import {
   fetchStripeChargesSince,
   fetchStripeRefundsSince,
@@ -62,7 +59,7 @@ interface FetchServices {
 
 let qboFunctions: any = null;
 const createNoopAccountingServices = (): AccountingServices => ({
-  postChargeToQbo: async () => ({ success: false, error: 'QBO service not available' } as any),
+  postChargeToQbo: async () => ({ success: false, error: 'QBO service not available' }) as any,
   postRefundToQbo: async () => ({ success: false, error: 'QBO service not available' }),
   postPayoutToQbo: async () => ({ success: false, error: 'QBO service not available' }),
 });
@@ -374,19 +371,18 @@ const extractSalesforceIdFromMetadata = (
   );
 };
 
-const isLikelySalesforceContactId = (value: string): boolean => {
-  const trimmed = value.trim();
-  return /^003[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/.test(trimmed);
-};
+type ResolvedSalesforceReference =
+  | { target: 'Contact'; id: string }
+  | { target: 'Account'; id: string };
 
-const resolveContactIdFromMetadata = async (
+const resolveSalesforceReferenceFromMetadata = async (
   salesforce: SalesforceSvc,
   metadata: Record<string, unknown> | null | undefined,
   contextLog: (...args: unknown[]) => void,
   sourceId: string,
   sourceType: 'charge' | 'refund',
   metadataSource: 'customer' | 'charge' = 'charge'
-): Promise<string | null> => {
+): Promise<ResolvedSalesforceReference | null> => {
   const metadataSalesforceId = extractSalesforceIdFromMetadata(metadata);
   if (!metadataSalesforceId) {
     return null;
@@ -402,8 +398,9 @@ const resolveContactIdFromMetadata = async (
           metadataSource,
           contactId: validatedContactId,
           metadataSalesforceId,
+          matchPath: 'stripe_salesforce_id',
         });
-        return validatedContactId;
+        return { target: 'Contact', id: validatedContactId };
       }
 
       contextLog('[StripeTrueUp] Stripe metadata salesforce_id did not match a Contact', {
@@ -412,26 +409,40 @@ const resolveContactIdFromMetadata = async (
         metadataSource,
         metadataSalesforceId,
       });
-      return null;
     }
 
-    if (isLikelySalesforceContactId(metadataSalesforceId)) {
-      contextLog('[StripeTrueUp] Using Stripe metadata salesforce_id as contact fallback', {
+    if (typeof salesforce.findAccountIdById === 'function') {
+      const validatedAccountId = await salesforce.findAccountIdById(metadataSalesforceId);
+      if (validatedAccountId) {
+        contextLog('[StripeTrueUp] Resolved account from Stripe metadata salesforce_id', {
+          sourceType,
+          sourceId,
+          metadataSource,
+          accountId: validatedAccountId,
+          metadataSalesforceId,
+          matchPath: 'stripe_salesforce_id',
+        });
+        return { target: 'Account', id: validatedAccountId };
+      }
+
+      contextLog('[StripeTrueUp] Stripe metadata salesforce_id did not match an Account', {
         sourceType,
         sourceId,
         metadataSource,
         metadataSalesforceId,
       });
-      return metadataSalesforceId;
     }
   } catch (error) {
-    contextLog('[StripeTrueUp] Failed to resolve contact from Stripe metadata salesforce_id', {
-      sourceType,
-      sourceId,
-      metadataSource,
-      metadataSalesforceId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    contextLog(
+      '[StripeTrueUp] Failed to resolve Salesforce record from Stripe metadata salesforce_id',
+      {
+        sourceType,
+        sourceId,
+        metadataSource,
+        metadataSalesforceId,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    );
   }
 
   return null;
@@ -800,7 +811,9 @@ const selectBestMatchingContact = (
     return null;
   }
 
-  const stripeIdMatch = candidates.find((contact) => contact.Stripe_Customer_Id__c === stripeCustomer.id);
+  const stripeIdMatch = candidates.find(
+    (contact) => contact.Stripe_Customer_Id__c === stripeCustomer.id
+  );
   if (stripeIdMatch) {
     return stripeIdMatch;
   }
@@ -808,9 +821,11 @@ const selectBestMatchingContact = (
   if (firstName && lastName) {
     const nameMatch = candidates.find((contact) => {
       const firstMatches =
-        typeof contact.FirstName === 'string' && contact.FirstName.toLowerCase() === firstName.toLowerCase();
+        typeof contact.FirstName === 'string' &&
+        contact.FirstName.toLowerCase() === firstName.toLowerCase();
       const lastMatches =
-        typeof contact.LastName === 'string' && contact.LastName.toLowerCase() === lastName.toLowerCase();
+        typeof contact.LastName === 'string' &&
+        contact.LastName.toLowerCase() === lastName.toLowerCase();
       return firstMatches && lastMatches;
     });
 
@@ -887,7 +902,10 @@ const findOrCreateContactInSalesforce = async (
   }
 
   const stripeCustomer = customer as Stripe.Customer;
-  const { customerName, firstName, lastName } = buildContactIdentity(stripeCustomer, transactionName);
+  const { customerName, firstName, lastName } = buildContactIdentity(
+    stripeCustomer,
+    transactionName
+  );
 
   contextLog('[StripeTrueUp] Starting contact find/create process', {
     customerId: stripeCustomer.id,
@@ -1182,8 +1200,7 @@ const processPayments = async (
 
         const customerMetadata =
           stripeCustomer && !stripeCustomer.deleted
-            ? (((stripeCustomer as Stripe.Customer).metadata as Record<string, unknown>) ||
-              undefined)
+            ? ((stripeCustomer as Stripe.Customer).metadata as Record<string, unknown>) || undefined
             : undefined;
         const customerMetadataSalesforceId = extractSalesforceIdFromMetadata(customerMetadata);
         const chargeMetadataSalesforceId = extractSalesforceIdFromMetadata(chargeObjectMetadata);
@@ -1216,8 +1233,9 @@ const processPayments = async (
         });
 
         let contactId: string | null = null;
+        let accountId: string | null = null;
         if (metadataSalesforceId && selectedMetadata) {
-          contactId = await resolveContactIdFromMetadata(
+          const resolvedReference = await resolveSalesforceReferenceFromMetadata(
             salesforce,
             selectedMetadata,
             (...args: unknown[]) => context.log(...args),
@@ -1226,9 +1244,15 @@ const processPayments = async (
             metadataSource || 'charge'
           );
 
-          if (!contactId) {
+          if (resolvedReference?.target === 'Contact') {
+            contactId = resolvedReference.id;
+          } else if (resolvedReference?.target === 'Account') {
+            accountId = resolvedReference.id;
+          }
+
+          if (!resolvedReference) {
             context.log(
-              '[StripeTrueUp] Stripe metadata salesforce_id provided but could not be resolved; skipping contact creation fallback',
+              '[StripeTrueUp] Stripe metadata salesforce_id provided but could not be resolved; skipping Salesforce creation fallback',
               {
                 chargeId: charge.id,
                 metadataSalesforceId,
@@ -1237,6 +1261,11 @@ const processPayments = async (
             );
           }
         } else if (stripeCustomer && !stripeCustomer.deleted) {
+          context.log('[StripeTrueUp] Falling back to existing Stripe customer matching flow', {
+            chargeId: charge.id,
+            customerId: stripeCustomer.id,
+            matchPath: 'fallback_match',
+          });
           context.log('[StripeTrueUp] Calling upsertCustomerByStripeId', {
             customerId: stripeCustomer.id,
             customerName: (stripeCustomer as Stripe.Customer).name,
@@ -1257,6 +1286,10 @@ const processPayments = async (
             context.log('[StripeTrueUp] Contact upsert completed', {
               contactId,
               success: !!contactId,
+              matchPath:
+                customerUpsertResult?.created === true
+                  ? 'created_new_salesforce_record'
+                  : 'fallback_match',
             });
 
             if (stripeCustomer && contactId) {
@@ -1371,12 +1404,22 @@ const processPayments = async (
 
         if (contactId) {
           transaction.contact__c = contactId;
+          delete transaction.account__c;
           context.log('[StripeTrueUp] Associated contact with transaction', {
             contactId,
             transactionStripeChargeId: transaction.stripe_charge_id__c,
+            matchPath: 'stripe_salesforce_id',
+          });
+        } else if (accountId) {
+          transaction.account__c = accountId;
+          delete transaction.contact__c;
+          context.log('[StripeTrueUp] Associated account with transaction', {
+            accountId,
+            transactionStripeChargeId: transaction.stripe_charge_id__c,
+            matchPath: 'stripe_salesforce_id',
           });
         } else {
-          context.log('[StripeTrueUp] No contact ID to associate with transaction', {
+          context.log('[StripeTrueUp] No Salesforce record ID to associate with transaction', {
             transactionStripeChargeId: transaction.stripe_charge_id__c,
           });
         }
@@ -1384,7 +1427,9 @@ const processPayments = async (
         context.log('[StripeTrueUp] Upserting transaction to Salesforce', {
           chargeId: charge.id,
           contactId: transaction.contact__c,
+          accountId: transaction.account__c,
           hasContact: !!transaction.contact__c,
+          hasAccount: !!transaction.account__c,
         });
 
         if (
@@ -1590,6 +1635,7 @@ const processRefunds = async (
           (chargeFragment?.metadata as Record<string, unknown> | undefined) || undefined;
 
         let contactId: string | null = null;
+        let accountId: string | null = null;
         let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
 
         if (chargeFragment && chargeFragment.customer) {
@@ -1602,8 +1648,7 @@ const processRefunds = async (
 
         const customerMetadata =
           stripeCustomer && !stripeCustomer.deleted
-            ? (((stripeCustomer as Stripe.Customer).metadata as Record<string, unknown>) ||
-              undefined)
+            ? ((stripeCustomer as Stripe.Customer).metadata as Record<string, unknown>) || undefined
             : undefined;
         const customerMetadataSalesforceId = extractSalesforceIdFromMetadata(customerMetadata);
         const chargeMetadataSalesforceId = extractSalesforceIdFromMetadata(chargeMetadata);
@@ -1626,7 +1671,7 @@ const processRefunds = async (
               : null;
 
         if (metadataSalesforceId && selectedMetadata) {
-          contactId = await resolveContactIdFromMetadata(
+          const resolvedReference = await resolveSalesforceReferenceFromMetadata(
             salesforce,
             selectedMetadata,
             (...args: unknown[]) => context.log(...args),
@@ -1635,9 +1680,15 @@ const processRefunds = async (
             metadataSource || 'charge'
           );
 
-          if (!contactId) {
+          if (resolvedReference?.target === 'Contact') {
+            contactId = resolvedReference.id;
+          } else if (resolvedReference?.target === 'Account') {
+            accountId = resolvedReference.id;
+          }
+
+          if (!resolvedReference) {
             context.log(
-              '[StripeTrueUp] Stripe metadata salesforce_id provided on refund charge but could not be resolved; skipping contact creation fallback',
+              '[StripeTrueUp] Stripe metadata salesforce_id provided on refund charge but could not be resolved; skipping Salesforce creation fallback',
               {
                 refundId: refund.id,
                 chargeId: chargeFragment?.id ?? chargeId,
@@ -1647,6 +1698,15 @@ const processRefunds = async (
             );
           }
         } else if (chargeFragment && chargeFragment.customer) {
+          context.log(
+            '[StripeTrueUp] Falling back to existing Stripe customer matching flow for refund',
+            {
+              refundId: refund.id,
+              chargeId: chargeFragment.id,
+              customerId: extractStripeId(chargeFragment.customer),
+              matchPath: 'fallback_match',
+            }
+          );
           context.log('[StripeTrueUp] Processing refund customer', {
             refundId: refund.id,
             chargeId: chargeFragment.id,
@@ -1686,6 +1746,10 @@ const processRefunds = async (
                 refundId: refund.id,
                 contactId,
                 success: !!contactId,
+                matchPath:
+                  customerUpsertResult?.created === true
+                    ? 'created_new_salesforce_record'
+                    : 'fallback_match',
               });
             } catch (error) {
               context.log('[StripeTrueUp] Failed to upsert contact for refund', {
@@ -1750,20 +1814,35 @@ const processRefunds = async (
 
         if (contactId) {
           transaction.contact__c = contactId;
+          delete transaction.account__c;
           context.log('[StripeTrueUp] Associated contact with refund transaction', {
             contactId,
             refundId: refund.id,
+            matchPath: 'stripe_salesforce_id',
+          });
+        } else if (accountId) {
+          transaction.account__c = accountId;
+          delete transaction.contact__c;
+          context.log('[StripeTrueUp] Associated account with refund transaction', {
+            accountId,
+            refundId: refund.id,
+            matchPath: 'stripe_salesforce_id',
           });
         } else {
-          context.log('[StripeTrueUp] No contact ID to associate with refund transaction', {
-            refundId: refund.id,
-          });
+          context.log(
+            '[StripeTrueUp] No Salesforce record ID to associate with refund transaction',
+            {
+              refundId: refund.id,
+            }
+          );
         }
 
         context.log('[StripeTrueUp] Upserting refund transaction to Salesforce', {
           refundId: refund.id,
           contactId: transaction.contact__c,
+          accountId: transaction.account__c,
           hasContact: !!transaction.contact__c,
+          hasAccount: !!transaction.account__c,
         });
 
         if (
@@ -2100,9 +2179,7 @@ const validateEnvironment = (
       errors.push('QBO_CLIENT_SECRET is not configured (QuickBooks sync will fail)');
     }
     if (!process.env.QBO_REALM_ID && !process.env.QBO_COMPANY_ID) {
-      errors.push(
-        'QBO_REALM_ID or QBO_COMPANY_ID is not configured (QuickBooks sync will fail)'
-      );
+      errors.push('QBO_REALM_ID or QBO_COMPANY_ID is not configured (QuickBooks sync will fail)');
     }
   }
 
@@ -2122,7 +2199,10 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
 
     const bypassQboDefault = parseBoolean(process.env.STRIPE_TRUE_UP_BYPASS_QBO, false);
     const bypassQboParam =
-      query.bypassQbo ?? query.skipQbo ?? getHeader(req, 'x-bypass-qbo') ?? getHeader(req, 'x-skip-qbo');
+      query.bypassQbo ??
+      query.skipQbo ??
+      getHeader(req, 'x-bypass-qbo') ??
+      getHeader(req, 'x-skip-qbo');
     const bypassQbo = parseBoolean(bypassQboParam, bypassQboDefault);
 
     const defaultLiveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
@@ -2223,27 +2303,9 @@ const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promi
         limit
       );
     } else if (type === 'refunds') {
-      summary = await processRefunds(
-        context,
-        stripe,
-        from,
-        to,
-        dryRun,
-        resubmit,
-        bypassQbo,
-        limit
-      );
+      summary = await processRefunds(context, stripe, from, to, dryRun, resubmit, bypassQbo, limit);
     } else {
-      summary = await processPayouts(
-        context,
-        stripe,
-        from,
-        to,
-        dryRun,
-        resubmit,
-        bypassQbo,
-        limit
-      );
+      summary = await processPayouts(context, stripe, from, to, dryRun, resubmit, bypassQbo, limit);
     }
 
     if (!dryRun) {
