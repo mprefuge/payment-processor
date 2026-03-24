@@ -46,6 +46,11 @@ type QboCustomer = {
   CustomField?: QboCustomField[] | null;
 };
 
+type QboSalesforceIdExtraction = {
+  value: string | null;
+  matchedByName: boolean;
+};
+
 type QboSalesReceipt = {
   Id?: string | number | null;
   DocNumber?: string | null;
@@ -183,6 +188,21 @@ const toTrimmed = (value: unknown): string | null => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
+const expandComparableSalesforceIds = (value: string): string[] => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const normalized = trimmed.toLowerCase();
+  const variants = new Set<string>([normalized]);
+  if (trimmed.length >= 15) {
+    variants.add(trimmed.slice(0, 15).toLowerCase());
+  }
+
+  return [...variants];
+};
+
 const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
   if (typeof value === 'boolean') {
     return value;
@@ -258,18 +278,67 @@ const readSalesforceId = async (request: HttpRequest): Promise<string | null> =>
   return null;
 };
 
-const getQboSalesforceId = (customer: QboCustomer | null | undefined): string | null => {
-  const customFields = Array.isArray(customer?.CustomField) ? customer.CustomField : [];
-  const field = customFields.find((entry) => entry?.Name === 'Salesforce ID');
-  return toTrimmed(field?.StringValue);
-};
-
 const normalizeQboCustomerId = (value: unknown): string | null => {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return String(value);
   }
 
   return toTrimmed(value);
+};
+
+const normalizeFieldName = (value: unknown): string =>
+  (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const extractComparableCustomFieldIds = (value: unknown): string[] => {
+  const trimmed = toTrimmed(value);
+  if (!trimmed) {
+    return [];
+  }
+
+  const compact = trimmed.replace(/[^A-Za-z0-9]/g, '');
+  if (!/^[A-Za-z0-9]{15,18}$/.test(compact)) {
+    return [];
+  }
+
+  return expandComparableSalesforceIds(compact);
+};
+
+const extractQboSalesforceId = (
+  customer: QboCustomer | null | undefined,
+  allowedComparableIds?: Set<string>
+): QboSalesforceIdExtraction => {
+  const customFields = Array.isArray(customer?.CustomField) ? customer.CustomField : [];
+
+  for (const entry of customFields) {
+    const normalizedName = normalizeFieldName(entry?.Name);
+    if (normalizedName === 'salesforceid') {
+      return {
+        value: toTrimmed(entry?.StringValue),
+        matchedByName: true,
+      };
+    }
+  }
+
+  if (!allowedComparableIds || !allowedComparableIds.size) {
+    return { value: null, matchedByName: false };
+  }
+
+  for (const entry of customFields) {
+    const fieldValue = toTrimmed(entry?.StringValue);
+    if (!fieldValue) {
+      continue;
+    }
+
+    const candidates = extractComparableCustomFieldIds(fieldValue);
+    if (candidates.some((candidate) => allowedComparableIds.has(candidate))) {
+      return {
+        value: fieldValue,
+        matchedByName: false,
+      };
+    }
+  }
+
+  return { value: null, matchedByName: false };
 };
 
 const fetchSalesforceRecordById = async (
@@ -337,6 +406,30 @@ const resolveSalesforceRecord = async (
   return null;
 };
 
+const queryAllSalesforceRecords = async <T>(
+  connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
+  soql: string
+): Promise<T[]> => {
+  const firstPage = (await connection.query(soql)) as unknown as
+    | { records?: T[]; done?: boolean; nextRecordsUrl?: string | null }
+    | T[];
+  const records = [...toRecords(firstPage)];
+
+  let done = Array.isArray(firstPage) ? true : firstPage?.done !== false;
+  let nextRecordsUrl = Array.isArray(firstPage) ? null : toTrimmed(firstPage?.nextRecordsUrl);
+
+  while (!done && nextRecordsUrl) {
+    const page = (await connection.queryMore(nextRecordsUrl)) as unknown as
+      | { records?: T[]; done?: boolean; nextRecordsUrl?: string | null }
+      | T[];
+    records.push(...toRecords(page));
+    done = Array.isArray(page) ? true : page?.done !== false;
+    nextRecordsUrl = Array.isArray(page) ? null : toTrimmed(page?.nextRecordsUrl);
+  }
+
+  return records;
+};
+
 const collectSalesforceLookupCandidateIds = async (
   connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
   resolvedRecord: ResolvedSalesforceRecord
@@ -362,8 +455,8 @@ const collectSalesforceLookupCandidateIds = async (
 
   const query =
     `SELECT Id FROM Contact WHERE AccountId = '${escapeSoqlLiteral(primaryId)}' ` +
-    'ORDER BY CreatedDate ASC LIMIT 200';
-  const contacts = toRecords(await connection.query<{ Id?: string }>(query));
+    'ORDER BY CreatedDate ASC';
+  const contacts = await queryAllSalesforceRecords<{ Id?: string }>(connection, query);
   for (const contact of contacts) {
     const contactId = toTrimmed(contact.Id);
     if (contactId) {
@@ -402,7 +495,7 @@ const findQuickBooksCustomersBySalesforceId = async (
   queryFn: typeof qboQuery
 ): Promise<QboCustomer[]> => {
   const normalizedIds = new Set(
-    salesforceIds.map((value) => value.trim().toLowerCase()).filter((value) => value.length > 0)
+    salesforceIds.flatMap((value) => expandComparableSalesforceIds(value))
   );
   if (!normalizedIds.size) {
     return [];
@@ -420,8 +513,12 @@ const findQuickBooksCustomersBySalesforceId = async (
     matches.push(
       ...page.filter(
         (customer) => {
-          const qboSalesforceId = getQboSalesforceId(customer)?.toLowerCase();
-          return !!qboSalesforceId && normalizedIds.has(qboSalesforceId);
+          const qboSalesforceId = extractQboSalesforceId(customer, normalizedIds).value;
+          if (!qboSalesforceId) {
+            return false;
+          }
+
+          return expandComparableSalesforceIds(qboSalesforceId).some((id) => normalizedIds.has(id));
         }
       )
     );
@@ -434,6 +531,27 @@ const findQuickBooksCustomersBySalesforceId = async (
   }
 
   return matches;
+};
+
+const buildSalesforceDisplayName = (record: SalesforceRecord): string | null => {
+  const name = toTrimmed(record.Name);
+  if (name) return name;
+
+  const firstName = toTrimmed(record.FirstName);
+  const lastName = toTrimmed(record.LastName);
+  if (firstName && lastName) return `${firstName} ${lastName}`;
+  return firstName ?? lastName;
+};
+
+const findQuickBooksCustomersByDisplayName = async (
+  displayName: string,
+  queryFn: typeof qboQuery
+): Promise<QboCustomer[]> => {
+  const queryText =
+    'SELECT Id, DisplayName, PrimaryEmailAddr, Active, CustomField FROM Customer ' +
+    `WHERE DisplayName = '${escapeQboLiteral(displayName)}'`;
+  const records = await queryFn<QboCustomer[]>(queryText);
+  return Array.isArray(records) ? records : [];
 };
 
 const updateSalesforceQuickBooksId = async (
@@ -868,7 +986,7 @@ const salesforceRecordQboSync = async (
       resolvedRecord
     );
     const normalizedSalesforceLookupCandidateIds = new Set(
-      salesforceLookupCandidateIds.map((value) => value.toLowerCase())
+      salesforceLookupCandidateIds.flatMap((value) => expandComparableSalesforceIds(value))
     );
     const qboCustomersBySalesforceId = await findQuickBooksCustomersBySalesforceId(
       salesforceLookupCandidateIds,
@@ -928,6 +1046,35 @@ const salesforceRecordQboSync = async (
       }
     }
 
+    if (!qboCustomer) {
+      const displayName = buildSalesforceDisplayName(resolvedRecord.record);
+      if (displayName) {
+        const nameMatches = await findQuickBooksCustomersByDisplayName(
+          displayName,
+          qboQueryWithDebug
+        );
+        if (nameMatches.length === 1) {
+          qboCustomer = nameMatches[0];
+          const qboCustomerId = normalizeQboCustomerId(qboCustomer.Id);
+          if (resolvedRecord.quickBooksFieldSupported && qboCustomerId) {
+            summary.plannedBackfills.push({
+              type: 'backfill_salesforce_quickbooks_id',
+              salesforceId,
+              qboCustomerId,
+              objectType: resolvedRecord.objectType,
+              fieldName: 'QuickBooks_ID__c',
+              reason: 'determined_from_display_name_match',
+            });
+          }
+        } else if (nameMatches.length > 1) {
+          summary.manualReviewItems.push({
+            code: 'multiple_qbo_customers_matched_by_name',
+            message: `Multiple QuickBooks customers match display name "${displayName}".`,
+          });
+        }
+      }
+    }
+
     if (qboCustomer) {
       const qboCustomerId = normalizeQboCustomerId(qboCustomer.Id);
       const shouldRefreshAuthoritativeCustomer =
@@ -953,11 +1100,20 @@ const salesforceRecordQboSync = async (
       }
 
       const authoritativeQboCustomerId = normalizeQboCustomerId(qboCustomer.Id);
-      const qboSalesforceId = getQboSalesforceId(qboCustomer);
+      const qboSalesforceId = extractQboSalesforceId(
+        qboCustomer,
+        normalizedSalesforceLookupCandidateIds
+      ).value;
       summary.resolvedQuickBooksCustomerId = authoritativeQboCustomerId;
       summary.linkingFields.quickbooksSalesforceFieldValue = qboSalesforceId;
 
-      if (qboSalesforceId && !normalizedSalesforceLookupCandidateIds.has(qboSalesforceId.toLowerCase())) {
+      const qboSalesforceComparableIds = qboSalesforceId
+        ? expandComparableSalesforceIds(qboSalesforceId)
+        : [];
+      if (
+        qboSalesforceComparableIds.length > 0 &&
+        !qboSalesforceComparableIds.some((id) => normalizedSalesforceLookupCandidateIds.has(id))
+      ) {
         summary.conflicts.push({
           code: 'quickbooks_salesforce_id_conflict',
           message:

@@ -27,9 +27,16 @@ describe('salesforceRecordQboSync', () => {
     ) => Promise<any> = async () => ({
       success: true,
       id: 'updated',
+    }),
+    queryMoreImpl: (
+      nextRecordsUrl: string
+    ) => Promise<{ records: any[]; done?: boolean; nextRecordsUrl?: string } | any[]> = async () => ({
+      records: [],
+      done: true,
     })
   ) => ({
     query: vi.fn(queryImpl),
+    queryMore: vi.fn((nextRecordsUrl: string) => queryMoreImpl(nextRecordsUrl)),
     sobject: vi.fn((objectName: string) => ({
       update: vi.fn((payload: Record<string, unknown>) => updateImpl(objectName, payload)),
     })),
@@ -212,6 +219,178 @@ describe('salesforceRecordQboSync', () => {
     ]);
   });
 
+  it('resolves an Account when QuickBooks stores a 15-character Salesforce ID', async () => {
+    const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
+    const accountId18 = '001UQ00000haZGPYA2';
+    const accountId15 = '001UQ00000haZGP';
+
+    const connection = createConnection(
+      async (soql: string) => {
+        if (soql.includes(`FROM Contact WHERE Id = '${accountId18}'`)) {
+          return { records: [] };
+        }
+
+        if (soql.includes(`FROM Account WHERE Id = '${accountId18}'`)) {
+          return { records: [{ Id: accountId18, Name: 'Acme 15-Char', QuickBooks_ID__c: null }] };
+        }
+
+        if (soql.includes(`FROM Contact WHERE AccountId = '${accountId18}'`)) {
+          return { records: [] };
+        }
+
+        if (soql.includes(`FROM Transaction__c WHERE Account__c = '${accountId18}'`)) {
+          return { records: [] };
+        }
+
+        return { records: [] };
+      },
+      async (objectName: string, payload: Record<string, unknown>) => {
+        updateCalls.push({ objectName, payload });
+        return { success: true, id: String(payload.Id ?? 'updated') };
+      }
+    );
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [
+          {
+            Id: '349',
+            DisplayName: 'Acme 15-Char',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: accountId15 }],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '349'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '349',
+        DisplayName: 'Acme 15-Char',
+        CustomField: [{ Name: 'Salesforce ID', StringValue: accountId15 }],
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: `http://localhost/api/qbo/salesforce-record-sync?salesforceId=${accountId18}&dryRun=false`,
+          query: new URLSearchParams({ salesforceId: accountId18, dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('349');
+    expect(body.summary.linkingFields.quickbooksSalesforceFieldValue).toBe(accountId15);
+    expect(updateCalls).toEqual([
+      {
+        objectName: 'Account',
+        payload: { Id: accountId18, QuickBooks_ID__c: '349' },
+      },
+    ]);
+  });
+
+  it('resolves an Account when the QuickBooks custom field label differs from Salesforce ID', async () => {
+    const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
+    const accountId = '001UQ00000haZGPYA2';
+
+    const connection = createConnection(
+      async (soql: string) => {
+        if (soql.includes(`FROM Contact WHERE Id = '${accountId}'`)) {
+          return { records: [] };
+        }
+
+        if (soql.includes(`FROM Account WHERE Id = '${accountId}'`)) {
+          return { records: [{ Id: accountId, Name: 'Acme Label Variant', QuickBooks_ID__c: null }] };
+        }
+
+        if (soql.includes(`FROM Contact WHERE AccountId = '${accountId}'`)) {
+          return { records: [] };
+        }
+
+        if (soql.includes(`FROM Transaction__c WHERE Account__c = '${accountId}'`)) {
+          return { records: [] };
+        }
+
+        return { records: [] };
+      },
+      async (objectName: string, payload: Record<string, unknown>) => {
+        updateCalls.push({ objectName, payload });
+        return { success: true, id: String(payload.Id ?? 'updated') };
+      }
+    );
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [
+          {
+            Id: '350',
+            DisplayName: 'Acme Label Variant',
+            CustomField: [
+              { Name: 'SFDC Link', StringValue: accountId },
+              { Name: 'Unrelated', StringValue: 'foo' },
+            ],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '350'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '350',
+        DisplayName: 'Acme Label Variant',
+        CustomField: [{ Name: 'SFDC Link', StringValue: accountId }],
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: `http://localhost/api/qbo/salesforce-record-sync?salesforceId=${accountId}&dryRun=false`,
+          query: new URLSearchParams({ salesforceId: accountId, dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('350');
+    expect(body.summary.linkingFields.quickbooksSalesforceFieldValue).toBe(accountId);
+    expect(updateCalls).toEqual([
+      {
+        objectName: 'Account',
+        payload: { Id: accountId, QuickBooks_ID__c: '350' },
+      },
+    ]);
+  });
+
   it('resolves an Account when the QuickBooks customer is linked to a child Contact Salesforce ID', async () => {
     const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
     const connection = createConnection(
@@ -295,6 +474,108 @@ describe('salesforceRecordQboSync', () => {
       {
         objectName: 'Account',
         payload: { Id: '001ACCOUNTVIACONTACT', QuickBooks_ID__c: '346' },
+      },
+    ]);
+  });
+
+  it('resolves an Account when the matching child Contact is on a paged Salesforce query result', async () => {
+    const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
+    const accountId = '001ACCOUNTPAGED';
+
+    const connection = createConnection(
+      async (soql: string) => {
+        if (soql.includes(`FROM Contact WHERE Id = '${accountId}'`)) {
+          return { records: [] };
+        }
+
+        if (soql.includes(`FROM Account WHERE Id = '${accountId}'`)) {
+          return {
+            records: [{ Id: accountId, Name: 'Paged Account', QuickBooks_ID__c: null }],
+          };
+        }
+
+        if (soql.includes(`FROM Contact WHERE AccountId = '${accountId}'`)) {
+          return {
+            records: [{ Id: '003FIRSTPAGE' }],
+            done: false,
+            nextRecordsUrl: '/services/data/v61.0/query/01gPAGEDNEXT',
+          } as any;
+        }
+
+        if (
+          soql.includes(`FROM Transaction__c WHERE Account__c = '${accountId}'`) &&
+          soql.includes("Contact__c IN ('003FIRSTPAGE', '003SECONDPAGE')")
+        ) {
+          return { records: [] };
+        }
+
+        return { records: [] };
+      },
+      async (objectName: string, payload: Record<string, unknown>) => {
+        updateCalls.push({ objectName, payload });
+        return { success: true, id: String(payload.Id ?? 'updated') };
+      },
+      async (nextRecordsUrl: string) => {
+        if (nextRecordsUrl === '/services/data/v61.0/query/01gPAGEDNEXT') {
+          return {
+            records: [{ Id: '003SECONDPAGE' }],
+            done: true,
+          };
+        }
+
+        return { records: [], done: true };
+      }
+    );
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [
+          {
+            Id: '351',
+            DisplayName: 'Paged Account',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '003SECONDPAGE' }],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '351'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '351',
+        DisplayName: 'Paged Account',
+        CustomField: [{ Name: 'Salesforce ID', StringValue: '003SECONDPAGE' }],
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: `http://localhost/api/qbo/salesforce-record-sync?salesforceId=${accountId}&dryRun=false`,
+          query: new URLSearchParams({ salesforceId: accountId, dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('351');
+    expect(updateCalls).toEqual([
+      {
+        objectName: 'Account',
+        payload: { Id: accountId, QuickBooks_ID__c: '351' },
       },
     ]);
   });
@@ -1270,5 +1551,93 @@ describe('salesforceRecordQboSync', () => {
         debugLogger: expect.any(Function),
       })
     );
+  });
+
+  it('resolves an Account via QBO DisplayName match when neither linking field is populated', async () => {
+    const accountId = '001UQ00000haZGPYA2';
+    const qboCustomerRecord = {
+      Id: '500',
+      DisplayName: 'Acme Corp',
+      CustomField: [] as any[],
+    };
+
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes(`FROM Contact WHERE Id = '${accountId}'`)) {
+        return { records: [] };
+      }
+
+      if (soql.includes(`FROM Account WHERE Id = '${accountId}'`)) {
+        return { records: [{ Id: accountId, Name: 'Acme Corp', QuickBooks_ID__c: null }] };
+      }
+
+      if (soql.includes(`FROM Contact WHERE AccountId = '${accountId}'`)) {
+        return { records: [] };
+      }
+
+      if (soql.includes(`FROM Transaction__c WHERE Account__c = '${accountId}'`)) {
+        return { records: [] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      // Full customer page scan — customer has no Salesforce ID custom field
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [qboCustomerRecord];
+      }
+
+      // Name-based direct lookup
+      if (query.includes("WHERE DisplayName = 'Acme Corp'")) {
+        return [qboCustomerRecord];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '500'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => null),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: `http://localhost/api/qbo/salesforce-record-sync?salesforceId=${accountId}&dryRun=true`,
+          query: new URLSearchParams({ salesforceId: accountId, dryRun: 'true' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('500');
+    expect(body.summary.plannedBackfills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'backfill_salesforce_quickbooks_id',
+          salesforceId: accountId,
+          qboCustomerId: '500',
+          reason: 'determined_from_display_name_match',
+        }),
+        expect.objectContaining({
+          type: 'backfill_qbo_salesforce_id',
+          salesforceId: accountId,
+          qboCustomerId: '500',
+          reason: 'determined_from_salesforce_record',
+        }),
+      ])
+    );
+    expect(body.summary.conflicts).toEqual([]);
   });
 });
