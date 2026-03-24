@@ -465,15 +465,41 @@ const updateSalesforceQuickBooksId = async (
 
 const loadSalesforceTransactions = async (
   connection: Awaited<ReturnType<SalesforceService['authenticate']>>,
-  objectType: SalesforceObjectType,
-  salesforceId: string
+  resolvedRecord: ResolvedSalesforceRecord
 ): Promise<SalesforceTransaction[]> => {
-  const relationshipField = objectType === 'Contact' ? 'Contact__c' : 'Account__c';
-  const soql =
+  const selectClause =
     'SELECT Id, Name, Transaction_Type__c, Amount_Gross__c, Amount_Fee__c, Amount_Net__c, ' +
     'Memo__c, Received_At__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ' +
-    'Stripe_Payout_Id__c, Posting_Error__c ' +
-    `FROM Transaction__c WHERE ${relationshipField} = '${escapeSoqlLiteral(salesforceId)}' ` +
+    'Stripe_Payout_Id__c, Posting_Error__c ';
+
+  const recordId = toTrimmed(resolvedRecord.record.Id);
+  if (!recordId) {
+    return [];
+  }
+
+  if (resolvedRecord.objectType === 'Contact') {
+    const soql =
+      `${selectClause}FROM Transaction__c ` +
+      `WHERE Contact__c = '${escapeSoqlLiteral(recordId)}' ` +
+      'ORDER BY Received_At__c DESC NULLS LAST';
+    return toRecords(await connection.query<SalesforceTransaction>(soql));
+  }
+
+  const childContactIds = await collectSalesforceLookupCandidateIds(connection, resolvedRecord);
+  const childContactOnlyIds = childContactIds.filter(
+    (candidateId) => candidateId.toLowerCase() !== recordId.toLowerCase()
+  );
+
+  let whereClause = `Account__c = '${escapeSoqlLiteral(recordId)}'`;
+  if (childContactOnlyIds.length > 0) {
+    whereClause += ` OR Contact__c IN (${childContactOnlyIds
+      .map((candidateId) => `'${escapeSoqlLiteral(candidateId)}'`)
+      .join(', ')})`;
+  }
+
+  const soql =
+    `${selectClause}FROM Transaction__c ` +
+    `WHERE ${whereClause} ` +
     'ORDER BY Received_At__c DESC NULLS LAST';
   return toRecords(await connection.query<SalesforceTransaction>(soql));
 };
@@ -978,11 +1004,7 @@ const salesforceRecordQboSync = async (
       };
     }
 
-    const transactions = await loadSalesforceTransactions(
-      connection,
-      resolvedRecord.objectType,
-      salesforceId
-    );
+    const transactions = await loadSalesforceTransactions(connection, resolvedRecord);
 
     for (const transaction of transactions) {
       const transactionType = toTrimmed(transaction.Transaction_Type__c);

@@ -299,6 +299,111 @@ describe('salesforceRecordQboSync', () => {
     ]);
   });
 
+  it('syncs child-contact transactions when invoked with an Account ID', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '001ACCOUNTTRANSACTIONS'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001ACCOUNTTRANSACTIONS'")) {
+        return {
+          records: [
+            { Id: '001ACCOUNTTRANSACTIONS', Name: 'Account Transaction Scope', QuickBooks_ID__c: '348' },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Contact WHERE AccountId = '001ACCOUNTTRANSACTIONS'")) {
+        return { records: [{ Id: '003ACCOUNTCHILD' }] };
+      }
+
+      if (
+        soql.includes('FROM Transaction__c WHERE Account__c = \'001ACCOUNTTRANSACTIONS\'') &&
+        soql.includes("Contact__c IN ('003ACCOUNTCHILD')")
+      ) {
+        return {
+          records: [
+            {
+              Id: 'a01AccountScopedTxn',
+              Transaction_Type__c: 'refund',
+              QBO_Doc_Id__c: '901',
+              QBO_Doc_Type__c: 'journal-entry',
+              Posted_to_QBO__c: true,
+            },
+          ],
+        };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '348'")) {
+        return [
+          {
+            Id: '348',
+            DisplayName: 'Account Transaction Scope',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '001ACCOUNTTRANSACTIONS' }],
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      if (query.includes("FROM JournalEntry WHERE Id = '901'")) {
+        return [{ Id: '901', DocNumber: 'REF-ACCOUNT-1' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '348'")) {
+        return [];
+      }
+
+      throw new Error(`Unexpected QBO query: ${query}`);
+    });
+
+    const markPostedToQbo = vi.fn();
+    const postRefundToQbo = vi.fn();
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '348',
+        DisplayName: 'Account Transaction Scope',
+        CustomField: [{ Name: 'Salesforce ID', StringValue: '001ACCOUNTTRANSACTIONS' }],
+      })),
+      postRefundToQbo,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=001ACCOUNTTRANSACTIONS&dryRun=true',
+          query: new URLSearchParams({
+            salesforceId: '001ACCOUNTTRANSACTIONS',
+            dryRun: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.resolvedSalesforceObjectType).toBe('Account');
+    expect(body.summary.resolvedQuickBooksCustomerId).toBe('348');
+    expect(body.summary.transactionCounts.salesforce.refund).toBe(1);
+    expect(body.summary.transactionCounts.quickbooks.refund).toBe(1);
+    expect(body.summary.plannedCreates).toEqual([]);
+    expect(postRefundToQbo).not.toHaveBeenCalled();
+    expect(markPostedToQbo).not.toHaveBeenCalled();
+  });
+
   it('resolves a Contact when the QuickBooks customer is linked to the parent Account Salesforce ID', async () => {
     const updateCalls: Array<{ objectName: string; payload: Record<string, unknown> }> = [];
     const connection = createConnection(
