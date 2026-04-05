@@ -226,7 +226,13 @@ const listStripeSessionsForCustomer = async (
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
 
-    sessions.push(...response.data.map((session) => ({ id: session.id, status: session.status, customer: session.customer })));
+    sessions.push(
+      ...response.data.map((session) => ({
+        id: session.id,
+        status: session.status,
+        customer: session.customer,
+      }))
+    );
 
     if (!response.has_more || response.data.length === 0) {
       break;
@@ -277,7 +283,11 @@ const cleanupStripeArtifacts = async (
 ): Promise<{ summary: TestArtifactCleanupSystemSummary; stripeCustomerIds: string[] }> => {
   const summary = createSummary('stripe', request.dryRun);
   const customers = await listStripeCustomersByTag(stripe, request.tag, request.maxStripeCustomers);
-  const taggedSessions = await listTaggedStripeSessions(stripe, request.tag, request.maxStripeCustomers * 5);
+  const taggedSessions = await listTaggedStripeSessions(
+    stripe,
+    request.tag,
+    request.maxStripeCustomers * 5
+  );
 
   const stripeCustomerIds = new Set(customers.map((customer) => customer.id));
   const sessionsById = new Map<string, StripeSessionRecord>();
