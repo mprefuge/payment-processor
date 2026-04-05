@@ -166,9 +166,16 @@ export const handleCheckoutSessionCompleted = async (
   );
 
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
+  const status = session.payment_status === 'paid' ? 'paid' : 'processing';
+
+  context.log('[StripeWebhook] Derived checkout session status', {
+    sessionId: session.id,
+    paymentStatus: session.payment_status ?? null,
+    derivedStatus: status,
+  });
 
   const transaction: TransactionUpsertDTO = {
-    ...buildCheckoutSessionTransaction(session, 'processing', undefined, event.id, event.livemode),
+    ...buildCheckoutSessionTransaction(session, status, undefined, event.id, event.livemode),
     ...(campaignId ? { campaign__c: campaignId } : {}),
   };
 
