@@ -86,9 +86,9 @@ jobs:
     needs: deploy-staging
     environment:
       name: staging
-      url: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL != '' && vars.AZURE_FUNCTIONAPP_STAGING_URL || format('https://{0}-{1}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME, env.STAGING_SLOT_NAME) }}
+      url: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL != '' && vars.AZURE_FUNCTIONAPP_STAGING_URL || format('https://{0}-{1}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME, vars.STAGING_SLOT_NAME) }}
     env:
-      STAGING_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL != '' && vars.AZURE_FUNCTIONAPP_STAGING_URL || format('https://{0}-{1}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME, env.STAGING_SLOT_NAME) }}
+      STAGING_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL != '' && vars.AZURE_FUNCTIONAPP_STAGING_URL || format('https://{0}-{1}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME, vars.STAGING_SLOT_NAME) }}
       STAGING_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
       STAGING_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
       STAGING_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
@@ -152,9 +152,9 @@ jobs:
     needs: deploy-production
     environment:
       name: production
-      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME) }}
+      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
     env:
-      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME) }}
+      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
       PRODUCTION_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
       PRODUCTION_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
       PRODUCTION_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
