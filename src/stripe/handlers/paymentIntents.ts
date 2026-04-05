@@ -204,7 +204,17 @@ const resolveCampaignAndMembership = async (
   failureLogMessage: string,
   failureDetails: Record<string, unknown>
 ): Promise<void> => {
-  if (!campaignMetadata || transaction.campaign__c) {
+  if (!campaignMetadata) {
+    return;
+  }
+
+  const existingCampaignValue =
+    typeof transaction.campaign__c === 'string' ? transaction.campaign__c.trim() : null;
+  const existingCampaignIsSalesforceId =
+    typeof existingCampaignValue === 'string' &&
+    /^701[0-9A-Za-z]{12}(?:[0-9A-Za-z]{3})?$/.test(existingCampaignValue);
+
+  if (existingCampaignIsSalesforceId) {
     return;
   }
 
