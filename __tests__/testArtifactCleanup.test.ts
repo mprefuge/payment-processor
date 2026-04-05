@@ -177,4 +177,42 @@ describe('executeTestArtifactCleanup', () => {
     const stripeSummary = result.results.find((entry) => entry.system === 'stripe');
     expect(stripeSummary?.counts.changed).toBeGreaterThan(0);
   });
+
+  it('uses stripe.search.search when checkout.sessions.search is unavailable', async () => {
+    const { stripe, expire, cancel, del } = createStripeMock();
+    const { connection, destroyTransactions, destroyContacts } = createSalesforceConnectionMock();
+    const deleteQuickBooksDocument = vi.fn().mockResolvedValue(undefined);
+
+    stripe.checkout.sessions.search = undefined;
+    stripe.customers.search.mockResolvedValue({ data: [], has_more: false, next_page: null });
+    (stripe as any).search = {
+      search: vi.fn().mockResolvedValue({
+        data: [{ id: 'cs_open_3', status: 'open', customer: 'cus_search_1' }],
+        has_more: false,
+        next_page: null,
+      }),
+    };
+    stripe.checkout.sessions.list.mockResolvedValue({ data: [], has_more: false });
+    stripe.subscriptions.list.mockResolvedValue({ data: [], has_more: false });
+
+    const result = await executeTestArtifactCleanup(
+      {
+        tag: 'deploy-smoke-789',
+        dryRun: false,
+      },
+      {
+        createStripeClient: () => stripe as any,
+        getSalesforceConnection: async () => connection as any,
+        findTaggedQuickBooksDocuments: async () => [],
+        deleteQuickBooksDocument,
+      }
+    );
+
+    expect((stripe as any).search.search).toHaveBeenCalled();
+    expect(expire).toHaveBeenCalledWith('cs_open_3');
+    expect(del).toHaveBeenCalledWith('cus_search_1');
+    expect(result.stripeCustomerIds).toEqual(['cus_search_1']);
+    const stripeSummary = result.results.find((entry) => entry.system === 'stripe');
+    expect(stripeSummary?.counts.changed).toBeGreaterThan(0);
+  });
 });

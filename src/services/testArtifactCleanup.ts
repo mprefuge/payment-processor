@@ -244,7 +244,7 @@ const listStripeSessionsForCustomer = async (
   return sessions;
 };
 
-const listTaggedStripeSessions = async (
+const listTaggedStripeSessionsUsingCheckoutSearch = async (
   stripe: Stripe,
   tag: string,
   limit: number
@@ -275,6 +275,58 @@ const listTaggedStripeSessions = async (
   }
 
   return sessions;
+};
+
+const listTaggedStripeSessionsUsingGlobalSearch = async (
+  stripe: Stripe,
+  tag: string,
+  limit: number
+): Promise<StripeSessionRecord[]> => {
+  const sessions: StripeSessionRecord[] = [];
+  let page: string | undefined;
+  const globalSearch: any = (stripe as any).search;
+
+  while (sessions.length < limit) {
+    const response: any = await globalSearch.search({
+      query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
+      type: 'checkout.session',
+      limit: Math.min(100, limit - sessions.length),
+      ...(page ? { page } : {}),
+    });
+
+    sessions.push(
+      ...((response.data as any[]).map((session) => ({
+        id: session.id,
+        status: session.status,
+        customer: session.customer,
+      })) as StripeSessionRecord[])
+    );
+
+    if (!response.has_more || !response.next_page) {
+      break;
+    }
+
+    page = response.next_page;
+  }
+
+  return sessions;
+};
+
+const listTaggedStripeSessions = async (
+  stripe: Stripe,
+  tag: string,
+  limit: number
+): Promise<StripeSessionRecord[]> => {
+  if (typeof (stripe.checkout.sessions as any).search === 'function') {
+    return listTaggedStripeSessionsUsingCheckoutSearch(stripe, tag, limit);
+  }
+
+  const globalSearch = (stripe as any).search;
+  if (globalSearch && typeof globalSearch.search === 'function') {
+    return listTaggedStripeSessionsUsingGlobalSearch(stripe, tag, limit);
+  }
+
+  return [];
 };
 
 const cleanupStripeArtifacts = async (
