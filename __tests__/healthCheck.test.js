@@ -146,7 +146,11 @@ describe('healthCheck', () => {
     const quickBooksConnection = result.jsonBody.connections.find(
       (connection) => connection.name === 'accounting_quickbooks'
     );
-    expect(quickBooksConnection?.details?.tokenExchange).toMatchObject({ success: true, mode: 'persisted-refresh', refreshedAt: expect.any(String) });
+    expect(quickBooksConnection?.details?.tokenExchange).toMatchObject({
+      success: true,
+      mode: 'persisted-refresh',
+      refreshedAt: expect.any(String),
+    });
   });
 
   it('flags missing environment configuration', async () => {

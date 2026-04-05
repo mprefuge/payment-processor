@@ -129,9 +129,7 @@ function createListFetcher({
       ...restOptionParams,
       expand,
       created:
-        createdField === 'arrival_date'
-          ? undefined
-          : { gte: sinceEpoch, ...(optionCreated || {}) },
+        createdField === 'arrival_date' ? undefined : { gte: sinceEpoch, ...(optionCreated || {}) },
     };
 
     if (createdField === 'arrival_date') {

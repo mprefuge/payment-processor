@@ -1478,3 +1478,56 @@ describe('postPayoutToQbo', () => {
     ]);
   });
 });
+
+describe('postDisputeToQbo', () => {
+  it('creates dispute journal entry debiting losses and fees then crediting clearing', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Duplicate check for dispute journal entry
+      { JournalEntry: { Id: 'dispute-1' } }
+    );
+    const { postDisputeToQbo } = await importQboSvc();
+
+    const result = await postDisputeToQbo({
+      lossAmount: 7_500,
+      feeAmount: 1_500,
+      memo: 'Dispute memo',
+      date: new Date('2024-03-05'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'dispute-1', type: 'journal-entry' });
+
+    const journalBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    const journalLines = journalBody.Line.map((line: any) => ({
+      type: line.JournalEntryLineDetail.PostingType,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
+      amount: line.Amount,
+    }));
+    expect(journalLines).toEqual([
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_DISPUTE_LOSSES',
+          name: 'Dispute Losses',
+        },
+        amount: 75,
+      },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_FEES',
+          name: 'Stripe Fees',
+        },
+        amount: 15,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 90,
+      },
+    ]);
+  });
+});

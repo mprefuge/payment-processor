@@ -17,7 +17,7 @@ describe('manualQboSync', () => {
   beforeEach(async () => {
     vi.resetModules();
 
-        // Mock the qboSvc module
+    // Mock the qboSvc module
     vi.doMock('../src/services/qboSvc', () => ({
       postSalesReceipt: vi.fn(),
       postJournalEntry: vi.fn(),
@@ -72,38 +72,42 @@ describe('manualQboSync', () => {
     delete process.env.QBO_ENVIRONMENT;
   });
 
-  it('successfully syncs a sales receipt', async () => {
-    // Note: In test environment, QBO calls will fail due to invalid credentials
-    // This tests that the handler properly handles the request and calls the right function
-    const { context } = createContext();
-    const req = {
-      json: vi.fn().mockResolvedValue({
-        type: 'sales-receipt',
-        data: {
-          TxnDate: '2024-01-01',
-          DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
-          ClassRef: { name: 'Test Class' }, // Will be resolved automatically
-          Line: [
-            {
-              Amount: 100.0,
-              DetailType: 'SalesItemLineDetail',
-              SalesItemLineDetail: {
-                ItemRef: { name: 'Service' }, // Will be resolved automatically
-                ItemAccountRef: { name: 'Income' }, // Will be resolved automatically
+  it(
+    'successfully syncs a sales receipt',
+    async () => {
+      // Note: In test environment, QBO calls will fail due to invalid credentials
+      // This tests that the handler properly handles the request and calls the right function
+      const { context } = createContext();
+      const req = {
+        json: vi.fn().mockResolvedValue({
+          type: 'sales-receipt',
+          data: {
+            TxnDate: '2024-01-01',
+            DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
+            ClassRef: { name: 'Test Class' }, // Will be resolved automatically
+            Line: [
+              {
+                Amount: 100.0,
+                DetailType: 'SalesItemLineDetail',
+                SalesItemLineDetail: {
+                  ItemRef: { name: 'Service' }, // Will be resolved automatically
+                  ItemAccountRef: { name: 'Income' }, // Will be resolved automatically
+                },
               },
-            },
-          ],
-        },
-      }),
-    };
+            ],
+          },
+        }),
+      };
 
-    const response = await handler.default(req, context);
+      const response = await handler.default(req, context);
 
-    // Expect 500 due to QBO auth failure in test environment
-    expect(response.status).toBe(500);
-    expect(response.jsonBody.success).toBe(false);
-    expect(response.jsonBody.error).toContain('QuickBooks');
-  }, { timeout: 20000 });
+      // Expect 500 due to QBO auth failure in test environment
+      expect(response.status).toBe(500);
+      expect(response.jsonBody.success).toBe(false);
+      expect(response.jsonBody.error).toContain('QuickBooks');
+    },
+    { timeout: 20000 }
+  );
 
   it('defaults DepositToAccountRef for sales receipt when not provided', async () => {
     // Note: In test environment, QBO calls will fail due to invalid credentials
@@ -237,8 +241,8 @@ describe('manualQboSync', () => {
     expect(response.jsonBody.details).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          message: "CheckNum is required when PaymentMethodRef.name is 'Check'"
-        })
+          message: "CheckNum is required when PaymentMethodRef.name is 'Check'",
+        }),
       ])
     );
   });
@@ -416,7 +420,8 @@ describe('manualQboSync', () => {
           DepositToAccountRef: { name: 'Checking' },
           CustomerRef: { name: 'John Doe' },
           PrivateNote: '', // Empty note should be removed
-          BillAddr: { // Address with some empty fields
+          BillAddr: {
+            // Address with some empty fields
             Line1: '123 Main St',
             Line2: '', // Empty line should be removed
             City: 'Seattle',

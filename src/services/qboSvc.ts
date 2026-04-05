@@ -269,6 +269,14 @@ interface BuildBankDepositInput {
   targetAccountId?: string;
 }
 
+interface BuildJournalEntryFromLinesInput {
+  docNumber: string;
+  memo?: string;
+  date: string | Date;
+  lines: Array<QuickBooksJournalEntryLine | null>;
+  emptyLineError: string;
+}
+
 export interface PostChargeToQboInput {
   gross: number;
   fee: number;
@@ -346,6 +354,21 @@ const equalsIgnoreCase = (a: string | null | undefined, b: string | null | undef
   return Boolean(left && right && left === right);
 };
 
+const setTruncatedAddressField = (
+  target: QuickBooksPhysicalAddress,
+  key: keyof QuickBooksPhysicalAddress,
+  value: string | null | undefined,
+  maxLength: number
+): void => {
+  const normalized = truncate(value ?? null, maxLength);
+  if (normalized) {
+    target[key] = normalized;
+  }
+};
+
+const hasAddressFields = (address: QuickBooksPhysicalAddress): boolean =>
+  Object.keys(address).length > 0;
+
 const mapStripeAddress = (
   address: Stripe.Address | null | undefined
 ): QuickBooksPhysicalAddress | null => {
@@ -364,33 +387,14 @@ const mapStripeAddress = (
 
   const mapped: QuickBooksPhysicalAddress = {};
 
-  const line1 = extract('line1');
-  const line2 = extract('line2');
-  const city = extract('city');
-  const state = extract('state');
-  const postalCode = extract('postal_code');
-  const country = extract('country');
+  setTruncatedAddressField(mapped, 'Line1', extract('line1'), 500);
+  setTruncatedAddressField(mapped, 'Line2', extract('line2'), 500);
+  setTruncatedAddressField(mapped, 'City', extract('city'), 255);
+  setTruncatedAddressField(mapped, 'CountrySubDivisionCode', extract('state'), 255);
+  setTruncatedAddressField(mapped, 'PostalCode', extract('postal_code'), 30);
+  setTruncatedAddressField(mapped, 'Country', extract('country'), 255);
 
-  if (line1) {
-    mapped.Line1 = truncate(line1, 500) ?? undefined;
-  }
-  if (line2) {
-    mapped.Line2 = truncate(line2, 500) ?? undefined;
-  }
-  if (city) {
-    mapped.City = truncate(city, 255) ?? undefined;
-  }
-  if (state) {
-    mapped.CountrySubDivisionCode = truncate(state, 255) ?? undefined;
-  }
-  if (postalCode) {
-    mapped.PostalCode = truncate(postalCode, 30) ?? undefined;
-  }
-  if (country) {
-    mapped.Country = truncate(country, 255) ?? undefined;
-  }
-
-  return Object.keys(mapped).length > 0 ? mapped : null;
+  return hasAddressFields(mapped) ? mapped : null;
 };
 
 const sanitizeAddress = (
@@ -402,32 +406,21 @@ const sanitizeAddress = (
 
   const sanitized: QuickBooksPhysicalAddress = {};
 
-  if (address.Line1) {
-    sanitized.Line1 = truncate(address.Line1, 500) ?? undefined;
-  }
-  if (address.Line2) {
-    sanitized.Line2 = truncate(address.Line2, 500) ?? undefined;
-  }
-  if (address.Line3) {
-    sanitized.Line3 = truncate(address.Line3, 500) ?? undefined;
-  }
-  if (address.Line4) {
-    sanitized.Line4 = truncate(address.Line4, 500) ?? undefined;
-  }
-  if (address.City) {
-    sanitized.City = truncate(address.City, 255) ?? undefined;
-  }
-  if (address.CountrySubDivisionCode) {
-    sanitized.CountrySubDivisionCode = truncate(address.CountrySubDivisionCode, 255) ?? undefined;
-  }
-  if (address.PostalCode) {
-    sanitized.PostalCode = truncate(address.PostalCode, 30) ?? undefined;
-  }
-  if (address.Country) {
-    sanitized.Country = truncate(address.Country, 255) ?? undefined;
-  }
+  setTruncatedAddressField(sanitized, 'Line1', address.Line1, 500);
+  setTruncatedAddressField(sanitized, 'Line2', address.Line2, 500);
+  setTruncatedAddressField(sanitized, 'Line3', address.Line3, 500);
+  setTruncatedAddressField(sanitized, 'Line4', address.Line4, 500);
+  setTruncatedAddressField(sanitized, 'City', address.City, 255);
+  setTruncatedAddressField(
+    sanitized,
+    'CountrySubDivisionCode',
+    address.CountrySubDivisionCode,
+    255
+  );
+  setTruncatedAddressField(sanitized, 'PostalCode', address.PostalCode, 30);
+  setTruncatedAddressField(sanitized, 'Country', address.Country, 255);
 
-  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  return hasAddressFields(sanitized) ? sanitized : undefined;
 };
 
 const splitName = (
@@ -565,54 +558,31 @@ const deriveSalesReceiptCustomer = (source: StripeCustomerContext): EnsureCustom
   };
 };
 
+const getCheckoutMetadataValue = (
+  session: Stripe.Checkout.Session | null | undefined,
+  key: string
+): string | null => {
+  const metadata = session?.metadata as Record<string, unknown> | null | undefined;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+
+  const value = metadata[key];
+  return typeof value === 'string' ? (toTrimmed(value) ?? null) : null;
+};
+
 const getCheckoutTransactionType = (
   session: Stripe.Checkout.Session | null | undefined
 ): string | null => {
-  if (!session) {
-    const fallback = toTrimmed(env.accounting.defaultSalesItem);
-    return fallback ?? null;
-  }
-
-  const metadata = session.metadata as Record<string, unknown> | null | undefined;
-  if (!metadata || typeof metadata !== 'object') {
-    const fallback = toTrimmed(env.accounting.defaultSalesItem);
-    return fallback ?? null;
-  }
-
-  const value = metadata.transactionType;
-  if (typeof value === 'string') {
-    const normalized = toTrimmed(value);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  const fallback = toTrimmed(env.accounting.defaultSalesItem);
-  return fallback ?? null;
+  return (
+    getCheckoutMetadataValue(session, 'transactionType') ??
+    toTrimmed(env.accounting.defaultSalesItem) ??
+    null
+  );
 };
 
-const getCheckoutCategory = (
-  session: Stripe.Checkout.Session | null | undefined
-): string | null => {
-  if (!session) {
-    return null;
-  }
-
-  const metadata = session.metadata as Record<string, unknown> | null | undefined;
-  if (!metadata || typeof metadata !== 'object') {
-    return null;
-  }
-
-  const value = metadata.category;
-  if (typeof value === 'string') {
-    const normalized = toTrimmed(value);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  return null;
-};
+const getCheckoutCategory = (session: Stripe.Checkout.Session | null | undefined): string | null =>
+  getCheckoutMetadataValue(session, 'category');
 
 /**
  * Determine whether cover fees are enabled and the configured amount.  Covers
@@ -2109,6 +2079,26 @@ export const buildBankDeposit = ({
   };
 };
 
+const buildJournalEntryFromLines = ({
+  docNumber,
+  memo,
+  date,
+  lines,
+  emptyLineError,
+}: BuildJournalEntryFromLinesInput): QuickBooksJournalEntry => {
+  const filteredLines = lines.filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
+  if (filteredLines.length === 0) {
+    throw new Error(emptyLineError);
+  }
+
+  return {
+    DocNumber: docNumber,
+    TxnDate: normalizeDate(date),
+    PrivateNote: toTrimmed(memo) ?? undefined,
+    Line: filteredLines,
+  };
+};
+
 const getFetcher = (options?: PostOptions): Fetcher => {
   if (options?.fetcher) {
     return options.fetcher;
@@ -3124,135 +3114,128 @@ export const postBankDeposit = (
   options?: PostOptions
 ): Promise<PostResult> => postToQbo('bank-deposit', bankDeposit, options);
 
-export const postChargeToQbo = async ({
-  gross,
-  fee,
-  memo,
-  date,
-  stripe,
-  options,
-}: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
-  const grossAmount = ensurePositiveAmount(gross, 'Gross amount');
-  const feeAmount = ensurePositiveAmount(fee, 'Fee amount');
-  const normalizedMemo = memo?.trim() || undefined;
+const postChargeAsSalesReceipt = async (input: {
+  grossAmount: number;
+  feeAmount: number;
+  normalizedMemo?: string;
+  date: string | Date;
+  stripe?: StripeCustomerContext;
+  options?: PostOptions;
+}): Promise<PostChargeToQboResult> => {
+  const { grossAmount, feeAmount, normalizedMemo, date, stripe, options } = input;
+  const chargeId = stripe?.charge?.id ?? null;
+  const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount, chargeId);
+  const context = await createRequestContext(options);
+  let receiptCustomer: SalesReceiptCustomerDetails | null = null;
 
-  const strategy = env.accounting.postingStrategy;
-
-  if (strategy === 'sales-receipt') {
-    const chargeId = stripe?.charge?.id ?? null;
-    const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount, chargeId);
-    const context = await createRequestContext(options);
-    let receiptCustomer: SalesReceiptCustomerDetails | null = null;
-
-    try {
-      const derived = deriveSalesReceiptCustomer({ ...(stripe ?? {}) });
-      const ensured = await ensureSalesReceiptCustomer(derived, context);
-      if (ensured) {
-        receiptCustomer = {
-          ref: ensured.ref,
-          email: ensured.email ?? null,
-          billingAddress: ensured.billingAddress ?? null,
-          shippingAddress: ensured.shippingAddress ?? null,
-        };
-      }
-    } catch (error) {
-      throw new Error(
-        `Failed to ensure QuickBooks customer for sales receipt: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+  try {
+    const derived = deriveSalesReceiptCustomer({ ...(stripe ?? {}) });
+    const ensured = await ensureSalesReceiptCustomer(derived, context);
+    if (ensured) {
+      receiptCustomer = {
+        ref: ensured.ref,
+        email: ensured.email ?? null,
+        billingAddress: ensured.billingAddress ?? null,
+        shippingAddress: ensured.shippingAddress ?? null,
+      };
     }
-
-    const lineOverrides = getSalesReceiptLineOverrides(stripe);
-
-    const transactionTypeName =
-      lineOverrides.productService ?? getCheckoutTransactionType(stripe?.checkoutSession);
-    if (!transactionTypeName) {
-      throw new Error(
-        'Stripe Checkout Session metadata.transactionType is required to determine the QuickBooks item for sales receipts.'
-      );
-    }
-
-    let revenueItemReference: QuickBooksReference;
-    try {
-      revenueItemReference = await resolveRevenueItemReference(transactionTypeName, context);
-    } catch (error) {
-      throw new Error(
-        `Failed to ensure QuickBooks item "${transactionTypeName}" for sales receipt: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
-
-    const revenueItemPayload = JSON.stringify({
-      value: revenueItemReference.value,
-      name: revenueItemReference.name ?? transactionTypeName,
-    });
-
-    // Build description as "Category - TransactionType"
-    const category = getCheckoutCategory(stripe?.checkoutSession);
-    const description =
-      lineOverrides.description ??
-      (category ? `${category} - ${transactionTypeName}` : transactionTypeName);
-
-    // Get cover fees information from any available Stripe object metadata
-    const coverFeesInfo = getCoverFeesInfo(stripe as any);
-
-    // defensive: if metadata specifies a cover fee equal to or larger than the
-    // gross amount we are about to post, ignore it and log a warning instead of
-    // letting buildSalesReceipt blow up with an exception.  This prevents a bad
-    // metadata value from taking down the webhook handler.
-    let coverFeesAmountCents = coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0;
-    if (coverFeesAmountCents >= grossAmount) {
-      context.log('[QuickBooks] Ignoring invalid cover fees metadata; amount >= gross', {
-        coverFeesAmountCents,
-        grossAmount,
-      });
-      coverFeesAmountCents = 0;
-    }
-
-    // Resolve account references for the sales receipt
-    const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
-    const depositAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
-    const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
-    await resolveAccountReferences([revenueAccountRef, depositAccountRef, feesAccountRef], context);
-
-    const salesReceipt = buildSalesReceipt({
-      docNumber: salesReceiptDocNumber,
-      amountCents: grossAmount,
-      memo: normalizedMemo,
-      date,
-      revenueItemName: revenueItemPayload,
-      depositAccountName: depositAccountRef.value,
-      feesAccountName: feesAccountRef.value,
-      stripeFeeAmountCents: feeAmount,
-      stripeChargeId: stripe?.charge?.id ?? null,
-      stripeInvoiceId:
-        typeof stripe?.charge?.invoice === 'string' ? (stripe as any).charge.invoice : null,
-      stripeInvoiceNumber: (stripe?.checkoutSession as any)?.invoice?.number ?? null,
-      stripeSubscriptionId:
-        (stripe?.checkoutSession as any)?.subscription ??
-        (stripe?.paymentIntent as any)?.subscription ??
-        null,
-      customer: receiptCustomer,
-      description,
-      coverFeesAmountCents,
-      lineQuantity: lineOverrides.quantity,
-      lineRate: lineOverrides.rate,
-      lineAmountCents: lineOverrides.amountCents,
-      lineServiceDate: lineOverrides.serviceDate,
-      lineClassRef: lineOverrides.classRef,
-    });
-
-    const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
-    return { qboId: salesReceiptResult.id, type: 'sales-receipt' };
+  } catch (error) {
+    throw new Error(
+      `Failed to ensure QuickBooks customer for sales receipt: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 
-  const chargeId = stripe?.charge?.id ?? null;
+  const lineOverrides = getSalesReceiptLineOverrides(stripe);
+
+  const transactionTypeName =
+    lineOverrides.productService ?? getCheckoutTransactionType(stripe?.checkoutSession);
+  if (!transactionTypeName) {
+    throw new Error(
+      'Stripe Checkout Session metadata.transactionType is required to determine the QuickBooks item for sales receipts.'
+    );
+  }
+
+  let revenueItemReference: QuickBooksReference;
+  try {
+    revenueItemReference = await resolveRevenueItemReference(transactionTypeName, context);
+  } catch (error) {
+    throw new Error(
+      `Failed to ensure QuickBooks item "${transactionTypeName}" for sales receipt: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+
+  const revenueItemPayload = JSON.stringify({
+    value: revenueItemReference.value,
+    name: revenueItemReference.name ?? transactionTypeName,
+  });
+
+  const category = getCheckoutCategory(stripe?.checkoutSession);
+  const description =
+    lineOverrides.description ??
+    (category ? `${category} - ${transactionTypeName}` : transactionTypeName);
+
+  const coverFeesInfo = getCoverFeesInfo(stripe as any);
+  let coverFeesAmountCents = coverFeesInfo.enabled ? coverFeesInfo.amountCents : 0;
+  if (coverFeesAmountCents >= grossAmount) {
+    context.log('[QuickBooks] Ignoring invalid cover fees metadata; amount >= gross', {
+      coverFeesAmountCents,
+      grossAmount,
+    });
+    coverFeesAmountCents = 0;
+  }
+
+  const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
+  const depositAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
+  const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
+  await resolveAccountReferences([revenueAccountRef, depositAccountRef, feesAccountRef], context);
+
+  const salesReceipt = buildSalesReceipt({
+    docNumber: salesReceiptDocNumber,
+    amountCents: grossAmount,
+    memo: normalizedMemo,
+    date,
+    revenueItemName: revenueItemPayload,
+    depositAccountName: depositAccountRef.value,
+    feesAccountName: feesAccountRef.value,
+    stripeFeeAmountCents: feeAmount,
+    stripeChargeId: stripe?.charge?.id ?? null,
+    stripeInvoiceId:
+      typeof stripe?.charge?.invoice === 'string' ? (stripe as any).charge.invoice : null,
+    stripeInvoiceNumber: (stripe?.checkoutSession as any)?.invoice?.number ?? null,
+    stripeSubscriptionId:
+      (stripe?.checkoutSession as any)?.subscription ??
+      (stripe?.paymentIntent as any)?.subscription ??
+      null,
+    customer: receiptCustomer,
+    description,
+    coverFeesAmountCents,
+    lineQuantity: lineOverrides.quantity,
+    lineRate: lineOverrides.rate,
+    lineAmountCents: lineOverrides.amountCents,
+    lineServiceDate: lineOverrides.serviceDate,
+    lineClassRef: lineOverrides.classRef,
+  });
+
+  const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
+  return { qboId: salesReceiptResult.id, type: 'sales-receipt' };
+};
+
+const postChargeAsJournalEntry = async (input: {
+  grossAmount: number;
+  feeAmount: number;
+  normalizedMemo?: string;
+  date: string | Date;
+  chargeId?: string | null;
+  options?: PostOptions;
+}): Promise<PostChargeToQboResult> => {
+  const { grossAmount, feeAmount, normalizedMemo, date, chargeId, options } = input;
   const journalDocNumber = buildDocNumber('CHGJE', date, grossAmount + feeAmount, chargeId);
   const context = await createRequestContext(options);
 
-  // Resolve account references for the journal entry
   const clearingAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
   const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
   const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
@@ -3273,6 +3256,92 @@ export const postChargeToQbo = async ({
   return { qboId: journalResult.id, type: 'journal-entry' };
 };
 
+const postJournalEntryFromLines = async (
+  input: BuildJournalEntryFromLinesInput & {
+    options?: PostOptions;
+  }
+): Promise<PostChargeToQboResult> => {
+  const journalResult = await postJournalEntry(buildJournalEntryFromLines(input), input.options);
+  return { qboId: journalResult.id, type: 'journal-entry' };
+};
+
+const resolveExistingPayoutDepositResult = async (
+  payoutId: string | undefined,
+  date: Date,
+  payoutAmount: number,
+  options?: PostOptions
+): Promise<PostChargeToQboResult | null> => {
+  if (!payoutId) {
+    return null;
+  }
+
+  const existingDepositId = await checkForPayoutDeposit(payoutId, date, payoutAmount, options);
+  if (!existingDepositId) {
+    return null;
+  }
+
+  logger.info('[QBO] Found existing deposit for payout', {
+    payoutId,
+    existingId: existingDepositId,
+  });
+  return { qboId: existingDepositId, type: 'bank-deposit' };
+};
+
+const buildResolvedPayoutDeposit = async (input: {
+  docNumber: string;
+  amountCents: number;
+  memo?: string;
+  date: Date;
+  options?: PostOptions;
+}): Promise<QuickBooksBankDeposit> => {
+  const context = await createRequestContext(input.options);
+  const sourceAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
+  const targetAccountRef = createAccountRef(env.quickBooks.accounts.operatingBank);
+  await resolveAccountReferences([sourceAccountRef, targetAccountRef], context);
+
+  return buildBankDeposit({
+    docNumber: input.docNumber,
+    amountCents: input.amountCents,
+    memo: input.memo,
+    date: input.date,
+    sourceAccountId: sourceAccountRef.value,
+    targetAccountId: targetAccountRef.value,
+  });
+};
+
+export const postChargeToQbo = async ({
+  gross,
+  fee,
+  memo,
+  date,
+  stripe,
+  options,
+}: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
+  const grossAmount = ensurePositiveAmount(gross, 'Gross amount');
+  const feeAmount = ensurePositiveAmount(fee, 'Fee amount');
+  const normalizedMemo = memo?.trim() || undefined;
+
+  if (env.accounting.postingStrategy === 'sales-receipt') {
+    return await postChargeAsSalesReceipt({
+      grossAmount,
+      feeAmount,
+      normalizedMemo,
+      date,
+      stripe,
+      options,
+    });
+  }
+
+  return await postChargeAsJournalEntry({
+    grossAmount,
+    feeAmount,
+    normalizedMemo,
+    date,
+    chargeId: stripe?.charge?.id ?? null,
+    options,
+  });
+};
+
 export const postRefundToQbo = async ({
   amount,
   memo,
@@ -3285,21 +3354,17 @@ export const postRefundToQbo = async ({
     throw new Error('Refund amount must be greater than zero.');
   }
 
-  const docNumber = buildDocNumber('REF', date, refundAmount);
-  const lines = [
-    createJournalEntryLine('debit', env.quickBooks.accounts.refunds, refundAmount, memo),
-    createJournalEntryLine('credit', env.quickBooks.accounts.stripeClearing, refundAmount, memo),
-  ].filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
-
-  const journalEntry: QuickBooksJournalEntry = {
-    DocNumber: docNumber,
-    TxnDate: normalizeDate(date),
-    PrivateNote: memo?.trim() || undefined,
-    Line: lines,
-  };
-
-  const result = await postJournalEntry(journalEntry, options);
-  return { qboId: result.id, type: 'journal-entry' };
+  return postJournalEntryFromLines({
+    docNumber: buildDocNumber('REF', date, refundAmount),
+    memo,
+    date,
+    lines: [
+      createJournalEntryLine('debit', env.quickBooks.accounts.refunds, refundAmount, memo),
+      createJournalEntryLine('credit', env.quickBooks.accounts.stripeClearing, refundAmount, memo),
+    ],
+    emptyLineError: 'Refund journal entry must include at least one non-zero line.',
+    options,
+  });
 };
 
 interface PostPayoutToQboInput {
@@ -3323,41 +3388,22 @@ export const postPayoutToQbo = async ({
     throw new Error('Payout amount must be greater than zero.');
   }
 
-  // If we have a payout ID, check for existing deposits with same date and amount
-  if (payoutId) {
-    try {
-      const existingDepositId = await checkForPayoutDeposit(payoutId, date, payoutAmount, options);
-      if (existingDepositId) {
-        logger.info('[QBO] Found existing deposit for payout', {
-          payoutId,
-          existingId: existingDepositId,
-        });
-        return { qboId: existingDepositId, type: 'bank-deposit' };
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.warn('[QBO] Failed to check for existing payout deposit, proceeding with post', {
-        payoutId,
-        error: errorMessage,
-      });
-    }
+  const existingDepositResult = await resolveExistingPayoutDepositResult(
+    payoutId,
+    date,
+    payoutAmount,
+    options
+  );
+  if (existingDepositResult) {
+    return existingDepositResult;
   }
 
-  const docNumber = buildDocNumber('PO', date, payoutAmount, payoutId);
-  const context = await createRequestContext(options);
-
-  // Resolve account references for the bank deposit
-  const sourceAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
-  const targetAccountRef = createAccountRef(env.quickBooks.accounts.operatingBank);
-  await resolveAccountReferences([sourceAccountRef, targetAccountRef], context);
-
-  const deposit = buildBankDeposit({
-    docNumber,
+  const deposit = await buildResolvedPayoutDeposit({
+    docNumber: buildDocNumber('PO', date, payoutAmount, payoutId),
     amountCents: payoutAmount,
-    memo: memo?.trim() || undefined,
+    memo: toTrimmed(memo) ?? undefined,
     date,
-    sourceAccountId: sourceAccountRef.value,
-    targetAccountId: targetAccountRef.value,
+    options,
   });
 
   const result = await postBankDeposit(deposit, options);
@@ -3379,55 +3425,27 @@ export const postDisputeToQbo = async ({
     throw new Error('Dispute posting requires a non-zero amount.');
   }
 
-  const docNumber = buildDocNumber('DSP', date, total);
-  const privateNote = memo?.trim() || undefined;
-  const lines: QuickBooksJournalEntryLine[] = [];
-
-  if (normalizedLoss > 0) {
-    const lossLine = createJournalEntryLine(
-      'debit',
-      env.quickBooks.accounts.disputeLosses,
-      normalizedLoss,
-      memo
-    );
-    if (lossLine) {
-      lines.push(lossLine);
-    }
-  }
-
-  if (normalizedFee > 0) {
-    const feeLine = createJournalEntryLine(
-      'debit',
-      env.quickBooks.accounts.fees,
-      normalizedFee,
-      memo
-    );
-    if (feeLine) {
-      lines.push(feeLine);
-    }
-  }
-
-  const clearingLine = createJournalEntryLine(
-    'credit',
-    env.quickBooks.accounts.stripeClearing,
-    total,
-    memo
-  );
-  if (clearingLine) {
-    lines.push(clearingLine);
-  }
-
-  const filteredLines = lines.filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
-
-  const journalEntry: QuickBooksJournalEntry = {
-    DocNumber: docNumber,
-    TxnDate: normalizeDate(date),
-    PrivateNote: privateNote,
-    Line: filteredLines,
-  };
-
-  const result = await postJournalEntry(journalEntry, options);
-  return { qboId: result.id, type: 'journal-entry' };
+  return postJournalEntryFromLines({
+    docNumber: buildDocNumber('DSP', date, total),
+    memo,
+    date,
+    lines: [
+      normalizedLoss > 0
+        ? createJournalEntryLine(
+            'debit',
+            env.quickBooks.accounts.disputeLosses,
+            normalizedLoss,
+            memo
+          )
+        : null,
+      normalizedFee > 0
+        ? createJournalEntryLine('debit', env.quickBooks.accounts.fees, normalizedFee, memo)
+        : null,
+      createJournalEntryLine('credit', env.quickBooks.accounts.stripeClearing, total, memo),
+    ],
+    emptyLineError: 'Dispute journal entry must contain at least one non-zero line.',
+    options,
+  });
 };
 
 export const ensureItem = async (

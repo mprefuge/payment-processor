@@ -19,7 +19,7 @@ import {
   timestampToDate,
   timestampToIsoString,
 } from '../utils';
-import { ensureStripeClient } from './common';
+import { ensureStripeClient, markDocumentPosted } from './common';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
 
@@ -61,6 +61,23 @@ const hasRequiredTransactionFields = (
   status: TransactionUpsertDTO['status__c'] | null | undefined,
   amountGross: number | null | undefined
 ): boolean => status != null && amountGross != null;
+
+const canUpsertTransaction = (transaction: TransactionUpsertDTO): boolean =>
+  hasRequiredTransactionFields(transaction.status__c, transaction.amount_gross__c);
+
+const logSkippedTransactionUpsert = (
+  context: HttpContext,
+  idField: 'chargeId' | 'refundId',
+  idValue: string,
+  transaction: TransactionUpsertDTO
+): void => {
+  context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+    [idField]: idValue,
+    status: transaction.status__c,
+    amountGross: transaction.amount_gross__c,
+    transaction,
+  });
+};
 
 const fetchChargeById = async (
   stripe: Stripe,
@@ -373,13 +390,8 @@ const updateChargeTransaction = async (
     posted_to_qbo__c: false,
   };
 
-  if (!hasRequiredTransactionFields(transaction.status__c, transaction.amount_gross__c)) {
-    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-      chargeId,
-      status: transaction.status__c,
-      amountGross: transaction.amount_gross__c,
-      transaction,
-    });
+  if (!canUpsertTransaction(transaction)) {
+    logSkippedTransactionUpsert(context, 'chargeId', chargeId, transaction);
     return;
   }
 
@@ -703,50 +715,6 @@ const getRefundAdapter = (
   return null;
 };
 
-const normalizeDocumentReference = (
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
-): StripeQuickBooksDocument | null => {
-  if (!doc) {
-    return null;
-  }
-
-  if (typeof (doc as { qboId?: unknown }).qboId === 'string') {
-    return {
-      id: (doc as { qboId: string }).qboId,
-      type: (doc as { type: string }).type,
-    };
-  }
-
-  if (typeof (doc as StripeQuickBooksDocument).id === 'string') {
-    return doc as StripeQuickBooksDocument;
-  }
-
-  return null;
-};
-
-const markRefundPosted = async (
-  salesforce: SalesforceSvc,
-  upsertResult: unknown,
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
-): Promise<void> => {
-  const reference = normalizeDocumentReference(doc);
-  if (!reference || typeof reference.id !== 'string' || typeof reference.type !== 'string') {
-    return;
-  }
-
-  const recordId =
-    upsertResult &&
-    typeof upsertResult === 'object' &&
-    'id' in upsertResult &&
-    typeof (upsertResult as { id?: string }).id === 'string'
-      ? ((upsertResult as { id?: string }).id ?? '').trim()
-      : '';
-
-  if (recordId) {
-    await salesforce.markPostedToQbo(recordId, reference);
-  }
-};
-
 const loadStripeContext = async (
   context: HttpContext,
   stripe: Stripe,
@@ -858,13 +826,8 @@ const upsertSalesforceTransaction = async (
     refundId: refund.id,
   });
 
-  if (!hasRequiredTransactionFields(transaction.status__c, transaction.amount_gross__c)) {
-    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-      refundId: refund.id,
-      status: transaction.status__c,
-      amountGross: transaction.amount_gross__c,
-      transaction,
-    });
+  if (!canUpsertTransaction(transaction)) {
+    logSkippedTransactionUpsert(context, 'refundId', refund.id, transaction);
     return { upsertResult: null, parentId };
   }
 
@@ -876,51 +839,33 @@ const upsertSalesforceTransaction = async (
   return { upsertResult, parentId };
 };
 
-const processRefund = async (
+const handleFailedRefund = async (
+  deps: StripeWebhookDependencies,
+  event: Stripe.Event,
+  refund: Stripe.Refund,
+  stripeContext: StripeContext
+): Promise<void> => {
+  const adapter = getRefundAdapter(deps);
+  if (adapter?.markRefundFailed) {
+    await adapter.markRefundFailed({
+      stripeRefundId: refund.id,
+      stripeEventId: event.id,
+      charge: stripeContext.charge,
+      paymentIntent: stripeContext.paymentIntent,
+      reason: normalizeMetadataValue(refund.metadata ?? null, 'failure_reason'),
+    });
+  }
+};
+
+const syncRefundReceipt = async (
   context: HttpContext,
   event: Stripe.Event,
   deps: StripeWebhookDependencies,
   refund: Stripe.Refund,
-  chargeHint?: Stripe.Charge | null
+  stripeContext: StripeContext,
+  salesforce: SalesforceSvc,
+  upsertResult: unknown
 ): Promise<void> => {
-  const stripe = ensureStripeClient(deps, event);
-  const salesforce = await deps.getSalesforceSvc();
-  const stripeContext = await loadStripeContext(context, stripe, refund, chargeHint ?? null);
-
-  const balanceTransaction = await resolveBalanceTransaction(stripe, stripeContext.charge, refund);
-
-  const { upsertResult, parentId } = await upsertSalesforceTransaction(
-    context,
-    refund,
-    stripeContext,
-    balanceTransaction,
-    salesforce
-  );
-
-  if (refund.status === 'failed') {
-    const adapter = getRefundAdapter(deps);
-    if (adapter?.markRefundFailed) {
-      await adapter.markRefundFailed({
-        stripeRefundId: refund.id,
-        stripeEventId: event.id,
-        charge: stripeContext.charge,
-        paymentIntent: stripeContext.paymentIntent,
-        reason: normalizeMetadataValue(refund.metadata ?? null, 'failure_reason'),
-      });
-    }
-    return;
-  }
-
-  await updateChargeTransaction(
-    context,
-    stripe,
-    refund,
-    stripeContext,
-    balanceTransaction,
-    salesforce,
-    parentId
-  );
-
   if (!env.accounting.syncEnabled) {
     return;
   }
@@ -945,12 +890,11 @@ const processRefund = async (
     stripeContext.paymentIntent,
     stripeContext.charge
   );
-
   const refundInput = buildRefundReceiptInput(event.id, refund, stripeContext, salesReceiptContext);
 
   await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
     const result = await adapter.upsertRefundReceipt(refundInput);
-    await markRefundPosted(
+    await markDocumentPosted(
       salesforce,
       upsertResult,
       result as StripeQuickBooksDocument | { qboId: string; type: string } | null | void
@@ -964,6 +908,45 @@ const processRefund = async (
       event
     );
   });
+};
+
+const processRefund = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies,
+  refund: Stripe.Refund,
+  chargeHint?: Stripe.Charge | null
+): Promise<void> => {
+  const stripe = ensureStripeClient(deps, event);
+  const salesforce = await deps.getSalesforceSvc();
+  const stripeContext = await loadStripeContext(context, stripe, refund, chargeHint ?? null);
+
+  const balanceTransaction = await resolveBalanceTransaction(stripe, stripeContext.charge, refund);
+
+  const { upsertResult, parentId } = await upsertSalesforceTransaction(
+    context,
+    refund,
+    stripeContext,
+    balanceTransaction,
+    salesforce
+  );
+
+  if (refund.status === 'failed') {
+    await handleFailedRefund(deps, event, refund, stripeContext);
+    return;
+  }
+
+  await updateChargeTransaction(
+    context,
+    stripe,
+    refund,
+    stripeContext,
+    balanceTransaction,
+    salesforce,
+    parentId
+  );
+
+  await syncRefundReceipt(context, event, deps, refund, stripeContext, salesforce, upsertResult);
 };
 
 const getLatestRefund = (charge: Stripe.Charge): Stripe.Refund | null => {

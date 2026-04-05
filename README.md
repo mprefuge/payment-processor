@@ -36,42 +36,18 @@ Copy the template and configure your environment variables:
 cp local.settings.json.template local.settings.json
 ```
 
-### Required Environment Variables
+Use [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) as the source of truth for:
 
-- `STRIPE_TEST_SECRET_KEY`: Stripe test mode secret key
-- `STRIPE_LIVE_SECRET_KEY`: Stripe live mode secret key
-- `STRIPE_WEBHOOK_SECRET_TEST`: Stripe webhook secret for test mode
-- `STRIPE_WEBHOOK_SECRET_LIVE`: Stripe webhook secret for live mode
+- required core startup variables
+- feature-specific variables for Salesforce, QuickBooks, SendGrid, and true-up
+- production-only recommendations such as `TEST_MODE=false`, `APPLICATIONINSIGHTS_CONNECTION_STRING`,
+  and full QuickBooks account mapping
 
-### Optional Integrations
+The local template includes the currently supported variable names. In particular:
 
-**SendGrid Email**:
-
-- `SENDGRID_API_KEY`
-- `NOTIFICATION_EMAIL_FROM`
-- `NOTIFICATION_EMAIL_TEST`
-- `NOTIFICATION_EMAIL_LIVE`
-
-**Salesforce CRM**:
-
-- `CRM_PROVIDER=salesforce`
-- `SF_CLIENT_ID`
-- `SF_CLIENT_SECRET`
-- `SF_LOGIN_URL` (optional, defaults to `https://login.salesforce.com`)
-
-**QuickBooks Online**:
-
-- `QBO_ENV=sandbox` or `production`
-- `QBO_REALM_ID`
-- `QBO_CLIENT_ID`
-- `QBO_CLIENT_SECRET`
-- `QBO_REFRESH_TOKEN`
-- `QBO_ACCOUNT_STRIPE_CLEARING`
-- `QBO_ACCOUNT_OPERATING_BANK`
-- `QBO_ACCOUNT_REVENUE`
-- `QBO_ACCOUNT_FEES`
-
-See [ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) for complete documentation.
+- use `QBO_DEFAULT_SALES_ITEM`, not `DEFAULT_SALES_ITEM`
+- use `SF_AUTH_MODE=client-credentials` for Salesforce in this codebase
+- provide `QBO_ACCOUNT_REFUNDS` and `QBO_ACCOUNT_DISPUTES` if QuickBooks sync is enabled
 
 ## QuickBooks Online Setup
 
@@ -107,6 +83,7 @@ npm run setup:qbo
 Copy the `QBO_REFRESH_TOKEN` value from the setup output and set it as an environment variable in your Azure Function App.
 
 The Azure Function will automatically:
+
 - Use the refresh token to obtain access tokens
 - Refresh tokens before they expire
 - Persist refreshed tokens to the token store so manual updates aren't typically necessary

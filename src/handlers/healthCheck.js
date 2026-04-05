@@ -40,6 +40,41 @@ const createConnectionStatus = ({ name, type, healthy, status, message, details 
   details,
 });
 
+const createDisabledConnectionStatus = ({ name, type, message }) =>
+  createConnectionStatus({
+    name,
+    type,
+    healthy: true,
+    status: 'disabled',
+    message,
+  });
+
+const createUnhealthyConnectionStatus = ({
+  name,
+  type,
+  message,
+  details = {},
+  status = 'unhealthy',
+}) =>
+  createConnectionStatus({
+    name,
+    type,
+    healthy: false,
+    status,
+    message,
+    details,
+  });
+
+const createHealthyConnectionStatus = ({ name, type, message, details = {} }) =>
+  createConnectionStatus({
+    name,
+    type,
+    healthy: true,
+    status: 'healthy',
+    message,
+    details,
+  });
+
 const checkStripeConnection = async (mode, secretKey) => {
   const connectionName = `stripe_${mode}`;
 
@@ -156,20 +191,17 @@ const checkCrmConnection = async () => {
   const crmConfig = getCrmConfigFromEnv();
 
   if (!crmConfig) {
-    return createConnectionStatus({
+    return createDisabledConnectionStatus({
       name: 'crm',
       type: 'crm',
-      healthy: true,
-      status: 'disabled',
       message: 'CRM integration disabled',
     });
   }
 
   if (crmConfig.unsupported) {
-    return createConnectionStatus({
+    return createUnhealthyConnectionStatus({
       name: `crm_${crmConfig.provider}`,
       type: 'crm',
-      healthy: false,
       status: 'unsupported',
       message: `Unsupported CRM provider configured: ${crmConfig.provider}`,
     });
@@ -177,10 +209,9 @@ const checkCrmConnection = async () => {
 
   const validation = dependencies.crmFactory.validateConfig(crmConfig.provider, crmConfig.config);
   if (!validation.isValid) {
-    return createConnectionStatus({
+    return createUnhealthyConnectionStatus({
       name: `crm_${crmConfig.provider}`,
       type: 'crm',
-      healthy: false,
       status: 'configuration_error',
       message: `CRM configuration invalid: ${validation.error}`,
     });
@@ -211,19 +242,15 @@ const checkCrmConnection = async () => {
       await crmService.connect();
     }
 
-    return createConnectionStatus({
+    return createHealthyConnectionStatus({
       name: `crm_${crmConfig.provider}`,
       type: 'crm',
-      healthy: true,
-      status: 'healthy',
       message: `${crmConfig.provider} connection healthy`,
     });
   } catch (error) {
-    return createConnectionStatus({
+    return createUnhealthyConnectionStatus({
       name: `crm_${crmConfig.provider}`,
       type: 'crm',
-      healthy: false,
-      status: 'unhealthy',
       message: `${crmConfig.provider} connection failed: ${error.message}`,
       details: { error: error.message },
     });
@@ -234,11 +261,9 @@ const checkAccountingConnection = async () => {
   const config = dependencies.accountingSyncConfigFactory();
 
   if (!config.isEnabled()) {
-    return createConnectionStatus({
+    return createDisabledConnectionStatus({
       name: 'accounting',
       type: 'accounting',
-      healthy: true,
-      status: 'disabled',
       message: 'Accounting sync disabled',
     });
   }
@@ -247,10 +272,9 @@ const checkAccountingConnection = async () => {
   const validation = config.validate();
 
   if (!validation.isValid) {
-    return createConnectionStatus({
+    return createUnhealthyConnectionStatus({
       name: `accounting_${providerName}`,
       type: 'accounting',
-      healthy: false,
       status: 'configuration_error',
       message: `Accounting configuration invalid: ${validation.errors.join(', ')}`,
       details: { errors: validation.errors },
@@ -322,11 +346,9 @@ const checkAccountingConnection = async () => {
       details,
     });
   } catch (error) {
-    return createConnectionStatus({
+    return createUnhealthyConnectionStatus({
       name: `accounting_${providerName}`,
       type: 'accounting',
-      healthy: false,
-      status: 'unhealthy',
       message: `${providerName} connection failed: ${error.message}`,
       details: { error: error.message },
     });
@@ -344,20 +366,16 @@ const checkPersistentStorageConnection = async () => {
     await syncLedgerStore.set(probeKey, probeValue);
     await syncLedgerStore.delete(probeKey);
 
-    return createConnectionStatus({
+    return createHealthyConnectionStatus({
       name: 'persistent_storage',
       type: 'storage',
-      healthy: true,
-      status: 'healthy',
       message: 'Persistent storage reachable',
       details: { namespace },
     });
   } catch (error) {
-    return createConnectionStatus({
+    return createUnhealthyConnectionStatus({
       name: 'persistent_storage',
       type: 'storage',
-      healthy: false,
-      status: 'unhealthy',
       message: `Persistent storage error: ${error.message}`,
       details: { namespace, error: error.message },
     });
@@ -424,29 +442,43 @@ const checkEnvironmentConfiguration = async () => {
     }
   });
 
-  const missingKeys = applicableKeys
-    .filter((def) => !process.env[def.key] || process.env[def.key].trim() === '')
-    .map((def) => def.key);
+  const checkedKeys = applicableKeys.map((def) => def.key);
+  const missingKeys = checkedKeys.filter(
+    (key) => !process.env[key] || process.env[key].trim() === ''
+  );
 
   if (missingKeys.length === 0) {
-    return createConnectionStatus({
+    return createHealthyConnectionStatus({
       name: 'environment',
       type: 'configuration',
-      healthy: true,
-      status: 'healthy',
       message: 'All required environment variables are set',
-      details: { checkedKeys: applicableKeys.map((def) => def.key) },
+      details: { checkedKeys },
     });
   }
 
-  return createConnectionStatus({
+  return createUnhealthyConnectionStatus({
     name: 'environment',
     type: 'configuration',
-    healthy: false,
-    status: 'unhealthy',
     message: 'Missing required environment variables',
     details: { missingKeys },
   });
+};
+
+const buildHealthResponseBody = (connections, timestamp) => {
+  const degraded = connections.some((connection) => connection.healthy === false);
+
+  return {
+    status: degraded ? 'degraded' : 'ok',
+    timestamp: timestamp.toISOString(),
+    uptime: process.uptime(),
+    version: process.env.APP_VERSION || null,
+    connections,
+    components: connections.map((connection) => ({
+      component: connection.name,
+      status: connection.status,
+      healthy: connection.healthy,
+    })),
+  };
 };
 
 module.exports = async function healthCheck(request, context) {
@@ -466,23 +498,7 @@ module.exports = async function healthCheck(request, context) {
   ];
 
   const connections = await Promise.all(connectionChecks);
-  const degraded = connections.some((connection) => connection.healthy === false);
-  const overallStatus = degraded ? 'degraded' : 'ok';
-
-  const components = connections.map((connection) => ({
-    component: connection.name,
-    status: connection.status,
-    healthy: connection.healthy,
-  }));
-
-  const responseBody = {
-    status: overallStatus,
-    timestamp: now.toISOString(),
-    uptime: process.uptime(),
-    version: process.env.APP_VERSION || null,
-    connections,
-    components,
-  };
+  const responseBody = buildHealthResponseBody(connections, now);
 
   const sanitizedBody = redactSecrets(responseBody);
   const safeConnections = Array.isArray(sanitizedBody?.connections)

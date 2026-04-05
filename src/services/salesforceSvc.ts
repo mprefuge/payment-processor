@@ -132,6 +132,14 @@ type TransactionContactLookupRecord = {
   Contact__c?: string | null;
 };
 
+type ContactLookupRecord = {
+  Id?: string;
+  FirstName?: string | null;
+  LastName?: string | null;
+  Email?: string | null;
+  Stripe_Customer_Id__c?: string | null;
+};
+
 const TRANSACTION_OBJECT = 'Transaction__c';
 
 const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
@@ -272,6 +280,17 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return [];
   };
 
+  const queryRecords = async <T extends { Id?: string }>(soql: string): Promise<T[]> =>
+    toLookupRecords(await connection.query<T>(soql)) as T[];
+
+  const findFirstRecordWithId = <T extends { Id?: string }>(
+    records: T[]
+  ): (T & { Id: string }) | null =>
+    records.find(
+      (record): record is T & { Id: string } =>
+        typeof record.Id === 'string' && record.Id.trim().length > 0
+    ) ?? null;
+
   const buildInLiteralList = (values: string[]): string =>
     values.map((value) => `'${escapeForSoqlLiteral(value)}'`).join(',');
 
@@ -292,13 +311,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const escapedObject = escapeForSoqlLiteral(sObject);
     const soql = `SELECT Id FROM RecordType WHERE SObjectType = '${escapedObject}' AND Name = '${escapedName}' LIMIT 1`;
 
-    const result = await connection.query<{ Id: string }>(soql);
-    const records = toLookupRecords(result);
-
-    const recordWithId = records.find(
-      (record): record is { Id: string } =>
-        typeof record.Id === 'string' && record.Id.trim().length > 0
-    );
+    const recordWithId = findFirstRecordWithId(await queryRecords<{ Id: string }>(soql));
 
     if (!recordWithId) {
       throw new Error(`Record type '${recordTypeName}' not found for ${sObject}`);
@@ -324,13 +337,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
     soql += ' LIMIT 1';
 
-    const result = await connection.query<TransactionLookupRecord>(soql);
-    const records = toLookupRecords(result);
-
-    const recordWithId = records.find(
-      (record): record is { Id: string } =>
-        typeof record.Id === 'string' && record.Id.trim().length > 0
-    );
+    const recordWithId = findFirstRecordWithId(await queryRecords<TransactionLookupRecord>(soql));
 
     return recordWithId?.Id ?? null;
   };
@@ -400,6 +407,279 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return null;
   };
 
+  const normalizeCustomerName = (
+    dto: CustomerUpsertDTO
+  ): { firstName: string | null; lastName: string | null } => {
+    let firstName = dto.FirstName?.trim() || null;
+    let lastName = dto.LastName?.trim() || null;
+
+    if (!firstName && !lastName) {
+      const nameParts = dto.Name.trim().split(/\s+/);
+      if (nameParts.length === 1) {
+        lastName = nameParts[0];
+      } else if (nameParts.length >= 2) {
+        firstName = nameParts[0];
+        lastName = nameParts.slice(1).join(' ');
+      }
+    }
+
+    return { firstName, lastName };
+  };
+
+  const buildContactWhereConditions = (
+    stripeCustomerId: string,
+    email: string | null,
+    firstName: string | null,
+    lastName: string | null
+  ): string[] => {
+    const conditions: string[] = [];
+
+    if (stripeCustomerId) {
+      conditions.push(`Stripe_Customer_Id__c LIKE '%${escapeForSoqlLiteral(stripeCustomerId)}%'`);
+    }
+
+    if (email) {
+      conditions.push(`Email = '${escapeForSoqlLiteral(email)}'`);
+    }
+
+    if (firstName && lastName) {
+      const escapedFirst = escapeForSoqlLiteral(firstName);
+      const escapedLast = escapeForSoqlLiteral(lastName);
+      conditions.push(`(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`);
+    }
+
+    return conditions;
+  };
+
+  const selectExistingContact = (
+    records: ContactLookupRecord[],
+    stripeCustomerId: string,
+    firstName: string | null,
+    lastName: string | null
+  ): (ContactLookupRecord & { Id: string }) | null => {
+    const contactsWithIds = records.filter(
+      (record): record is ContactLookupRecord & { Id: string } =>
+        typeof record.Id === 'string' && record.Id.trim().length > 0
+    );
+
+    const stripeIdMatch = contactsWithIds.find((contact) =>
+      contactHasStripeCustomerId(contact.Stripe_Customer_Id__c, stripeCustomerId)
+    );
+    if (stripeIdMatch) {
+      return stripeIdMatch;
+    }
+
+    if (firstName && lastName) {
+      const nameMatch = contactsWithIds.find((contact) => {
+        const firstNameMatch =
+          contact.FirstName &&
+          firstName &&
+          contact.FirstName.toLowerCase() === firstName.toLowerCase();
+        const lastNameMatch =
+          contact.LastName && lastName && contact.LastName.toLowerCase() === lastName.toLowerCase();
+        return firstNameMatch && lastNameMatch;
+      });
+
+      if (nameMatch) {
+        return nameMatch;
+      }
+    }
+
+    return contactsWithIds[0] ?? null;
+  };
+
+  const buildContactUpdateFields = (
+    existingContact: ContactLookupRecord & { Id: string },
+    stripeCustomerId: string,
+    email: string | null,
+    firstName: string | null,
+    lastName: string | null
+  ): Record<string, any> => {
+    const updateFields: Record<string, any> = {
+      Id: existingContact.Id,
+    };
+
+    if (stripeCustomerId) {
+      const mergedStripeIds = mergeStripeCustomerIds(
+        existingContact.Stripe_Customer_Id__c,
+        stripeCustomerId
+      );
+
+      if ((existingContact.Stripe_Customer_Id__c || '') !== mergedStripeIds) {
+        updateFields.Stripe_Customer_Id__c = mergedStripeIds;
+      }
+    }
+
+    if (email && email !== existingContact.Email) {
+      updateFields.Email = email;
+    }
+
+    if (firstName && firstName !== existingContact.FirstName) {
+      updateFields.FirstName = firstName;
+    }
+
+    if (lastName && lastName !== existingContact.LastName) {
+      updateFields.LastName = lastName;
+    }
+
+    return updateFields;
+  };
+
+  const normalizeOptionalId = (value: string | null | undefined): string | null => {
+    if (typeof value !== 'string') {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  };
+
+  const resolveTransactionRecordTypeName = (dto: TransactionUpsertDTO): 'General' | 'Payout' =>
+    dto.transaction_type__c === 'payout' ? 'Payout' : 'General';
+
+  const resolveOverrideTransactionId = async (
+    dto: TransactionUpsertDTO,
+    recordTypeId: string,
+    overrideId: string | null
+  ): Promise<string | null> => {
+    if (overrideId) {
+      return overrideId;
+    }
+
+    const existing = await findExistingTransactionIdForDto(dto, recordTypeId);
+    if (existing) {
+      return existing;
+    }
+
+    return findExistingByCustomerAmountDate(dto, recordTypeId);
+  };
+
+  const buildTransactionUpsertRecord = (options: {
+    dto: TransactionUpsertDTO;
+    key: TransactionExternalIdField;
+    normalizedExternalId: string;
+    recordTypeId: string;
+    id?: string | null;
+    omitExternalId?: boolean;
+  }): TransactionRecord =>
+    sanitizeTransactionRecord({
+      ...options.dto,
+      [options.key]: options.omitExternalId ? undefined : options.normalizedExternalId,
+      Id: options.id ?? undefined,
+      RecordTypeId: options.recordTypeId,
+    });
+
+  const upsertSingleTransactionRecord = async (
+    record: TransactionRecord,
+    externalIdField: string
+  ): Promise<UpsertResult> => {
+    const [result] = toArray(
+      await connection.upsert(TRANSACTION_OBJECT, [record], externalIdField, {
+        allOrNone: true,
+      })
+    );
+
+    return result;
+  };
+
+  const createSingleTransactionRecord = async (
+    record: TransactionRecord,
+    errorMessage: string
+  ): Promise<UpsertResult & { created: true }> => {
+    const [result] = toArray(
+      await connection.sobject(TRANSACTION_OBJECT).create(record, {
+        allOrNone: true,
+      })
+    );
+
+    if (!result.success) {
+      throw new Error(collectErrorMessages([result]) || errorMessage);
+    }
+
+    return {
+      ...result,
+      created: true,
+    };
+  };
+
+  const resolveRetryableTransactionUpsertFailure = (
+    result: FailedUpsertResult
+  ): { omitExternalIdOnCreate: boolean } | null => {
+    const hasUnsupportedExternalIdFieldError = result.errors.some(
+      (error) =>
+        typeof error?.message === 'string' && isUnsupportedExternalIdFieldError(error.message)
+    );
+    if (hasUnsupportedExternalIdFieldError) {
+      return { omitExternalIdOnCreate: false };
+    }
+
+    const hasDuplicateExternalIdError = result.errors.some(
+      (error) =>
+        typeof error?.message === 'string' &&
+        error.message.includes('more than one record found for external id field')
+    );
+    if (hasDuplicateExternalIdError) {
+      return { omitExternalIdOnCreate: true };
+    }
+
+    return null;
+  };
+
+  const recoverFailedTransactionUpsert = async (options: {
+    dto: TransactionUpsertDTO;
+    key: TransactionExternalIdField;
+    normalizedExternalId: string;
+    recordTypeId: string;
+    failure: FailedUpsertResult;
+  }): Promise<UpsertResult> => {
+    const retryPlan = resolveRetryableTransactionUpsertFailure(options.failure);
+    if (!retryPlan) {
+      const message =
+        collectErrorMessages([options.failure]) ||
+        `Failed to upsert transaction with ${options.key}=${options.normalizedExternalId}.`;
+      throw new Error(message);
+    }
+
+    const fallbackId = await resolveExistingTransactionId(
+      options.key,
+      options.normalizedExternalId,
+      options.recordTypeId
+    );
+
+    if (fallbackId) {
+      const fallbackResult = await upsertSingleTransactionRecord(
+        buildTransactionUpsertRecord({
+          dto: options.dto,
+          key: options.key,
+          normalizedExternalId: options.normalizedExternalId,
+          recordTypeId: options.recordTypeId,
+          id: fallbackId,
+        }),
+        'Id'
+      );
+
+      if (!fallbackResult.success) {
+        const fallbackMessage =
+          collectErrorMessages([fallbackResult]) ||
+          `Failed to upsert transaction with ${options.key}=${options.normalizedExternalId}.`;
+        throw new Error(fallbackMessage);
+      }
+
+      return fallbackResult;
+    }
+
+    return createSingleTransactionRecord(
+      buildTransactionUpsertRecord({
+        dto: options.dto,
+        key: options.key,
+        normalizedExternalId: options.normalizedExternalId,
+        recordTypeId: options.recordTypeId,
+        omitExternalId: retryPlan.omitExternalIdOnCreate,
+      }),
+      `Failed to create transaction with ${options.key}=${options.normalizedExternalId}.`
+    );
+  };
+
   const upsertTransactionByExternalId = async (
     dto: TransactionUpsertDTO,
     key: TransactionExternalIdField,
@@ -410,116 +690,32 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       throw new Error(`Transaction payload must include a value for ${key}.`);
     }
     const normalizedExternalId = externalId.trim();
-    let overrideId =
-      typeof options.overrideId === 'string' && options.overrideId.trim().length > 0
-        ? options.overrideId.trim()
-        : null;
-
-    const recordTypeName = dto.transaction_type__c === 'payout' ? 'Payout' : 'General';
+    const overrideId = normalizeOptionalId(options.overrideId);
+    const recordTypeName = resolveTransactionRecordTypeName(dto);
     const recordTypeId = await resolveRecordTypeId(recordTypeName);
 
-    if (!overrideId) {
-      const existing = await findExistingTransactionIdForDto(dto, recordTypeId);
-      if (existing) {
-        overrideId = existing;
-      } else {
-        const byContent = await findExistingByCustomerAmountDate(dto, recordTypeId);
-        if (byContent) {
-          overrideId = byContent;
-        }
-      }
-    }
-
-    const records = [
-      sanitizeTransactionRecord({
-        ...dto,
-        [key]: normalizedExternalId,
-        Id: overrideId ?? undefined,
-        RecordTypeId: recordTypeId,
+    const resolvedOverrideId = await resolveOverrideTransactionId(dto, recordTypeId, overrideId);
+    const result = await upsertSingleTransactionRecord(
+      buildTransactionUpsertRecord({
+        dto,
+        key,
+        normalizedExternalId,
+        recordTypeId,
+        id: resolvedOverrideId,
       }),
-    ];
-
-    const externalIdFieldToUse = overrideId ? 'Id' : resolveExternalIdField(key);
-
-    const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, records, externalIdFieldToUse, {
-        allOrNone: true,
-      })
+      resolvedOverrideId ? 'Id' : resolveExternalIdField(key)
     );
+
     if (!result.success) {
-      const unsupportedExternalIdFieldError = result.errors.find(
-        (error) =>
-          typeof error?.message === 'string' && isUnsupportedExternalIdFieldError(error.message)
-      );
-      const duplicateError = result.errors.find(
-        (error) =>
-          typeof error?.message === 'string' &&
-          error.message.includes('more than one record found for external id field')
-      );
-
-      if (duplicateError || unsupportedExternalIdFieldError) {
-        const fallbackId = await resolveExistingTransactionId(
-          key,
-          normalizedExternalId,
-          recordTypeId
-        );
-
-        if (fallbackId) {
-          const fallbackRecords = [
-            sanitizeTransactionRecord({
-              ...dto,
-              [key]: normalizedExternalId,
-              Id: fallbackId,
-              RecordTypeId: recordTypeId,
-            }),
-          ];
-
-          const [fallbackResult] = toArray(
-            await connection.upsert(TRANSACTION_OBJECT, fallbackRecords, 'Id', {
-              allOrNone: true,
-            })
-          );
-
-          if (!fallbackResult.success) {
-            const fallbackMessage =
-              collectErrorMessages([fallbackResult]) ||
-              `Failed to upsert transaction with ${key}=${normalizedExternalId}.`;
-            throw new Error(fallbackMessage);
-          }
-
-          return fallbackResult;
-        } else {
-          const newRecord = sanitizeTransactionRecord({
-            ...dto,
-            RecordTypeId: recordTypeId,
-            [key]: duplicateError ? undefined : normalizedExternalId,
-          });
-
-          const [insertResult] = toArray(
-            await connection.sobject(TRANSACTION_OBJECT).create(newRecord, {
-              allOrNone: true,
-            })
-          );
-
-          if (!insertResult.success) {
-            const insertMessage =
-              collectErrorMessages([insertResult]) ||
-              `Failed to create transaction with ${key}=${normalizedExternalId}.`;
-            throw new Error(insertMessage);
-          }
-
-          return {
-            ...insertResult,
-            created: true,
-          };
-        }
-      }
-
-      const message =
-        collectErrorMessages([result]) ||
-        `Failed to upsert transaction with ${key}=${normalizedExternalId}.`;
-      throw new Error(message);
+      return recoverFailedTransactionUpsert({
+        dto,
+        key,
+        normalizedExternalId,
+        recordTypeId,
+        failure: result,
+      });
     }
+
     return result;
   };
 
@@ -631,12 +827,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
     soql += ' LIMIT 1';
 
-    const result = await connection.query<TransactionContactLookupRecord>(soql);
-    const records = toLookupRecords(result) as TransactionContactLookupRecord[];
-    const record = records.find(
-      (candidate): candidate is { Id: string; Contact__c?: string | null } =>
-        typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
-    );
+    const record = findFirstRecordWithId(await queryRecords<TransactionContactLookupRecord>(soql));
 
     if (!record) {
       return null;
@@ -656,39 +847,16 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const upsertCustomerByStripeId = async (dto: CustomerUpsertDTO): Promise<UpsertResult> => {
     const stripeCustomerId = ensureNonEmpty(dto.stripe_customer_id__c, 'Stripe Customer ID');
     const name = ensureNonEmpty(dto.Name, 'Customer Name');
+    const email = dto.Email?.trim() || null;
+    const { firstName, lastName } = normalizeCustomerName(dto);
+    const whereConditions = buildContactWhereConditions(
+      stripeCustomerId,
+      email,
+      firstName,
+      lastName
+    );
 
-    let firstName = dto.FirstName?.trim() || null;
-    let lastName = dto.LastName?.trim() || null;
-
-    if (!firstName && !lastName) {
-      const nameParts = name.trim().split(/\s+/);
-      if (nameParts.length === 1) {
-        lastName = nameParts[0];
-      } else if (nameParts.length >= 2) {
-        firstName = nameParts[0];
-        lastName = nameParts.slice(1).join(' ');
-      }
-    }
-
-    const whereConditions: string[] = [];
-
-    if (stripeCustomerId) {
-      const escapedId = stripeCustomerId.replace(/'/g, "\\'");
-      whereConditions.push(`Stripe_Customer_Id__c LIKE '%${escapedId}%'`);
-    }
-
-    if (dto.Email && dto.Email.trim()) {
-      const escapedEmail = dto.Email.trim().replace(/'/g, "\\'");
-      whereConditions.push(`Email = '${escapedEmail}'`);
-    }
-
-    if (firstName && lastName) {
-      const escapedFirst = firstName.replace(/'/g, "\\'");
-      const escapedLast = lastName.replace(/'/g, "\\'");
-      whereConditions.push(`(FirstName = '${escapedFirst}' AND LastName = '${escapedLast}')`);
-    }
-
-    let existingContact: any = null;
+    let existingContact: (ContactLookupRecord & { Id: string }) | null = null;
 
     if (whereConditions.length > 0) {
       const query = `SELECT Id, FirstName, LastName, Email, Stripe_Customer_Id__c 
@@ -697,61 +865,24 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
                      ORDER BY CreatedDate DESC 
                      LIMIT 10`;
 
-      const queryResult = await connection.query(query);
-
-      if (queryResult.records && queryResult.records.length > 0) {
-        const stripeIdMatch = queryResult.records.find((c: any) =>
-          contactHasStripeCustomerId(c.Stripe_Customer_Id__c, stripeCustomerId)
-        );
-
-        if (stripeIdMatch) {
-          existingContact = stripeIdMatch;
-        } else if (firstName && lastName) {
-          const nameMatch = queryResult.records.find((c: any) => {
-            const firstNameMatch =
-              c.FirstName && firstName && c.FirstName.toLowerCase() === firstName.toLowerCase();
-            const lastNameMatch =
-              c.LastName && lastName && c.LastName.toLowerCase() === lastName.toLowerCase();
-            return firstNameMatch && lastNameMatch;
-          });
-
-          if (nameMatch) {
-            existingContact = nameMatch;
-          }
-        } else {
-          existingContact = queryResult.records[0];
-        }
-      }
+      existingContact = selectExistingContact(
+        await queryRecords<ContactLookupRecord>(query),
+        stripeCustomerId,
+        firstName,
+        lastName
+      );
     }
 
     let result: UpsertResult;
 
     if (existingContact) {
-      const updateFields: Record<string, any> = {
-        Id: existingContact.Id,
-      };
-
-      if (stripeCustomerId) {
-        const mergedStripeIds = mergeStripeCustomerIds(
-          existingContact.Stripe_Customer_Id__c,
-          stripeCustomerId
-        );
-
-        if ((existingContact.Stripe_Customer_Id__c || '') !== mergedStripeIds) {
-          updateFields.Stripe_Customer_Id__c = mergedStripeIds;
-        }
-      }
-
-      if (dto.Email && dto.Email.trim() && dto.Email.trim() !== existingContact.Email) {
-        updateFields.Email = dto.Email.trim();
-      }
-
-      if (firstName && firstName !== existingContact.FirstName) {
-        updateFields.FirstName = firstName;
-      }
-      if (lastName && lastName !== existingContact.LastName) {
-        updateFields.LastName = lastName;
-      }
+      const updateFields = buildContactUpdateFields(
+        existingContact,
+        stripeCustomerId,
+        email,
+        firstName,
+        lastName
+      );
 
       if (Object.keys(updateFields).length > 1) {
         const updateResult = await connection.sobject('Contact').update(updateFields as any);
@@ -788,8 +919,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         contactRecord.FirstName = firstName;
       }
 
-      if (dto.Email && dto.Email.trim()) {
-        contactRecord.Email = dto.Email.trim();
+      if (email) {
+        contactRecord.Email = email;
       }
 
       if (!cachedContactRecordTypeId) {
@@ -824,13 +955,10 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const findContactIdById = async (contactId: string): Promise<string | null> => {
     const normalizedId = ensureNonEmpty(contactId, 'Contact ID');
     const escapedId = escapeForSoqlLiteral(normalizedId);
-    const result = await connection.query<{ Id?: string }>(
-      `SELECT Id FROM Contact WHERE Id = '${escapedId}' LIMIT 1`
-    );
-    const records = toLookupRecords(result);
-    const record = records.find(
-      (candidate): candidate is { Id: string } =>
-        typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
+    const record = findFirstRecordWithId(
+      await queryRecords<{ Id?: string }>(
+        `SELECT Id FROM Contact WHERE Id = '${escapedId}' LIMIT 1`
+      )
     );
     return record?.Id ?? null;
   };
@@ -838,13 +966,10 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const findAccountIdById = async (accountId: string): Promise<string | null> => {
     const normalizedId = ensureNonEmpty(accountId, 'Account ID');
     const escapedId = escapeForSoqlLiteral(normalizedId);
-    const result = await connection.query<{ Id?: string }>(
-      `SELECT Id FROM Account WHERE Id = '${escapedId}' LIMIT 1`
-    );
-    const records = toLookupRecords(result);
-    const record = records.find(
-      (candidate): candidate is { Id: string } =>
-        typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
+    const record = findFirstRecordWithId(
+      await queryRecords<{ Id?: string }>(
+        `SELECT Id FROM Account WHERE Id = '${escapedId}' LIMIT 1`
+      )
     );
     return record?.Id ?? null;
   };

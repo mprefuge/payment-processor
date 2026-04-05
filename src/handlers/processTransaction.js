@@ -37,7 +37,7 @@ const createInMemoryStore = () => {
 };
 
 // Initialize idempotency store for transaction processing
-let idempotencyStore =
+const createIdempotencyStore = () =>
   process.env.DISABLE_AZURE_TABLES === '1'
     ? createInMemoryStore()
     : new AzureIdempotencyStore({
@@ -45,18 +45,14 @@ let idempotencyStore =
         processedPartitionKey: 'checkout-sessions',
       });
 
+let idempotencyStore = createIdempotencyStore();
+
 const setIdempotencyStore = (store) => {
   idempotencyStore = store;
 };
 
 const resetIdempotencyStore = () => {
-  idempotencyStore =
-    process.env.DISABLE_AZURE_TABLES === '1'
-      ? createInMemoryStore()
-      : new AzureIdempotencyStore({
-          tableName: process.env.TRANSACTION_IDEMPOTENCY_TABLE || 'TransactionIdempotency',
-          processedPartitionKey: 'checkout-sessions',
-        });
+  idempotencyStore = createIdempotencyStore();
 };
 const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
 const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
@@ -116,25 +112,52 @@ const normalizeModeToggle = (value) => {
   return null;
 };
 
+const readHeaderValue = (headers, name) => {
+  if (!headers) {
+    return null;
+  }
+
+  if (typeof headers.get === 'function') {
+    const value = headers.get(name);
+    return value == null ? null : value;
+  }
+
+  const direct = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
+  return direct == null ? null : direct;
+};
+
+const normalizeConfiguredMode = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized === 'live') {
+    return true;
+  }
+
+  if (normalized === 'test' || normalized === 'sandbox') {
+    return false;
+  }
+
+  if (TRUTHY_VALUES.has(normalized)) {
+    return true;
+  }
+
+  if (FALSY_VALUES.has(normalized)) {
+    return false;
+  }
+
+  return null;
+};
+
 const readModeToggleFromRequest = (request) => {
   if (!request || typeof request !== 'object') {
     return null;
   }
 
   const headers = request.headers;
-  const readHeader = (name) => {
-    if (!headers) {
-      return null;
-    }
-
-    if (typeof headers.get === 'function') {
-      const value = headers.get(name);
-      return value == null ? null : value;
-    }
-
-    const direct = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
-    return direct == null ? null : direct;
-  };
 
   const candidates = [];
 
@@ -153,8 +176,8 @@ const readModeToggleFromRequest = (request) => {
     }
   }
 
-  candidates.push(readHeader('x-stripe-mode'));
-  candidates.push(readHeader('x-livemode'));
+  candidates.push(readHeaderValue(headers, 'x-stripe-mode'));
+  candidates.push(readHeaderValue(headers, 'x-livemode'));
 
   for (const candidate of candidates) {
     const normalized = normalizeModeToggle(candidate);
@@ -179,24 +202,9 @@ const getConfiguredMode = (requestOrContext, maybeContext) => {
     return parseBooleanFlag(context.bindingData.livemode);
   }
 
-  if (typeof process.env.STRIPE_MODE === 'string') {
-    const normalized = process.env.STRIPE_MODE.trim().toLowerCase();
-
-    if (normalized === 'live') {
-      return true;
-    }
-
-    if (normalized === 'test' || normalized === 'sandbox') {
-      return false;
-    }
-
-    if (TRUTHY_VALUES.has(normalized)) {
-      return true;
-    }
-
-    if (FALSY_VALUES.has(normalized)) {
-      return false;
-    }
+  const configuredMode = normalizeConfiguredMode(process.env.STRIPE_MODE);
+  if (configuredMode !== null) {
+    return configuredMode;
   }
 
   const envFlag =
@@ -710,116 +718,188 @@ const getIntervalCount = (frequency) => {
   }
 };
 
-// Main function handler for Azure Functions v4 model
-module.exports = async function (request, context) {
-  // Handle both v3 (context, req) and v4 (request, context) signatures
+const resolveInvocation = (request, context) => {
   let actualRequest = request;
   let actualContext = context;
   let isV3 = false;
 
-  // Detect v3 signature: first param has res/bindings, second has body
   if (request && typeof request === 'object' && ('res' in request || 'bindings' in request)) {
     actualContext = request;
     actualRequest = context;
     isV3 = true;
   }
 
-  // Helper to handle both v3 and v4 responses
-  const sendResponse = (response) => {
-    if (isV3) {
-      actualContext.res = {
-        status: response.status,
-        headers: response.headers || {},
-        body: response.jsonBody ? JSON.stringify(response.jsonBody) : response.body,
-      };
-      return;
-    } else {
-      return response;
+  return { actualRequest, actualContext, isV3 };
+};
+
+const createResponseSender = (actualContext, isV3) => (response) => {
+  if (isV3) {
+    actualContext.res = {
+      status: response.status,
+      headers: response.headers || {},
+      body: response.jsonBody ? JSON.stringify(response.jsonBody) : response.body,
+    };
+    return;
+  }
+
+  return response;
+};
+
+const readIdempotencyKey = (request) => {
+  if (!request?.headers) {
+    return null;
+  }
+
+  if (typeof request.headers.get === 'function') {
+    return request.headers.get('idempotency-key') || request.headers.get('Idempotency-Key');
+  }
+
+  return request.headers['idempotency-key'] || request.headers['Idempotency-Key'] || null;
+};
+
+const buildIdempotencyReplayResponse = (idempotencyKey) => ({
+  status: 200,
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Idempotency-Replay': 'true',
+  },
+  jsonBody: {
+    message: 'Request already processed',
+    idempotencyKey,
+  },
+});
+
+const readRequestBody = async (actualRequest, isV3, debugLog) => {
+  let body;
+
+  debugLog('Request object type check', {
+    hasBody: !!actualRequest.body,
+    bodyType: typeof actualRequest.body,
+    bodyKeys: actualRequest.body ? Object.keys(actualRequest.body).length : 0,
+    hasJson: typeof actualRequest.json === 'function',
+    hasText: typeof actualRequest.text === 'function',
+    isV3,
+  });
+
+  if (!isV3 && typeof actualRequest.json === 'function') {
+    body = await actualRequest.json();
+    debugLog('Using v4 style body (from json())', { bodyKeys: Object.keys(body) });
+    return body;
+  }
+
+  if (
+    actualRequest.body &&
+    typeof actualRequest.body === 'object' &&
+    Object.keys(actualRequest.body).length > 0
+  ) {
+    body = actualRequest.body;
+    debugLog('Using v3 style body', { bodyKeys: Object.keys(body) });
+    return body;
+  }
+
+  if (typeof actualRequest.text === 'function') {
+    const text = await actualRequest.text();
+    debugLog('Got text from request', {
+      textLength: text?.length,
+      textPreview: text?.substring(0, 100),
+    });
+
+    try {
+      body = JSON.parse(text);
+      debugLog('Parsed JSON from text()', { bodyKeys: Object.keys(body) });
+    } catch (error) {
+      debugLog('Failed to parse JSON from text', { error: error.message });
     }
-  };
+  }
+
+  return body;
+};
+
+const resolveStripeCustomerId = async (stripe, customerDetails, log) => {
+  const fullName = `${customerDetails.firstname} ${customerDetails.lastname}`;
+  const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
+
+  if (existingCustomers.length === 0) {
+    log('Creating new Stripe customer');
+    const newCustomer = await createStripeCustomer(stripe, customerDetails);
+    return newCustomer.id;
+  }
+
+  log('Using existing Stripe customer');
+  const existingCustomer = existingCustomers[0];
+  const customerId = existingCustomer.id;
+
+  if (shouldUpdateStripeCustomer(existingCustomer, customerDetails)) {
+    log('Updating existing Stripe customer with latest information');
+    await updateStripeCustomer(stripe, customerId, customerDetails);
+  } else {
+    log('Skipping Stripe customer update; no profile changes detected');
+  }
+
+  return customerId;
+};
+
+const syncPendingCrmTransaction = async (
+  actualContext,
+  stripe,
+  customerDetails,
+  session,
+  requestData
+) => {
+  const contact = await syncContactToCrm(actualContext, stripe, customerDetails);
+  let pendingTransactionUpserted = false;
+
+  if (contact?.Id) {
+    const pendingResult = await createPendingTransaction(session, contact.Id, requestData);
+    pendingTransactionUpserted = Boolean(pendingResult);
+  } else {
+    console.log('No CRM contact available - skipping pending transaction creation');
+  }
+
+  if (!pendingTransactionUpserted) {
+    await upsertSalesforceTransaction(session, requestData);
+  }
+};
+
+const markIdempotencyRequestProcessed = async (idempotencyKey, log) => {
+  if (!idempotencyKey || !idempotencyStore) {
+    return;
+  }
+
+  await idempotencyStore.markProcessed(idempotencyKey);
+  log('Marked request as processed', { idempotencyKey });
+};
+
+// Main function handler for Azure Functions v4 model
+module.exports = async function (request, context) {
+  const { actualRequest, actualContext, isV3 } = resolveInvocation(request, context);
+  const sendResponse = createResponseSender(actualContext, isV3);
 
   const requestId = randomUUID();
   const secureDebugEnabled = process.env.SECURE_DEBUG === 'true';
   const log = (message, extra = {}) => {
     console.log(message, { requestId, ...extra });
   };
+  const debugLog = (message, extra = {}) => {
+    if (secureDebugEnabled) {
+      log(message, extra);
+    }
+  };
 
   try {
     log('Processing payment request');
 
-    // Check for idempotency key - handle both v3 and v4 header access
-    let idempotencyKey;
-    if (actualRequest.headers) {
-      if (typeof actualRequest.headers.get === 'function') {
-        // v4 style
-        idempotencyKey =
-          actualRequest.headers.get('idempotency-key') ||
-          actualRequest.headers.get('Idempotency-Key');
-      } else {
-        // v3 style - headers is a plain object
-        idempotencyKey =
-          actualRequest.headers['idempotency-key'] || actualRequest.headers['Idempotency-Key'];
-      }
-    }
+    const idempotencyKey = readIdempotencyKey(actualRequest);
 
     if (idempotencyKey && idempotencyStore) {
       const isProcessed = await idempotencyStore.isProcessed(idempotencyKey);
       if (isProcessed) {
         log('Duplicate request detected via idempotency key', { idempotencyKey });
-        return sendResponse({
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Idempotency-Replay': 'true',
-          },
-          jsonBody: {
-            message: 'Request already processed',
-            idempotencyKey,
-          },
-        });
+        return sendResponse(buildIdempotencyReplayResponse(idempotencyKey));
       }
     }
 
-    // Get request body - handle both v3 and v4
-    let body;
-
-    // Debug: Log what we're receiving
-    log('Request object type check', {
-      hasBody: !!actualRequest.body,
-      bodyType: typeof actualRequest.body,
-      bodyKeys: actualRequest.body ? Object.keys(actualRequest.body).length : 0,
-      hasJson: typeof actualRequest.json === 'function',
-      hasText: typeof actualRequest.text === 'function',
-      isV3,
-    });
-
-    // For v4, always try json() first even if body exists
-    if (!isV3 && typeof actualRequest.json === 'function') {
-      // v4 style - need to call json()
-      body = await actualRequest.json();
-      log('Using v4 style body (from json())', { bodyKeys: Object.keys(body) });
-    } else if (
-      actualRequest.body &&
-      typeof actualRequest.body === 'object' &&
-      Object.keys(actualRequest.body).length > 0
-    ) {
-      // v3 style - body is already parsed and has content
-      body = actualRequest.body;
-      log('Using v3 style body', { bodyKeys: Object.keys(body) });
-    } else if (typeof actualRequest.text === 'function') {
-      // v4 style fallback - try text() and parse
-      const text = await actualRequest.text();
-      log('Got text from request', {
-        textLength: text?.length,
-        textPreview: text?.substring(0, 100),
-      });
-      try {
-        body = JSON.parse(text);
-        log('Parsed JSON from text()', { bodyKeys: Object.keys(body) });
-      } catch (e) {
-        log('Failed to parse JSON from text', { error: e.message });
-      }
-    }
+    const body = await readRequestBody(actualRequest, isV3, debugLog);
 
     if (!body || Object.keys(body).length === 0) {
       log('No request body provided or body is empty');
@@ -832,8 +912,7 @@ module.exports = async function (request, context) {
     }
 
     const requestSummary = createRequestSummary(body);
-    console.error('[DEBUG] Request body summary:', requestSummary);
-    log('Request body summary', requestSummary);
+    debugLog('Request body summary', requestSummary);
 
     if (secureDebugEnabled) {
       log('Secure debug payload snapshot', { payload: redactSensitiveFields(body) });
@@ -841,19 +920,13 @@ module.exports = async function (request, context) {
 
     // Validate request
     const validation = validateRequest(body);
-    console.error('[DEBUG] Validation result:', {
-      isValid: validation.isValid,
-      hasError: Boolean(validation.error),
-      errorDetails: validation.error,
-    });
-    log('Validation result', {
+    debugLog('Validation result', {
       isValid: validation.isValid,
       hasError: Boolean(validation.error),
       errorDetails: validation.error,
     });
     if (!validation.isValid) {
-      console.error('[DEBUG] Validation failed with error:', validation.error);
-      log('Validation failed with error:', validation.error);
+      log('Validation failed with error', { error: validation.error });
       return sendResponse({
         status: 400,
         jsonBody: {
@@ -869,59 +942,18 @@ module.exports = async function (request, context) {
     const isLiveMode = getConfiguredMode(actualRequest, actualContext);
     const { stripe } = initializeServices(isLiveMode);
 
-    // Search for existing customer
-    const fullName = `${customerDetails.firstname} ${customerDetails.lastname}`;
-    const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
-
-    // Get or create customer
-    let customerId;
-    if (existingCustomers.length === 0) {
-      log('Creating new Stripe customer');
-      const newCustomer = await createStripeCustomer(stripe, customerDetails);
-      customerId = newCustomer.id;
-    } else {
-      log('Using existing Stripe customer');
-      const existingCustomer = existingCustomers[0];
-      customerId = existingCustomer.id;
-
-      if (shouldUpdateStripeCustomer(existingCustomer, customerDetails)) {
-        log('Updating existing Stripe customer with latest information');
-        await updateStripeCustomer(stripe, customerId, customerDetails);
-      } else {
-        log('Skipping Stripe customer update; no profile changes detected');
-      }
-    }
-
-    // Add Stripe Customer ID to customerDetails for CRM sync
-    customerDetails.stripeCustomerId = customerId;
+    customerDetails.stripeCustomerId = await resolveStripeCustomerId(stripe, customerDetails, log);
 
     // Create checkout session
     log('Creating Stripe checkout session');
-    const session = await createCheckoutSession(stripe, customerId, requestData);
+    const session = await createCheckoutSession(
+      stripe,
+      customerDetails.stripeCustomerId,
+      requestData
+    );
 
-    // Sync contact to CRM (Salesforce) if configured
-    // This happens after checkout session creation to not block the payment flow
-    const contact = await syncContactToCrm(actualContext, stripe, customerDetails);
-
-    let pendingTransactionUpserted = false;
-
-    if (contact?.Id) {
-      const pendingResult = await createPendingTransaction(session, contact.Id, requestData);
-      pendingTransactionUpserted = Boolean(pendingResult);
-    } else {
-      console.log('No CRM contact available - skipping pending transaction creation');
-    }
-
-    // Upsert pending transaction in CRM as a fallback when contact sync fails
-    if (!pendingTransactionUpserted) {
-      await upsertSalesforceTransaction(session, requestData);
-    }
-
-    // Mark request as processed if idempotency key was provided
-    if (idempotencyKey && idempotencyStore) {
-      await idempotencyStore.markProcessed(idempotencyKey);
-      log('Marked request as processed', { idempotencyKey });
-    }
+    await syncPendingCrmTransaction(actualContext, stripe, customerDetails, session, requestData);
+    await markIdempotencyRequestProcessed(idempotencyKey, log);
 
     // Return success response with checkout URL
     return sendResponse({

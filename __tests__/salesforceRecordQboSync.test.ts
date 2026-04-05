@@ -30,7 +30,9 @@ describe('salesforceRecordQboSync', () => {
     }),
     queryMoreImpl: (
       nextRecordsUrl: string
-    ) => Promise<{ records: any[]; done?: boolean; nextRecordsUrl?: string } | any[]> = async () => ({
+    ) => Promise<
+      { records: any[]; done?: boolean; nextRecordsUrl?: string } | any[]
+    > = async () => ({
       records: [],
       done: true,
     })
@@ -315,7 +317,9 @@ describe('salesforceRecordQboSync', () => {
         }
 
         if (soql.includes(`FROM Account WHERE Id = '${accountId}'`)) {
-          return { records: [{ Id: accountId, Name: 'Acme Label Variant', QuickBooks_ID__c: null }] };
+          return {
+            records: [{ Id: accountId, Name: 'Acme Label Variant', QuickBooks_ID__c: null }],
+          };
         }
 
         if (soql.includes(`FROM Contact WHERE AccountId = '${accountId}'`)) {
@@ -401,7 +405,9 @@ describe('salesforceRecordQboSync', () => {
 
         if (soql.includes("FROM Account WHERE Id = '001ACCOUNTVIACONTACT'")) {
           return {
-            records: [{ Id: '001ACCOUNTVIACONTACT', Name: 'Account Via Contact', QuickBooks_ID__c: null }],
+            records: [
+              { Id: '001ACCOUNTVIACONTACT', Name: 'Account Via Contact', QuickBooks_ID__c: null },
+            ],
           };
         }
 
@@ -589,7 +595,11 @@ describe('salesforceRecordQboSync', () => {
       if (soql.includes("FROM Account WHERE Id = '001ACCOUNTTRANSACTIONS'")) {
         return {
           records: [
-            { Id: '001ACCOUNTTRANSACTIONS', Name: 'Account Transaction Scope', QuickBooks_ID__c: '348' },
+            {
+              Id: '001ACCOUNTTRANSACTIONS',
+              Name: 'Account Transaction Scope',
+              QuickBooks_ID__c: '348',
+            },
           ],
         };
       }
@@ -599,7 +609,7 @@ describe('salesforceRecordQboSync', () => {
       }
 
       if (
-        soql.includes('FROM Transaction__c WHERE Account__c = \'001ACCOUNTTRANSACTIONS\'') &&
+        soql.includes("FROM Transaction__c WHERE Account__c = '001ACCOUNTTRANSACTIONS'") &&
         soql.includes("Contact__c IN ('003ACCOUNTCHILD')")
       ) {
         return {

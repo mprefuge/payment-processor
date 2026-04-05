@@ -9,27 +9,25 @@ import {
 import { z } from 'zod';
 
 import './preflight';
+import { createEventHandlerService } from './handlers/eventHandlerCommon';
 
-const healthCheck = require('./handlers/healthCheck');
-const processTransaction = require('./handlers/processTransaction');
-const stripeWebhookModule = require('./handlers/stripeWebhook');
-const stripeWebhook = stripeWebhookModule.default || stripeWebhookModule;
-const payoutSyncTrigger = require('./handlers/payoutSyncTrigger');
-const stripeTrueUpModule = require('./handlers/stripeTrueUp');
-const stripeTrueUp = stripeTrueUpModule.default || stripeTrueUpModule;
-const manualQboSyncModule = require('./handlers/manualQboSync');
-const manualQboSync = manualQboSyncModule.default || manualQboSyncModule;
-const salesforcePaymentsSyncModule = require('./handlers/salesforcePaymentsSync');
-const salesforcePaymentsSync = salesforcePaymentsSyncModule.default || salesforcePaymentsSyncModule;
-const qboCustomersSyncModule = require('./handlers/qboCustomersSync');
-const qboCustomersSync = qboCustomersSyncModule.default || qboCustomersSyncModule;
-const salesforceRecordQboSyncModule = require('./handlers/salesforceRecordQboSync');
-const salesforceRecordQboSync =
-  salesforceRecordQboSyncModule.default || salesforceRecordQboSyncModule;
-const eventRegistrationModule = require('./handlers/eventRegistration');
-const eventRegistration = eventRegistrationModule.default || eventRegistrationModule;
-const eventCheckInModule = require('./handlers/eventCheckIn');
-const eventCheckIn = eventCheckInModule.default || eventCheckInModule;
+const loadHandler = (modulePath: string): any => {
+  const loadedModule = require(modulePath);
+  return loadedModule.default || loadedModule;
+};
+
+const healthCheck = loadHandler('./handlers/healthCheck');
+const processTransaction = loadHandler('./handlers/processTransaction');
+const stripeWebhook = loadHandler('./handlers/stripeWebhook');
+const payoutSyncTrigger = loadHandler('./handlers/payoutSyncTrigger');
+const stripeTrueUp = loadHandler('./handlers/stripeTrueUp');
+const manualQboSync = loadHandler('./handlers/manualQboSync');
+const salesforcePaymentsSync = loadHandler('./handlers/salesforcePaymentsSync');
+const qboCustomersSync = loadHandler('./handlers/qboCustomersSync');
+const salesforceRecordQboSync = loadHandler('./handlers/salesforceRecordQboSync');
+const qboReceiptsSync = loadHandler('./handlers/qboReceiptsSync');
+const eventRegistration = loadHandler('./handlers/eventRegistration');
+const eventCheckIn = loadHandler('./handlers/eventCheckIn');
 
 // configure the Azure Functions runtime and add OpenAPI/Swagger support
 app.setup({ enableHttpStream: true });
@@ -52,13 +50,29 @@ const openAPIConfig: OpenAPIObjectConfig = {
     { name: 'Stripe', description: 'Stripe webhook and helper functions' },
     { name: 'QBO', description: 'QuickBooks Online sync endpoints' },
     { name: 'Salesforce', description: 'Salesforce sync endpoints' },
-    { name: 'Events', description: 'Event registration and check‑in' },
+    { name: 'Events', description: 'Event registration and check-in' },
   ],
 };
+
+const API_ROUTE_PREFIX = 'api';
+const OPENAPI_VERSION = '3.1.0';
 
 const functionCodeQuerySecurity = registerApiKeySecuritySchema('code', 'query');
 const functionKeyHeaderSecurity = registerApiKeySecuritySchema('x-functions-key', 'header');
 const functionAuthSecurity = [functionCodeQuerySecurity, functionKeyHeaderSecurity];
+
+const withAnonymousAuth = <T extends Record<string, unknown>>(options: T) => ({
+  authLevel: 'anonymous' as const,
+  azureFunctionRoutePrefix: API_ROUTE_PREFIX,
+  ...options,
+});
+
+const withFunctionAuth = <T extends Record<string, unknown>>(options: T) => ({
+  security: functionAuthSecurity,
+  authLevel: 'function' as const,
+  azureFunctionRoutePrefix: API_ROUTE_PREFIX,
+  ...options,
+});
 
 const BoolLikeQuerySchema = z.enum(['true', 'false', '1', '0', 'yes', 'no', 'on', 'off']);
 const PositiveIntLikeSchema = z.string().regex(/^\d+$/);
@@ -204,12 +218,78 @@ const SalesforceRecordQboSyncQuerySchema = z
   })
   .passthrough();
 
-const documents = [
-  registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'json'),
-  registerOpenAPIHandler('anonymous', openAPIConfig, '3.1.0', 'yaml'),
-];
+const QboReceiptsSyncQuerySchema = z
+  .object({
+    dryRun: BoolLikeQuerySchema.optional(),
+    debug: BoolLikeQuerySchema.optional(),
+    limit: PositiveIntLikeSchema.optional(),
+    start_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
+    end_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
+    start_position: PositiveIntLikeSchema.optional(),
+    max_results: PositiveIntLikeSchema.optional(),
+  })
+  .passthrough();
 
-registerSwaggerUIHandler('anonymous', 'api', documents);
+const documents = ['json', 'yaml'].map((format) =>
+  registerOpenAPIHandler('anonymous', openAPIConfig, OPENAPI_VERSION, format as 'json' | 'yaml')
+);
+
+registerSwaggerUIHandler('anonymous', API_ROUTE_PREFIX, documents);
+
+const jsonResponse = (status: number, body: unknown) => ({
+  status,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify(body),
+});
+
+const htmlResponse = (html: string) => ({
+  status: 200,
+  headers: {
+    'Content-Type': 'text/html',
+  },
+  body: html,
+});
+
+const loadEventConfigPayload = async () => {
+  const eventSvc = await createEventHandlerService();
+  const events = await eventSvc.getActiveEvents();
+  const staticConfig = require('./config/events.config.json');
+
+  return {
+    events,
+    theme: staticConfig.theme,
+    stripe: staticConfig.stripe,
+    salesforce: staticConfig.salesforce,
+  };
+};
+
+const eventConfigHandler = async (_request: any, context: any) => {
+  try {
+    return jsonResponse(200, await loadEventConfigPayload());
+  } catch (error) {
+    context.error('Error loading event config:', error);
+    return jsonResponse(500, {
+      error: 'Failed to load event configuration',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+};
+
+const eventLandingPageHandler = async () => {
+  const fs = require('fs');
+  const path = require('path');
+  const htmlPath = path.join(__dirname, 'public', 'event-registration.html');
+  const html = fs.readFileSync(htmlPath, 'utf-8');
+  return htmlResponse(html);
+};
 
 // Register HTTP-triggered functions
 registerFunction('healthCheck', 'Returns overall health and integration statuses', {
@@ -218,8 +298,7 @@ registerFunction('healthCheck', 'Returns overall health and integration statuses
     'Use to validate connectivity to configured downstream dependencies and verify runtime health.',
   tags: ['Health'],
   methods: ['GET'],
-  authLevel: 'anonymous',
-  azureFunctionRoutePrefix: 'api',
+  ...withAnonymousAuth({}),
   route: 'health',
   responses: {
     200: { description: 'Service healthy' },
@@ -232,8 +311,7 @@ registerFunction('processTransaction', 'Process a payment transaction', {
   description: 'Creates and processes a transaction request into downstream payment/CRM workflows.',
   tags: ['Transactions'],
   methods: ['POST'],
-  authLevel: 'anonymous',
-  azureFunctionRoutePrefix: 'api',
+  ...withAnonymousAuth({}),
   route: 'transaction',
   request: {
     query: z
@@ -259,10 +337,8 @@ registerFunction('stripeWebhook', 'Stripe webhook receiver', {
   handler: stripeWebhook,
   description: 'Receives Stripe webhook events and routes them to the appropriate domain handlers.',
   tags: ['Stripe'],
-  security: functionAuthSecurity,
   methods: ['POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'stripe/webhook',
   request: {
     headers: StripeWebhookHeadersSchema,
@@ -282,10 +358,8 @@ registerFunction('payoutSyncTrigger', 'Trigger payout sync with Stripe', {
   handler: payoutSyncTrigger,
   description: 'Manually triggers payout synchronization and reconciliation flow with Stripe/QBO.',
   tags: ['Stripe'],
-  security: functionAuthSecurity,
   methods: ['POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'stripe/payout-sync',
   request: {
     query: PayoutSyncQuerySchema,
@@ -297,22 +371,20 @@ registerFunction('payoutSyncTrigger', 'Trigger payout sync with Stripe', {
   },
 });
 
-registerFunction('stripeTrueUp', 'Stripe true‑up support', {
+registerFunction('stripeTrueUp', 'Stripe true-up support', {
   handler: stripeTrueUp,
   description: 'Runs Stripe true-up operations for payment reconciliation.',
   tags: ['Stripe'],
-  security: functionAuthSecurity,
   methods: ['GET', 'POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'stripe/true-up',
   request: {
     query: StripeTrueUpQuerySchema,
   },
   responses: {
-    200: { description: 'True‑up operation complete' },
+    200: { description: 'True-up operation complete' },
     400: { description: 'Invalid or missing query parameters' },
-    500: { description: 'True‑up operation failed' },
+    500: { description: 'True-up operation failed' },
   },
 });
 
@@ -320,10 +392,8 @@ registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
   handler: manualQboSync,
   description: 'Starts an on-demand QuickBooks Online synchronization cycle.',
   tags: ['QBO'],
-  security: functionAuthSecurity,
   methods: ['POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'qbo/manual-sync',
   request: {
     body: {
@@ -343,10 +413,8 @@ registerFunction('salesforcePaymentsSync', 'Salesforce payments synchronization'
   handler: salesforcePaymentsSync,
   description: 'Triggers synchronization of payments from Stripe into Salesforce records.',
   tags: ['Salesforce'],
-  security: functionAuthSecurity,
   methods: ['GET', 'POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'stripe/salesforce-payments-sync',
   request: {
     query: SalesforcePaymentsSyncQuerySchema,
@@ -362,10 +430,8 @@ registerFunction('qboCustomersSync', 'QBO customer sync to Salesforce contacts',
   description:
     'Synchronizes QuickBooks Online customers into Salesforce Contacts with dry-run and duplicate checks.',
   tags: ['QBO', 'Salesforce'],
-  security: functionAuthSecurity,
   methods: ['GET', 'POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'qbo/customers-salesforce-sync',
   request: {
     query: QboCustomersSyncQuerySchema,
@@ -373,6 +439,25 @@ registerFunction('qboCustomersSync', 'QBO customer sync to Salesforce contacts',
   responses: {
     200: { description: 'Customer sync completed' },
     500: { description: 'Customer sync failed' },
+  },
+});
+
+registerFunction('qboReceiptsSync', 'Sync QuickBooks sales receipts to Salesforce transactions', {
+  handler: qboReceiptsSync,
+  description:
+    'Pages through QuickBooks Online sales receipts (all or up to a limit), resolves each customer ' +
+    'to a Salesforce Contact or Account via the customer "Salesforce ID" custom field, and imports ' +
+    'unsynced receipts as Salesforce Transaction__c records. Supports dry-run mode.',
+  tags: ['QBO', 'Salesforce'],
+  methods: ['GET', 'POST'],
+  ...withFunctionAuth({}),
+  route: 'qbo/receipts-salesforce-sync',
+  request: {
+    query: QboReceiptsSyncQuerySchema,
+  },
+  responses: {
+    200: { description: 'Receipt sync completed - see summary for per-receipt outcomes' },
+    500: { description: 'Unhandled error during receipt sync' },
   },
 });
 
@@ -384,10 +469,8 @@ registerFunction(
     description:
       'Resolves a Salesforce Contact or Account by Id, links the matching QuickBooks customer, syncs supported transactions, and can optionally import unmatched QBO sales receipts into Salesforce with a dry-run summary.',
     tags: ['QBO', 'Salesforce'],
-    security: functionAuthSecurity,
     methods: ['GET', 'POST'],
-    authLevel: 'function',
-    azureFunctionRoutePrefix: 'api',
+    ...withFunctionAuth({}),
     route: 'qbo/salesforce-record-sync',
     request: {
       query: SalesforceRecordQboSyncQuerySchema,
@@ -430,8 +513,7 @@ registerFunction('eventRegistration', 'Register for an event', {
   description: 'Creates an event registration, including optional payment setup when required.',
   tags: ['Events'],
   methods: ['POST'],
-  authLevel: 'anonymous',
-  azureFunctionRoutePrefix: 'api',
+  ...withAnonymousAuth({}),
   route: 'events/register',
   request: {
     body: { content: { 'application/json': { schema: EventRegistrationSchema } } },
@@ -457,101 +539,29 @@ registerFunction('eventCheckIn', 'Check in an event attendee', {
   handler: eventCheckIn,
   description: 'Checks in an event registrant by registrationId or by email+eventId lookup.',
   tags: ['Events'],
-  security: functionAuthSecurity,
   methods: ['POST'],
-  authLevel: 'function',
-  azureFunctionRoutePrefix: 'api',
+  ...withFunctionAuth({}),
   route: 'events/checkin',
   request: { body: { content: { 'application/json': { schema: EventCheckInSchema } } } },
-  responses: { 200: { description: 'Check‑in outcome' }, 400: { description: 'Bad request' } },
+  responses: { 200: { description: 'Check-in outcome' }, 400: { description: 'Bad request' } },
 });
 
 registerFunction('eventConfig', 'Retrieve event configuration with theme', {
-  handler: async (request: any, context: any) => {
-    try {
-      // Get Salesforce connection
-      const CrmFactory = require('./services/salesforce/crmFactory');
-      const crmConfig = {
-        provider: 'salesforce',
-        config: {
-          clientId: process.env.SF_CLIENT_ID,
-          clientSecret: process.env.SF_CLIENT_SECRET,
-          loginUrl: process.env.SF_LOGIN_URL || 'https://login.salesforce.com',
-        },
-      };
-      const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
-      const salesforceConnection = await crmService.authenticate();
-
-      // Create event service and get active events
-      const { createEventSvc } = require('./services/eventSvc');
-      const { stripeClientFactory } = require('./services/stripeClientFactory');
-      const stripeClient = stripeClientFactory.getClient(false);
-      const eventSvc = createEventSvc({
-        salesforceConnection,
-        stripeClient,
-      });
-
-      const events = await eventSvc.getActiveEvents();
-
-      // Load theme from static config (could also be made dynamic if needed)
-      const staticConfig = require('./config/events.config.json');
-
-      const eventConfig = {
-        events,
-        theme: staticConfig.theme,
-        stripe: staticConfig.stripe,
-        salesforce: staticConfig.salesforce,
-      };
-
-      return {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(eventConfig),
-      };
-    } catch (error) {
-      context.error('Error loading event config:', error);
-      return {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          error: 'Failed to load event configuration',
-          details: error instanceof Error ? error.message : 'Unknown error',
-        }),
-      };
-    }
-  },
+  handler: eventConfigHandler,
   description: 'Returns currently active events and front-end theme/payment configuration.',
   tags: ['Events'],
-  azureFunctionRoutePrefix: 'api',
   methods: ['GET'],
-  authLevel: 'anonymous',
+  ...withAnonymousAuth({}),
   route: 'events/config',
   responses: { 200: { description: 'Configuration object' }, 500: { description: 'Server error' } },
 });
 
 registerFunction('eventLandingPage', 'Serve static event landing page html', {
-  handler: async (request: any, context: any) => {
-    const fs = require('fs');
-    const path = require('path');
-    const htmlPath = path.join(__dirname, 'public', 'event-registration.html');
-    const html = fs.readFileSync(htmlPath, 'utf-8');
-    return {
-      status: 200,
-      headers: {
-        'Content-Type': 'text/html',
-      },
-      body: html,
-    };
-  },
+  handler: eventLandingPageHandler,
   description: 'Serves the event registration landing page HTML document.',
   tags: ['Events'],
-  azureFunctionRoutePrefix: 'api',
   methods: ['GET'],
-  authLevel: 'anonymous',
+  ...withAnonymousAuth({}),
   route: 'events',
   responses: { 200: { description: 'HTML landing page' } },
 });

@@ -10,7 +10,6 @@ import { ensureStripeClient } from './common';
 import type { HttpContext, StripeWebhookDependencies } from '../types';
 import {
   deriveNextRetryFromPaymentIntent,
-  handlePaymentIntentActionRequired,
   handleSuccessfulPaymentIntent,
   updatePaymentIntentStatus,
 } from './paymentIntents';
@@ -60,6 +59,51 @@ const loadPaymentIntent = async (
     });
     return null;
   }
+};
+
+const getInvoiceNextRetry = (invoice: Stripe.Invoice): Date | null =>
+  typeof invoice.next_payment_attempt === 'number' && Number.isFinite(invoice.next_payment_attempt)
+    ? new Date(invoice.next_payment_attempt * 1000)
+    : null;
+
+const buildPaymentIntentStatusOptions = (
+  invoice: Stripe.Invoice,
+  paymentIntent: Stripe.PaymentIntent
+): { nextRetry?: Date; dunningRequired: boolean } => {
+  const nextRetry = getInvoiceNextRetry(invoice) ?? deriveNextRetryFromPaymentIntent(paymentIntent);
+
+  return nextRetry ? { nextRetry, dunningRequired: true } : { dunningRequired: true };
+};
+
+const updateInvoicePaymentIntentStatus = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies,
+  invoice: Stripe.Invoice,
+  status: TransactionUpsertDTO['status__c'],
+  missingPaymentIntentMessage: string
+): Promise<void> => {
+  const paymentIntentId = normalizeStripeId(invoice.payment_intent);
+
+  if (!paymentIntentId) {
+    context.log(missingPaymentIntentMessage, {
+      invoiceId: invoice.id,
+    });
+    return;
+  }
+
+  const paymentIntent = await loadPaymentIntent(context, event, deps, invoice, paymentIntentId);
+  if (!paymentIntent) {
+    return;
+  }
+
+  await updatePaymentIntentStatus(
+    context,
+    paymentIntent,
+    status,
+    deps,
+    buildPaymentIntentStatusOptions(invoice, paymentIntent)
+  );
 };
 
 export const handleInvoicePaidNoPI = async (
@@ -138,38 +182,14 @@ export const handleInvoicePaymentFailed = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const invoice = event.data.object as Stripe.Invoice;
-  const paymentIntentId = normalizeStripeId(invoice.payment_intent);
-
-  if (!paymentIntentId) {
-    context.log('[StripeWebhook] Invoice payment failed without payment intent', {
-      invoiceId: invoice.id,
-    });
-    return;
-  }
-
-  const paymentIntent = await loadPaymentIntent(context, event, deps, invoice, paymentIntentId);
-
-  if (!paymentIntent) {
-    return;
-  }
-
-  const invoiceNextRetry =
-    typeof invoice.next_payment_attempt === 'number' &&
-    Number.isFinite(invoice.next_payment_attempt)
-      ? new Date(invoice.next_payment_attempt * 1000)
-      : null;
-  const paymentIntentNextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
-  const nextRetry = invoiceNextRetry ?? paymentIntentNextRetry ?? null;
-
-  const options: { nextRetry?: Date; dunningRequired: boolean } = {
-    dunningRequired: true,
-  };
-
-  if (nextRetry) {
-    options.nextRetry = nextRetry;
-  }
-
-  await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, options);
+  await updateInvoicePaymentIntentStatus(
+    context,
+    event,
+    deps,
+    invoice,
+    'failed',
+    '[StripeWebhook] Invoice payment failed without payment intent'
+  );
 };
 
 export const handleInvoicePaymentActionRequired = async (
@@ -178,36 +198,12 @@ export const handleInvoicePaymentActionRequired = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const invoice = event.data.object as Stripe.Invoice;
-  const paymentIntentId = normalizeStripeId(invoice.payment_intent);
-
-  if (!paymentIntentId) {
-    context.log('[StripeWebhook] Invoice requires action without payment intent', {
-      invoiceId: invoice.id,
-    });
-    return;
-  }
-
-  const paymentIntent = await loadPaymentIntent(context, event, deps, invoice, paymentIntentId);
-
-  if (!paymentIntent) {
-    return;
-  }
-
-  const invoiceNextRetry =
-    typeof invoice.next_payment_attempt === 'number' &&
-    Number.isFinite(invoice.next_payment_attempt)
-      ? new Date(invoice.next_payment_attempt * 1000)
-      : null;
-  const paymentIntentNextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
-  const nextRetry = invoiceNextRetry ?? paymentIntentNextRetry ?? null;
-
-  const options: { nextRetry?: Date; dunningRequired: boolean } = {
-    dunningRequired: true,
-  };
-
-  if (nextRetry) {
-    options.nextRetry = nextRetry;
-  }
-
-  await updatePaymentIntentStatus(context, paymentIntent, 'pending', deps, options);
+  await updateInvoicePaymentIntentStatus(
+    context,
+    event,
+    deps,
+    invoice,
+    'pending',
+    '[StripeWebhook] Invoice requires action without payment intent'
+  );
 };

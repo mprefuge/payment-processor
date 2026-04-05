@@ -1,6 +1,10 @@
 import type Stripe from 'stripe';
 
-import type { StripeWebhookDependencies, HttpContext } from '../../stripe/types';
+import type {
+  StripeWebhookDependencies,
+  HttpContext,
+  StripeQuickBooksDocument,
+} from '../../stripe/types';
 import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
@@ -10,23 +14,95 @@ export const markPosted = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown,
   doc: PostChargeToQboResult
-): Promise<void> => {
+): Promise<void> => markDocumentPosted(salesforce, upsertResult, doc);
+
+const resolveUpsertRecordId = (upsertResult: unknown): string | null => {
   const id =
     upsertResult && typeof upsertResult === 'object' && 'id' in upsertResult
       ? (upsertResult as { id?: string }).id
       : undefined;
 
-  if (typeof id === 'string' && id.trim().length > 0) {
-    const reference: QuickBooksDocumentReference = {
-      id: doc.qboId,
-      type: doc.type,
-    };
-    await salesforce.markPostedToQbo(id, reference);
+  return typeof id === 'string' && id.trim().length > 0 ? id : null;
+};
+
+const normalizeDocumentReference = (
+  doc:
+    | PostChargeToQboResult
+    | StripeQuickBooksDocument
+    | { qboId: string; type: string }
+    | null
+    | void
+): QuickBooksDocumentReference | null => {
+  if (!doc) {
+    return null;
   }
+
+  if (typeof (doc as { qboId?: unknown }).qboId === 'string') {
+    return {
+      id: (doc as { qboId: string }).qboId,
+      type: (doc as { type: string }).type,
+    };
+  }
+
+  if (typeof (doc as StripeQuickBooksDocument).id === 'string') {
+    return doc as QuickBooksDocumentReference;
+  }
+
+  return null;
+};
+
+export const markDocumentPosted = async (
+  salesforce: SalesforceSvc,
+  upsertResult: unknown,
+  doc:
+    | PostChargeToQboResult
+    | StripeQuickBooksDocument
+    | { qboId: string; type: string }
+    | null
+    | void
+): Promise<void> => {
+  const recordId = resolveUpsertRecordId(upsertResult);
+  const reference = normalizeDocumentReference(doc);
+
+  if (!recordId || !reference) {
+    return;
+  }
+
+  await salesforce.markPostedToQbo(recordId, reference);
 };
 
 export const ensureStripeClient = (deps: StripeWebhookDependencies, event: Stripe.Event): Stripe =>
   deps.stripe.getClient(Boolean(event.livemode));
+
+const logCheckoutSessionEvent = (
+  context: HttpContext,
+  message: string,
+  session: Stripe.Checkout.Session
+): void => {
+  context.log(message, {
+    sessionId: session.id,
+    paymentIntent: normalizeStripeId(session.payment_intent),
+  });
+};
+
+const canUpsertCheckoutSessionTransaction = (transaction: TransactionUpsertDTO): boolean =>
+  transaction.status__c != null &&
+  (transaction as any).status__c !== '' &&
+  transaction.amount_gross__c != null;
+
+const logCheckoutSessionUpsertSkipped = (
+  context: HttpContext,
+  message: string,
+  sessionId: string,
+  transaction: TransactionUpsertDTO
+): void => {
+  context.log(message, {
+    sessionId,
+    status: transaction.status__c,
+    amountGross: transaction.amount_gross__c,
+    transaction,
+  });
+};
 
 const resolveCampaignId = async (
   metadata: Record<string, string | null> | null | undefined,
@@ -81,13 +157,13 @@ export const handleCheckoutSessionCompleted = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const session = event.data.object as Stripe.Checkout.Session;
-  const salesforce = await deps.getSalesforceSvc();
   const crm = await deps.getCrmSvc();
 
-  context.log('[StripeWebhook] Processing checkout session completed', {
-    sessionId: session.id,
-    paymentIntent: normalizeStripeId(session.payment_intent),
-  });
+  logCheckoutSessionEvent(
+    context,
+    '[StripeWebhook] Processing checkout session completed',
+    session
+  );
 
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
 
@@ -100,21 +176,13 @@ export const handleCheckoutSessionCompleted = async (
     sessionId: session.id,
   });
 
-  if (
-    transaction.status__c == null ||
-    (transaction as any).status__c === '' ||
-    transaction.amount_gross__c == null
-  ) {
-    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-      sessionId: session.id,
-      status: transaction.status__c,
-      amountGross: transaction.amount_gross__c,
-      transaction,
-    });
-    return;
-  }
-
-  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_checkout_session_id__c');
+  await upsertCheckoutSessionTransaction(
+    context,
+    deps,
+    session.id,
+    transaction,
+    '[StripeWebhook] Skipping transaction upsert due to missing required fields'
+  );
 };
 
 const buildCheckoutSessionTransaction = (
@@ -135,31 +203,51 @@ const buildCheckoutSessionTransaction = (
   ...(memo ? { memo__c: memo } : {}),
 });
 
+const upsertCheckoutSessionTransaction = async (
+  context: HttpContext,
+  deps: StripeWebhookDependencies,
+  sessionId: string,
+  transaction: TransactionUpsertDTO,
+  skipMessage: string
+): Promise<void> => {
+  const salesforce = await deps.getSalesforceSvc();
+
+  if (!canUpsertCheckoutSessionTransaction(transaction)) {
+    logCheckoutSessionUpsertSkipped(context, skipMessage, sessionId, transaction);
+    return;
+  }
+
+  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_checkout_session_id__c');
+};
+
 const upsertCheckoutSessionStatus = async (
   context: HttpContext,
   session: Stripe.Checkout.Session,
   status: TransactionUpsertDTO['status__c'],
   deps: StripeWebhookDependencies,
   memo?: string
-): Promise<void> => {
-  const salesforce = await deps.getSalesforceSvc();
-  const transaction = buildCheckoutSessionTransaction(session, status, memo);
+): Promise<void> =>
+  upsertCheckoutSessionTransaction(
+    context,
+    deps,
+    session.id,
+    buildCheckoutSessionTransaction(session, status, memo),
+    '[StripeWebhook] Skipping checkout session status upsert due to missing required fields'
+  );
 
-  if (
-    transaction.status__c == null ||
-    (transaction as any).status__c === '' ||
-    transaction.amount_gross__c == null
-  ) {
-    context.log('[StripeWebhook] Skipping checkout session status upsert due to missing required fields', {
-      sessionId: session.id,
-      status: transaction.status__c,
-      amountGross: transaction.amount_gross__c,
-      transaction,
-    });
-    return;
+const handleCheckoutSessionStatusEvent = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies,
+  options: {
+    logMessage: string;
+    status: TransactionUpsertDTO['status__c'];
+    memo?: string;
   }
-
-  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_checkout_session_id__c');
+): Promise<void> => {
+  const session = event.data.object as Stripe.Checkout.Session;
+  logCheckoutSessionEvent(context, options.logMessage, session);
+  await upsertCheckoutSessionStatus(context, session, options.status, deps, options.memo);
 };
 
 export const handleCheckoutSessionExpired = async (
@@ -167,20 +255,11 @@ export const handleCheckoutSessionExpired = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies
 ): Promise<void> => {
-  const session = event.data.object as Stripe.Checkout.Session;
-
-  context.log('[StripeWebhook] Processing checkout session expired', {
-    sessionId: session.id,
-    paymentIntent: normalizeStripeId(session.payment_intent),
+  await handleCheckoutSessionStatusEvent(context, event, deps, {
+    logMessage: '[StripeWebhook] Processing checkout session expired',
+    status: 'failed',
+    memo: 'Checkout session expired before payment completion.',
   });
-
-  await upsertCheckoutSessionStatus(
-    context,
-    session,
-    'failed',
-    deps,
-    'Checkout session expired before payment completion.'
-  );
 };
 
 export const handleCheckoutSessionAsyncPaymentFailed = async (
@@ -188,20 +267,11 @@ export const handleCheckoutSessionAsyncPaymentFailed = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies
 ): Promise<void> => {
-  const session = event.data.object as Stripe.Checkout.Session;
-
-  context.log('[StripeWebhook] Processing checkout session async payment failed', {
-    sessionId: session.id,
-    paymentIntent: normalizeStripeId(session.payment_intent),
+  await handleCheckoutSessionStatusEvent(context, event, deps, {
+    logMessage: '[StripeWebhook] Processing checkout session async payment failed',
+    status: 'failed',
+    memo: 'Checkout session payment failed after asynchronous processing.',
   });
-
-  await upsertCheckoutSessionStatus(
-    context,
-    session,
-    'failed',
-    deps,
-    'Checkout session payment failed after asynchronous processing.'
-  );
 };
 
 export const handleCheckoutSessionAsyncPaymentSucceeded = async (
@@ -209,12 +279,8 @@ export const handleCheckoutSessionAsyncPaymentSucceeded = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies
 ): Promise<void> => {
-  const session = event.data.object as Stripe.Checkout.Session;
-
-  context.log('[StripeWebhook] Processing checkout session async payment succeeded', {
-    sessionId: session.id,
-    paymentIntent: normalizeStripeId(session.payment_intent),
+  await handleCheckoutSessionStatusEvent(context, event, deps, {
+    logMessage: '[StripeWebhook] Processing checkout session async payment succeeded',
+    status: 'paid',
   });
-
-  await upsertCheckoutSessionStatus(context, session, 'paid', deps);
 };

@@ -1,36 +1,28 @@
 import type { WebhookResponseFormatter } from './types';
 
+const JSON_HEADERS = {
+  'Content-Type': 'application/json',
+};
+
+const buildJsonResponse = (status: number, jsonBody: Record<string, unknown>) => ({
+  status,
+  headers: JSON_HEADERS,
+  jsonBody,
+});
+
 export class DefaultWebhookResponseFormatter implements WebhookResponseFormatter {
   success(eventType?: string): any {
-    return {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      jsonBody: eventType ? { received: true, eventType } : { received: true },
-    };
+    return buildJsonResponse(200, eventType ? { received: true, eventType } : { received: true });
   }
 
   duplicate(eventType: string): any {
-    return {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      jsonBody: { duplicate: true, eventType },
-    };
+    return buildJsonResponse(200, { duplicate: true, eventType });
   }
 
   error(error: string): any {
-    return {
-      status: 400,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      jsonBody: {
-        received: false,
-        error,
-      },
-    };
+    return buildJsonResponse(400, {
+      received: false,
+      error,
+    });
   }
 }

@@ -53,18 +53,60 @@ export const timestampToIsoString = (timestamp: number | null | undefined): stri
 export const extractBalanceTransactionId = (source: unknown): string | null =>
   normalizeStripeId(source);
 
-export const resolveCharge = async (
-  stripe: Stripe,
-  paymentIntent: Stripe.PaymentIntent
-): Promise<Stripe.Charge | null> => {
+const getExpandedCharges = (paymentIntent: Stripe.PaymentIntent): Stripe.Charge[] => {
   const piWithCharges = paymentIntent as Stripe.PaymentIntent & {
     charges?: { data?: Stripe.Charge[] };
   };
 
-  const charges = Array.isArray(piWithCharges.charges?.data) ? piWithCharges.charges!.data! : [];
-  if (charges.length > 0) {
-    const succeededCharge = charges.find((charge: Stripe.Charge) => charge.status === 'succeeded');
-    return succeededCharge || charges[0];
+  return Array.isArray(piWithCharges.charges?.data) ? piWithCharges.charges.data : [];
+};
+
+const getPreferredCharge = (charges: Stripe.Charge[]): Stripe.Charge | null => {
+  if (charges.length === 0) {
+    return null;
+  }
+
+  return charges.find((charge: Stripe.Charge) => charge.status === 'succeeded') || charges[0];
+};
+
+const retrieveBalanceTransactionSafely = async (
+  stripe: Stripe,
+  balanceTransactionId: string | null
+): Promise<Stripe.BalanceTransaction | null> => {
+  if (!balanceTransactionId) {
+    return null;
+  }
+
+  try {
+    return await stripe.balanceTransactions.retrieve(balanceTransactionId);
+  } catch (error) {
+    return null;
+  }
+};
+
+const buildCustomerMetadataUpdate = (
+  metadata: Stripe.Metadata | undefined,
+  salesforceId: string
+): Stripe.CustomerUpdateParams => ({
+  metadata: { ...(metadata || {}), salesforce_id: salesforceId },
+});
+
+const trimToNull = (value: string | null | undefined): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+export const resolveCharge = async (
+  stripe: Stripe,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<Stripe.Charge | null> => {
+  const preferredCharge = getPreferredCharge(getExpandedCharges(paymentIntent));
+  if (preferredCharge) {
+    return preferredCharge;
   }
 
   const latestChargeId = normalizeStripeId(paymentIntent.latest_charge);
@@ -91,23 +133,15 @@ export const resolveBalanceTransaction = async (
       )
     : null;
 
-  if (fallbackId) {
-    try {
-      return await stripe.balanceTransactions.retrieve(fallbackId);
-    } catch (error) {
-    }
+  const fallbackTransaction = await retrieveBalanceTransactionSafely(stripe, fallbackId);
+  if (fallbackTransaction) {
+    return fallbackTransaction;
   }
 
-  const id = extractBalanceTransactionId(charge?.balance_transaction);
-  if (id) {
-    try {
-      return await stripe.balanceTransactions.retrieve(id);
-    } catch (error) {
-      return null;
-    }
-  }
-
-  return null;
+  return retrieveBalanceTransactionSafely(
+    stripe,
+    extractBalanceTransactionId(charge?.balance_transaction)
+  );
 };
 
 export const resolveStripeCustomer = async (
@@ -152,8 +186,10 @@ export const ensureSalesforceIdOnCustomer = async (
       return;
     }
 
-    const newMetadata = { ...(cust.metadata || {}), salesforce_id: salesforceId };
-    await stripe.customers.update(customerId, { metadata: newMetadata });
+    await stripe.customers.update(
+      customerId,
+      buildCustomerMetadataUpdate(cust.metadata, salesforceId)
+    );
     logger('[Stripe] Added salesforce_id to customer metadata', {
       customerId,
       salesforceId,
@@ -171,12 +207,8 @@ export const findCheckoutSessionForPaymentIntent = async (
   stripe: Stripe,
   paymentIntentId: string | null | undefined
 ): Promise<Stripe.Checkout.Session | null> => {
-  if (!paymentIntentId || typeof paymentIntentId !== 'string') {
-    return null;
-  }
-
-  const trimmed = paymentIntentId.trim();
-  if (trimmed.length === 0) {
+  const trimmed = trimToNull(paymentIntentId);
+  if (!trimmed) {
     return null;
   }
 
@@ -191,14 +223,13 @@ export const findCheckoutSessionForPaymentIntent = async (
 
   try {
     const paymentIntent = await stripe.paymentIntents.retrieve(trimmed);
-    const checkoutSessionId = paymentIntent.metadata?.checkout_session_id;
+    const checkoutSessionId = trimToNull(paymentIntent.metadata?.checkout_session_id);
 
-    if (checkoutSessionId && typeof checkoutSessionId === 'string') {
-      const session = await stripe.checkout.sessions.retrieve(checkoutSessionId.trim());
+    if (checkoutSessionId) {
+      const session = await stripe.checkout.sessions.retrieve(checkoutSessionId);
       return session;
     }
-  } catch (error) {
-  }
+  } catch (error) {}
 
   return null;
 };
@@ -329,9 +360,14 @@ export const getProductNameFromCharge = async (
 ): Promise<string | null> => {
   try {
     if (typeof charge.invoice === 'string' && charge.invoice.startsWith('in_')) {
-      const invoiceProductName = await resolveProductNameFromInvoice(stripe, charge.invoice, logger, {
-        chargeId: charge.id,
-      });
+      const invoiceProductName = await resolveProductNameFromInvoice(
+        stripe,
+        charge.invoice,
+        logger,
+        {
+          chargeId: charge.id,
+        }
+      );
       if (invoiceProductName) {
         return invoiceProductName;
       }
@@ -346,11 +382,16 @@ export const getProductNameFromCharge = async (
 
       const paymentIntentProductRefs = getProductReferencesFromPaymentIntent(paymentIntent);
       for (const productRef of paymentIntentProductRefs) {
-        const resolvedFromPaymentIntent = await resolveStripeProductName(stripe, productRef, logger, {
-          chargeId: charge.id,
-          paymentIntentId: paymentIntent.id,
-          source: 'payment_intent',
-        });
+        const resolvedFromPaymentIntent = await resolveStripeProductName(
+          stripe,
+          productRef,
+          logger,
+          {
+            chargeId: charge.id,
+            paymentIntentId: paymentIntent.id,
+            source: 'payment_intent',
+          }
+        );
         if (resolvedFromPaymentIntent) {
           return resolvedFromPaymentIntent;
         }
@@ -368,11 +409,14 @@ export const getProductNameFromCharge = async (
           : null;
 
       if (expandedProductName) {
-        logger('[getProductNameFromCharge] Resolved product name from expanded payment intent invoice', {
-          chargeId: charge.id,
-          paymentIntentId: paymentIntent.id,
-          productName: expandedProductName,
-        });
+        logger(
+          '[getProductNameFromCharge] Resolved product name from expanded payment intent invoice',
+          {
+            chargeId: charge.id,
+            paymentIntentId: paymentIntent.id,
+            productName: expandedProductName,
+          }
+        );
         return expandedProductName;
       }
     }

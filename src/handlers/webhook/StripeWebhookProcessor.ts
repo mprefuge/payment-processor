@@ -16,45 +16,60 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
   }
 
   async handle(req: StripeWebhookRequest, context: HttpContext): Promise<any> {
+    const verification = await this.verifyRequest(req);
+    if ('response' in verification) {
+      return verification.response;
+    }
+
+    return this.processVerifiedEvent(verification.event, context);
+  }
+
+  private async verifyRequest(
+    req: StripeWebhookRequest
+  ): Promise<{ event: Stripe.Event } | { response: any }> {
     const signature = this.getStripeSignature(req);
 
     if (!signature) {
       logger.warn('[StripeWebhook] Missing signature');
-      return this.responseFormatter.error('missing_signature');
+      return { response: this.responseFormatter.error('missing_signature') };
     }
 
     const payload = await this.getRawBody(req);
 
-    let event: Stripe.Event;
     try {
-      event = this.dependencies.stripe.verifyEvent(payload, signature);
+      return { event: this.dependencies.stripe.verifyEvent(payload, signature) };
     } catch (error) {
       logger.warn('[StripeWebhook] Signature verification failed', {
         error: error instanceof Error ? error.message : String(error),
       });
-      return this.responseFormatter.error('invalid_signature');
+      return { response: this.responseFormatter.error('invalid_signature') };
     }
+  }
 
-    return this.dependencies.idempotencyStore.withLock(`stripe_webhook_evt_${event.id}`, async () => {
-      const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
-      if (isProcessed) {
-        logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
-        return this.responseFormatter.duplicate(event.type);
-      }
+  private async processVerifiedEvent(event: Stripe.Event, context: HttpContext): Promise<any> {
+    return this.dependencies.idempotencyStore.withLock(
+      `stripe_webhook_evt_${event.id}`,
+      async () => {
+        const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
+        if (isProcessed) {
+          logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
+          return this.responseFormatter.duplicate(event.type);
+        }
 
-      try {
-        await this.eventRouter.route(event, this.dependencies, context);
-        await this.dependencies.idempotencyStore.markProcessed(event.id);
-        return this.responseFormatter.success(event.type);
-      } catch (error) {
-        logger.error('[StripeWebhook] Event processing failed', {
-          eventId: event.id,
-          eventType: event.type,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return this.responseFormatter.error('processing_error');
+        try {
+          await this.eventRouter.route(event, this.dependencies, context);
+          await this.dependencies.idempotencyStore.markProcessed(event.id);
+          return this.responseFormatter.success(event.type);
+        } catch (error) {
+          logger.error('[StripeWebhook] Event processing failed', {
+            eventId: event.id,
+            eventType: event.type,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return this.responseFormatter.error('processing_error');
+        }
       }
-    });
+    );
   }
 
   private getStripeSignature(req: StripeWebhookRequest): string | undefined {

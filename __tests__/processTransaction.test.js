@@ -106,9 +106,7 @@ describe('processTransaction', () => {
     const stripeMock = {
       customers: {
         search: vi.fn().mockResolvedValue({
-          data: [
-            { id: 'cusX', name: 'Other Name' },
-          ],
+          data: [{ id: 'cusX', name: 'Other Name' }],
         }),
       },
     };
@@ -270,7 +268,8 @@ describe('processTransaction', () => {
 
     await handler(context, req);
 
-    expect(stripeMock.customers.update).toHaveBeenCalledWith('cus_test',
+    expect(stripeMock.customers.update).toHaveBeenCalledWith(
+      'cus_test',
       expect.objectContaining({
         metadata: expect.objectContaining({ salesforce_id: '003TEST' }),
       })

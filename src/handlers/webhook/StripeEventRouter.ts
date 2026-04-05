@@ -31,34 +31,61 @@ type StripeEventHandler = (
   deps: StripeWebhookDependencies
 ) => Promise<void>;
 
-const stripeEventHandlers: Record<string, StripeEventHandler> = {
-  'checkout.session.completed': handleCheckoutSessionCompleted,
-  'checkout.session.expired': handleCheckoutSessionExpired,
-  'checkout.session.async_payment_failed': handleCheckoutSessionAsyncPaymentFailed,
-  'checkout.session.async_payment_succeeded': handleCheckoutSessionAsyncPaymentSucceeded,
-  'payment_intent.succeeded': handlePaymentIntentSucceeded,
-  'payment_intent.payment_failed': handlePaymentIntentFailed,
-  'payment_intent.canceled': handlePaymentIntentCanceled,
-  'payment_intent.requires_action': handlePaymentIntentActionRequired,
-  'charge.refunded': handleChargeRefunded,
-  'refund.created': handleRefundEvent,
-  'refund.updated': handleRefundEvent,
-  'refund.failed': handleRefundEvent,
-  'charge.dispute.closed': handleDisputeClosed,
-  'invoice.paid': handleInvoicePaid,
-  'invoice.payment_succeeded': handleInvoicePaid,
-  'invoice.payment_failed': handleInvoicePaymentFailed,
-  'invoice.payment_action_required': handleInvoicePaymentActionRequired,
-  'payout.created': handlePayoutEvent,
-  'payout.updated': handlePayoutEvent,
-  'payout.paid': handlePayoutEvent,
-  'payout.failed': handlePayoutEvent,
-  'payout.canceled': handlePayoutEvent,
-  'payout.reconciliation_completed': handlePayoutEvent,
-  'credit_note.created': handleCreditNoteEvent,
-  'credit_note.updated': handleCreditNoteEvent,
-  'credit_note.voided': handleCreditNoteEvent,
+const addEventHandlers = (
+  handlers: Record<string, StripeEventHandler>,
+  eventTypes: string[],
+  handler: StripeEventHandler
+): void => {
+  for (const eventType of eventTypes) {
+    handlers[eventType] = handler;
+  }
 };
+
+const buildStripeEventHandlers = (): Record<string, StripeEventHandler> => {
+  const handlers: Record<string, StripeEventHandler> = {
+    'checkout.session.completed': handleCheckoutSessionCompleted,
+    'checkout.session.expired': handleCheckoutSessionExpired,
+    'checkout.session.async_payment_failed': handleCheckoutSessionAsyncPaymentFailed,
+    'checkout.session.async_payment_succeeded': handleCheckoutSessionAsyncPaymentSucceeded,
+    'payment_intent.succeeded': handlePaymentIntentSucceeded,
+    'payment_intent.payment_failed': handlePaymentIntentFailed,
+    'payment_intent.canceled': handlePaymentIntentCanceled,
+    'payment_intent.requires_action': handlePaymentIntentActionRequired,
+    'charge.refunded': handleChargeRefunded,
+    'charge.dispute.closed': handleDisputeClosed,
+    'invoice.paid': handleInvoicePaid,
+    'invoice.payment_succeeded': handleInvoicePaid,
+    'invoice.payment_failed': handleInvoicePaymentFailed,
+    'invoice.payment_action_required': handleInvoicePaymentActionRequired,
+  };
+
+  addEventHandlers(
+    handlers,
+    ['refund.created', 'refund.updated', 'refund.failed'],
+    handleRefundEvent
+  );
+  addEventHandlers(
+    handlers,
+    [
+      'payout.created',
+      'payout.updated',
+      'payout.paid',
+      'payout.failed',
+      'payout.canceled',
+      'payout.reconciliation_completed',
+    ],
+    handlePayoutEvent
+  );
+  addEventHandlers(
+    handlers,
+    ['credit_note.created', 'credit_note.updated', 'credit_note.voided'],
+    handleCreditNoteEvent
+  );
+
+  return handlers;
+};
+
+const stripeEventHandlers: Record<string, StripeEventHandler> = buildStripeEventHandlers();
 
 export class StripeEventRouter implements EventRouter {
   async route(

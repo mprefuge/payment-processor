@@ -23,12 +23,14 @@ type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
 // Comprehensive schemas for all QuickBooks document types
 
 // Reference schema - can be just a name or a name + value
-const QuickBooksReferenceSchema = z.object({
-  name: z.string().optional(),
-  value: z.string().optional(),
-}).refine(data => data.name || data.value, {
-  message: "Either name or value must be provided for a reference"
-});
+const QuickBooksReferenceSchema = z
+  .object({
+    name: z.string().optional(),
+    value: z.string().optional(),
+  })
+  .refine((data) => data.name || data.value, {
+    message: 'Either name or value must be provided for a reference',
+  });
 
 // Email address schema
 const QuickBooksEmailAddressSchema = z.object({
@@ -75,9 +77,11 @@ const SalesReceiptDataSchema = z.object({
   DocNumber: z.string().optional(),
   TxnDate: z.string().optional(),
   PrivateNote: z.string().optional(),
-  CustomerMemo: z.object({
-    value: z.string(),
-  }).optional(),
+  CustomerMemo: z
+    .object({
+      value: z.string(),
+    })
+    .optional(),
   DepositToAccountRef: QuickBooksReferenceSchema.optional(),
   CustomerRef: QuickBooksReferenceSchema.optional(),
   BillEmail: QuickBooksEmailAddressSchema.optional(),
@@ -94,27 +98,35 @@ const SalesReceiptDataSchema = z.object({
   ExchangeRate: z.number().optional(),
   GlobalTaxCalculation: z.enum(['TaxExcluded', 'TaxInclusive', 'NotApplicable']).optional(),
   Line: z.array(SalesReceiptLineSchema),
-  TxnTaxDetail: z.object({
-    TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
-    TotalTax: z.number().optional(),
-    TaxLine: z.array(z.any()).optional(),
-  }).optional(),
-  CustomField: z.array(z.object({
-    DefinitionId: z.string(),
-    Name: z.string().optional(),
-    Type: z.string().optional(),
-    StringValue: z.string().optional(),
-  })).optional(),
+  TxnTaxDetail: z
+    .object({
+      TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
+      TotalTax: z.number().optional(),
+      TaxLine: z.array(z.any()).optional(),
+    })
+    .optional(),
+  CustomField: z
+    .array(
+      z.object({
+        DefinitionId: z.string(),
+        Name: z.string().optional(),
+        Type: z.string().optional(),
+        StringValue: z.string().optional(),
+      })
+    )
+    .optional(),
 });
 
 // Journal Entry Line Schema
 const JournalEntryLineDetailSchema = z.object({
   PostingType: z.enum(['Debit', 'Credit']),
   AccountRef: QuickBooksReferenceSchema,
-  Entity: z.object({
-    EntityRef: QuickBooksReferenceSchema,
-    Type: z.enum(['Customer', 'Vendor', 'Employee', 'Other']).optional(),
-  }).optional(),
+  Entity: z
+    .object({
+      EntityRef: QuickBooksReferenceSchema,
+      Type: z.enum(['Customer', 'Vendor', 'Employee', 'Other']).optional(),
+    })
+    .optional(),
   ClassRef: QuickBooksReferenceSchema.optional(),
   DepartmentRef: QuickBooksReferenceSchema.optional(),
   TaxCodeRef: QuickBooksReferenceSchema.optional(),
@@ -141,40 +153,53 @@ const JournalEntryDataSchema = z.object({
   CurrencyRef: QuickBooksReferenceSchema.optional(),
   ExchangeRate: z.number().optional(),
   Line: z.array(JournalEntryLineSchema),
-  TxnTaxDetail: z.object({
-    TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
-    TotalTax: z.number().optional(),
-    TaxLine: z.array(z.any()).optional(),
-  }).optional(),
+  TxnTaxDetail: z
+    .object({
+      TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
+      TotalTax: z.number().optional(),
+      TaxLine: z.array(z.any()).optional(),
+    })
+    .optional(),
 });
 
 // Bank Deposit Line Schema
-const DepositLineDetailSchema = z.object({
-  AccountRef: QuickBooksReferenceSchema.optional(),
-  Entity: z.object({
-    EntityRef: QuickBooksReferenceSchema,
-    Type: z.enum(['Customer', 'Vendor', 'Employee', 'Other']).optional(),
-  }).optional(),
-  ClassRef: QuickBooksReferenceSchema.optional(),
-  CheckNum: z.string().optional(),
-  PaymentMethodRef: QuickBooksReferenceSchema.optional(),
-  TaxCodeRef: QuickBooksReferenceSchema.optional(),
-  TaxApplicableOn: z.enum(['Sales', 'Purchase']).optional(),
-  LinkedTxn: z.array(z.object({
-    TxnId: z.string(),
-    TxnType: z.string(),
-    TxnLineId: z.string().optional(),
-  })).optional(),
-}).refine(data => {
-  // CheckNum is required only when PaymentMethodRef.name is "Check" (case insensitive)
-  const paymentMethodName = data.PaymentMethodRef?.name?.toLowerCase();
-  if (paymentMethodName === 'check') {
-    return data.CheckNum && data.CheckNum.trim().length > 0;
-  }
-  return true;
-}, {
-  message: "CheckNum is required when PaymentMethodRef.name is 'Check'"
-});
+const DepositLineDetailSchema = z
+  .object({
+    AccountRef: QuickBooksReferenceSchema.optional(),
+    Entity: z
+      .object({
+        EntityRef: QuickBooksReferenceSchema,
+        Type: z.enum(['Customer', 'Vendor', 'Employee', 'Other']).optional(),
+      })
+      .optional(),
+    ClassRef: QuickBooksReferenceSchema.optional(),
+    CheckNum: z.string().optional(),
+    PaymentMethodRef: QuickBooksReferenceSchema.optional(),
+    TaxCodeRef: QuickBooksReferenceSchema.optional(),
+    TaxApplicableOn: z.enum(['Sales', 'Purchase']).optional(),
+    LinkedTxn: z
+      .array(
+        z.object({
+          TxnId: z.string(),
+          TxnType: z.string(),
+          TxnLineId: z.string().optional(),
+        })
+      )
+      .optional(),
+  })
+  .refine(
+    (data) => {
+      // CheckNum is required only when PaymentMethodRef.name is "Check" (case insensitive)
+      const paymentMethodName = data.PaymentMethodRef?.name?.toLowerCase();
+      if (paymentMethodName === 'check') {
+        return data.CheckNum && data.CheckNum.trim().length > 0;
+      }
+      return true;
+    },
+    {
+      message: "CheckNum is required when PaymentMethodRef.name is 'Check'",
+    }
+  );
 
 const BankDepositLineSchema = z.object({
   Id: z.string().optional(),
@@ -183,10 +208,14 @@ const BankDepositLineSchema = z.object({
   DetailType: z.literal('DepositLineDetail'),
   Description: z.string().optional(),
   DepositLineDetail: DepositLineDetailSchema,
-  LinkedTxn: z.array(z.object({
-    TxnId: z.string(),
-    TxnType: z.string(),
-  })).optional(), // Allow at top level for backward compatibility
+  LinkedTxn: z
+    .array(
+      z.object({
+        TxnId: z.string(),
+        TxnType: z.string(),
+      })
+    )
+    .optional(), // Allow at top level for backward compatibility
 });
 
 // Bank Deposit Schema - comprehensive fields
@@ -195,20 +224,24 @@ const BankDepositDataSchema = z.object({
   TxnDate: z.string().optional(),
   PrivateNote: z.string().optional(),
   DepositToAccountRef: QuickBooksReferenceSchema,
-  CashBack: z.object({
-    AccountRef: QuickBooksReferenceSchema,
-    Amount: z.number(),
-    Memo: z.string().optional(),
-  }).optional(),
+  CashBack: z
+    .object({
+      AccountRef: QuickBooksReferenceSchema,
+      Amount: z.number(),
+      Memo: z.string().optional(),
+    })
+    .optional(),
   CurrencyRef: QuickBooksReferenceSchema.optional(),
   ExchangeRate: z.number().optional(),
   DepartmentRef: QuickBooksReferenceSchema.optional(),
   Line: z.array(BankDepositLineSchema).optional(),
-  TxnTaxDetail: z.object({
-    TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
-    TotalTax: z.number().optional(),
-    TaxLine: z.array(z.any()).optional(),
-  }).optional(),
+  TxnTaxDetail: z
+    .object({
+      TxnTaxCodeRef: QuickBooksReferenceSchema.optional(),
+      TotalTax: z.number().optional(),
+      TaxLine: z.array(z.any()).optional(),
+    })
+    .optional(),
   // Special field for simplified deposit creation from sales receipts
   SalesReceiptIds: z.array(z.string()).optional(),
 });
@@ -260,6 +293,174 @@ interface QuickBooksAccount {
   AccountSubType?: string;
 }
 
+const buildHttpResponse = (status: number, jsonBody: Record<string, any>): HttpResponseInit => ({
+  status,
+  jsonBody,
+});
+
+const buildSuccessResponse = (
+  result: { id: string; type: QuickBooksDocType },
+  docNumber?: string
+): ManualSyncResponse => ({
+  success: true,
+  id: result.id,
+  type: result.type,
+  ...(docNumber && { docNumber }),
+});
+
+const buildFailureResponse = (error: unknown): ManualSyncResponse => ({
+  success: false,
+  error: error instanceof Error ? error.message : 'Unknown error occurred',
+});
+
+const defaultSalesReceiptDepositAccount = (
+  type: QuickBooksDocType,
+  data: any,
+  context: InvocationContext
+): any => {
+  if (type === 'sales-receipt' && !data.DepositToAccountRef) {
+    data.DepositToAccountRef = { name: 'Undeposited Funds' };
+    logger.info('Defaulting DepositToAccountRef to Undeposited Funds for sales-receipt', {
+      invocationId: context.invocationId,
+    });
+  }
+
+  return data;
+};
+
+const normalizeBankDepositLines = (lines: any[]): any[] =>
+  lines.map((line: any) => {
+    if (line?.DetailType !== 'DepositLineDetail') {
+      return line;
+    }
+
+    return {
+      Amount: line.Amount,
+      DetailType: 'DepositLineDetail',
+      DepositLineDetail: {
+        LinkedTxn: line.DepositLineDetail?.LinkedTxn || line.LinkedTxn || [],
+      },
+    };
+  });
+
+const createMinimalBankDepositPayload = (resolvedData: any): any => ({
+  DepositToAccountRef: { value: resolvedData.DepositToAccountRef?.value },
+  TxnDate: resolvedData.TxnDate || new Date().toISOString().slice(0, 10),
+  Line: resolvedData.Line,
+});
+
+const postQuickBooksDocument = async (
+  type: QuickBooksDocType,
+  data: QuickBooksSalesReceipt | QuickBooksJournalEntry | QuickBooksBankDeposit
+): Promise<{ id: string; type: QuickBooksDocType }> => {
+  switch (type) {
+    case 'sales-receipt':
+      return postSalesReceipt(data as QuickBooksSalesReceipt);
+    case 'journal-entry':
+      return postJournalEntry(data as QuickBooksJournalEntry);
+    case 'bank-deposit':
+      return postBankDeposit(data as QuickBooksBankDeposit);
+    default:
+      throw new Error(`Unsupported QuickBooks document type: ${type}`);
+  }
+};
+
+const processBankDepositSalesReceiptIds = async (
+  data: BankDepositData,
+  context: InvocationContext
+): Promise<ManualSyncResponse> => {
+  logger.info('Processing bank deposit with SalesReceiptIds using minimal schema', {
+    salesReceiptIds: data.SalesReceiptIds,
+    count: data.SalesReceiptIds?.length,
+    invocationId: context.invocationId,
+  });
+
+  if (!data.SalesReceiptIds || data.SalesReceiptIds.length === 0) {
+    throw new Error('SalesReceiptIds array cannot be empty for bank deposits');
+  }
+
+  const salesReceiptId = data.SalesReceiptIds[0];
+  const salesReceipt = await getSalesReceiptById(salesReceiptId);
+  if (!salesReceipt) {
+    throw new Error(`Sales receipt with ID ${salesReceiptId} not found in QuickBooks`);
+  }
+
+  const depositToAccount = salesReceipt.DepositToAccountRef?.name;
+  if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
+    logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
+      salesReceiptId,
+      currentAccount: depositToAccount,
+      invocationId: context.invocationId,
+    });
+  }
+
+  const operatingBankId = await getAccountIdByName('Operating Bank', context);
+  if (!operatingBankId) {
+    throw new Error('Operating Bank account not found');
+  }
+
+  const realmId = process.env.QBO_COMPANY_ID || '';
+  if (!realmId) {
+    throw new Error('QBO_COMPANY_ID not configured');
+  }
+
+  const accessToken = await tokenManager.getValidAccessToken(fetch);
+  const depositResult = await createQboDeposit({
+    realmId,
+    accessToken,
+    bankId: operatingBankId,
+    salesReceiptId: salesReceipt.Id,
+    amountDollars: salesReceipt.TotalAmt || 0,
+    txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10),
+    env: process.env.QBO_ENVIRONMENT === 'production' ? 'prod' : 'sandbox',
+  });
+
+  logger.info('Bank deposit created successfully with minimal schema', {
+    depositId: depositResult.Deposit?.Id,
+    salesReceiptId,
+    invocationId: context.invocationId,
+  });
+
+  return {
+    success: true,
+    id: depositResult.Deposit?.Id,
+    type: 'bank-deposit',
+  };
+};
+
+const parseManualSyncRequest = async (
+  request: HttpRequest,
+  context: InvocationContext
+): Promise<
+  | { success: true; type: QuickBooksDocType; data: ManualSyncRequest['data'] }
+  | { success: false; response: HttpResponseInit }
+> => {
+  const body = await request.json();
+  const validationResult = ManualSyncRequestSchema.safeParse(body);
+
+  if (!validationResult.success) {
+    logger.warn('Invalid request body for manual QBO sync', {
+      errors: validationResult.error.errors,
+      invocationId: context.invocationId,
+    });
+
+    return {
+      success: false,
+      response: buildHttpResponse(400, {
+        success: false,
+        error: 'Invalid request body',
+        details: validationResult.error.errors,
+      }),
+    };
+  }
+
+  return {
+    success: true,
+    type: validationResult.data.type,
+    data: validationResult.data.data,
+  };
+};
+
 // Generate DocNumber in format "MAN-YYYY-MMDDHHMMSS"
 const generateDocNumber = (): string => {
   const now = new Date();
@@ -272,7 +473,6 @@ const generateDocNumber = (): string => {
   const dateTimeStr = `${month}${day}${hours}${minutes}${seconds}`;
   return `MAN-${year}-${dateTimeStr}`;
 };
-
 
 // Retrieve sales receipt from QBO by ID
 const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> => {
@@ -385,7 +585,6 @@ const getAccountIdByName = async (
     return null;
   }
 };
-
 
 // Validate that required references are resolved
 const validateRequiredReferences = (data: any, type: QuickBooksDocType): void => {
@@ -579,21 +778,21 @@ const resolveItemReferences = async (
             // Handle hierarchical class names like "Parent:Child"
             const classNameParts = refValue.name.split(':');
             let classCreateData: any = { Name: refValue.name };
-            
+
             if (classNameParts.length > 1) {
               // Hierarchical class: find or create parent first
               const parentName = classNameParts[0].trim();
               const childName = classNameParts.slice(1).join(':').trim();
-              
+
               // First ensure the parent class exists
               const parentClass = await ensureReference('Class', parentName, { Name: parentName });
-              
+
               // Then create child class with ParentRef
-              classCreateData = { 
+              classCreateData = {
                 Name: childName,
-                ParentRef: { value: parentClass.value }
+                ParentRef: { value: parentClass.value },
               };
-              
+
               // Query for existing child class under this parent
               const existingChild = await queryReference('Class', childName);
               if (existingChild) {
@@ -609,13 +808,22 @@ const resolveItemReferences = async (
               resolvedRef = { value: classResult.value, name: classResult.name || refValue.name };
             }
           } else if (key === 'DepartmentRef') {
-            const deptResult = await ensureReference('Department', refValue.name, { Name: refValue.name });
+            const deptResult = await ensureReference('Department', refValue.name, {
+              Name: refValue.name,
+            });
             resolvedRef = { value: deptResult.value, name: deptResult.name || refValue.name };
           } else if (key === 'PaymentMethodRef') {
-            const pmResult = await ensureReference('PaymentMethod', refValue.name, { Name: refValue.name, Type: 'CREDIT_CARD' });
+            const pmResult = await ensureReference('PaymentMethod', refValue.name, {
+              Name: refValue.name,
+              Type: 'CREDIT_CARD',
+            });
             resolvedRef = { value: pmResult.value, name: pmResult.name || refValue.name };
           } else if (key === 'SalesTermRef') {
-            const termResult = await ensureReference('Term', refValue.name, { Name: refValue.name, Type: 'STANDARD', DueDays: 30 });
+            const termResult = await ensureReference('Term', refValue.name, {
+              Name: refValue.name,
+              Type: 'STANDARD',
+              DueDays: 30,
+            });
             resolvedRef = { value: termResult.value, name: termResult.name || refValue.name };
           } else if (key === 'ShipMethodRef') {
             // QuickBooks doesn't support creating ShipMethod entities via API
@@ -625,11 +833,14 @@ const resolveItemReferences = async (
               resolvedRef = { value: shipResult.value, name: shipResult.name || refValue.name };
             } else {
               // ShipMethod doesn't exist and can't be created, remove the reference
-              logger.warn(`ShipMethod "${refValue.name}" not found and cannot be created via API, removing reference`, {
-                refType: key,
-                refName: refValue.name,
-                invocationId: context.invocationId,
-              });
+              logger.warn(
+                `ShipMethod "${refValue.name}" not found and cannot be created via API, removing reference`,
+                {
+                  refType: key,
+                  refName: refValue.name,
+                  invocationId: context.invocationId,
+                }
+              );
               delete resolved[key];
             }
           } else if (key === 'TaxCodeRef') {
@@ -642,14 +853,17 @@ const resolveItemReferences = async (
             // For currencies, just query
             const currencyResult = await queryReference('Currency', refValue.name);
             if (currencyResult) {
-              resolvedRef = { value: currencyResult.value, name: currencyResult.name || refValue.name };
+              resolvedRef = {
+                value: currencyResult.value,
+                name: currencyResult.name || refValue.name,
+              };
             }
           } else if (key === 'EntityRef') {
             // EntityRef can be Customer, Vendor, Employee, etc.
             // Check the Type field in the parent Entity object
             const entityType = resolved.Type || 'Customer'; // Default to Customer
             let entityResult;
-            
+
             if (entityType === 'Customer') {
               entityResult = await ensureCustomer(refValue.name);
             } else if (entityType === 'Vendor') {
@@ -657,27 +871,27 @@ const resolveItemReferences = async (
               entityResult = await queryReference('Vendor', refValue.name);
               if (!entityResult) {
                 // Create vendor
-                entityResult = await ensureReference('Vendor', refValue.name, { 
+                entityResult = await ensureReference('Vendor', refValue.name, {
                   Name: refValue.name,
-                  Vendor1099: false
+                  Vendor1099: false,
                 });
               }
             } else if (entityType === 'Employee') {
-              // For employees, query first, create if not found  
+              // For employees, query first, create if not found
               entityResult = await queryReference('Employee', refValue.name);
               if (!entityResult) {
                 // Create employee
-                entityResult = await ensureReference('Employee', refValue.name, { 
+                entityResult = await ensureReference('Employee', refValue.name, {
                   Name: refValue.name,
                   GivenName: refValue.name.split(' ')[0],
-                  FamilyName: refValue.name.split(' ').slice(1).join(' ') || refValue.name
+                  FamilyName: refValue.name.split(' ').slice(1).join(' ') || refValue.name,
                 });
               }
             } else {
               // For other types, just query
               entityResult = await queryReference(entityType, refValue.name);
             }
-            
+
             if (entityResult) {
               resolvedRef = { value: entityResult.value, name: entityResult.name || refValue.name };
             }
@@ -725,8 +939,13 @@ const resolveItemReferences = async (
     }
   }
 
-    // Special handling for sales receipts: inherit ClassRef from header to lines if needed
-  if (resolved.ClassRef && resolved.Line && Array.isArray(resolved.Line) && resolved.Line.some((line: any) => line.SalesItemLineDetail)) {
+  // Special handling for sales receipts: inherit ClassRef from header to lines if needed
+  if (
+    resolved.ClassRef &&
+    resolved.Line &&
+    Array.isArray(resolved.Line) &&
+    resolved.Line.some((line: any) => line.SalesItemLineDetail)
+  ) {
     const headerClassRef = resolved.ClassRef;
     for (const line of resolved.Line) {
       if (line.SalesItemLineDetail && !line.SalesItemLineDetail.ClassRef) {
@@ -743,12 +962,17 @@ const resolveItemReferences = async (
   // Fix amount calculation when discounts are present for all line items
   if (resolved.Line && Array.isArray(resolved.Line)) {
     for (const line of resolved.Line) {
-      if (line.SalesItemLineDetail && line.SalesItemLineDetail.DiscountAmt && line.SalesItemLineDetail.UnitPrice && line.SalesItemLineDetail.Qty) {
+      if (
+        line.SalesItemLineDetail &&
+        line.SalesItemLineDetail.DiscountAmt &&
+        line.SalesItemLineDetail.UnitPrice &&
+        line.SalesItemLineDetail.Qty
+      ) {
         const unitPrice = line.SalesItemLineDetail.UnitPrice;
         const qty = line.SalesItemLineDetail.Qty;
         const discountAmt = line.SalesItemLineDetail.DiscountAmt;
         const calculatedAmount = unitPrice * qty;
-        
+
         // If Amount is currently set to discounted amount, correct it
         if (line.Amount == calculatedAmount - discountAmt) {
           line.Amount = calculatedAmount;
@@ -784,86 +1008,11 @@ const validateAndPost = async (
       invocationId: context.invocationId,
     });
 
-    let resolvedData = data;
-
-    // Default DepositToAccountRef for sales receipts if not provided
-    if (type === 'sales-receipt' && !resolvedData.DepositToAccountRef) {
-      resolvedData.DepositToAccountRef = { name: 'Undeposited Funds' };
-      logger.info('Defaulting DepositToAccountRef to Undeposited Funds for sales-receipt', {
-        invocationId: context.invocationId,
-      });
-    }
+    let resolvedData = defaultSalesReceiptDepositAccount(type, data, context);
 
     // Special handling for bank-deposit with SalesReceiptIds
     if (type === 'bank-deposit' && data.SalesReceiptIds && Array.isArray(data.SalesReceiptIds)) {
-      logger.info('Processing bank deposit with SalesReceiptIds using minimal schema', {
-        salesReceiptIds: data.SalesReceiptIds,
-        count: data.SalesReceiptIds.length,
-        invocationId: context.invocationId,
-      });
-
-      // Validate SalesReceiptIds array is not empty
-      if (data.SalesReceiptIds.length === 0) {
-        throw new Error('SalesReceiptIds array cannot be empty for bank deposits');
-      }
-
-      // Get the first sales receipt ID (process one at a time)
-      const salesReceiptId = data.SalesReceiptIds[0];
-
-      // Get the sales receipt details
-      const salesReceipt = await getSalesReceiptById(salesReceiptId);
-      if (!salesReceipt) {
-        throw new Error(`Sales receipt with ID ${salesReceiptId} not found in QuickBooks`);
-      }
-
-      // Verify that the sales receipt is deposited to Undeposited Funds
-      const depositToAccount = salesReceipt.DepositToAccountRef?.name;
-      if (depositToAccount && depositToAccount.toLowerCase() !== 'undeposited funds') {
-        logger.warn(`Sales receipt ${salesReceiptId} is not in Undeposited Funds account`, {
-          salesReceiptId,
-          currentAccount: depositToAccount,
-          invocationId: context.invocationId,
-        });
-      }
-
-      // Get the operating bank account ID
-      const operatingBankId = await getAccountIdByName('Operating Bank', context);
-      if (!operatingBankId) {
-        throw new Error('Operating Bank account not found');
-      }
-
-      // Get QBO realm ID
-      const realmId = process.env.QBO_COMPANY_ID || '';
-      if (!realmId) {
-        throw new Error('QBO_COMPANY_ID not configured');
-      }
-
-      // Get a valid access token
-      const accessToken = await tokenManager.getValidAccessToken(fetch);
-
-      // Create deposit using the minimal schema
-      const depositResult = await createQboDeposit({
-        realmId,
-        accessToken,
-        bankId: operatingBankId,
-        salesReceiptId: salesReceipt.Id,
-        amountDollars: salesReceipt.TotalAmt || 0,
-        txnDateISO: data.TxnDate || new Date().toISOString().slice(0, 10),
-        env: process.env.QBO_ENVIRONMENT === 'production' ? 'prod' : 'sandbox',
-      });
-
-      logger.info('Bank deposit created successfully with minimal schema', {
-        depositId: depositResult.Deposit?.Id,
-        salesReceiptId,
-        invocationId: context.invocationId,
-      });
-
-      // Return success immediately
-      return {
-        success: true,
-        id: depositResult.Deposit?.Id,
-        type: 'bank-deposit',
-      };
+      return processBankDepositSalesReceiptIds(data, context);
     }
 
     if (
@@ -878,32 +1027,14 @@ const validateAndPost = async (
     }
 
     if (type === 'bank-deposit' && Array.isArray(resolvedData.Line)) {
-      resolvedData.Line = resolvedData.Line.map((line: any) => {
-        if (line?.DetailType !== 'DepositLineDetail') {
-          return line;
-        }
-
-        // Ensure minimal schema structure for DepositLineDetail
-        const depositLineDetail: any = {
-          LinkedTxn: line.DepositLineDetail?.LinkedTxn || line.LinkedTxn || [],
-        };
-
-        // Create clean line object with only required fields
-        line = {
-          Amount: line.Amount,
-          DetailType: 'DepositLineDetail',
-          DepositLineDetail: depositLineDetail,
-        };
-
-        return line;
-      });
+      resolvedData.Line = normalizeBankDepositLines(resolvedData.Line);
     }
 
     // Resolve item references before posting
     resolvedData = await resolveItemReferences(resolvedData, context);
 
     // Fallback for sales receipt DepositToAccountRef if not resolved
-    if (type === 'sales-receipt' && (!resolvedData.DepositToAccountRef?.value)) {
+    if (type === 'sales-receipt' && !resolvedData.DepositToAccountRef?.value) {
       logger.warn('DepositToAccountRef not resolved, falling back to Undeposited Funds', {
         providedName: resolvedData.DepositToAccountRef?.name,
         invocationId: context.invocationId,
@@ -915,17 +1046,7 @@ const validateAndPost = async (
 
     // For bank deposits, ensure minimal schema structure
     if (type === 'bank-deposit') {
-      // Ensure TxnDate is set
-      if (!resolvedData.TxnDate) {
-        resolvedData.TxnDate = new Date().toISOString().slice(0, 10);
-      }
-
-      // Create clean bank deposit object with only required fields
-      resolvedData = {
-        DepositToAccountRef: { value: resolvedData.DepositToAccountRef?.value },
-        TxnDate: resolvedData.TxnDate,
-        Line: resolvedData.Line,
-      };
+      resolvedData = createMinimalBankDepositPayload(resolvedData);
     }
 
     logger.info(`References resolved for ${type}`, {
@@ -956,21 +1077,7 @@ const validateAndPost = async (
       });
     }
 
-    let result;
-
-    switch (type) {
-      case 'sales-receipt':
-        result = await postSalesReceipt(cleanedData as QuickBooksSalesReceipt);
-        break;
-      case 'journal-entry':
-        result = await postJournalEntry(cleanedData as QuickBooksJournalEntry);
-        break;
-      case 'bank-deposit':
-        result = await postBankDeposit(cleanedData as QuickBooksBankDeposit);
-        break;
-      default:
-        throw new Error(`Unsupported QuickBooks document type: ${type}`);
-    }
+    const result = await postQuickBooksDocument(type, cleanedData);
 
     logger.info(`Successfully synced ${type} with ID: ${result.id}`, {
       type,
@@ -978,12 +1085,7 @@ const validateAndPost = async (
       invocationId: context.invocationId,
     });
 
-    return {
-      success: true,
-      id: result.id,
-      type: result.type,
-      ...(generatedDocNumber && { docNumber: generatedDocNumber }),
-    };
+    return buildSuccessResponse(result, generatedDocNumber);
   } catch (error) {
     logger.error(`Failed to sync ${type} to QuickBooks`, {
       type,
@@ -991,10 +1093,7 @@ const validateAndPost = async (
       invocationId: context.invocationId,
     });
 
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error occurred',
-    };
+    return buildFailureResponse(error);
   }
 };
 
@@ -1003,26 +1102,12 @@ export default async function manualQboSync(
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
-    const body = await request.json();
-
-    const validationResult = ManualSyncRequestSchema.safeParse(body);
-    if (!validationResult.success) {
-      logger.warn('Invalid request body for manual QBO sync', {
-        errors: validationResult.error.errors,
-        invocationId: context.invocationId,
-      });
-
-      return {
-        status: 400,
-        jsonBody: {
-          success: false,
-          error: 'Invalid request body',
-          details: validationResult.error.errors,
-        },
-      };
+    const parsedRequest = await parseManualSyncRequest(request, context);
+    if (!parsedRequest.success) {
+      return parsedRequest.response;
     }
 
-    const { type, data } = validationResult.data;
+    const { type, data } = parsedRequest;
 
     logger.info(`Processing manual QBO sync request`, {
       type,
@@ -1031,29 +1116,16 @@ export default async function manualQboSync(
 
     const result = await validateAndPost(type, data, context);
 
-    if (result.success) {
-      return {
-        status: 200,
-        jsonBody: result,
-      };
-    } else {
-      return {
-        status: 500,
-        jsonBody: result,
-      };
-    }
+    return buildHttpResponse(result.success ? 200 : 500, result);
   } catch (error) {
     logger.error('Unexpected error in manual QBO sync', {
       error: error instanceof Error ? error.message : 'Unknown error occurred',
       invocationId: context.invocationId,
     });
 
-    return {
-      status: 500,
-      jsonBody: {
-        success: false,
-        error: 'Internal server error',
-      },
-    };
+    return buildHttpResponse(500, {
+      success: false,
+      error: 'Internal server error',
+    });
   }
-};
+}

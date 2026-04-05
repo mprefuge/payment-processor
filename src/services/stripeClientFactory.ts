@@ -27,34 +27,31 @@ class StripeClientFactory {
     return `${clientScope}:api=${config.apiVersion}:timeout=${config.timeout}:retries=${config.maxNetworkRetries}`;
   }
 
-  getClient(livemode: boolean, options?: StripeClientOptions): Stripe {
-    const cacheKey = this.buildCacheKey(`mode=${livemode}`, options);
-
+  private getOrCreateCachedClient(cacheKey: string, createClient: () => Stripe): Stripe {
     const cachedClient = this.clientCache.get(cacheKey);
     if (cachedClient) {
       return cachedClient;
     }
 
-    const secretKey = this.resolveSecretKey(livemode);
-
-    const client = new Stripe(secretKey, this.resolveClientConfig(options));
-
+    const client = createClient();
     this.clientCache.set(cacheKey, client);
     return client;
   }
 
+  getClient(livemode: boolean, options?: StripeClientOptions): Stripe {
+    const cacheKey = this.buildCacheKey(`mode=${livemode}`, options);
+    return this.getOrCreateCachedClient(
+      cacheKey,
+      () => new Stripe(this.resolveSecretKey(livemode), this.resolveClientConfig(options))
+    );
+  }
+
   getDefaultClient(options?: StripeClientOptions): Stripe {
     const cacheKey = this.buildCacheKey('default', options);
-
-    const cachedClient = this.clientCache.get(cacheKey);
-    if (cachedClient) {
-      return cachedClient;
-    }
-
-    const client = new Stripe(env.stripe.secret, this.resolveClientConfig(options));
-
-    this.clientCache.set(cacheKey, client);
-    return client;
+    return this.getOrCreateCachedClient(
+      cacheKey,
+      () => new Stripe(env.stripe.secret, this.resolveClientConfig(options))
+    );
   }
 
   createClient(secretKey: string, options?: StripeClientOptions): Stripe {

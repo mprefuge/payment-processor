@@ -299,6 +299,47 @@ const toMetadataRecord = (
   return Object.fromEntries(Object.entries(metadata).map(([key, value]) => [key, value ?? null]));
 };
 
+const CONTACT_METADATA_KEYS = ['contact__c', 'Contact__c', 'contact', 'salesforce_id'] as const;
+const ACCOUNT_METADATA_KEYS = ['account__c', 'Account__c', 'account'] as const;
+const CAMPAIGN_METADATA_KEYS = ['campaign__c', 'Campaign__c', 'campaign'] as const;
+const FUND_METADATA_KEYS = ['fund__c', 'Fund__c', 'fund'] as const;
+const DESIGNATION_METADATA_KEYS = ['designation__c', 'Designation__c', 'designation'] as const;
+const RESTRICTION_METADATA_KEYS = ['restriction__c', 'Restriction__c', 'restriction'] as const;
+
+const buildCombinedMetadata = (
+  paymentIntent: Stripe.PaymentIntent | null,
+  charge: Stripe.Charge | null,
+  stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null | undefined
+): Record<string, unknown> => ({
+  // intent/charge metadata should be overridden by the customer when both
+  // are present; the customer is the more persistent object and is where we
+  // typically write the salesforce_id in the various handlers and utils.
+  ...toMetadataRecord(paymentIntent?.metadata ?? null),
+  ...toMetadataRecord(charge?.metadata ?? null),
+  // Stripe's DeletedCustomer type doesn't include metadata, so coerce to
+  // Customer when accessing it (safe since metadata is only present on the
+  // live-customer object).
+  ...toMetadataRecord((stripeCustomer as Stripe.Customer | undefined)?.metadata ?? null),
+});
+
+const readLookupIdsFromMetadata = (metadata: Record<string, unknown>) => ({
+  contactId: parseMetadataString(metadata, ...CONTACT_METADATA_KEYS),
+  accountId: parseMetadataString(metadata, ...ACCOUNT_METADATA_KEYS),
+  campaignId: parseMetadataString(metadata, ...CAMPAIGN_METADATA_KEYS),
+  fundId: parseMetadataString(metadata, ...FUND_METADATA_KEYS),
+  designationId: parseMetadataString(metadata, ...DESIGNATION_METADATA_KEYS),
+  restrictionId: parseMetadataString(metadata, ...RESTRICTION_METADATA_KEYS),
+});
+
+const buildLookupFields = (lookupIds: ReturnType<typeof readLookupIdsFromMetadata>) => ({
+  ...(lookupIds.contactId !== null ? { contact__c: lookupIds.contactId } : {}),
+  ...(lookupIds.accountId !== null ? { account__c: lookupIds.accountId } : {}),
+  ...(lookupIds.campaignId !== null ? { campaign__c: lookupIds.campaignId } : {}),
+  ...(lookupIds.fundId !== null ? { fund__c: lookupIds.fundId } : {}),
+  ...(lookupIds.designationId !== null ? { designation__c: lookupIds.designationId } : {}),
+  ...(lookupIds.restrictionId !== null ? { restriction__c: lookupIds.restrictionId } : {}),
+});
+
 const deriveTransactionType = (
   charge: Stripe.Charge | null | undefined,
   balanceTransaction: Stripe.BalanceTransaction | null | undefined
@@ -532,47 +573,8 @@ export const mapStripeToTransaction = (
     stripeBalanceTransactionFragmentSchema.parse(balanceTransaction);
   }
 
-  const combinedMetadata: Record<string, unknown> = {
-    // intent/charge metadata should be overridden by the customer when both
-    // are present; the customer is the more persistent object and is where we
-    // typically write the salesforce_id in the various handlers and utils.
-    ...toMetadataRecord(paymentIntent?.metadata ?? null),
-    ...toMetadataRecord(charge?.metadata ?? null),
-    // Stripe's DeletedCustomer type doesn't include metadata, so coerce to
-    // Customer when accessing it (safe since metadata is only present on the
-    // live-customer object).
-    ...toMetadataRecord(
-      ((input.stripeCustomer as Stripe.Customer | undefined)?.metadata) ?? null
-    ),
-  };
-
-  const contactId = parseMetadataString(
-    combinedMetadata,
-    'contact__c',
-    'Contact__c',
-    'contact',
-    'salesforce_id'
-  );
-  const accountId = parseMetadataString(combinedMetadata, 'account__c', 'Account__c', 'account');
-  const campaignId = parseMetadataString(
-    combinedMetadata,
-    'campaign__c',
-    'Campaign__c',
-    'campaign'
-  );
-  const fundId = parseMetadataString(combinedMetadata, 'fund__c', 'Fund__c', 'fund');
-  const designationId = parseMetadataString(
-    combinedMetadata,
-    'designation__c',
-    'Designation__c',
-    'designation'
-  );
-  const restrictionId = parseMetadataString(
-    combinedMetadata,
-    'restriction__c',
-    'Restriction__c',
-    'restriction'
-  );
+  const combinedMetadata = buildCombinedMetadata(paymentIntent, charge, input.stripeCustomer);
+  const lookupIds = readLookupIdsFromMetadata(combinedMetadata);
 
   const transactionCandidate: TransactionUpsertDTO = {
     transaction_type__c: deriveTransactionType(charge, balanceTransaction),
@@ -670,12 +672,7 @@ export const mapStripeToTransaction = (
       'Posting_Error__c',
       'posting_error'
     ),
-    ...(contactId !== null ? { contact__c: contactId } : {}),
-    ...(accountId !== null ? { account__c: accountId } : {}),
-    ...(campaignId !== null ? { campaign__c: campaignId } : {}),
-    ...(fundId !== null ? { fund__c: fundId } : {}),
-    ...(designationId !== null ? { designation__c: designationId } : {}),
-    ...(restrictionId !== null ? { restriction__c: restrictionId } : {}),
+    ...buildLookupFields(lookupIds),
   };
 
   return transactionUpsertSchema.parse(transactionCandidate);

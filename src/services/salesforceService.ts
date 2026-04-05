@@ -70,7 +70,9 @@ export class SalesforceService {
     const token = (await response.json()) as SalesforceClientCredentialsTokenResponse;
 
     if (!token?.access_token || !token?.instance_url) {
-      throw new Error('Salesforce authentication response is missing access_token or instance_url.');
+      throw new Error(
+        'Salesforce authentication response is missing access_token or instance_url.'
+      );
     }
 
     const connection = new jsforce.Connection({

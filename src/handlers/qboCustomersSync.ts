@@ -154,6 +154,52 @@ type MatchResult =
 
 type SyncMode = 'create-and-update' | 'create-only' | 'update-only';
 
+type SyncOptions = {
+  dryRun: boolean;
+  pageSize: number;
+  maxPages: number;
+  maxRuntimeMs: number;
+  includeInactive: boolean;
+  exampleLimit: number;
+  overwrite: boolean;
+  syncMode: SyncMode;
+};
+
+type SyncCounts = {
+  totalQboCustomers: number;
+  alreadyExistInSalesforce: number;
+  notInSalesforce: number;
+  willBeCreated: number;
+  wouldUpdate: number;
+  duplicateConflicts: number;
+  created: number;
+  updated: number;
+  skippedByMode: number;
+  errors: number;
+};
+
+type SyncSamples = {
+  duplicates: Array<Record<string, unknown>>;
+  willCreate: Array<Record<string, unknown>>;
+  matched: Array<Record<string, unknown>>;
+  errors: Array<Record<string, unknown>>;
+};
+
+type SyncPagination = {
+  pageSize: number;
+  maxPages: number;
+  pagesProcessed: number;
+  hasMore: boolean;
+  nextStartPosition: number | null;
+  stopReason: string;
+};
+
+type SyncWorkflowResult = {
+  counts: SyncCounts;
+  samples: SyncSamples;
+  pagination: SyncPagination;
+};
+
 const DEFAULT_PAGE_SIZE = 250;
 const MAX_PAGE_SIZE = 1000;
 const DEFAULT_MAX_PAGES = 25;
@@ -1051,6 +1097,413 @@ const resolveDependencies = (): SyncDependencies => {
   };
 };
 
+const readSyncOptions = (request: HttpRequest): SyncOptions => {
+  const query = readQuery(request);
+
+  return {
+    dryRun: parseBoolean(query.dryRun, true),
+    pageSize: parseIntWithBounds(query.pageSize, DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE),
+    maxPages: parseIntWithBounds(query.maxPages, DEFAULT_MAX_PAGES, 1, MAX_MAX_PAGES),
+    maxRuntimeMs: parseIntWithBounds(
+      query.maxRuntimeMs,
+      DEFAULT_MAX_RUNTIME_MS,
+      MIN_MAX_RUNTIME_MS,
+      MAX_MAX_RUNTIME_MS
+    ),
+    includeInactive: parseBoolean(query.includeInactive, true),
+    exampleLimit: parseIntWithBounds(
+      query.exampleLimit,
+      DEFAULT_EXAMPLE_LIMIT,
+      1,
+      MAX_EXAMPLE_LIMIT
+    ),
+    overwrite: parseBoolean(query.overwrite, false),
+    syncMode: parseSyncMode(query.syncMode),
+  };
+};
+
+const buildInitialCounts = (): SyncCounts => ({
+  totalQboCustomers: 0,
+  alreadyExistInSalesforce: 0,
+  notInSalesforce: 0,
+  willBeCreated: 0,
+  wouldUpdate: 0,
+  duplicateConflicts: 0,
+  created: 0,
+  updated: 0,
+  skippedByMode: 0,
+  errors: 0,
+});
+
+const buildInitialSamples = (): SyncSamples => ({
+  duplicates: [],
+  willCreate: [],
+  matched: [],
+  errors: [],
+});
+
+const addSample = (
+  samples: Array<Record<string, unknown>>,
+  limit: number,
+  value: Record<string, unknown>
+): void => {
+  if (samples.length < limit) {
+    samples.push(value);
+  }
+};
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const resolveContactRecordTypeIdSafely = async (
+  salesforce: SalesforceConnectionLike
+): Promise<string | null> => {
+  try {
+    return await resolveContactRecordTypeId(salesforce);
+  } catch (error) {
+    logger.warn(
+      '[qboCustomersSync] Unable to resolve Contact record type; defaulting to org default',
+      {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    );
+    return null;
+  }
+};
+
+const processDuplicateMatch = (
+  normalized: NormalizedQboCustomer,
+  match: Extract<MatchResult, { status: 'duplicate' }>,
+  counts: SyncCounts,
+  samples: SyncSamples,
+  exampleLimit: number
+): void => {
+  counts.duplicateConflicts += 1;
+  addSample(samples.duplicates, exampleLimit, {
+    qboCustomerId: normalized.id,
+    qboDisplayName: normalized.displayName,
+    reason: match.reason,
+    candidateIds: match.candidates.map((candidate) => candidate.Id).filter(Boolean),
+  });
+};
+
+const processMatchedCustomer = async (input: {
+  rawCustomer: QboCustomer;
+  normalized: NormalizedQboCustomer;
+  match: Extract<MatchResult, { status: 'matched' }>;
+  salesforce: SalesforceConnectionLike;
+  deps: SyncDependencies;
+  counts: SyncCounts;
+  samples: SyncSamples;
+  options: Pick<SyncOptions, 'dryRun' | 'overwrite' | 'syncMode' | 'exampleLimit'>;
+}): Promise<void> => {
+  const { rawCustomer, normalized, match, salesforce, deps, counts, samples, options } = input;
+
+  counts.alreadyExistInSalesforce += 1;
+  const updatePayload =
+    match.target === 'Contact'
+      ? buildUpdatePayload(match.record as SalesforceContact, normalized, options.overwrite)
+      : null;
+
+  if (updatePayload && match.target === 'Contact') {
+    counts.wouldUpdate += 1;
+  }
+
+  logger.info('[qboCustomersSync] Matched existing Salesforce record', {
+    qboCustomerId: normalized.id,
+    salesforceId: match.record.Id,
+    salesforceObject: match.target,
+    matchPath: match.path,
+  });
+
+  addSample(samples.matched, options.exampleLimit, {
+    qboCustomerId: normalized.id,
+    qboDisplayName: normalized.displayName,
+    salesforceId: match.record.Id,
+    salesforceObject: match.target,
+    matchPath: match.path,
+    wouldUpdate: Boolean(updatePayload),
+  });
+
+  if (
+    match.path === 'salesforce_quickbooks_id' &&
+    match.shouldBackfillQuickBooksSalesforceId &&
+    !getQboSalesforceId(rawCustomer) &&
+    match.record.Id &&
+    !options.dryRun
+  ) {
+    await deps.updateQboCustomerSalesforceId(normalized.id, match.record.Id);
+    logger.info('[qboCustomersSync] Backfilled QuickBooks Salesforce ID', {
+      qboCustomerId: normalized.id,
+      salesforceId: match.record.Id,
+      matchPath: 'backfilled_quickbooks_salesforce_id',
+    });
+  }
+
+  if (options.syncMode === 'create-only') {
+    counts.skippedByMode += 1;
+    return;
+  }
+
+  if (!options.dryRun && updatePayload) {
+    const saveResult = await executeContactSaveWithFieldFallback(
+      salesforce,
+      'update',
+      updatePayload
+    );
+    if (!saveResult?.success) {
+      throw new Error(`Failed to update Salesforce contact ${String(match.record.Id ?? '')}`);
+    }
+    counts.updated += 1;
+  }
+};
+
+const processUnmatchedCustomer = async (input: {
+  normalized: NormalizedQboCustomer;
+  salesforce: SalesforceConnectionLike;
+  deps: SyncDependencies;
+  counts: SyncCounts;
+  samples: SyncSamples;
+  contactRecordTypeId: string | null;
+  options: Pick<SyncOptions, 'dryRun' | 'syncMode' | 'exampleLimit'>;
+}): Promise<void> => {
+  const { normalized, salesforce, deps, counts, samples, contactRecordTypeId, options } = input;
+
+  counts.notInSalesforce += 1;
+  counts.willBeCreated += 1;
+
+  addSample(samples.willCreate, options.exampleLimit, {
+    qboCustomerId: normalized.id,
+    qboDisplayName: normalized.displayName,
+    email: normalized.email,
+    phone: normalized.phone,
+    mobilePhone: normalized.mobilePhone,
+    hasBillingAddress: Boolean(normalized.mailingAddress.street),
+    hasShippingAddress: Boolean(normalized.otherAddress.street),
+  });
+
+  if (options.syncMode === 'update-only') {
+    counts.skippedByMode += 1;
+    return;
+  }
+
+  if (!options.dryRun) {
+    const createPayload = buildCreatePayload(normalized, contactRecordTypeId);
+    const saveResult = await executeContactSaveWithFieldFallback(
+      salesforce,
+      'create',
+      createPayload
+    );
+    if (!saveResult?.success) {
+      throw new Error(`Failed to create Salesforce contact for QBO customer ${normalized.id}`);
+    }
+    logger.info('[qboCustomersSync] Created Salesforce record for QuickBooks customer', {
+      qboCustomerId: normalized.id,
+      salesforceId: saveResult.id,
+      salesforceObject: 'Contact',
+      matchPath: 'created_new_salesforce_record',
+    });
+    if (saveResult.id) {
+      await deps.updateQboCustomerSalesforceId(normalized.id, saveResult.id);
+    }
+    counts.created += 1;
+  }
+};
+
+const processCustomerSync = async (input: {
+  rawCustomer: QboCustomer;
+  normalized: NormalizedQboCustomer;
+  salesforce: SalesforceConnectionLike;
+  deps: SyncDependencies;
+  counts: SyncCounts;
+  samples: SyncSamples;
+  contactRecordTypeId: string | null;
+  options: Pick<SyncOptions, 'dryRun' | 'overwrite' | 'syncMode' | 'exampleLimit'>;
+}): Promise<void> => {
+  const {
+    rawCustomer,
+    normalized,
+    salesforce,
+    deps,
+    counts,
+    samples,
+    contactRecordTypeId,
+    options,
+  } = input;
+
+  const match = await findSalesforceMatch(salesforce, rawCustomer, normalized);
+
+  if (match.status === 'duplicate') {
+    processDuplicateMatch(normalized, match, counts, samples, options.exampleLimit);
+    return;
+  }
+
+  if (match.status === 'matched') {
+    await processMatchedCustomer({
+      rawCustomer,
+      normalized,
+      match,
+      salesforce,
+      deps,
+      counts,
+      samples,
+      options,
+    });
+    return;
+  }
+
+  await processUnmatchedCustomer({
+    normalized,
+    salesforce,
+    deps,
+    counts,
+    samples,
+    contactRecordTypeId,
+    options,
+  });
+};
+
+const runSyncWorkflow = async (input: {
+  salesforce: SalesforceConnectionLike;
+  deps: SyncDependencies;
+  contactRecordTypeId: string | null;
+  options: SyncOptions;
+}): Promise<SyncWorkflowResult> => {
+  const { salesforce, deps, contactRecordTypeId, options } = input;
+  const startedAt = Date.now();
+  const counts = buildInitialCounts();
+  const samples = buildInitialSamples();
+
+  let pagesProcessed = 0;
+  let nextStartPosition = 1;
+  let hasMore = false;
+  let stopReason = 'completed';
+
+  while (pagesProcessed < options.maxPages) {
+    const runtimeElapsed = Date.now() - startedAt;
+    if (runtimeElapsed >= options.maxRuntimeMs) {
+      stopReason = 'max_runtime_reached';
+      hasMore = true;
+      break;
+    }
+
+    const qboCustomers = await deps.fetchQboCustomersPage({
+      startPosition: nextStartPosition,
+      maxResults: options.pageSize,
+      includeInactive: options.includeInactive,
+    });
+
+    pagesProcessed += 1;
+
+    if (!qboCustomers.length) {
+      hasMore = false;
+      stopReason = 'completed';
+      break;
+    }
+
+    nextStartPosition += qboCustomers.length;
+    hasMore = qboCustomers.length === options.pageSize;
+
+    for (const rawCustomer of qboCustomers) {
+      counts.totalQboCustomers += 1;
+
+      const normalized = normalizeQboCustomer(rawCustomer);
+      if (!normalized) {
+        counts.errors += 1;
+        addSample(samples.errors, options.exampleLimit, {
+          reason: 'invalid_qbo_customer_id',
+          customer: rawCustomer,
+        });
+        continue;
+      }
+
+      try {
+        await processCustomerSync({
+          rawCustomer,
+          normalized,
+          salesforce,
+          deps,
+          counts,
+          samples,
+          contactRecordTypeId,
+          options: {
+            dryRun: options.dryRun,
+            overwrite: options.overwrite,
+            syncMode: options.syncMode,
+            exampleLimit: options.exampleLimit,
+          },
+        });
+      } catch (error) {
+        counts.errors += 1;
+
+        addSample(samples.errors, options.exampleLimit, {
+          qboCustomerId: normalized.id,
+          message: getErrorMessage(error),
+        });
+
+        logger.error('[qboCustomersSync] Failed processing customer', {
+          qboCustomerId: normalized.id,
+          error: getErrorMessage(error),
+        });
+      }
+    }
+
+    if (!hasMore) {
+      stopReason = 'completed';
+      break;
+    }
+
+    if (pagesProcessed >= options.maxPages) {
+      stopReason = 'max_pages_reached';
+      break;
+    }
+
+    const loopElapsed = Date.now() - startedAt;
+    if (loopElapsed >= options.maxRuntimeMs) {
+      stopReason = 'max_runtime_reached';
+      break;
+    }
+  }
+
+  return {
+    counts,
+    samples,
+    pagination: {
+      pageSize: options.pageSize,
+      maxPages: options.maxPages,
+      pagesProcessed,
+      hasMore,
+      nextStartPosition: hasMore ? nextStartPosition : null,
+      stopReason,
+    },
+  };
+};
+
+const buildSuccessResponse = (
+  options: SyncOptions,
+  result: SyncWorkflowResult
+): HttpResponseInit => ({
+  status: 200,
+  jsonBody: {
+    success: true,
+    dryRun: options.dryRun,
+    syncMode: options.syncMode,
+    overwrite: options.overwrite,
+    pagination: result.pagination,
+    counts: result.counts,
+    samples: result.samples,
+  },
+});
+
+const buildErrorResponse = (error: unknown): HttpResponseInit => ({
+  status: 500,
+  jsonBody: {
+    error: 'internal_error',
+    message: 'Failed to sync QBO customers to Salesforce.',
+    details: error instanceof Error ? error.message : String(error),
+  },
+});
+
 const syncQboCustomersToSalesforce = async (
   request: HttpRequest,
   context: InvocationContext
@@ -1066,305 +1519,26 @@ const syncQboCustomersToSalesforce = async (
       };
     }
 
-    const query = readQuery(request);
-
-    const dryRun = parseBoolean(query.dryRun, true);
-    const pageSize = parseIntWithBounds(query.pageSize, DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE);
-    const maxPages = parseIntWithBounds(query.maxPages, DEFAULT_MAX_PAGES, 1, MAX_MAX_PAGES);
-    const maxRuntimeMs = parseIntWithBounds(
-      query.maxRuntimeMs,
-      DEFAULT_MAX_RUNTIME_MS,
-      MIN_MAX_RUNTIME_MS,
-      MAX_MAX_RUNTIME_MS
-    );
-    const includeInactive = parseBoolean(query.includeInactive, true);
-    const exampleLimit = parseIntWithBounds(
-      query.exampleLimit,
-      DEFAULT_EXAMPLE_LIMIT,
-      1,
-      MAX_EXAMPLE_LIMIT
-    );
-    const overwrite = parseBoolean(query.overwrite, false);
-    const syncMode = parseSyncMode(query.syncMode);
+    const options = readSyncOptions(request);
 
     const deps = resolveDependencies();
     const salesforce = await deps.getSalesforceConnection();
-    let contactRecordTypeId: string | null = null;
+    const contactRecordTypeId = await resolveContactRecordTypeIdSafely(salesforce);
+    const result = await runSyncWorkflow({
+      salesforce,
+      deps,
+      contactRecordTypeId,
+      options,
+    });
 
-    try {
-      contactRecordTypeId = await resolveContactRecordTypeId(salesforce);
-    } catch (error) {
-      contactRecordTypeId = null;
-      logger.warn(
-        '[qboCustomersSync] Unable to resolve Contact record type; defaulting to org default',
-        {
-          error: error instanceof Error ? error.message : String(error),
-        }
-      );
-    }
-
-    const startedAt = Date.now();
-
-    const counts = {
-      totalQboCustomers: 0,
-      alreadyExistInSalesforce: 0,
-      notInSalesforce: 0,
-      willBeCreated: 0,
-      wouldUpdate: 0,
-      duplicateConflicts: 0,
-      created: 0,
-      updated: 0,
-      skippedByMode: 0,
-      errors: 0,
-    };
-
-    const samples: {
-      duplicates: Array<Record<string, unknown>>;
-      willCreate: Array<Record<string, unknown>>;
-      matched: Array<Record<string, unknown>>;
-      errors: Array<Record<string, unknown>>;
-    } = {
-      duplicates: [],
-      willCreate: [],
-      matched: [],
-      errors: [],
-    };
-
-    let pagesProcessed = 0;
-    let nextStartPosition = 1;
-    let hasMore = false;
-    let stopReason = 'completed';
-
-    while (pagesProcessed < maxPages) {
-      const runtimeElapsed = Date.now() - startedAt;
-      if (runtimeElapsed >= maxRuntimeMs) {
-        stopReason = 'max_runtime_reached';
-        hasMore = true;
-        break;
-      }
-
-      const qboCustomers = await deps.fetchQboCustomersPage({
-        startPosition: nextStartPosition,
-        maxResults: pageSize,
-        includeInactive,
-      });
-
-      pagesProcessed += 1;
-
-      if (!qboCustomers.length) {
-        hasMore = false;
-        stopReason = 'completed';
-        break;
-      }
-
-      nextStartPosition += qboCustomers.length;
-      hasMore = qboCustomers.length === pageSize;
-
-      for (const rawCustomer of qboCustomers) {
-        counts.totalQboCustomers += 1;
-
-        const normalized = normalizeQboCustomer(rawCustomer);
-        if (!normalized) {
-          counts.errors += 1;
-          if (samples.errors.length < exampleLimit) {
-            samples.errors.push({ reason: 'invalid_qbo_customer_id', customer: rawCustomer });
-          }
-          continue;
-        }
-
-        try {
-          const match = await findSalesforceMatch(salesforce, rawCustomer, normalized);
-
-          if (match.status === 'duplicate') {
-            counts.duplicateConflicts += 1;
-
-            if (samples.duplicates.length < exampleLimit) {
-              samples.duplicates.push({
-                qboCustomerId: normalized.id,
-                qboDisplayName: normalized.displayName,
-                reason: match.reason,
-                candidateIds: match.candidates.map((candidate) => candidate.Id).filter(Boolean),
-              });
-            }
-
-            continue;
-          }
-
-          if (match.status === 'matched') {
-            counts.alreadyExistInSalesforce += 1;
-            const updatePayload =
-              match.target === 'Contact'
-                ? buildUpdatePayload(match.record as SalesforceContact, normalized, overwrite)
-                : null;
-            if (updatePayload && match.target === 'Contact') {
-              counts.wouldUpdate += 1;
-            }
-
-            logger.info('[qboCustomersSync] Matched existing Salesforce record', {
-              qboCustomerId: normalized.id,
-              salesforceId: match.record.Id,
-              salesforceObject: match.target,
-              matchPath: match.path,
-            });
-
-            if (samples.matched.length < exampleLimit) {
-              samples.matched.push({
-                qboCustomerId: normalized.id,
-                qboDisplayName: normalized.displayName,
-                salesforceId: match.record.Id,
-                salesforceObject: match.target,
-                matchPath: match.path,
-                wouldUpdate: Boolean(updatePayload),
-              });
-            }
-
-            if (
-              match.path === 'salesforce_quickbooks_id' &&
-              match.shouldBackfillQuickBooksSalesforceId &&
-              !getQboSalesforceId(rawCustomer) &&
-              match.record.Id &&
-              !dryRun
-            ) {
-              await deps.updateQboCustomerSalesforceId(normalized.id, match.record.Id);
-              logger.info('[qboCustomersSync] Backfilled QuickBooks Salesforce ID', {
-                qboCustomerId: normalized.id,
-                salesforceId: match.record.Id,
-                matchPath: 'backfilled_quickbooks_salesforce_id',
-              });
-            }
-
-            if (syncMode === 'create-only') {
-              counts.skippedByMode += 1;
-              continue;
-            }
-
-            if (!dryRun && updatePayload) {
-              const saveResult = await executeContactSaveWithFieldFallback(
-                salesforce,
-                'update',
-                updatePayload
-              );
-              if (!saveResult?.success) {
-                throw new Error(
-                  `Failed to update Salesforce contact ${String(match.record.Id ?? '')}`
-                );
-              }
-              counts.updated += 1;
-            }
-
-            continue;
-          }
-
-          counts.notInSalesforce += 1;
-          counts.willBeCreated += 1;
-
-          if (samples.willCreate.length < exampleLimit) {
-            samples.willCreate.push({
-              qboCustomerId: normalized.id,
-              qboDisplayName: normalized.displayName,
-              email: normalized.email,
-              phone: normalized.phone,
-              mobilePhone: normalized.mobilePhone,
-              hasBillingAddress: Boolean(normalized.mailingAddress.street),
-              hasShippingAddress: Boolean(normalized.otherAddress.street),
-            });
-          }
-
-          if (syncMode === 'update-only') {
-            counts.skippedByMode += 1;
-            continue;
-          }
-
-          if (!dryRun) {
-            const createPayload = buildCreatePayload(normalized, contactRecordTypeId);
-            const saveResult = await executeContactSaveWithFieldFallback(
-              salesforce,
-              'create',
-              createPayload
-            );
-            if (!saveResult?.success) {
-              throw new Error(
-                `Failed to create Salesforce contact for QBO customer ${normalized.id}`
-              );
-            }
-            logger.info('[qboCustomersSync] Created Salesforce record for QuickBooks customer', {
-              qboCustomerId: normalized.id,
-              salesforceId: saveResult.id,
-              salesforceObject: 'Contact',
-              matchPath: 'created_new_salesforce_record',
-            });
-            if (saveResult.id) {
-              await deps.updateQboCustomerSalesforceId(normalized.id, saveResult.id);
-            }
-            counts.created += 1;
-          }
-        } catch (error) {
-          counts.errors += 1;
-
-          if (samples.errors.length < exampleLimit) {
-            samples.errors.push({
-              qboCustomerId: normalized.id,
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }
-
-          logger.error('[qboCustomersSync] Failed processing customer', {
-            qboCustomerId: normalized.id,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-
-      if (!hasMore) {
-        stopReason = 'completed';
-        break;
-      }
-
-      if (pagesProcessed >= maxPages) {
-        stopReason = 'max_pages_reached';
-        break;
-      }
-
-      const loopElapsed = Date.now() - startedAt;
-      if (loopElapsed >= maxRuntimeMs) {
-        stopReason = 'max_runtime_reached';
-        break;
-      }
-    }
-
-    return {
-      status: 200,
-      jsonBody: {
-        success: true,
-        dryRun,
-        syncMode,
-        overwrite,
-        pagination: {
-          pageSize,
-          maxPages,
-          pagesProcessed,
-          hasMore,
-          nextStartPosition: hasMore ? nextStartPosition : null,
-          stopReason,
-        },
-        counts,
-        samples,
-      },
-    };
+    return buildSuccessResponse(options, result);
   } catch (error) {
     context.log('[qboCustomersSync] Unhandled error', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
     });
 
-    return {
-      status: 500,
-      jsonBody: {
-        error: 'internal_error',
-        message: 'Failed to sync QBO customers to Salesforce.',
-        details: error instanceof Error ? error.message : String(error),
-      },
-    };
+    return buildErrorResponse(error);
   }
 };
 

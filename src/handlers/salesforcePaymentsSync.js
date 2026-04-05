@@ -27,10 +27,7 @@ const MAX_MAX_RECORDS = 5_000;
 
 const SALESFORCE_RELATIONSHIP_FIELD = 'Contact__r.Stripe_Customer_Id__c';
 const TRANSACTION_CSV_HEADERS = Array.from(
-  new Set([
-    ...Object.values(TRANSACTION_FIELD_API_NAMES || {}),
-    SALESFORCE_RELATIONSHIP_FIELD,
-  ])
+  new Set([...Object.values(TRANSACTION_FIELD_API_NAMES || {}), SALESFORCE_RELATIONSHIP_FIELD])
 );
 
 const csvEscape = (value) => {
@@ -205,7 +202,10 @@ const derivePaymentType = (charge) => {
     return 'disputed';
   }
 
-  if (charge?.refunded || (typeof charge?.amount_refunded === 'number' && charge.amount_refunded > 0)) {
+  if (
+    charge?.refunded ||
+    (typeof charge?.amount_refunded === 'number' && charge.amount_refunded > 0)
+  ) {
     return 'refunded';
   }
 
@@ -243,7 +243,8 @@ const createSummary = () => ({
 
 const hasReachedRuntimeLimit = (startedAt, maxRuntimeMs) => Date.now() - startedAt >= maxRuntimeMs;
 
-const hasReachedRecordLimit = (processedRecordCount, maxRecords) => processedRecordCount >= maxRecords;
+const hasReachedRecordLimit = (processedRecordCount, maxRecords) =>
+  processedRecordCount >= maxRecords;
 
 const resolveSyncOptions = ({ query, deps }) => {
   const requestedDryRun = parseBoolean(query.dryRun, false);
@@ -253,18 +254,8 @@ const resolveSyncOptions = ({ query, deps }) => {
   const exampleLimit = parseExampleLimit(query.exampleLimit);
   const format = typeof query.format === 'string' ? query.format.trim().toLowerCase() : '';
   const exportCsv = format === 'csv';
-  const pageSize = parseIntegerWithBounds(
-    query.pageSize,
-    DEFAULT_PAGE_SIZE,
-    1,
-    MAX_PAGE_SIZE
-  );
-  const maxPages = parseIntegerWithBounds(
-    query.maxPages,
-    DEFAULT_MAX_PAGES,
-    1,
-    MAX_MAX_PAGES
-  );
+  const pageSize = parseIntegerWithBounds(query.pageSize, DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE);
+  const maxPages = parseIntegerWithBounds(query.maxPages, DEFAULT_MAX_PAGES, 1, MAX_MAX_PAGES);
   const maxRuntimeMs = parseIntegerWithBounds(
     query.maxRuntimeMs,
     DEFAULT_MAX_RUNTIME_MS,
@@ -277,10 +268,7 @@ const resolveSyncOptions = ({ query, deps }) => {
     1,
     MAX_MAX_RECORDS
   );
-  const includeCustomerLookup = parseBoolean(
-    query.includeCustomerLookup,
-    !dryRun && !exportCsv
-  );
+  const includeCustomerLookup = parseBoolean(query.includeCustomerLookup, !dryRun && !exportCsv);
   const requestedCursor =
     typeof query.cursor === 'string' && query.cursor.trim().length > 0 ? query.cursor.trim() : null;
 
@@ -398,6 +386,8 @@ const createSalesforceGetter = () => {
   };
 };
 
+const createStripeClient = (secret) => new Stripe(secret, { apiVersion: STRIPE_API_VERSION });
+
 const createDefaultDependencies = () => {
   const testMode = parseBoolean(process.env.TEST_MODE, false);
   const stripeSecret = resolveStripeSecret(testMode);
@@ -406,11 +396,9 @@ const createDefaultDependencies = () => {
     throw new Error('Stripe secret key is not configured.');
   }
 
-  const stripe = new Stripe(stripeSecret, { apiVersion: STRIPE_API_VERSION });
-
   return {
     testMode,
-    stripe,
+    stripe: createStripeClient(stripeSecret),
     getSalesforceSvc: createSalesforceGetter(),
   };
 };
@@ -433,23 +421,23 @@ const resolveDependencies = () => {
   return createDefaultDependencies();
 };
 
+const readHeaderValue = (request, name) => {
+  const headers = request?.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (typeof headers.get === 'function') {
+    return headers.get(name) || undefined;
+  }
+
+  return headers[name] || headers[name?.toLowerCase?.()] || headers[name?.toUpperCase?.()];
+};
+
 const readQuery = (request) => {
-  const readHeader = (name) => {
-    const headers = request?.headers;
-    if (!headers) {
-      return undefined;
-    }
-
-    if (typeof headers.get === 'function') {
-      return headers.get(name) || undefined;
-    }
-
-    return headers[name] || headers[name?.toLowerCase?.()] || headers[name?.toUpperCase?.()];
-  };
-
   if (request?.query && typeof request.query.get === 'function') {
     return {
-      mode: request.query.get('mode') || readHeader('x-stripe-mode') || undefined,
+      mode: request.query.get('mode') || readHeaderValue(request, 'x-stripe-mode') || undefined,
       dryRun: request.query.get('dryRun') || undefined,
       exampleLimit: request.query.get('exampleLimit') || undefined,
       format: request.query.get('format') || undefined,
@@ -465,7 +453,7 @@ const readQuery = (request) => {
   if (request?.query && typeof request.query === 'object') {
     return {
       ...request.query,
-      mode: request.query.mode || readHeader('x-stripe-mode') || undefined,
+      mode: request.query.mode || readHeaderValue(request, 'x-stripe-mode') || undefined,
     };
   }
 
@@ -473,7 +461,8 @@ const readQuery = (request) => {
     if (typeof request?.url === 'string') {
       const parsed = new URL(request.url);
       return {
-        mode: parsed.searchParams.get('mode') || readHeader('x-stripe-mode') || undefined,
+        mode:
+          parsed.searchParams.get('mode') || readHeaderValue(request, 'x-stripe-mode') || undefined,
         dryRun: parsed.searchParams.get('dryRun') || undefined,
         exampleLimit: parsed.searchParams.get('exampleLimit') || undefined,
         format: parsed.searchParams.get('format') || undefined,
@@ -485,11 +474,105 @@ const readQuery = (request) => {
         includeCustomerLookup: parsed.searchParams.get('includeCustomerLookup') || undefined,
       };
     }
-  } catch (error) {
-  }
+  } catch (error) {}
 
   return {};
 };
+
+const resolveRuntimeDependencies = (deps, modeToggle) => {
+  if (typeof modeToggle.testMode !== 'boolean') {
+    return deps;
+  }
+
+  const stripeSecret = resolveStripeSecret(modeToggle.testMode);
+  if (!stripeSecret) {
+    throw new Error(
+      modeToggle.testMode
+        ? 'STRIPE_TEST_SECRET_KEY (or STRIPE_SECRET) is not configured.'
+        : 'STRIPE_LIVE_SECRET_KEY (or STRIPE_SECRET) is not configured.'
+    );
+  }
+
+  return {
+    ...deps,
+    testMode: modeToggle.testMode,
+    stripe: createStripeClient(stripeSecret),
+  };
+};
+
+const buildPagination = ({
+  pageSize,
+  maxPages,
+  maxRuntimeMs,
+  maxRecords,
+  pagesProcessed,
+  requestedCursor,
+  nextCursor,
+  hasMore,
+  stopReason,
+  summary,
+}) => ({
+  pageSize,
+  maxPages,
+  maxRuntimeMs,
+  maxRecords,
+  pagesProcessed,
+  recordsProcessed: summary.totalPayments,
+  requestedCursor,
+  nextCursor: hasMore ? nextCursor : null,
+  hasMore,
+  stopReason,
+  continuationRecommended: hasMore,
+});
+
+const buildCsvResponse = ({ csvRows, hasMore, nextCursor, stopReason }) => {
+  const csvContent = buildPaymentsCsv(csvRows);
+  const fileName = `stripe-payments-export-${formatTimestampForFilename()}.csv`;
+
+  return {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${fileName}"`,
+      'X-Has-More': hasMore ? 'true' : 'false',
+      'X-Next-Cursor': hasMore && nextCursor ? nextCursor : '',
+      'X-Stop-Reason': stopReason,
+    },
+    body: csvContent,
+  };
+};
+
+const buildJsonResponse = ({
+  dryRun,
+  testMode,
+  forcedByTestMode,
+  pagination,
+  summary,
+  examples,
+  errorSamples,
+}) => ({
+  status: 200,
+  jsonBody: {
+    success: true,
+    dryRun,
+    testMode,
+    dryRunForcedByTestMode: forcedByTestMode,
+    pagination,
+    paymentCount: summary.totalPayments,
+    counts: summary,
+    examplePayloads: examples,
+    errors: errorSamples,
+  },
+});
+
+const buildErrorResponse = (error) => ({
+  status: 500,
+  jsonBody: {
+    error: 'internal_error',
+    message: 'Failed to sync Stripe payments to Salesforce.',
+    details: error instanceof Error ? error.message : String(error),
+  },
+});
 
 const syncSalesforcePayments = async (request, context) => {
   try {
@@ -517,25 +600,16 @@ const syncSalesforcePayments = async (request, context) => {
       };
     }
 
-    let runtimeDeps = deps;
-    if (typeof modeToggle.testMode === 'boolean') {
-      const stripeSecret = resolveStripeSecret(modeToggle.testMode);
-      if (!stripeSecret) {
-        return {
-          status: 500,
-          jsonBody: {
-            error: 'configuration_error',
-            message: modeToggle.testMode
-              ? 'STRIPE_TEST_SECRET_KEY (or STRIPE_SECRET) is not configured.'
-              : 'STRIPE_LIVE_SECRET_KEY (or STRIPE_SECRET) is not configured.',
-          },
-        };
-      }
-
-      runtimeDeps = {
-        ...deps,
-        testMode: modeToggle.testMode,
-        stripe: new Stripe(stripeSecret, { apiVersion: STRIPE_API_VERSION }),
+    let runtimeDeps;
+    try {
+      runtimeDeps = resolveRuntimeDependencies(deps, modeToggle);
+    } catch (error) {
+      return {
+        status: 500,
+        jsonBody: {
+          error: 'configuration_error',
+          message: error instanceof Error ? error.message : String(error),
+        },
       };
     }
 
@@ -622,14 +696,15 @@ const syncSalesforcePayments = async (request, context) => {
           const balanceTransactionId = normalizeStripeId(charge.balance_transaction);
           if (balanceTransactionId) {
             try {
-              balanceTransaction = await runtimeDeps.stripe.balanceTransactions.retrieve(balanceTransactionId);
+              balanceTransaction =
+                await runtimeDeps.stripe.balanceTransactions.retrieve(balanceTransactionId);
             } catch (error) {
               balanceTransaction = null;
             }
           }
 
-              const paymentIntent = await fetchPaymentIntentForCharge(runtimeDeps.stripe, charge);
-              const stripeCustomer = await fetchStripeCustomerSafely(runtimeDeps.stripe, customerId);
+          const paymentIntent = await fetchPaymentIntentForCharge(runtimeDeps.stripe, charge);
+          const stripeCustomer = await fetchStripeCustomerSafely(runtimeDeps.stripe, customerId);
 
           const transactionPayload = mapStripeToTransaction({
             paymentIntent,
@@ -755,65 +830,39 @@ const syncSalesforcePayments = async (request, context) => {
 
     summary.customers.uniqueCustomerCount = uniqueCustomerIds.size;
 
-    const pagination = {
+    const pagination = buildPagination({
       pageSize,
       maxPages,
       maxRuntimeMs,
       maxRecords,
       pagesProcessed,
-      recordsProcessed: summary.totalPayments,
       requestedCursor,
-      nextCursor: hasMore ? nextCursor : null,
+      nextCursor,
       hasMore,
       stopReason,
-      continuationRecommended: hasMore,
-    };
+      summary,
+    });
 
     if (exportCsv) {
-      const csvContent = buildPaymentsCsv(csvRows);
-      const fileName = `stripe-payments-export-${formatTimestampForFilename()}.csv`;
-
-      return {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/csv; charset=utf-8',
-          'Content-Disposition': `attachment; filename="${fileName}"`,
-          'X-Has-More': hasMore ? 'true' : 'false',
-          'X-Next-Cursor': hasMore && nextCursor ? nextCursor : '',
-          'X-Stop-Reason': stopReason,
-        },
-        body: csvContent,
-      };
+      return buildCsvResponse({ csvRows, hasMore, nextCursor, stopReason });
     }
 
-    return {
-      status: 200,
-      jsonBody: {
-        success: true,
-        dryRun,
-        testMode,
-        dryRunForcedByTestMode: forcedByTestMode,
-        pagination,
-        paymentCount: summary.totalPayments,
-        counts: summary,
-        examplePayloads: examples,
-        errors: errorSamples,
-      },
-    };
+    return buildJsonResponse({
+      dryRun,
+      testMode,
+      forcedByTestMode,
+      pagination,
+      summary,
+      examples,
+      errorSamples,
+    });
   } catch (error) {
     context.log('[salesforcePaymentsSync] Unhandled error', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
     });
 
-    return {
-      status: 500,
-      jsonBody: {
-        error: 'internal_error',
-        message: 'Failed to sync Stripe payments to Salesforce.',
-        details: error instanceof Error ? error.message : String(error),
-      },
-    };
+    return buildErrorResponse(error);
   }
 };
 

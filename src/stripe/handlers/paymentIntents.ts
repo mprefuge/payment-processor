@@ -18,10 +18,7 @@ import {
   getFrequencyFromSubscription,
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
-import {
-  loadConfig,
-  normalizeTransactionCategory,
-} from '../../config/contactMatching';
+import { loadConfig, normalizeTransactionCategory } from '../../config/contactMatching';
 
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
   if (input === null || input === undefined) {
@@ -84,6 +81,13 @@ interface ProcessPaymentIntentOptions {
   salesforce: SalesforceSvc;
   deps: StripeWebhookDependencies;
   invoice?: Stripe.Invoice | null;
+}
+
+interface SuccessfulPaymentIntentResources {
+  charge: Stripe.Charge | null;
+  balanceTransaction: Stripe.BalanceTransaction | null;
+  checkoutSession: Stripe.Checkout.Session | null;
+  stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null;
 }
 
 const extractCampaignMetadataValue = (metadata: Record<string, unknown>): string | null => {
@@ -328,71 +332,90 @@ const findExistingTransactionId = async (
   return null;
 };
 
-const processSuccessfulPaymentIntent = async ({
-  context,
-  paymentIntent,
-  stripe,
-  salesforce,
-  deps,
-  invoice,
-}: ProcessPaymentIntentOptions): Promise<void> => {
-  const charge = await resolveCharge(stripe, paymentIntent);
-  const balanceTransaction = await resolveBalanceTransaction(stripe, charge, paymentIntent);
+const resolveCheckoutSessionForPaymentIntent = async (
+  context: HttpContext,
+  stripe: Stripe,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<Stripe.Checkout.Session | null> => {
+  const metadata = paymentIntent?.metadata ?? ({} as Record<string, string | undefined>);
+  const raw = (metadata['stripe_checkout_session_id__c'] ||
+    metadata['Stripe_Checkout_Session_Id__c'] ||
+    metadata['stripe_checkout_session_id'] ||
+    metadata['checkout_session_id'] ||
+    metadata['checkoutSessionId']) as string | undefined;
+  const metaSessionId = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null;
 
-  let checkoutSession: Stripe.Checkout.Session | null = null;
-  const metaSessionId = (() => {
-    const md = paymentIntent?.metadata ?? ({} as Record<string, string | undefined>);
-    const raw = (md['stripe_checkout_session_id__c'] ||
-      md['Stripe_Checkout_Session_Id__c'] ||
-      md['stripe_checkout_session_id'] ||
-      md['checkout_session_id'] ||
-      md['checkoutSessionId']) as string | undefined;
-    return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null;
-  })();
   if (metaSessionId) {
-    (checkoutSession as any) = { id: metaSessionId } as Stripe.Checkout.Session;
-  } else {
-    try {
-      checkoutSession = await findCheckoutSessionForPaymentIntent(stripe, paymentIntent.id);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown error retrieving checkout session';
-      context.log('[StripeWebhook] Failed to load checkout session for payment intent', {
-        paymentIntentId: paymentIntent.id,
-        error: message,
-      });
-    }
+    return { id: metaSessionId } as Stripe.Checkout.Session;
   }
 
-  let stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null = null;
   try {
-    stripeCustomer = await resolveStripeCustomer(stripe, charge, paymentIntent, context.log);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    return await findCheckoutSessionForPaymentIntent(stripe, paymentIntent.id);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Unknown error retrieving checkout session';
+    context.log('[StripeWebhook] Failed to load checkout session for payment intent', {
+      paymentIntentId: paymentIntent.id,
+      error: message,
+    });
+    return null;
+  }
+};
+
+const resolveStripeCustomerForTransaction = async (
+  context: HttpContext,
+  stripe: Stripe,
+  charge: Stripe.Charge | null,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<Stripe.Customer | Stripe.DeletedCustomer | null> => {
+  try {
+    return await resolveStripeCustomer(stripe, charge, paymentIntent, context.log);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     context.log('[StripeWebhook] Failed to fetch Stripe customer for transaction mapping', {
-      error: msg,
+      error: message,
       paymentIntentId: paymentIntent.id,
     });
+    return null;
   }
+};
 
-  const transaction = mapStripeToTransaction({
-    paymentIntent,
-    charge: charge ?? undefined,
-    balanceTransaction: balanceTransaction ?? undefined,
-    stripeCustomer,
-  });
-
-  const combinedMetadata = mergeCampaignMetadataSources(paymentIntent, charge, checkoutSession);
-  const metadataCampaign = extractCampaignMetadataValue(combinedMetadata);
-  await resolveCampaignAndMembership(
+const loadSuccessfulPaymentIntentResources = async (
+  context: HttpContext,
+  stripe: Stripe,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<SuccessfulPaymentIntentResources> => {
+  const charge = await resolveCharge(stripe, paymentIntent);
+  const balanceTransaction = await resolveBalanceTransaction(stripe, charge, paymentIntent);
+  const checkoutSession = await resolveCheckoutSessionForPaymentIntent(
     context,
-    deps,
-    transaction,
-    metadataCampaign,
-    '[StripeWebhook] Failed to resolve campaign for payment intent; continuing without campaign',
-    { campaignName: metadataCampaign }
+    stripe,
+    paymentIntent
+  );
+  const stripeCustomer = await resolveStripeCustomerForTransaction(
+    context,
+    stripe,
+    charge,
+    paymentIntent
   );
 
+  return {
+    charge,
+    balanceTransaction,
+    checkoutSession,
+    stripeCustomer,
+  };
+};
+
+const enrichTransactionWithInvoiceAndSubscription = async (
+  context: HttpContext,
+  stripe: Stripe,
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  checkoutSession: Stripe.Checkout.Session | null,
+  invoice: Stripe.Invoice | null | undefined,
+  transaction: TransactionUpsertDTO
+): Promise<string | null> => {
   const invoiceId =
     normalizeStripeId(paymentIntent.invoice) ||
     normalizeStripeId(charge?.invoice) ||
@@ -403,7 +426,6 @@ const processSuccessfulPaymentIntent = async ({
   }
 
   let resolvedInvoice: Stripe.Invoice | null = invoice ?? null;
-
   let subscriptionId =
     transaction.stripe_subscription_id__c ||
     normalizeStripeId(checkoutSession?.subscription) ||
@@ -463,58 +485,77 @@ const processSuccessfulPaymentIntent = async ({
     transaction.status__c = 'paid';
   }
 
-  context.log('[StripeWebhook] Starting transaction search for payment intent', {
-    paymentIntentId: paymentIntent.id,
-    chargeId: charge?.id,
-    hasCheckoutSession: !!checkoutSession,
-  });
+  return subscriptionId ?? null;
+};
 
-  if (checkoutSession) {
-    if (!transaction.stripe_checkout_session_id__c) {
-      transaction.stripe_checkout_session_id__c = checkoutSession.id;
-    }
+const applyMetadataCampaignToTransaction = async (
+  context: HttpContext,
+  deps: StripeWebhookDependencies,
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  checkoutSession: Stripe.Checkout.Session | null,
+  transaction: TransactionUpsertDTO
+): Promise<void> => {
+  const combinedMetadata = mergeCampaignMetadataSources(paymentIntent, charge, checkoutSession);
+  const metadataCampaign = extractCampaignMetadataValue(combinedMetadata);
+
+  await resolveCampaignAndMembership(
+    context,
+    deps,
+    transaction,
+    metadataCampaign,
+    '[StripeWebhook] Failed to resolve campaign for payment intent; continuing without campaign',
+    { campaignName: metadataCampaign }
+  );
+};
+
+const enrichTransactionWithProductCampaign = async (
+  context: HttpContext,
+  deps: StripeWebhookDependencies,
+  stripe: Stripe,
+  charge: Stripe.Charge | null,
+  paymentIntent: Stripe.PaymentIntent,
+  transaction: TransactionUpsertDTO
+): Promise<void> => {
+  if (transaction.Name || !charge) {
+    return;
   }
 
-  const overrideId = await findExistingTransactionId(
-    context,
-    salesforce,
-    paymentIntent.id,
-    charge?.id ?? null,
-    checkoutSession?.id ?? null,
-    subscriptionId ?? null
-  );
+  let productName: string | null = null;
+  try {
+    productName = await getProductNameFromCharge(stripe, charge, (...args: unknown[]) =>
+      context.log(...args)
+    );
+  } catch (error) {
+    context.log('[StripeWebhook] Error getting product name from charge', {
+      chargeId: charge.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
+  await resolveCampaignAndMembership(
+    context,
+    deps,
+    transaction,
+    productName,
+    '[StripeWebhook] Failed to associate category with campaign; continuing without campaign',
+    { category: productName, paymentIntentId: paymentIntent.id }
+  );
+};
+
+const upsertSuccessfulPaymentIntentTransaction = async (
+  context: HttpContext,
+  salesforce: SalesforceSvc,
+  paymentIntent: Stripe.PaymentIntent,
+  transaction: TransactionUpsertDTO,
+  overrideId: string | null
+): Promise<Awaited<ReturnType<SalesforceSvc['upsertTransactionByExternalId']>> | null> => {
   context.log('[StripeWebhook] Upserting transaction for payment intent', {
     paymentIntentId: paymentIntent.id,
     overrideId,
     willUpdate: !!overrideId,
     currentStatus: transaction.status__c,
   });
-
-  if (!transaction.Name) {
-    let productName: string | null = null;
-    if (charge) {
-      try {
-        productName = await getProductNameFromCharge(stripe, charge, (...args: unknown[]) =>
-          context.log(...args)
-        );
-      } catch (error) {
-        context.log('[StripeWebhook] Error getting product name from charge', {
-          chargeId: charge.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    await resolveCampaignAndMembership(
-      context,
-      deps,
-      transaction,
-      productName,
-      '[StripeWebhook] Failed to associate category with campaign; continuing without campaign',
-      { category: productName, paymentIntentId: paymentIntent.id }
-    );
-  }
 
   if (
     transaction.status__c == null ||
@@ -527,7 +568,7 @@ const processSuccessfulPaymentIntent = async ({
       amountGross: transaction.amount_gross__c,
       transaction,
     });
-    return;
+    return null;
   }
 
   const upsertResult = await salesforce.upsertTransactionByExternalId(
@@ -543,16 +584,53 @@ const processSuccessfulPaymentIntent = async ({
     wasUpdate: !!overrideId,
   });
 
-  if (!env.accounting.syncEnabled || !balanceTransaction) {
+  return upsertResult;
+};
+
+const resolveSuccessfulPaymentIntentOverrideId = async (
+  context: HttpContext,
+  salesforce: SalesforceSvc,
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  checkoutSession: Stripe.Checkout.Session | null,
+  subscriptionId: string | null,
+  transaction: TransactionUpsertDTO
+): Promise<string | null> => {
+  context.log('[StripeWebhook] Starting transaction search for payment intent', {
+    paymentIntentId: paymentIntent.id,
+    chargeId: charge?.id,
+    hasCheckoutSession: !!checkoutSession,
+  });
+
+  if (checkoutSession && !transaction.stripe_checkout_session_id__c) {
+    transaction.stripe_checkout_session_id__c = checkoutSession.id;
+  }
+
+  return findExistingTransactionId(
+    context,
+    salesforce,
+    paymentIntent.id,
+    charge?.id ?? null,
+    checkoutSession?.id ?? null,
+    subscriptionId ?? null
+  );
+};
+
+const postSuccessfulPaymentIntentToAccounting = async (
+  deps: StripeWebhookDependencies,
+  salesforce: SalesforceSvc,
+  upsertResult: Awaited<ReturnType<SalesforceSvc['upsertTransactionByExternalId']>>,
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  balanceTransaction: Stripe.BalanceTransaction | null,
+  stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null,
+  checkoutSession: Stripe.Checkout.Session | null
+): Promise<void> => {
+  if (!env.accounting.syncEnabled || !balanceTransaction?.id) {
     return;
   }
 
-  const balanceTransactionId = balanceTransaction.id;
-  if (!balanceTransactionId) {
-    return;
-  }
-
-  await deps.idempotencyStore.withLock(`bt_${balanceTransactionId}`, async () => {
+  await deps.idempotencyStore.withLock(`bt_${balanceTransaction.id}`, async () => {
     const posting = await deps.accounting.postChargeToQbo({
       gross: Math.abs(balanceTransaction.amount ?? 0),
       fee: Math.abs(balanceTransaction.fee ?? 0),
@@ -568,6 +646,83 @@ const processSuccessfulPaymentIntent = async ({
 
     await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
   });
+};
+
+const processSuccessfulPaymentIntent = async ({
+  context,
+  paymentIntent,
+  stripe,
+  salesforce,
+  deps,
+  invoice,
+}: ProcessPaymentIntentOptions): Promise<void> => {
+  const { charge, balanceTransaction, checkoutSession, stripeCustomer } =
+    await loadSuccessfulPaymentIntentResources(context, stripe, paymentIntent);
+
+  const transaction = mapStripeToTransaction({
+    paymentIntent,
+    charge: charge ?? undefined,
+    balanceTransaction: balanceTransaction ?? undefined,
+    stripeCustomer,
+  });
+  await applyMetadataCampaignToTransaction(
+    context,
+    deps,
+    paymentIntent,
+    charge,
+    checkoutSession,
+    transaction
+  );
+
+  const subscriptionId = await enrichTransactionWithInvoiceAndSubscription(
+    context,
+    stripe,
+    paymentIntent,
+    charge,
+    checkoutSession,
+    invoice,
+    transaction
+  );
+  const overrideId = await resolveSuccessfulPaymentIntentOverrideId(
+    context,
+    salesforce,
+    paymentIntent,
+    charge,
+    checkoutSession,
+    subscriptionId,
+    transaction
+  );
+
+  await enrichTransactionWithProductCampaign(
+    context,
+    deps,
+    stripe,
+    charge,
+    paymentIntent,
+    transaction
+  );
+  const upsertResult = await upsertSuccessfulPaymentIntentTransaction(
+    context,
+    salesforce,
+    paymentIntent,
+    transaction,
+    overrideId
+  );
+
+  if (!upsertResult) {
+    return;
+  }
+
+  await postSuccessfulPaymentIntentToAccounting(
+    deps,
+    salesforce,
+    upsertResult,
+    paymentIntent,
+    charge,
+    balanceTransaction,
+    stripeCustomer,
+    checkoutSession
+  );
 };
 
 const buildFailureTransaction = (
@@ -601,19 +756,27 @@ const buildFailureTransaction = (
   return base;
 };
 
-export const updatePaymentIntentStatus = async (
+const buildPaymentIntentStatusOptions = (
+  paymentIntent: Stripe.PaymentIntent,
+  dunningRequired: boolean
+): { nextRetry?: Date; dunningRequired: boolean } => {
+  const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
+
+  return nextRetry ? { nextRetry, dunningRequired } : { dunningRequired };
+};
+
+const canUpsertPaymentIntentTransaction = (payload: TransactionUpsertDTO): boolean =>
+  payload.status__c != null && (payload as any).status__c !== '' && payload.amount_gross__c != null;
+
+const logPaymentIntentStatusUpdate = (
   context: HttpContext,
   paymentIntent: Stripe.PaymentIntent,
   status: TransactionUpsertDTO['status__c'],
-  deps: StripeWebhookDependencies,
   options?: {
     nextRetry?: Date | null;
     dunningRequired?: boolean;
   }
-): Promise<void> => {
-  const salesforce = await deps.getSalesforceSvc();
-  const payload = buildFailureTransaction(paymentIntent, status, options);
-
+): void => {
   const nextRetryIso = options?.nextRetry ? options.nextRetry.toISOString() : null;
   const lastError = paymentIntent.last_payment_error
     ? {
@@ -631,18 +794,37 @@ export const updatePaymentIntentStatus = async (
     dunningRequired: options?.dunningRequired ?? null,
     lastError,
   });
+};
 
-  if (
-    payload.status__c == null ||
-    (payload as any).status__c === '' ||
-    payload.amount_gross__c == null
-  ) {
-    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-      paymentIntentId: paymentIntent.id,
-      status: payload.status__c,
-      amountGross: payload.amount_gross__c,
-      payload,
-    });
+const logPaymentIntentUpsertSkipped = (
+  context: HttpContext,
+  paymentIntent: Stripe.PaymentIntent,
+  payload: TransactionUpsertDTO
+): void => {
+  context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+    paymentIntentId: paymentIntent.id,
+    status: payload.status__c,
+    amountGross: payload.amount_gross__c,
+    payload,
+  });
+};
+
+export const updatePaymentIntentStatus = async (
+  context: HttpContext,
+  paymentIntent: Stripe.PaymentIntent,
+  status: TransactionUpsertDTO['status__c'],
+  deps: StripeWebhookDependencies,
+  options?: {
+    nextRetry?: Date | null;
+    dunningRequired?: boolean;
+  }
+): Promise<void> => {
+  const salesforce = await deps.getSalesforceSvc();
+  const payload = buildFailureTransaction(paymentIntent, status, options);
+  logPaymentIntentStatusUpdate(context, paymentIntent, status, options);
+
+  if (!canUpsertPaymentIntentTransaction(payload)) {
+    logPaymentIntentUpsertSkipped(context, paymentIntent, payload);
     return;
   }
 
@@ -693,20 +875,12 @@ export const handlePaymentIntentFailed = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
   await updatePaymentIntentStatus(
     context,
     paymentIntent,
     'failed',
     deps,
-    nextRetry
-      ? {
-          nextRetry,
-          dunningRequired: true,
-        }
-      : {
-          dunningRequired: true,
-        }
+    buildPaymentIntentStatusOptions(paymentIntent, true)
   );
 };
 
@@ -727,19 +901,11 @@ export const handlePaymentIntentActionRequired = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  const nextRetry = deriveNextRetryFromPaymentIntent(paymentIntent);
   await updatePaymentIntentStatus(
     context,
     paymentIntent,
     'pending',
     deps,
-    nextRetry
-      ? {
-          nextRetry,
-          dunningRequired: true,
-        }
-      : {
-          dunningRequired: true,
-        }
+    buildPaymentIntentStatusOptions(paymentIntent, true)
   );
 };

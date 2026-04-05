@@ -392,7 +392,11 @@ describe('checkout session lifecycle handlers', () => {
       },
     });
 
-    await handleCheckoutSessionExpired(context, createSessionEvent('checkout.session.expired'), deps);
+    await handleCheckoutSessionExpired(
+      context,
+      createSessionEvent('checkout.session.expired'),
+      deps
+    );
 
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({

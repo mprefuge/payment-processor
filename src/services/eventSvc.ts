@@ -6,6 +6,7 @@
 import type { Connection } from 'jsforce/lib/connection';
 import Stripe from 'stripe';
 import { randomUUID } from 'crypto';
+import { buildFullName, filterCustomersByExactName } from '../stripe/customerIdentity';
 import {
   Event,
   EventRegistration,
@@ -28,53 +29,155 @@ export interface EventSvcOptions {
 }
 
 export interface EventSvc {
-  registerForEvent: (request: EventRegistrationRequest, event: Event) => Promise<EventRegistrationResponse>;
+  registerForEvent: (
+    request: EventRegistrationRequest,
+    event: Event
+  ) => Promise<EventRegistrationResponse>;
   checkInRegistrant: (request: EventCheckInRequest) => Promise<EventCheckInResponse>;
   findOrCreateContact: (contact: RegistrantContact) => Promise<string>;
   addCampaignMember: (contactId: string, campaignId: string, status?: string) => Promise<string>;
   getActiveEvents: () => Promise<Event[]>;
 }
 
-// In-memory storage for registrations (in production, use a database)
+type SalesforceCreateResult =
+  | { success: boolean; id: string; errors: string[] }
+  | Array<{ success: boolean; id: string; errors: string[] }>;
+
+type PaymentResult = {
+  paymentStatus: PaymentStatus;
+  stripePaymentIntentId?: string;
+  stripeSubscriptionId?: string;
+  stripeCustomerId?: string;
+  checkoutUrl?: string;
+};
+
+type EventCampaignRecord = {
+  Id: string;
+  Name: string;
+  Description?: string;
+  StartDate?: string;
+  EndDate?: string;
+  IsActive: boolean;
+  Event_Type__c?: string;
+  Price__c?: number;
+  Currency__c?: string;
+  Capacity__c?: number;
+  Recurring_Interval__c?: string;
+  Recurring_Count__c?: number;
+  Location__c?: string;
+  Requires_Approval__c?: boolean;
+};
+
 const registrations: Map<string, EventRegistration> = new Map();
 
-export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcOptions): EventSvc => {
-  /**
-   * Find or create a contact in Salesforce
-   */
-  // simple cache stored in closure, reused across calls
+const escapeSoqlLiteral = (value: string): string => value.replace(/'/g, "\\'");
+
+const toRecords = <T>(result: { records?: T[] } | null | undefined): T[] =>
+  Array.isArray(result?.records) ? result.records : [];
+
+const getRegistrantName = (contact: RegistrantContact): string =>
+  buildFullName(contact.firstName, contact.lastName) || '';
+
+const createRegistrationFailure = (eventId: string, error: string): EventRegistrationResponse => ({
+  success: false,
+  registrationId: '',
+  eventId,
+  registrationStatus: RegistrationStatus.FAILED,
+  paymentStatus: PaymentStatus.FAILED,
+  error,
+});
+
+const createCheckInFailure = (error: string): EventCheckInResponse => ({
+  success: false,
+  registrationId: '',
+  checkInStatus: CheckInStatus.NOT_CHECKED_IN,
+  registrantName: '',
+  error,
+});
+
+const unwrapCreateResult = (result: SalesforceCreateResult, entityName: string): string => {
+  const normalized = Array.isArray(result) ? result[0] : result;
+
+  if (!normalized?.success) {
+    throw new Error(`Failed to create ${entityName}: ${normalized?.errors.join(', ')}`);
+  }
+
+  return normalized.id;
+};
+
+const mapCampaignRecordToEvent = (record: EventCampaignRecord): Event => ({
+  id: record.Id,
+  name: record.Name,
+  description: record.Description || '',
+  type: (record.Event_Type__c as EventType) || EventType.FREE,
+  campaignId: record.Id,
+  startDate: record.StartDate || new Date().toISOString(),
+  endDate: record.EndDate || new Date().toISOString(),
+  location: record.Location__c,
+  capacity: record.Capacity__c,
+  price: record.Price__c,
+  currency: record.Currency__c || 'USD',
+  recurringInterval: record.Recurring_Interval__c as 'month' | 'year',
+  recurringCount: record.Recurring_Count__c,
+  requiresApproval: record.Requires_Approval__c || false,
+  isActive: record.IsActive,
+});
+
+export const createEventSvc = ({
+  salesforceConnection,
+  stripeClient,
+}: EventSvcOptions): EventSvc => {
   let cachedContactRecordTypeId: string | undefined;
 
+  const queryRecords = async <T>(soql: string): Promise<T[]> =>
+    toRecords(await salesforceConnection.query<any>(soql)) as T[];
+
+  const findSingleId = async (soql: string): Promise<string | null> => {
+    const records = await queryRecords<{ Id: string }>(soql);
+    return records[0]?.Id ?? null;
+  };
+
+  const getContactRecordTypeId = async (): Promise<string | undefined> => {
+    if (cachedContactRecordTypeId) {
+      return cachedContactRecordTypeId;
+    }
+
+    cachedContactRecordTypeId =
+      (await findSingleId(
+        "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1"
+      )) ?? undefined;
+
+    return cachedContactRecordTypeId;
+  };
+
   const findOrCreateContact = async (contact: RegistrantContact): Promise<string> => {
-    const { email, firstName, lastName, phone, company, mailingStreet, mailingCity, mailingState, mailingPostalCode, mailingCountry } = contact;
+    const {
+      email,
+      firstName,
+      lastName,
+      phone,
+      company,
+      mailingStreet,
+      mailingCity,
+      mailingState,
+      mailingPostalCode,
+      mailingCountry,
+    } = contact;
 
     if (!email || !email.trim()) {
       throw new Error('Email is required for contact creation');
     }
 
-    // Search for existing contact by email
-    const escapedEmail = email.replace(/'/g, "\\'");
-    const soql = `SELECT Id FROM Contact WHERE Email = '${escapedEmail}' LIMIT 1`;
+    const existingContactId = await findSingleId(
+      `SELECT Id FROM Contact WHERE Email = '${escapeSoqlLiteral(email)}' LIMIT 1`
+    );
 
-    const result = await salesforceConnection.query<{ Id: string }>(soql);
-    const records = Array.isArray(result.records) ? result.records : [];
-
-    if (records.length > 0 && records[0].Id) {
-      // Contact exists, return ID
-      return records[0].Id;
+    if (existingContactId) {
+      return existingContactId;
     }
 
-    // resolve record type id for new contact (cache if possible)
-    if (!cachedContactRecordTypeId) {
-      const recordTypeQuery = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
-      const rtResult = await salesforceConnection.query<{ Id: string }>(recordTypeQuery);
-      const rtRecords = Array.isArray(rtResult.records) ? rtResult.records : [];
-      if (rtRecords.length > 0 && rtRecords[0].Id) {
-        cachedContactRecordTypeId = rtRecords[0].Id;
-      }
-    }
+    const recordTypeId = await getContactRecordTypeId();
 
-    // Create new contact
     const contactData: ContactUpsertDTO = {
       Email: email,
       FirstName: firstName || undefined,
@@ -86,29 +189,13 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
       MailingState: mailingState || undefined,
       MailingPostalCode: mailingPostalCode || undefined,
       MailingCountry: mailingCountry || undefined,
-      ...(cachedContactRecordTypeId ? { RecordTypeId: cachedContactRecordTypeId } : {}),
+      ...(recordTypeId ? { RecordTypeId: recordTypeId } : {}),
     };
 
     const createResult = await salesforceConnection.sobject('Contact').create(contactData);
-
-    if (Array.isArray(createResult)) {
-      const firstResult = createResult[0];
-      if (!firstResult.success) {
-        throw new Error(`Failed to create contact: ${firstResult.errors.join(', ')}`);
-      }
-      return firstResult.id;
-    }
-
-    if (!createResult.success) {
-      throw new Error(`Failed to create contact: ${createResult.errors.join(', ')}`);
-    }
-
-    return createResult.id;
+    return unwrapCreateResult(createResult as SalesforceCreateResult, 'contact');
   };
 
-  /**
-   * Add contact as a campaign member
-   */
   const addCampaignMember = async (
     contactId: string,
     campaignId: string,
@@ -118,57 +205,141 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
       throw new Error('ContactId and CampaignId are required');
     }
 
-    // Check if campaign member already exists
-    const escapedContactId = contactId.replace(/'/g, "\\'");
-    const escapedCampaignId = campaignId.replace(/'/g, "\\'");
-    const soql = `SELECT Id FROM CampaignMember WHERE ContactId = '${escapedContactId}' AND CampaignId = '${escapedCampaignId}' LIMIT 1`;
+    const existingCampaignMemberId = await findSingleId(
+      `SELECT Id FROM CampaignMember WHERE ContactId = '${escapeSoqlLiteral(contactId)}' ` +
+        `AND CampaignId = '${escapeSoqlLiteral(campaignId)}' LIMIT 1`
+    );
 
-    const result = await salesforceConnection.query<{ Id: string }>(soql);
-    const records = Array.isArray(result.records) ? result.records : [];
-
-    if (records.length > 0 && records[0].Id) {
-      // Campaign member exists, return ID
-      return records[0].Id;
+    if (existingCampaignMemberId) {
+      return existingCampaignMemberId;
     }
 
-    // Create campaign member
     const campaignMemberData: CampaignMemberDTO = {
       CampaignId: campaignId,
       ContactId: contactId,
       Status: status,
     };
 
-    const createResult = await salesforceConnection.sobject('CampaignMember').create(campaignMemberData);
-
-    if (Array.isArray(createResult)) {
-      const firstResult = createResult[0];
-      if (!firstResult.success) {
-        throw new Error(`Failed to add campaign member: ${firstResult.errors.join(', ')}`);
-      }
-      return firstResult.id;
-    }
-
-    if (!createResult.success) {
-      throw new Error(`Failed to add campaign member: ${createResult.errors.join(', ')}`);
-    }
-
-    return createResult.id;
+    const createResult = await salesforceConnection
+      .sobject('CampaignMember')
+      .create(campaignMemberData);
+    return unwrapCreateResult(createResult as SalesforceCreateResult, 'campaign member');
   };
 
-  /**
-   * Process payment for paid events
-   */
+  const getOrCreateStripeCustomer = async (
+    event: Event,
+    contact: RegistrantContact
+  ): Promise<Stripe.Customer> => {
+    const existingCustomers = await stripeClient.customers.list({
+      email: contact.email,
+      limit: 20,
+    });
+
+    const customers = Array.isArray(existingCustomers.data) ? existingCustomers.data : [];
+    const namedMatches = filterCustomersByExactName(
+      customers,
+      buildFullName(contact.firstName, contact.lastName)
+    );
+
+    if (namedMatches.length > 0) {
+      return namedMatches[0];
+    }
+
+    if (customers.length > 0) {
+      return customers[0];
+    }
+
+    return await stripeClient.customers.create({
+      email: contact.email,
+      name: getRegistrantName(contact),
+      phone: contact.phone,
+      metadata: {
+        eventId: event.id,
+        eventName: event.name,
+      },
+    });
+  };
+
+  const createRecurringPayment = async (
+    event: Event,
+    customer: Stripe.Customer
+  ): Promise<PaymentResult> => {
+    if (!event.recurringInterval) {
+      throw new Error('Recurring interval is required for recurring events');
+    }
+
+    const price = await stripeClient.prices.create({
+      unit_amount: event.price,
+      currency: event.currency || 'usd',
+      recurring: {
+        interval: event.recurringInterval,
+        interval_count: 1,
+      },
+      product_data: {
+        name: event.name,
+      },
+    });
+
+    const subscription = await stripeClient.subscriptions.create({
+      customer: customer.id,
+      items: [{ price: price.id }],
+      payment_behavior: 'default_incomplete',
+      payment_settings: { save_default_payment_method: 'on_subscription' },
+      expand: ['latest_invoice.payment_intent'],
+      metadata: {
+        eventId: event.id,
+        eventName: event.name,
+      },
+    });
+
+    const invoice = subscription.latest_invoice as Stripe.Invoice;
+    const paymentIntent = invoice?.payment_intent as Stripe.PaymentIntent;
+
+    return {
+      paymentStatus: PaymentStatus.PENDING,
+      stripeSubscriptionId: subscription.id,
+      stripeCustomerId: customer.id,
+      stripePaymentIntentId: paymentIntent?.id,
+    };
+  };
+
+  const createOneTimePayment = async (
+    event: Event,
+    contact: RegistrantContact,
+    customer: Stripe.Customer,
+    paymentMethodId?: string
+  ): Promise<PaymentResult> => {
+    if (event.price === undefined) {
+      throw new Error('Price is required for paid events');
+    }
+
+    const paymentIntent = await stripeClient.paymentIntents.create({
+      amount: event.price,
+      currency: event.currency || 'usd',
+      customer: customer.id,
+      payment_method: paymentMethodId,
+      confirm: !!paymentMethodId,
+      metadata: {
+        eventId: event.id,
+        eventName: event.name,
+        contactEmail: contact.email,
+      },
+      description: `Registration for ${event.name}`,
+    });
+
+    return {
+      paymentStatus:
+        paymentIntent.status === 'succeeded' ? PaymentStatus.COMPLETED : PaymentStatus.PENDING,
+      stripePaymentIntentId: paymentIntent.id,
+      stripeCustomerId: customer.id,
+    };
+  };
+
   const processPayment = async (
     event: Event,
     contact: RegistrantContact,
     paymentMethodId?: string
-  ): Promise<{
-    paymentStatus: PaymentStatus;
-    stripePaymentIntentId?: string;
-    stripeSubscriptionId?: string;
-    stripeCustomerId?: string;
-    checkoutUrl?: string;
-  }> => {
+  ): Promise<PaymentResult> => {
     if (event.type === 'free') {
       return { paymentStatus: PaymentStatus.NOT_REQUIRED };
     }
@@ -177,157 +348,74 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
       throw new Error('Price is required for paid events');
     }
 
-    // Create or retrieve Stripe customer
-    const customerEmail = contact.email;
-    const customerName = `${contact.firstName || ''} ${contact.lastName || ''}`.trim();
-
-    let customer: Stripe.Customer;
-    const existingCustomers = await stripeClient.customers.list({ email: customerEmail, limit: 1 });
-
-    if (existingCustomers.data.length > 0) {
-      customer = existingCustomers.data[0];
-    } else {
-      customer = await stripeClient.customers.create({
-        email: customerEmail,
-        name: customerName,
-        phone: contact.phone,
-        metadata: {
-          eventId: event.id,
-          eventName: event.name,
-        },
-      });
-    }
+    const customer = await getOrCreateStripeCustomer(event, contact);
 
     if (event.type === 'paid_recurring') {
-      // Create subscription for recurring events
-      if (!event.recurringInterval) {
-        throw new Error('Recurring interval is required for recurring events');
-      }
-
-      const price = await stripeClient.prices.create({
-        unit_amount: event.price,
-        currency: event.currency || 'usd',
-        recurring: {
-          interval: event.recurringInterval,
-          interval_count: 1,
-        },
-        product_data: {
-          name: event.name,
-        },
-      });
-
-      const subscription = await stripeClient.subscriptions.create({
-        customer: customer.id,
-        items: [{ price: price.id }],
-        payment_behavior: 'default_incomplete',
-        payment_settings: { save_default_payment_method: 'on_subscription' },
-        expand: ['latest_invoice.payment_intent'],
-        metadata: {
-          eventId: event.id,
-          eventName: event.name,
-        },
-      });
-
-      const invoice = subscription.latest_invoice as Stripe.Invoice;
-      const paymentIntent = invoice?.payment_intent as Stripe.PaymentIntent;
-
-      return {
-        paymentStatus: PaymentStatus.PENDING,
-        stripeSubscriptionId: subscription.id,
-        stripeCustomerId: customer.id,
-        stripePaymentIntentId: paymentIntent?.id,
-      };
-    } else {
-      // Create one-time payment intent for paid_onetime events
-      const paymentIntent = await stripeClient.paymentIntents.create({
-        amount: event.price,
-        currency: event.currency || 'usd',
-        customer: customer.id,
-        payment_method: paymentMethodId,
-        confirm: !!paymentMethodId,
-        metadata: {
-          eventId: event.id,
-          eventName: event.name,
-          contactEmail: contact.email,
-        },
-        description: `Registration for ${event.name}`,
-      });
-
-      return {
-        paymentStatus: paymentIntent.status === 'succeeded' ? PaymentStatus.COMPLETED : PaymentStatus.PENDING,
-        stripePaymentIntentId: paymentIntent.id,
-        stripeCustomerId: customer.id,
-      };
+      return await createRecurringPayment(event, customer);
     }
+
+    return await createOneTimePayment(event, contact, customer, paymentMethodId);
   };
 
-  /**
-   * Register a participant for an event
-   */
+  const createRegistrationRecord = (
+    request: EventRegistrationRequest,
+    event: Event,
+    contactId: string,
+    campaignMemberId: string,
+    paymentResult: PaymentResult
+  ): EventRegistration => ({
+    id: randomUUID(),
+    eventId: event.id,
+    contact: request.contact,
+    salesforceContactId: contactId,
+    salesforceCampaignMemberId: campaignMemberId,
+    registrationStatus: event.requiresApproval
+      ? RegistrationStatus.PENDING
+      : RegistrationStatus.CONFIRMED,
+    checkInStatus: CheckInStatus.NOT_CHECKED_IN,
+    paymentStatus: paymentResult.paymentStatus,
+    stripeCustomerId: paymentResult.stripeCustomerId,
+    stripePaymentIntentId: paymentResult.stripePaymentIntentId,
+    stripeSubscriptionId: paymentResult.stripeSubscriptionId,
+    amountPaid: event.price,
+    currency: event.currency,
+    registeredAt: new Date().toISOString(),
+    notes: request.notes,
+    customFields: request.customFields,
+  });
+
+  const getConfirmedRegistrationCount = (eventId: string): number =>
+    Array.from(registrations.values()).filter(
+      (registration) =>
+        registration.eventId === eventId &&
+        registration.registrationStatus === RegistrationStatus.CONFIRMED
+    ).length;
+
   const registerForEvent = async (
     request: EventRegistrationRequest,
     event: Event
   ): Promise<EventRegistrationResponse> => {
     try {
       if (!event.isActive) {
-        return {
-          success: false,
-          registrationId: '',
-          eventId: event.id,
-          registrationStatus: RegistrationStatus.FAILED,
-          paymentStatus: PaymentStatus.FAILED,
-          error: 'Event is not currently active',
-        };
+        return createRegistrationFailure(event.id, 'Event is not currently active');
       }
 
-      // Check capacity
-      if (event.capacity) {
-        const existingRegistrations = Array.from(registrations.values()).filter(
-          (r) => r.eventId === event.id && r.registrationStatus === RegistrationStatus.CONFIRMED
-        );
-        if (existingRegistrations.length >= event.capacity) {
-          return {
-            success: false,
-            registrationId: '',
-            eventId: event.id,
-            registrationStatus: RegistrationStatus.FAILED,
-            paymentStatus: PaymentStatus.FAILED,
-            error: 'Event is at full capacity',
-          };
-        }
+      if (event.capacity && getConfirmedRegistrationCount(event.id) >= event.capacity) {
+        return createRegistrationFailure(event.id, 'Event is at full capacity');
       }
 
-      // Find or create contact in Salesforce
       const contactId = await findOrCreateContact(request.contact);
-
-      // Add to campaign
       const campaignMemberId = await addCampaignMember(contactId, event.campaignId);
-
-      // Process payment if required
       const paymentResult = await processPayment(event, request.contact, request.paymentMethodId);
+      const registration = createRegistrationRecord(
+        request,
+        event,
+        contactId,
+        campaignMemberId,
+        paymentResult
+      );
 
-      // Create registration record
-      const registrationId = randomUUID();
-      const registration: EventRegistration = {
-        id: registrationId,
-        eventId: event.id,
-        contact: request.contact,
-        salesforceContactId: contactId,
-        salesforceCampaignMemberId: campaignMemberId,
-        registrationStatus: event.requiresApproval ? RegistrationStatus.PENDING : RegistrationStatus.CONFIRMED,
-        checkInStatus: CheckInStatus.NOT_CHECKED_IN,
-        paymentStatus: paymentResult.paymentStatus,
-        stripeCustomerId: paymentResult.stripeCustomerId,
-        stripePaymentIntentId: paymentResult.stripePaymentIntentId,
-        stripeSubscriptionId: paymentResult.stripeSubscriptionId,
-        amountPaid: event.price,
-        currency: event.currency,
-        registeredAt: new Date().toISOString(),
-        notes: request.notes,
-        customFields: request.customFields,
-      };
-
-      registrations.set(registrationId, registration);
+      registrations.set(registration.id, registration);
 
       return {
         success: true,
@@ -344,41 +432,47 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
       };
     } catch (error) {
       console.error('Event registration error:', error);
-      return {
-        success: false,
-        registrationId: '',
-        eventId: event.id,
-        registrationStatus: RegistrationStatus.FAILED,
-        paymentStatus: PaymentStatus.FAILED,
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
-      };
+      return createRegistrationFailure(
+        event.id,
+        error instanceof Error ? error.message : 'Unknown error occurred'
+      );
     }
   };
 
-  /**
-   * Check in a registrant
-   */
+  const findRegistration = (request: EventCheckInRequest): EventRegistration | undefined => {
+    if (request.registrationId) {
+      return registrations.get(request.registrationId);
+    }
+
+    if (request.email && request.eventId) {
+      return Array.from(registrations.values()).find(
+        (registration) =>
+          registration.contact.email.toLowerCase() === request.email!.toLowerCase() &&
+          registration.eventId === request.eventId
+      );
+    }
+
+    return undefined;
+  };
+
+  const createCheckInResponse = (
+    registration: EventRegistration,
+    message: string
+  ): EventCheckInResponse => ({
+    success: true,
+    registrationId: registration.id,
+    checkInStatus: CheckInStatus.CHECKED_IN,
+    checkedInAt: registration.checkedInAt,
+    registrantName: getRegistrantName(registration.contact),
+    message,
+  });
+
   const checkInRegistrant = async (request: EventCheckInRequest): Promise<EventCheckInResponse> => {
     try {
-      let registration: EventRegistration | undefined;
-
-      if (request.registrationId) {
-        registration = registrations.get(request.registrationId);
-      } else if (request.email && request.eventId) {
-        // Find registration by email and event ID
-        registration = Array.from(registrations.values()).find(
-          (r) => r.contact.email.toLowerCase() === request.email!.toLowerCase() && r.eventId === request.eventId
-        );
-      }
+      const registration = findRegistration(request);
 
       if (!registration) {
-        return {
-          success: false,
-          registrationId: '',
-          checkInStatus: CheckInStatus.NOT_CHECKED_IN,
-          registrantName: '',
-          error: 'Registration not found',
-        };
+        return createCheckInFailure('Registration not found');
       }
 
       if (registration.registrationStatus !== RegistrationStatus.CONFIRMED) {
@@ -386,53 +480,30 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
           success: false,
           registrationId: registration.id,
           checkInStatus: CheckInStatus.NOT_CHECKED_IN,
-          registrantName: `${registration.contact.firstName} ${registration.contact.lastName}`,
+          registrantName: getRegistrantName(registration.contact),
           error: 'Registration is not confirmed',
         };
       }
 
       if (registration.checkInStatus === CheckInStatus.CHECKED_IN) {
-        return {
-          success: true,
-          registrationId: registration.id,
-          checkInStatus: CheckInStatus.CHECKED_IN,
-          checkedInAt: registration.checkedInAt,
-          registrantName: `${registration.contact.firstName} ${registration.contact.lastName}`,
-          message: 'Already checked in',
-        };
+        return createCheckInResponse(registration, 'Already checked in');
       }
 
-      // Update check-in status
       registration.checkInStatus = CheckInStatus.CHECKED_IN;
       registration.checkedInAt = new Date().toISOString();
       registrations.set(registration.id, registration);
 
-      return {
-        success: true,
-        registrationId: registration.id,
-        checkInStatus: CheckInStatus.CHECKED_IN,
-        checkedInAt: registration.checkedInAt,
-        registrantName: `${registration.contact.firstName} ${registration.contact.lastName}`,
-        message: 'Check-in successful',
-      };
+      return createCheckInResponse(registration, 'Check-in successful');
     } catch (error) {
       console.error('Event check-in error:', error);
-      return {
-        success: false,
-        registrationId: '',
-        checkInStatus: CheckInStatus.NOT_CHECKED_IN,
-        registrantName: '',
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
-      };
+      return createCheckInFailure(
+        error instanceof Error ? error.message : 'Unknown error occurred'
+      );
     }
   };
 
-  /**
-   * Get all active events from Salesforce campaigns
-   */
   const getActiveEvents = async (): Promise<Event[]> => {
     try {
-      // Query active campaigns with Event record type
       const soql = `
         SELECT Id, Name, Description, StartDate, EndDate, IsActive,
                Event_Type__c, Price__c, Currency__c, Capacity__c,
@@ -444,42 +515,8 @@ export const createEventSvc = ({ salesforceConnection, stripeClient }: EventSvcO
         ORDER BY StartDate ASC NULLS LAST
       `;
 
-      const result = await salesforceConnection.query<{
-        Id: string;
-        Name: string;
-        Description?: string;
-        StartDate?: string;
-        EndDate?: string;
-        IsActive: boolean;
-        Event_Type__c?: string;
-        Price__c?: number;
-        Currency__c?: string;
-        Capacity__c?: number;
-        Recurring_Interval__c?: string;
-        Recurring_Count__c?: number;
-        Location__c?: string;
-        Requires_Approval__c?: boolean;
-      }>(soql);
-
-      const records = Array.isArray(result.records) ? result.records : [];
-
-      return records.map(record => ({
-        id: record.Id,
-        name: record.Name,
-        description: record.Description || '',
-        type: (record.Event_Type__c as EventType) || EventType.FREE,
-        campaignId: record.Id,
-        startDate: record.StartDate || new Date().toISOString(),
-        endDate: record.EndDate || new Date().toISOString(),
-        location: record.Location__c,
-        capacity: record.Capacity__c,
-        price: record.Price__c,
-        currency: record.Currency__c || 'USD',
-        recurringInterval: record.Recurring_Interval__c as 'month' | 'year',
-        recurringCount: record.Recurring_Count__c,
-        requiresApproval: record.Requires_Approval__c || false,
-        isActive: record.IsActive,
-      }));
+      const records = await queryRecords<EventCampaignRecord>(soql);
+      return records.map(mapCampaignRecordToEvent);
     } catch (error) {
       console.error('Error querying active events from Salesforce:', error);
       throw new Error('Failed to load events from Salesforce');

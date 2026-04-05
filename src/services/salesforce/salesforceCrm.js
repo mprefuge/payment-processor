@@ -105,8 +105,11 @@ class SalesforceCrmService extends BaseCrmService {
   }
 
   async findExistingTransactionIdByContentSignature(transactionData) {
-    const { Contact__c: contact, Amount_Gross__c: amount, Received_At__c: received } =
-      transactionData;
+    const {
+      Contact__c: contact,
+      Amount_Gross__c: amount,
+      Received_At__c: received,
+    } = transactionData;
 
     if (
       typeof contact !== 'string' ||
@@ -233,7 +236,8 @@ class SalesforceCrmService extends BaseCrmService {
 
     await this.authenticate();
 
-    const soql = "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
+    const soql =
+      "SELECT Id FROM RecordType WHERE SObjectType = 'Contact' AND Name = 'Contact' LIMIT 1";
     const result = await this.conn.query(soql);
     const records = Array.isArray(result.records) ? result.records : [];
 

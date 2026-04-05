@@ -61,6 +61,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function requireKey(key: string, operation: string): string {
+  if (!key) {
+    throw new Error(`Key must be provided to ${operation}.`);
+  }
+
+  return key;
+}
+
 export class AzureIdempotencyStore implements IdempotencyStore {
   private readonly client: TableClient;
   private readonly processedPartitionKey: string;
@@ -125,20 +133,27 @@ export class AzureIdempotencyStore implements IdempotencyStore {
     await this.ensureTablePromise;
   }
 
-  async isProcessed(key: string): Promise<boolean> {
-    if (!key) {
-      throw new Error('Key must be provided to isProcessed.');
-    }
-
-    if (this.processedKeys.has(key)) {
-      return true;
-    }
-
-    await this.ensureReady();
-
+  private async getEntityOrNull<T extends object>(
+    partitionKey: string,
+    rowKey: string
+  ): Promise<TableEntityResult<T> | null> {
     try {
-      await this.client.getEntity(this.processedPartitionKey, key);
-      this.processedKeys.add(key);
+      return await this.client.getEntity<T>(partitionKey, rowKey);
+    } catch (error) {
+      if (isStatus(error, 404)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async deleteEntityIfPresent(
+    partitionKey: string,
+    rowKey: string,
+    options: { etag?: string } = {}
+  ): Promise<boolean> {
+    try {
+      await this.client.deleteEntity(partitionKey, rowKey, options);
       return true;
     } catch (error) {
       if (isStatus(error, 404)) {
@@ -148,15 +163,55 @@ export class AzureIdempotencyStore implements IdempotencyStore {
     }
   }
 
-  async markProcessed(key: string): Promise<void> {
-    if (!key) {
-      throw new Error('Key must be provided to markProcessed.');
+  private createProcessedEntity(key: string): {
+    partitionKey: string;
+    rowKey: string;
+    processedAt: string;
+  } {
+    return {
+      partitionKey: this.processedPartitionKey,
+      rowKey: key,
+      processedAt: new Date().toISOString(),
+    };
+  }
+
+  private createLockEntity(
+    key: string,
+    ttl: number
+  ): { partitionKey: string; rowKey: string; leaseExpiresAt: string; ttl: number } {
+    return {
+      partitionKey: this.lockPartitionKey,
+      rowKey: key,
+      leaseExpiresAt: nowPlusSeconds(this.lockTtlSeconds),
+      ttl,
+    };
+  }
+
+  async isProcessed(key: string): Promise<boolean> {
+    const normalizedKey = requireKey(key, 'isProcessed');
+
+    if (this.processedKeys.has(normalizedKey)) {
+      return true;
     }
 
     await this.ensureReady();
 
-    this.processedKeys.add(key);
-    this.pendingPersist.add(key);
+    const entity = await this.getEntityOrNull(this.processedPartitionKey, normalizedKey);
+    if (entity) {
+      this.processedKeys.add(normalizedKey);
+      return true;
+    }
+
+    return false;
+  }
+
+  async markProcessed(key: string): Promise<void> {
+    const normalizedKey = requireKey(key, 'markProcessed');
+
+    await this.ensureReady();
+
+    this.processedKeys.add(normalizedKey);
+    this.pendingPersist.add(normalizedKey);
     this.schedulePersist();
   }
 
@@ -206,11 +261,7 @@ export class AzureIdempotencyStore implements IdempotencyStore {
     for (let i = 0; i < keys.length; i += 1) {
       const key = keys[i];
       try {
-        await this.client.upsertEntity({
-          partitionKey: this.processedPartitionKey,
-          rowKey: key,
-          processedAt: new Date().toISOString(),
-        });
+        await this.client.upsertEntity(this.createProcessedEntity(key));
       } catch (error) {
         for (let j = i; j < keys.length; j += 1) {
           this.pendingPersist.add(keys[j]);
@@ -221,12 +272,10 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   }
 
   async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    if (!key) {
-      throw new Error('Key must be provided to withLock.');
-    }
+    const normalizedKey = requireKey(key, 'withLock');
 
     await this.ensureReady();
-    const release = await this.acquireLock(key);
+    const release = await this.acquireLock(normalizedKey);
 
     try {
       const result = await fn();
@@ -246,19 +295,11 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   }
 
   private async acquireLock(key: string): Promise<() => Promise<void>> {
-    const partitionKey = this.lockPartitionKey;
     const ttl = Math.max(1, Math.ceil(this.lockTtlSeconds));
 
     for (let attempt = 0; attempt < this.lockMaxAttempts; attempt += 1) {
-      const leaseExpiresAt = nowPlusSeconds(this.lockTtlSeconds);
-
       try {
-        await this.client.createEntity({
-          partitionKey,
-          rowKey: key,
-          leaseExpiresAt,
-          ttl,
-        });
+        await this.client.createEntity(this.createLockEntity(key, ttl));
 
         let released = false;
         return async () => {
@@ -266,12 +307,9 @@ export class AzureIdempotencyStore implements IdempotencyStore {
             return;
           }
           released = true;
-          try {
-            await this.client.deleteEntity(partitionKey, key);
-          } catch (error) {
-            if (!isStatus(error, 404)) {
-              throw error;
-            }
+          const deleted = await this.deleteEntityIfPresent(this.lockPartitionKey, key);
+          if (!deleted) {
+            return;
           }
         };
       } catch (error) {
@@ -288,9 +326,9 @@ export class AzureIdempotencyStore implements IdempotencyStore {
 
         if (existing) {
           try {
-            await this.client.deleteEntity(partitionKey, key, { etag: existing.etag });
+            await this.deleteEntityIfPresent(this.lockPartitionKey, key, { etag: existing.etag });
           } catch (deleteError) {
-            if (!isStatus(deleteError, 404) && !isStatus(deleteError, 412)) {
+            if (!isStatus(deleteError, 412)) {
               throw deleteError;
             }
           }
@@ -304,14 +342,7 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   }
 
   private async getLockEntity(key: string): Promise<TableEntityResult<LockEntity> | null> {
-    try {
-      return await this.client.getEntity<LockEntity>(this.lockPartitionKey, key);
-    } catch (error) {
-      if (isStatus(error, 404)) {
-        return null;
-      }
-      throw error;
-    }
+    return this.getEntityOrNull<LockEntity>(this.lockPartitionKey, key);
   }
 
   private lockExpired(entity: TableEntityResult<LockEntity>): boolean {

@@ -57,10 +57,17 @@ for (const key of DELIMITED_SECRET_ENV_KEYS) {
 }
 
 // Start QBO automatic refresh in background
-tokenManager.initialize().then(() => {
-  const envInterval = process.env.QBO_AUTO_REFRESH_INTERVAL_MS ? parseInt(process.env.QBO_AUTO_REFRESH_INTERVAL_MS, 10) : undefined;
-  tokenManager.startAutoRefresh(envInterval).catch((err) => {
-    const { logger } = require('./lib/logger');
-    logger.warn('Failed to start QBO auto-refresh: ' + (err instanceof Error ? err.message : String(err)));
-  });
-}).catch(() => undefined);
+tokenManager
+  .initialize()
+  .then(() => {
+    const envInterval = process.env.QBO_AUTO_REFRESH_INTERVAL_MS
+      ? parseInt(process.env.QBO_AUTO_REFRESH_INTERVAL_MS, 10)
+      : undefined;
+    tokenManager.startAutoRefresh(envInterval).catch((err) => {
+      const { logger } = require('./lib/logger');
+      logger.warn(
+        'Failed to start QBO auto-refresh: ' + (err instanceof Error ? err.message : String(err))
+      );
+    });
+  })
+  .catch(() => undefined);

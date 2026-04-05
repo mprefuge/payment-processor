@@ -252,6 +252,52 @@ const resolveDependencies = () => {
   return createDefaultDependencies();
 };
 
+const readRequestMode = (request) => {
+  const url = new URL(request.url);
+  const headerMode =
+    request?.headers?.get?.('x-stripe-mode') || request?.headers?.['x-stripe-mode'];
+
+  return {
+    url,
+    modeToggle: parseModeToggle(url.searchParams.get('mode') || headerMode),
+  };
+};
+
+const createStripeClient = (secret) => new Stripe(secret, { apiVersion: STRIPE_API_VERSION });
+
+const resolveRequestDependencies = (deps, modeToggle) => {
+  if (typeof modeToggle.isLiveMode !== 'boolean') {
+    return deps;
+  }
+
+  const modeSecret = stripeSecretForMode(modeToggle.isLiveMode);
+  if (!modeSecret) {
+    throw new Error(
+      modeToggle.isLiveMode
+        ? 'STRIPE_LIVE_SECRET_KEY (or STRIPE_SECRET) is not configured.'
+        : 'STRIPE_TEST_SECRET_KEY (or STRIPE_SECRET) is not configured.'
+    );
+  }
+
+  return {
+    ...deps,
+    stripe: createStripeClient(modeSecret),
+  };
+};
+
+const buildSummary = (lookbackDays, payouts, processed, skipped, errors) => ({
+  lookbackDays,
+  total: payouts.length,
+  processed: processed.length,
+  skipped: skipped.length,
+  errors: errors.length,
+});
+
+const buildHandlerResponse = (status, jsonBody) => ({
+  status,
+  jsonBody,
+});
+
 const getSalesforceService = async (deps) => {
   if (!deps.salesforce) {
     return null;
@@ -419,13 +465,10 @@ const handler = async (request, context) => {
   const method = request.method.toUpperCase();
 
   if (method !== 'POST') {
-    return {
-      status: 405,
-      jsonBody: {
-        error: 'Method not allowed',
-        message: 'Only POST requests are supported.',
-      },
-    };
+    return buildHandlerResponse(405, {
+      error: 'Method not allowed',
+      message: 'Only POST requests are supported.',
+    });
   }
 
   let deps;
@@ -434,50 +477,28 @@ const handler = async (request, context) => {
     deps = resolveDependencies();
   } catch (error) {
     console.error('[payoutSyncTrigger] Failed to initialize dependencies', error);
-    return {
-      status: 500,
-      jsonBody: {
-        error: 'Initialization failed',
-        message: error.message,
-      },
-    };
+    return buildHandlerResponse(500, {
+      error: 'Initialization failed',
+      message: error.message,
+    });
   }
 
   try {
-    const url = new URL(request.url);
-    const modeToggle = parseModeToggle(
-      url.searchParams.get('mode') ||
-        request?.headers?.get?.('x-stripe-mode') ||
-        request?.headers?.['x-stripe-mode']
-    );
+    const { url, modeToggle } = readRequestMode(request);
     if (!modeToggle.isValid) {
-      return {
-        status: 400,
-        jsonBody: {
-          error: 'bad_request',
-          message: modeToggle.message,
-        },
-      };
+      return buildHandlerResponse(400, {
+        error: 'bad_request',
+        message: modeToggle.message,
+      });
     }
 
-    if (typeof modeToggle.isLiveMode === 'boolean') {
-      const modeSecret = stripeSecretForMode(modeToggle.isLiveMode);
-      if (!modeSecret) {
-        return {
-          status: 500,
-          jsonBody: {
-            error: 'configuration_error',
-            message: modeToggle.isLiveMode
-              ? 'STRIPE_LIVE_SECRET_KEY (or STRIPE_SECRET) is not configured.'
-              : 'STRIPE_TEST_SECRET_KEY (or STRIPE_SECRET) is not configured.',
-          },
-        };
-      }
-
-      deps = {
-        ...deps,
-        stripe: new Stripe(modeSecret, { apiVersion: STRIPE_API_VERSION }),
-      };
+    try {
+      deps = resolveRequestDependencies(deps, modeToggle);
+    } catch (error) {
+      return buildHandlerResponse(500, {
+        error: 'configuration_error',
+        message: error.message,
+      });
     }
 
     const lookbackFromRequest = Number(url.searchParams.get('lookbackDays'));
@@ -513,30 +534,18 @@ const handler = async (request, context) => {
     const processed = outcomes.filter((entry) => entry.status === 'processed');
     const skipped = outcomes.filter((entry) => entry.status === 'skipped');
 
-    return {
-      status: errors.length > 0 ? 207 : 200,
-      jsonBody: {
-        summary: {
-          lookbackDays,
-          total: payouts.length,
-          processed: processed.length,
-          skipped: skipped.length,
-          errors: errors.length,
-        },
-        processed,
-        skipped,
-        errors,
-      },
-    };
+    return buildHandlerResponse(errors.length > 0 ? 207 : 200, {
+      summary: buildSummary(lookbackDays, payouts, processed, skipped, errors),
+      processed,
+      skipped,
+      errors,
+    });
   } catch (error) {
     console.error('[payoutSyncTrigger] Unexpected error', error);
-    return {
-      status: 500,
-      jsonBody: {
-        error: 'Processing failed',
-        message: error.message,
-      },
-    };
+    return buildHandlerResponse(500, {
+      error: 'Processing failed',
+      message: error.message,
+    });
   }
 };
 

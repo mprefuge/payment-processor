@@ -8,7 +8,7 @@ import {
   timestampToDate,
   timestampToIsoString,
 } from '../utils';
-import { ensureStripeClient } from './common';
+import { ensureStripeClient, markDocumentPosted } from './common';
 import type {
   HttpContext,
   RefundReceiptAccountingAdapter,
@@ -251,52 +251,6 @@ const getRefundAdapter = (
   return null;
 };
 
-const normalizeDocumentReference = (
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
-): StripeQuickBooksDocument | null => {
-  if (!doc) {
-    return null;
-  }
-
-  if (typeof (doc as { qboId?: unknown }).qboId === 'string') {
-    return {
-      id: (doc as { qboId: string }).qboId,
-      type: (doc as { type: string }).type,
-    };
-  }
-
-  if (typeof (doc as StripeQuickBooksDocument).id === 'string') {
-    return doc as StripeQuickBooksDocument;
-  }
-
-  return null;
-};
-
-const markCreditNotePosted = async (
-  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
-  upsertResult: unknown,
-  doc: StripeQuickBooksDocument | { qboId: string; type: string } | null | void
-): Promise<void> => {
-  const reference = normalizeDocumentReference(doc);
-  if (!reference) {
-    return;
-  }
-
-  const recordId =
-    upsertResult &&
-    typeof upsertResult === 'object' &&
-    'id' in upsertResult &&
-    typeof (upsertResult as { id?: string }).id === 'string'
-      ? ((upsertResult as { id?: string }).id ?? '').trim()
-      : '';
-
-  if (!recordId) {
-    return;
-  }
-
-  await salesforce.markPostedToQbo(recordId, reference);
-};
-
 const loadInvoice = async (
   stripe: Stripe,
   creditNote: Stripe.CreditNote,
@@ -372,6 +326,92 @@ const loadCharge = async (
   }
 };
 
+const loadCreditNoteContext = async (
+  stripe: Stripe,
+  creditNote: Stripe.CreditNote,
+  context: HttpContext
+): Promise<{
+  invoice: Stripe.Invoice | null;
+  paymentIntent: Stripe.PaymentIntent | null;
+  charge: Stripe.Charge | null;
+}> => {
+  const invoice = await loadInvoice(stripe, creditNote, context);
+  const paymentIntent = await loadPaymentIntent(stripe, invoice, context);
+  const charge = await loadCharge(stripe, invoice, paymentIntent, context);
+
+  return {
+    invoice,
+    paymentIntent,
+    charge,
+  };
+};
+
+const findParentInvoiceTransactionId = async (
+  context: HttpContext,
+  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+  creditNote: Stripe.CreditNote,
+  invoiceId: string | null
+): Promise<string | null> => {
+  if (!invoiceId) {
+    return null;
+  }
+
+  try {
+    return await salesforce.findTransactionIdByExternalId(
+      'stripe_invoice_id__c',
+      invoiceId,
+      'General'
+    );
+  } catch (error) {
+    context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {
+      creditNoteId: creditNote.id,
+      invoiceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
+
+const canUpsertCreditNoteTransaction = (transaction: TransactionUpsertDTO): boolean =>
+  transaction.status__c != null &&
+  (transaction as any).status__c !== '' &&
+  transaction.amount_gross__c != null;
+
+const logSkippedCreditNoteUpsert = (
+  context: HttpContext,
+  creditNote: Stripe.CreditNote,
+  transaction: TransactionUpsertDTO
+): void => {
+  context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
+    creditNoteId: creditNote.id,
+    status: transaction.status__c,
+    amountGross: transaction.amount_gross__c,
+    transaction,
+  });
+};
+
+const upsertCreditNoteTransaction = async (
+  context: HttpContext,
+  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+  creditNote: Stripe.CreditNote,
+  options: {
+    invoiceId: string | null;
+    parentId: string | null;
+    paymentIntent: Stripe.PaymentIntent | null;
+    charge: Stripe.Charge | null;
+    invoice: Stripe.Invoice | null;
+  }
+): Promise<unknown> => {
+  const transaction = buildCreditNoteTransaction(creditNote, options);
+
+  if (!canUpsertCreditNoteTransaction(transaction)) {
+    logSkippedCreditNoteUpsert(context, creditNote, transaction);
+    return null;
+  }
+
+  return salesforce.upsertTransactionByExternalId(transaction, 'stripe_credit_note_id__c');
+};
+
 export const handleCreditNoteEvent = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -380,31 +420,17 @@ export const handleCreditNoteEvent = async (
   const creditNote = event.data.object as Stripe.CreditNote;
   const stripe = ensureStripeClient(deps, event);
 
-  const invoice = await loadInvoice(stripe, creditNote, context);
-  const paymentIntent = await loadPaymentIntent(stripe, invoice, context);
-  const charge = await loadCharge(stripe, invoice, paymentIntent, context);
+  const { invoice, paymentIntent, charge } = await loadCreditNoteContext(
+    stripe,
+    creditNote,
+    context
+  );
 
   const salesforce = await deps.getSalesforceSvc();
 
-  let parentId: string | null = null;
   const invoiceId = normalizeStripeId(invoice?.id) || normalizeStripeId(creditNote.invoice);
-  if (invoiceId) {
-    try {
-      parentId = await salesforce.findTransactionIdByExternalId(
-        'stripe_invoice_id__c',
-        invoiceId,
-        'General'
-      );
-    } catch (error) {
-      context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {
-        creditNoteId: creditNote.id,
-        invoiceId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  const transaction = buildCreditNoteTransaction(creditNote, {
+  const parentId = await findParentInvoiceTransactionId(context, salesforce, creditNote, invoiceId);
+  const upsertResult = await upsertCreditNoteTransaction(context, salesforce, creditNote, {
     invoiceId,
     parentId,
     paymentIntent,
@@ -412,24 +438,9 @@ export const handleCreditNoteEvent = async (
     invoice,
   });
 
-  if (
-    transaction.status__c == null ||
-    (transaction as any).status__c === '' ||
-    transaction.amount_gross__c == null
-  ) {
-    context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-      creditNoteId: creditNote.id,
-      status: transaction.status__c,
-      amountGross: transaction.amount_gross__c,
-      transaction,
-    });
+  if (!upsertResult) {
     return;
   }
-
-  const upsertResult = await salesforce.upsertTransactionByExternalId(
-    transaction,
-    'stripe_credit_note_id__c'
-  );
 
   if (event.type === 'credit_note.voided') {
     const adapter = getRefundAdapter(deps);
@@ -471,6 +482,6 @@ export const handleCreditNoteEvent = async (
 
   await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
     const doc = await adapter.upsertRefundReceipt(refundInput);
-    await markCreditNotePosted(salesforce, upsertResult, doc);
+    await markDocumentPosted(salesforce, upsertResult, doc);
   });
 };

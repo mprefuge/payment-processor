@@ -1,29 +1,13 @@
 const { logger } = require('../../lib/logger');
+const {
+  buildFullName,
+  filterCustomersByExactName,
+  normalizeName,
+  trimToNull,
+} = require('../../stripe/customerIdentity');
 
-const toTrimmed = (value) => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
-
-const toNormalizedName = (value) => {
-  const trimmed = toTrimmed(value);
-  return trimmed ? trimmed.toLowerCase() : null;
-};
-
-const buildFullName = (customerData) => {
-  const firstName = toTrimmed(customerData?.firstname);
-  const lastName = toTrimmed(customerData?.lastname);
-
-  if (firstName && lastName) {
-    return `${firstName} ${lastName}`;
-  }
-
-  return firstName || lastName || null;
-};
+const buildCustomerFullName = (customerData) =>
+  buildFullName(customerData?.firstname, customerData?.lastname);
 
 const normalizeAddressInput = (customerData) => {
   const nestedAddress =
@@ -31,19 +15,19 @@ const normalizeAddressInput = (customerData) => {
 
   if (nestedAddress) {
     return {
-      line1: toTrimmed(nestedAddress.line1),
-      city: toTrimmed(nestedAddress.city),
-      state: toTrimmed(nestedAddress.state),
-      postal_code: toTrimmed(nestedAddress.postal_code),
-      country: toTrimmed(nestedAddress.country) || 'US',
+      line1: trimToNull(nestedAddress.line1),
+      city: trimToNull(nestedAddress.city),
+      state: trimToNull(nestedAddress.state),
+      postal_code: trimToNull(nestedAddress.postal_code),
+      country: trimToNull(nestedAddress.country) || 'US',
     };
   }
 
   return {
-    line1: toTrimmed(customerData?.address),
-    city: toTrimmed(customerData?.city),
-    state: toTrimmed(customerData?.state),
-    postal_code: toTrimmed(customerData?.zipcode),
+    line1: trimToNull(customerData?.address),
+    city: trimToNull(customerData?.city),
+    state: trimToNull(customerData?.state),
+    postal_code: trimToNull(customerData?.zipcode),
     country: 'US',
   };
 };
@@ -78,7 +62,7 @@ const addressesMatch = (left, right) => {
 
 const buildStripeCustomerPayload = (customerData) => ({
   email: customerData.email,
-  name: buildFullName(customerData),
+  name: buildCustomerFullName(customerData),
   phone: customerData.phone || null,
   address: normalizeAddressInput(customerData),
 });
@@ -93,7 +77,7 @@ const escapeStripeQueryValue = (value) => {
 
 const searchStripeCustomer = async (stripe, email, fullName) => {
   try {
-    const normalizedSearchName = toNormalizedName(fullName);
+    const normalizedSearchName = normalizeName(fullName);
     if (!normalizedSearchName) {
       return [];
     }
@@ -105,10 +89,7 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
     });
 
     const customerRecords = Array.isArray(customers?.data) ? customers.data : [];
-
-    return customerRecords.filter(
-      (customer) => toNormalizedName(customer?.name) === normalizedSearchName
-    );
+    return filterCustomersByExactName(customerRecords, fullName);
   } catch (error) {
     logger.error('Error searching Stripe customer:', error);
     throw error;

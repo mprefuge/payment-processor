@@ -34,7 +34,10 @@ describe('SalesforceCrmService (JS)', () => {
     service.conn = conn;
     service.authenticate = async () => conn;
 
-    const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+    const result = await service.upsertTransactionsRecord(
+      transactionData,
+      'Stripe_Payment_Intent_Id__c'
+    );
 
     expect(upsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -73,12 +76,12 @@ describe('SalesforceCrmService (JS)', () => {
     service.conn = conn;
     service.authenticate = async () => conn;
 
-    const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
-
-    expect(upsertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ Id: 'match_id' }),
-      'Id'
+    const result = await service.upsertTransactionsRecord(
+      transactionData,
+      'Stripe_Payment_Intent_Id__c'
     );
+
+    expect(upsertMock).toHaveBeenCalledWith(expect.objectContaining({ Id: 'match_id' }), 'Id');
     expect(result).toEqual({ success: true, id: 'match_id' });
     expect(conn.query).toHaveBeenCalledWith(
       expect.stringContaining('Received_At__c = 2025-03-03T00:00:00Z')
@@ -111,7 +114,10 @@ describe('SalesforceCrmService (JS)', () => {
     service.conn = conn;
     service.authenticate = async () => conn;
 
-    const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+    const result = await service.upsertTransactionsRecord(
+      transactionData,
+      'Stripe_Payment_Intent_Id__c'
+    );
 
     expect(upsertMock).toHaveBeenCalledWith(expect.any(Object), 'Stripe_Payment_Intent_Id__c');
     expect(result).toEqual({ success: true, id: 'new' });
@@ -135,7 +141,10 @@ describe('SalesforceCrmService (JS)', () => {
     service.conn = conn;
     service.authenticate = async () => conn;
 
-    const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+    const result = await service.upsertTransactionsRecord(
+      transactionData,
+      'Stripe_Payment_Intent_Id__c'
+    );
 
     expect(conn.query).not.toHaveBeenCalledWith(expect.stringContaining('Received_At__c ='));
     expect(upsertMock).toHaveBeenCalledWith(
@@ -171,7 +180,10 @@ describe('SalesforceCrmService (JS)', () => {
     service.conn = conn;
     service.authenticate = async () => conn;
 
-    const result = await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+    const result = await service.upsertTransactionsRecord(
+      transactionData,
+      'Stripe_Payment_Intent_Id__c'
+    );
 
     expect(payoutQuery).toBe(false);
     expect(upsertMock).toHaveBeenCalledWith(expect.any(Object), 'Stripe_Payment_Intent_Id__c');

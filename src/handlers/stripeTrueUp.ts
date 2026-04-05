@@ -1,16 +1,6 @@
 import type { InvocationContext, HttpRequest } from '@azure/functions';
 import Stripe from 'stripe';
 
-let env: any = { stripe: { secret: '' } };
-try {
-  env = require('../config/env').default;
-} catch (error) {
-  console.warn(
-    '[StripeTrueUp] env.ts failed to load, will use environment variables directly:',
-    error
-  );
-}
-
 import {
   centsToPositiveMajorUnits,
   findCheckoutSessionForPaymentIntent,
@@ -45,6 +35,8 @@ import {
 } from '../services/qbo/stripe/fetchStripe';
 
 const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2023-10-16';
+
+const getDefaultStripeSecret = (): string => process.env.STRIPE_SECRET || '';
 
 interface StripeServices {
   getClient: (livemode: boolean) => Stripe;
@@ -81,6 +73,15 @@ const getQboFunctions = () => {
   return qboFunctions;
 };
 
+const createAccountingServices = (): AccountingServices => ({
+  postChargeToQbo: async (charge: any, options?: any) =>
+    getQboFunctions().postChargeToQbo(charge, options),
+  postRefundToQbo: async (refund: any, options?: any) =>
+    getQboFunctions().postRefundToQbo(refund, options),
+  postPayoutToQbo: async (payout: any, balanceTransactions?: any[], options?: any) =>
+    getQboFunctions().postPayoutToQbo(payout, balanceTransactions, options),
+});
+
 interface AccountingServices {
   postChargeToQbo: (charge: any, options?: any) => Promise<PostChargeToQboResult>;
   postRefundToQbo: (refund: any, options?: any) => Promise<any>;
@@ -93,6 +94,17 @@ interface Dependencies {
   idempotencyStore: IdempotencyStore;
   getSalesforceSvc: () => Promise<SalesforceSvc>;
   accounting: AccountingServices;
+}
+
+interface TrueUpRequestOptions {
+  bypassQbo: boolean;
+  liveMode: boolean;
+  from: number;
+  to: number | null;
+  type: 'payments' | 'refunds' | 'payouts';
+  dryRun: boolean;
+  resubmit: boolean;
+  limit: number | null;
 }
 
 interface ProcessSummary {
@@ -121,6 +133,10 @@ type DependencyOverrides = Partial<{
   accounting: Partial<AccountingServices>;
 }>;
 
+type ParsedRequestOptions =
+  | { ok: true; value: TrueUpRequestOptions }
+  | { ok: false; response: ReturnType<typeof respond> };
+
 const createInMemoryStore = (): IdempotencyStore => {
   const processed = new Set<string>();
   return {
@@ -139,6 +155,32 @@ const createInMemoryStore = (): IdempotencyStore => {
   };
 };
 
+const buildProcessSummary = (): ProcessSummary => ({
+  fetched: 0,
+  processed: 0,
+  skipped: 0,
+  salesforceUpdates: 0,
+  qboPosts: 0,
+  errors: 0,
+});
+
+const createLazySalesforceGetter = () => {
+  let salesforceSvc: SalesforceSvc | null = null;
+
+  return async (): Promise<SalesforceSvc> => {
+    if (!salesforceSvc) {
+      salesforceSvc = await dependencies.getSalesforceSvc();
+    }
+    return salesforceSvc;
+  };
+};
+
+const buildFetchParams = (
+  upperBoundField: 'created' | 'arrival_date',
+  to: number | null,
+  logger: HttpContext['log']
+) => (to ? { params: { [upperBoundField]: { lte: to } }, logger } : { logger });
+
 const createStripeServices = (): StripeServices => {
   const cache = new Map<boolean, Stripe>();
 
@@ -148,8 +190,8 @@ const createStripeServices = (): StripeServices => {
     }
 
     const secret = livemode
-      ? process.env.STRIPE_LIVE_SECRET_KEY || env.stripe.secret
-      : process.env.STRIPE_TEST_SECRET_KEY || env.stripe.secret;
+      ? process.env.STRIPE_LIVE_SECRET_KEY || getDefaultStripeSecret()
+      : process.env.STRIPE_TEST_SECRET_KEY || getDefaultStripeSecret();
 
     const client = new Stripe(secret, {
       apiVersion: STRIPE_API_VERSION,
@@ -160,6 +202,16 @@ const createStripeServices = (): StripeServices => {
 
   return { getClient };
 };
+
+const createFetchServices = (): FetchServices => ({
+  payments: fetchStripeChargesSince,
+  refunds: fetchStripeRefundsSince,
+  payouts: fetchStripePayoutsSince,
+  payoutBalance: fetchBalanceTransactionsForPayout,
+});
+
+const createIdempotencyStore = (): IdempotencyStore =>
+  process.env.DISABLE_AZURE_TABLES === '1' ? createInMemoryStore() : new AzureIdempotencyStore();
 
 let defaultSalesforceSvcPromise: Promise<SalesforceSvc> | null = null;
 let salesforceConnection: any = null;
@@ -234,49 +286,29 @@ const getCrmSvc = createCrmGetter();
 
 const createDefaultDependencies = (): Dependencies => ({
   stripe: createStripeServices(),
-  fetchers: {
-    payments: fetchStripeChargesSince,
-    refunds: fetchStripeRefundsSince,
-    payouts: fetchStripePayoutsSince,
-    payoutBalance: fetchBalanceTransactionsForPayout,
-  },
-  idempotencyStore:
-    process.env.DISABLE_AZURE_TABLES === '1' ? createInMemoryStore() : new AzureIdempotencyStore(),
+  fetchers: createFetchServices(),
+  idempotencyStore: createIdempotencyStore(),
   getSalesforceSvc: createSalesforceGetter(),
-  accounting: getQboFunctions(),
+  accounting: createAccountingServices(),
 });
 
 let dependencies: Dependencies = createDefaultDependencies();
 
+const mergeDependencies = (
+  base: Dependencies,
+  overrides: DependencyOverrides = {}
+): Dependencies => ({
+  stripe: overrides.stripe ? { ...base.stripe, ...overrides.stripe } : base.stripe,
+  fetchers: overrides.fetchers ? { ...base.fetchers, ...overrides.fetchers } : base.fetchers,
+  idempotencyStore: overrides.idempotencyStore ?? base.idempotencyStore,
+  getSalesforceSvc: overrides.getSalesforceSvc ?? base.getSalesforceSvc,
+  accounting: overrides.accounting
+    ? { ...base.accounting, ...overrides.accounting }
+    : base.accounting,
+});
+
 const setDependencies = (overrides: DependencyOverrides = {}): void => {
-  if (overrides.idempotencyStore) {
-    dependencies.idempotencyStore = overrides.idempotencyStore;
-  }
-
-  if (overrides.getSalesforceSvc) {
-    dependencies.getSalesforceSvc = overrides.getSalesforceSvc;
-  }
-
-  if (overrides.stripe) {
-    dependencies.stripe = {
-      ...dependencies.stripe,
-      ...overrides.stripe,
-    };
-  }
-
-  if (overrides.fetchers) {
-    dependencies.fetchers = {
-      ...dependencies.fetchers,
-      ...overrides.fetchers,
-    } as FetchServices;
-  }
-
-  if (overrides.accounting) {
-    dependencies.accounting = {
-      ...dependencies.accounting,
-      ...overrides.accounting,
-    } as AccountingServices;
-  }
+  dependencies = mergeDependencies(dependencies, overrides);
 };
 
 const resetDependencies = (): void => {
@@ -1077,30 +1109,14 @@ const processPayments = async (
   bypassQbo: boolean,
   limit: number | null
 ): Promise<ProcessSummary> => {
-  const summary: ProcessSummary = {
-    fetched: 0,
-    processed: 0,
-    skipped: 0,
-    salesforceUpdates: 0,
-    qboPosts: 0,
-    errors: 0,
-  };
-
-  const params = to
-    ? { params: { created: { lte: to } }, logger: context.log }
-    : { logger: context.log };
+  const summary = buildProcessSummary();
+  const params = buildFetchParams('created', to, context.log);
 
   const charges = await dependencies.fetchers.payments(stripe, from, params as never);
   const recordsToProcess = typeof limit === 'number' ? charges.slice(0, limit) : charges;
   summary.fetched = recordsToProcess.length;
 
-  let salesforceSvc: SalesforceSvc | null = null;
-  const ensureSalesforce = async (): Promise<SalesforceSvc> => {
-    if (!salesforceSvc) {
-      salesforceSvc = await dependencies.getSalesforceSvc();
-    }
-    return salesforceSvc;
-  };
+  const ensureSalesforce = createLazySalesforceGetter();
 
   for (const charge of recordsToProcess) {
     try {
@@ -1521,30 +1537,14 @@ const processRefunds = async (
   bypassQbo: boolean,
   limit: number | null
 ): Promise<ProcessSummary> => {
-  const summary: ProcessSummary = {
-    fetched: 0,
-    processed: 0,
-    skipped: 0,
-    salesforceUpdates: 0,
-    qboPosts: 0,
-    errors: 0,
-  };
-
-  const params = to
-    ? { params: { created: { lte: to } }, logger: context.log }
-    : { logger: context.log };
+  const summary = buildProcessSummary();
+  const params = buildFetchParams('created', to, context.log);
 
   const refunds = await dependencies.fetchers.refunds(stripe, from, params as never);
   const recordsToProcess = typeof limit === 'number' ? refunds.slice(0, limit) : refunds;
   summary.fetched = recordsToProcess.length;
 
-  let salesforceSvc: SalesforceSvc | null = null;
-  const ensureSalesforce = async (): Promise<SalesforceSvc> => {
-    if (!salesforceSvc) {
-      salesforceSvc = await dependencies.getSalesforceSvc();
-    }
-    return salesforceSvc;
-  };
+  const ensureSalesforce = createLazySalesforceGetter();
 
   for (const refund of recordsToProcess) {
     try {
@@ -1916,30 +1916,14 @@ const processPayouts = async (
   bypassQbo: boolean,
   limit: number | null
 ): Promise<ProcessSummary> => {
-  const summary: ProcessSummary = {
-    fetched: 0,
-    processed: 0,
-    skipped: 0,
-    salesforceUpdates: 0,
-    qboPosts: 0,
-    errors: 0,
-  };
-
-  const params = to
-    ? { params: { arrival_date: { lte: to } }, logger: context.log }
-    : { logger: context.log };
+  const summary = buildProcessSummary();
+  const params = buildFetchParams('arrival_date', to, context.log);
 
   const payouts = await dependencies.fetchers.payouts(stripe, from, params as never);
   const recordsToProcess = typeof limit === 'number' ? payouts.slice(0, limit) : payouts;
   summary.fetched = recordsToProcess.length;
 
-  let salesforceSvc: SalesforceSvc | null = null;
-  const ensureSalesforce = async (): Promise<SalesforceSvc> => {
-    if (!salesforceSvc) {
-      salesforceSvc = await dependencies.getSalesforceSvc();
-    }
-    return salesforceSvc;
-  };
+  const ensureSalesforce = createLazySalesforceGetter();
 
   for (const payout of recordsToProcess) {
     try {
@@ -2155,11 +2139,11 @@ const validateEnvironment = (
   const errors: string[] = [];
 
   if (liveMode) {
-    if (!process.env.STRIPE_LIVE_SECRET_KEY && !env.stripe.secret) {
+    if (!process.env.STRIPE_LIVE_SECRET_KEY && !getDefaultStripeSecret()) {
       errors.push('STRIPE_LIVE_SECRET_KEY is not configured for live mode');
     }
   } else {
-    if (!process.env.STRIPE_TEST_SECRET_KEY && !env.stripe.secret) {
+    if (!process.env.STRIPE_TEST_SECRET_KEY && !getDefaultStripeSecret()) {
       errors.push('STRIPE_TEST_SECRET_KEY is not configured for test mode');
     }
   }
@@ -2186,156 +2170,250 @@ const validateEnvironment = (
   return { valid: errors.length === 0, errors };
 };
 
-const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promise<any> => {
-  try {
-    const queryRaw = (req as unknown as { query?: unknown }).query;
-    let query: Record<string, string | undefined> = {};
+const readQueryParams = (req: HttpRequest): Record<string, string | undefined> => {
+  const queryRaw = (req as unknown as { query?: unknown }).query;
 
-    if (queryRaw instanceof URLSearchParams) {
-      query = Object.fromEntries(queryRaw.entries());
-    } else if (queryRaw && typeof queryRaw === 'object') {
-      query = queryRaw as Record<string, string | undefined>;
-    }
+  if (queryRaw instanceof URLSearchParams) {
+    return Object.fromEntries(queryRaw.entries());
+  }
 
-    const bypassQboDefault = parseBoolean(process.env.STRIPE_TRUE_UP_BYPASS_QBO, false);
-    const bypassQboParam =
-      query.bypassQbo ??
-      query.skipQbo ??
-      getHeader(req, 'x-bypass-qbo') ??
-      getHeader(req, 'x-skip-qbo');
-    const bypassQbo = parseBoolean(bypassQboParam, bypassQboDefault);
+  if (queryRaw && typeof queryRaw === 'object') {
+    return queryRaw as Record<string, string | undefined>;
+  }
 
-    const defaultLiveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
-    const requestedMode = parseModeToggle(query.mode ?? getHeader(req, 'x-stripe-mode'));
-    if (!requestedMode.isValid) {
-      return respond(400, {
+  return {};
+};
+
+const parseRequestOptions = (req: HttpRequest): ParsedRequestOptions => {
+  const query = readQueryParams(req);
+  const bypassQboDefault = parseBoolean(process.env.STRIPE_TRUE_UP_BYPASS_QBO, false);
+  const bypassQboParam =
+    query.bypassQbo ??
+    query.skipQbo ??
+    getHeader(req, 'x-bypass-qbo') ??
+    getHeader(req, 'x-skip-qbo');
+  const bypassQbo = parseBoolean(bypassQboParam, bypassQboDefault);
+
+  const defaultLiveMode = process.env.STRIPE_TRUE_UP_MODE === 'live';
+  const requestedMode = parseModeToggle(query.mode ?? getHeader(req, 'x-stripe-mode'));
+  if (!requestedMode.isValid) {
+    return {
+      ok: false,
+      response: respond(400, {
         error: 'bad_request',
         message: requestedMode.message,
-      });
-    }
-    const liveMode =
-      typeof requestedMode.isLiveMode === 'boolean' ? requestedMode.isLiveMode : defaultLiveMode;
+      }),
+    };
+  }
 
-    const envCheck = validateEnvironment(bypassQbo, liveMode);
-    if (!envCheck.valid) {
-      context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
-      return respond(500, {
-        error: 'configuration_error',
-        message: 'Required environment variables are not configured.',
-        details: envCheck.errors,
-      });
-    }
+  const liveMode =
+    typeof requestedMode.isLiveMode === 'boolean' ? requestedMode.isLiveMode : defaultLiveMode;
 
-    const fromParam = query.from;
-    if (!fromParam) {
-      return respond(400, {
+  const fromParam = query.from;
+  if (!fromParam) {
+    return {
+      ok: false,
+      response: respond(400, {
         error: 'bad_request',
         message: 'Query parameter "from" is required.',
-      });
-      return;
-    }
+      }),
+    };
+  }
 
-    let from: number;
-    try {
-      from = toEpochSeconds(fromParam);
-    } catch (error) {
-      return respond(400, {
+  let from: number;
+  try {
+    from = toEpochSeconds(fromParam);
+  } catch (error) {
+    return {
+      ok: false,
+      response: respond(400, {
         error: 'bad_request',
         message: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
+      }),
+    };
+  }
 
-    let to: number | null = null;
-    if (query.to) {
-      try {
-        to = toEpochSeconds(query.to);
-      } catch (error) {
-        return respond(400, {
+  let to: number | null = null;
+  if (query.to) {
+    try {
+      to = toEpochSeconds(query.to);
+    } catch (error) {
+      return {
+        ok: false,
+        response: respond(400, {
           error: 'bad_request',
           message: error instanceof Error ? error.message : String(error),
-        });
-        return;
-      }
+        }),
+      };
+    }
 
-      if (to < from) {
-        return respond(400, {
+    if (to < from) {
+      return {
+        ok: false,
+        response: respond(400, {
           error: 'bad_request',
           message: 'The "to" parameter must be greater than or equal to "from".',
-        });
-        return;
-      }
+        }),
+      };
     }
+  }
 
-    const type = (query.type || 'payments').toLowerCase();
-    if (!['payments', 'refunds', 'payouts'].includes(type)) {
-      return respond(400, {
+  const type = (query.type || 'payments').toLowerCase();
+  if (!['payments', 'refunds', 'payouts'].includes(type)) {
+    return {
+      ok: false,
+      response: respond(400, {
         error: 'bad_request',
         message: 'Query parameter "type" must be one of payments, refunds, or payouts.',
-      });
-      return;
-    }
+      }),
+    };
+  }
 
-    const dryRun = parseBoolean(query.dryRun, false);
-    const resubmit = parseBoolean(query.resubmit, false);
-    let limit: number | null;
-    try {
-      limit = parseLimit(query.limit);
-    } catch (error) {
-      return respond(400, {
+  let limit: number | null;
+  try {
+    limit = parseLimit(query.limit);
+  } catch (error) {
+    return {
+      ok: false,
+      response: respond(400, {
         error: 'bad_request',
         message: error instanceof Error ? error.message : String(error),
-      });
-    }
+      }),
+    };
+  }
 
-    const stripe = dependencies.stripe.getClient(liveMode);
-
-    let summary: ProcessSummary;
-    if (type === 'payments') {
-      summary = await processPayments(
-        context,
-        stripe,
-        from,
-        to,
-        dryRun,
-        resubmit,
-        bypassQbo,
-        limit
-      );
-    } else if (type === 'refunds') {
-      summary = await processRefunds(context, stripe, from, to, dryRun, resubmit, bypassQbo, limit);
-    } else {
-      summary = await processPayouts(context, stripe, from, to, dryRun, resubmit, bypassQbo, limit);
-    }
-
-    if (!dryRun) {
-      await dependencies.idempotencyStore.flush();
-      context.log('[StripeTrueUp] Idempotency store flushed successfully');
-    }
-
-    return respond(200, {
-      type,
-      dryRun,
-      resubmit,
+  return {
+    ok: true,
+    value: {
       bypassQbo,
-      limit,
       liveMode,
-      range: {
-        from: timestampToIsoString(from),
-        to: to ? timestampToIsoString(to) : null,
-      },
-      counts: summary,
-    });
+      from,
+      to,
+      type: type as TrueUpRequestOptions['type'],
+      dryRun: parseBoolean(query.dryRun, false),
+      resubmit: parseBoolean(query.resubmit, false),
+      limit,
+    },
+  };
+};
+
+const processRecordsByType = async (
+  context: InvocationContext,
+  stripe: Stripe,
+  options: TrueUpRequestOptions
+): Promise<ProcessSummary> => {
+  if (options.type === 'payments') {
+    return await processPayments(
+      context,
+      stripe,
+      options.from,
+      options.to,
+      options.dryRun,
+      options.resubmit,
+      options.bypassQbo,
+      options.limit
+    );
+  }
+
+  if (options.type === 'refunds') {
+    return await processRefunds(
+      context,
+      stripe,
+      options.from,
+      options.to,
+      options.dryRun,
+      options.resubmit,
+      options.bypassQbo,
+      options.limit
+    );
+  }
+
+  return await processPayouts(
+    context,
+    stripe,
+    options.from,
+    options.to,
+    options.dryRun,
+    options.resubmit,
+    options.bypassQbo,
+    options.limit
+  );
+};
+
+const flushIdempotencyStoreIfNeeded = async (
+  dryRun: boolean,
+  context: InvocationContext
+): Promise<void> => {
+  if (dryRun) {
+    return;
+  }
+
+  await dependencies.idempotencyStore.flush();
+  context.log('[StripeTrueUp] Idempotency store flushed successfully');
+};
+
+const buildSuccessResponse = (options: TrueUpRequestOptions, summary: ProcessSummary) =>
+  respond(200, {
+    type: options.type,
+    dryRun: options.dryRun,
+    resubmit: options.resubmit,
+    bypassQbo: options.bypassQbo,
+    limit: options.limit,
+    liveMode: options.liveMode,
+    range: {
+      from: timestampToIsoString(options.from),
+      to: options.to ? timestampToIsoString(options.to) : null,
+    },
+    counts: summary,
+  });
+
+const buildEnvironmentErrorResponse = (errors: string[]) =>
+  respond(500, {
+    error: 'configuration_error',
+    message: 'Required environment variables are not configured.',
+    details: errors,
+  });
+
+const buildInternalErrorResponse = (error: unknown) =>
+  respond(500, {
+    error: 'internal_error',
+    message: 'Failed to complete Stripe true-up operation.',
+    details: error instanceof Error ? error.message : String(error),
+  });
+
+const runTrueUpWorkflow = async (
+  context: InvocationContext,
+  options: TrueUpRequestOptions
+): Promise<ReturnType<typeof buildSuccessResponse>> => {
+  const stripe = dependencies.stripe.getClient(options.liveMode);
+  const summary = await processRecordsByType(context, stripe, options);
+
+  await flushIdempotencyStoreIfNeeded(options.dryRun, context);
+
+  return buildSuccessResponse(options, summary);
+};
+
+const stripeTrueUp = async (req: HttpRequest, context: InvocationContext): Promise<any> => {
+  try {
+    const parsedOptions = parseRequestOptions(req);
+    if (!parsedOptions.ok) {
+      return parsedOptions.response;
+    }
+
+    const options = parsedOptions.value;
+    const envCheck = validateEnvironment(options.bypassQbo, options.liveMode);
+    if (!envCheck.valid) {
+      context.log('[StripeTrueUp] Environment validation failed:', envCheck.errors);
+      return buildEnvironmentErrorResponse(envCheck.errors);
+    }
+
+    return await runTrueUpWorkflow(context, options);
   } catch (error) {
     context.log('[StripeTrueUp] Unhandled error', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
     });
-    return respond(500, {
-      error: 'internal_error',
-      message: 'Failed to complete Stripe true-up operation.',
-      details: error instanceof Error ? error.message : String(error),
-    });
+    return buildInternalErrorResponse(error);
   }
 };
 

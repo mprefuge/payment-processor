@@ -26,8 +26,7 @@ const resolveDisputeBalanceTransactions = async (
     try {
       const balanceTransaction = await stripe.balanceTransactions.retrieve(id);
       results.push(balanceTransaction);
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   return results;

@@ -101,7 +101,9 @@ class QuickBooksProvider extends BaseAccountingProvider {
       const currentAccessToken =
         typeof this.oauthTokens.accessToken === 'string' ? this.oauthTokens.accessToken.trim() : '';
       const currentRefreshToken =
-        typeof this.oauthTokens.refreshToken === 'string' ? this.oauthTokens.refreshToken.trim() : '';
+        typeof this.oauthTokens.refreshToken === 'string'
+          ? this.oauthTokens.refreshToken.trim()
+          : '';
 
       const shouldUpdate =
         (!!storedAccessToken && !currentAccessToken) ||
@@ -207,7 +209,9 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
     const emailMatches = Boolean(normalizedEmail && recordEmail === normalizedEmail);
     const displayNameMatches =
-      Boolean(normalizedDisplayName) && Boolean(recordDisplayName) && recordDisplayName === normalizedDisplayName;
+      Boolean(normalizedDisplayName) &&
+      Boolean(recordDisplayName) &&
+      recordDisplayName === normalizedDisplayName;
 
     return emailMatches || displayNameMatches;
   }
@@ -226,8 +230,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
   }
 
   async _findPartiesByDisplayName(entityType, displayName) {
-    const normalizedDisplayName =
-      typeof displayName === 'string' ? displayName.trim() : '';
+    const normalizedDisplayName = typeof displayName === 'string' ? displayName.trim() : '';
 
     if (!normalizedDisplayName) {
       return [];
@@ -250,8 +253,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
     const displayNameSource =
       input.displayName || input.name || input.email || input.externalId || entityType;
     const fallbackDisplayName = entityType === 'Customer' ? 'Stripe Customer' : 'Stripe';
-    const displayName =
-      displayNameSource.toString().trim().substring(0, 99) || fallbackDisplayName;
+    const displayName = displayNameSource.toString().trim().substring(0, 99) || fallbackDisplayName;
     const normalizedDisplayName = displayName.toLowerCase();
     const normalizedEmail = this._normalizeEmail(input.email);
 
@@ -1157,7 +1159,10 @@ class QuickBooksProvider extends BaseAccountingProvider {
 
         const isInvalidGrant =
           Boolean(refreshResponse.error && refreshResponse.error === 'invalid_grant') ||
-          (typeof errorDescription === 'string' && /invalid refresh token|invalid_grant|incorrect or invalid refresh token/i.test(errorDescription));
+          (typeof errorDescription === 'string' &&
+            /invalid refresh token|invalid_grant|incorrect or invalid refresh token/i.test(
+              errorDescription
+            ));
 
         if (isInvalidGrant) {
           this.logger.warn('[QBO] Refresh token invalid or revoked; clearing stored oauth tokens');
@@ -1171,10 +1176,15 @@ class QuickBooksProvider extends BaseAccountingProvider {
               this.logger.info('[QBO] Cleared persisted tokens from storage');
             }
           } catch (err) {
-            this.logger.warn('[QBO] Failed to clear persisted tokens: ' + (err && err.message ? err.message : String(err)));
+            this.logger.warn(
+              '[QBO] Failed to clear persisted tokens: ' +
+                (err && err.message ? err.message : String(err))
+            );
           }
 
-          throw new Error('QBO refresh token is invalid or revoked; manual re-authentication required.');
+          throw new Error(
+            'QBO refresh token is invalid or revoked; manual re-authentication required.'
+          );
         }
 
         throw new Error(errorDescription);
@@ -1217,11 +1227,17 @@ class QuickBooksProvider extends BaseAccountingProvider {
               await clients.tokenStore.set('tokens', tokenData);
               this.logger.info('[QBO] Persisted refreshed tokens to storage');
             } catch (err) {
-              this.logger.warn('[QBO] Failed to persist refreshed tokens to storage: ' + (err && err.message ? err.message : String(err)));
+              this.logger.warn(
+                '[QBO] Failed to persist refreshed tokens to storage: ' +
+                  (err && err.message ? err.message : String(err))
+              );
             }
           }
         } catch (err) {
-          this.logger.warn('[QBO] Failed to persist refreshed tokens: ' + (err && err.message ? err.message : String(err)));
+          this.logger.warn(
+            '[QBO] Failed to persist refreshed tokens: ' +
+              (err && err.message ? err.message : String(err))
+          );
         }
 
         // Update env vars for backward compatibility

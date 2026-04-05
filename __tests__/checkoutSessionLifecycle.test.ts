@@ -122,17 +122,15 @@ describe('checkout session lifecycle', () => {
     const stripeClient = {
       paymentIntents: { retrieve: vi.fn().mockResolvedValue(paymentIntent) },
       balanceTransactions: {
-        retrieve: vi
-          .fn()
-          .mockResolvedValue({
-            id: 'bt_lifecycle',
-            amount: 5000,
-            fee: 150,
-            net: 4850,
-            currency: 'usd',
-            created: Math.floor(Date.now() / 1000),
-            type: 'charge',
-          }),
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'bt_lifecycle',
+          amount: 5000,
+          fee: 150,
+          net: 4850,
+          currency: 'usd',
+          created: Math.floor(Date.now() / 1000),
+          type: 'charge',
+        }),
       },
       customers: {
         retrieve: vi.fn().mockResolvedValue({ id: 'cus_lifecycle', email: 'donor@example.com' }),

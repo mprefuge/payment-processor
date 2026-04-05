@@ -65,8 +65,22 @@ describe('salesforcePaymentsSync', () => {
 
     const balanceTransactionsRetrieve = vi
       .fn()
-      .mockResolvedValueOnce({ id: 'bt_1', amount: 1000, fee: 100, net: 900, currency: 'usd', type: 'charge' })
-      .mockResolvedValueOnce({ id: 'bt_2', amount: 2500, fee: 150, net: 2350, currency: 'usd', type: 'charge' });
+      .mockResolvedValueOnce({
+        id: 'bt_1',
+        amount: 1000,
+        fee: 100,
+        net: 900,
+        currency: 'usd',
+        type: 'charge',
+      })
+      .mockResolvedValueOnce({
+        id: 'bt_2',
+        amount: 2500,
+        fee: 150,
+        net: 2350,
+        currency: 'usd',
+        type: 'charge',
+      });
 
     const customersRetrieve = vi.fn().mockResolvedValue({
       id: 'cus_1',
@@ -146,9 +160,14 @@ describe('salesforcePaymentsSync', () => {
       has_more: false,
     });
 
-    const balanceTransactionsRetrieve = vi
-      .fn()
-      .mockResolvedValue({ id: 'bt_sync', amount: 1900, fee: 100, net: 1800, currency: 'usd', type: 'charge' });
+    const balanceTransactionsRetrieve = vi.fn().mockResolvedValue({
+      id: 'bt_sync',
+      amount: 1900,
+      fee: 100,
+      net: 1800,
+      currency: 'usd',
+      type: 'charge',
+    });
 
     const customersRetrieve = vi.fn().mockResolvedValue({
       id: 'cus_sync',
@@ -220,9 +239,14 @@ describe('salesforcePaymentsSync', () => {
       has_more: false,
     });
 
-    const balanceTransactionsRetrieve = vi
-      .fn()
-      .mockResolvedValue({ id: 'bt_csv_1', amount: 1200, fee: 70, net: 1130, currency: 'usd', type: 'charge' });
+    const balanceTransactionsRetrieve = vi.fn().mockResolvedValue({
+      id: 'bt_csv_1',
+      amount: 1200,
+      fee: 70,
+      net: 1130,
+      currency: 'usd',
+      type: 'charge',
+    });
 
     const customersRetrieve = vi.fn().mockResolvedValue({
       id: 'cus_csv_1',

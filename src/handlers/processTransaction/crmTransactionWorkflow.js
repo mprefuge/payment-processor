@@ -1,6 +1,8 @@
 const DEFAULT_TRANSACTION_RECORD_TYPE_NAME = 'General';
 const DEFAULT_CAMPAIGN_NAME = 'General Giving';
 
+const { getCrmService } = require('./crmWorkflowCommon');
+
 const normalizeStripeEntityId = (value) => {
   if (!value) {
     return null;
@@ -26,6 +28,51 @@ const convertCentsToDollars = (amountInCents) => {
   }
 
   return amountInCents / 100;
+};
+
+const assignOptionalField = (record, key, value) => {
+  if (value !== null && value !== undefined) {
+    record[key] = value;
+  }
+};
+
+const buildTransactionRecord = ({
+  session,
+  transactionData,
+  contactId = null,
+  campaignId = null,
+  recordTypeId = null,
+  frequencyValue = undefined,
+  includeStripeIds = false,
+}) => {
+  const transactionRecord = {
+    Stripe_Checkout_Session_Id__c: session.id,
+    Transaction_Type__c: 'charge',
+    Status__c: 'Pending',
+    Payment_Method__c: 'Pending',
+  };
+
+  assignOptionalField(transactionRecord, 'Contact__c', contactId);
+  assignOptionalField(transactionRecord, 'Campaign__c', campaignId);
+  assignOptionalField(transactionRecord, 'RecordTypeId', recordTypeId);
+
+  if (includeStripeIds) {
+    const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
+    assignOptionalField(transactionRecord, 'Stripe_Payment_Intent_Id__c', paymentIntentId);
+
+    const customerId = normalizeStripeEntityId(session.customer);
+    assignOptionalField(transactionRecord, 'Stripe_Customer_Id__c', customerId);
+  }
+
+  const amount = convertCentsToDollars(transactionData.amount);
+  assignOptionalField(transactionRecord, 'Amount_Gross__c', amount);
+
+  const currency = session.currency ? session.currency.toUpperCase() : 'USD';
+  assignOptionalField(transactionRecord, 'Currency_ISO_Code__c', currency);
+  assignOptionalField(transactionRecord, 'Frequency__c', frequencyValue);
+  assignOptionalField(transactionRecord, 'Attribution__c', transactionData.attribution || null);
+
+  return transactionRecord;
 };
 
 const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
@@ -124,31 +171,45 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
     }
   };
 
-  const getCrmTransactionService = async (operationName) => {
-    const crmConfig = getCrmConfig();
+  const getCrmTransactionService = (operationName) =>
+    getCrmService({
+      CrmFactory,
+      getCrmConfig,
+      operationName,
+      requiredMethods: ['upsertTransactionsRecord'],
+      unsupportedCapabilityLabel: 'transaction upsert',
+    });
 
-    if (!crmConfig) {
-      console.log(`CRM integration disabled - skipping ${operationName}`);
-      return null;
+  const addContactToCampaignIfNeeded = async (crmService, campaignId, contactId) => {
+    if (!campaignId || typeof crmService.addCampaignMember !== 'function') {
+      return;
     }
 
-    const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
-    if (!validation.isValid) {
-      console.log(`CRM configuration invalid: ${validation.error}`);
-      return null;
-    }
+    try {
+      console.log('Adding contact as campaign member', { campaignId, contactId });
+      const memberResult = await crmService.addCampaignMember(campaignId, contactId);
+      if (memberResult.isNew) {
+        console.log('Contact added as new campaign member', {
+          campaignId,
+          contactId,
+          campaignMemberId: memberResult.id,
+        });
+        return;
+      }
 
-    const crmService = CrmFactory.createCrmService(crmConfig.provider, crmConfig.config);
-    if (typeof crmService.authenticate === 'function') {
-      await crmService.authenticate();
+      console.log('Contact is already a campaign member', {
+        campaignId,
+        contactId,
+        campaignMemberId: memberResult.id,
+      });
+    } catch (error) {
+      console.log('Failed to add contact as campaign member', {
+        campaignId,
+        contactId,
+        error: error.message,
+      });
+      logger.error('Campaign member creation error:', error);
     }
-
-    if (typeof crmService.upsertTransactionsRecord !== 'function') {
-      console.log(`CRM service does not support transaction upsert - skipping ${operationName}`);
-      return null;
-    }
-
-    return crmService;
   };
 
   const createPendingTransaction = async (session, contactId, transactionData) => {
@@ -166,73 +227,17 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       const campaignId = await resolveCampaignId(crmService, transactionData);
       const recordTypeId = await resolveTransactionRecordTypeId(crmService);
 
-      if (campaignId && typeof crmService.addCampaignMember === 'function') {
-        try {
-          console.log('Adding contact as campaign member', { campaignId, contactId });
-          const memberResult = await crmService.addCampaignMember(campaignId, contactId);
-          if (memberResult.isNew) {
-            console.log('Contact added as new campaign member', {
-              campaignId,
-              contactId,
-              campaignMemberId: memberResult.id,
-            });
-          } else {
-            console.log('Contact is already a campaign member', {
-              campaignId,
-              contactId,
-              campaignMemberId: memberResult.id,
-            });
-          }
-        } catch (error) {
-          console.log('Failed to add contact as campaign member', {
-            campaignId,
-            contactId,
-            error: error.message,
-          });
-          logger.error('Campaign member creation error:', error);
-        }
-      }
+      await addContactToCampaignIfNeeded(crmService, campaignId, contactId);
 
-      const transactionRecord = {
-        Stripe_Checkout_Session_Id__c: session.id,
-        Transaction_Type__c: 'charge',
-        Status__c: 'Pending',
-        Contact__c: contactId,
-        Frequency__c: transactionData.frequency || 'onetime',
-        Payment_Method__c: 'Pending',
-      };
-
-      if (campaignId) {
-        transactionRecord.Campaign__c = campaignId;
-      }
-
-      if (recordTypeId) {
-        transactionRecord.RecordTypeId = recordTypeId;
-      }
-
-      const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
-      if (paymentIntentId) {
-        transactionRecord.Stripe_Payment_Intent_Id__c = paymentIntentId;
-      }
-
-      const customerId = normalizeStripeEntityId(session.customer);
-      if (customerId) {
-        transactionRecord.Stripe_Customer_Id__c = customerId;
-      }
-
-      const amount = convertCentsToDollars(transactionData.amount);
-      if (amount !== null) {
-        transactionRecord.Amount_Gross__c = amount;
-      }
-
-      const currency = session.currency ? session.currency.toUpperCase() : 'USD';
-      if (currency) {
-        transactionRecord.Currency_ISO_Code__c = currency;
-      }
-
-      if (transactionData.attribution) {
-        transactionRecord.Attribution__c = transactionData.attribution;
-      }
+      const transactionRecord = buildTransactionRecord({
+        session,
+        transactionData,
+        contactId,
+        campaignId,
+        recordTypeId,
+        frequencyValue: transactionData.frequency || 'onetime',
+        includeStripeIds: true,
+      });
 
       const upsertResult = await crmService.upsertTransactionsRecord(
         transactionRecord,
@@ -259,42 +264,16 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         return null;
       }
 
-      const transactionRecord = {
-        Stripe_Checkout_Session_Id__c: session.id,
-        Transaction_Type__c: 'charge',
-        Status__c: 'Pending',
-      };
-
       const campaignId = await resolveCampaignId(crmService, requestData);
       const recordTypeId = await resolveTransactionRecordTypeId(crmService);
 
-      if (campaignId) {
-        transactionRecord.Campaign__c = campaignId;
-      }
-
-      if (recordTypeId) {
-        transactionRecord.RecordTypeId = recordTypeId;
-      }
-
-      const amount = convertCentsToDollars(requestData.amount);
-      if (amount !== null) {
-        transactionRecord.Amount_Gross__c = amount;
-      }
-
-      const currency = session.currency ? session.currency.toUpperCase() : 'USD';
-      if (currency) {
-        transactionRecord.Currency_ISO_Code__c = currency;
-      }
-
-      if (requestData.frequency) {
-        transactionRecord.Frequency__c = requestData.frequency;
-      }
-
-      transactionRecord.Payment_Method__c = 'Pending';
-
-      if (requestData.attribution) {
-        transactionRecord.Attribution__c = requestData.attribution;
-      }
+      const transactionRecord = buildTransactionRecord({
+        session,
+        transactionData: requestData,
+        campaignId,
+        recordTypeId,
+        frequencyValue: requestData.frequency,
+      });
 
       const upsertResult = await crmService.upsertTransactionsRecord(
         transactionRecord,

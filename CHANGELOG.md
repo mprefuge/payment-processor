@@ -3,21 +3,24 @@
 ## [Unreleased] - Production Readiness Improvements
 
 ### Added
+
 - **Comprehensive README.md**: Complete project documentation including setup, configuration, API endpoints, and deployment instructions
 - **New Test Coverage**: Added unit tests for utility functions previously untested:
   - `__tests__/http.test.ts`: Tests for HTTP response utilities
-  - `__tests__/time.test.ts`: Tests for time/date utilities  
+  - `__tests__/time.test.ts`: Tests for time/date utilities
   - `__tests__/errors.test.ts`: Tests for custom error classes
 - **Git Configuration Files**:
   - `.gitattributes`: Proper line ending configuration for cross-platform development
 - **Total Test Coverage**: 20 test files, 104 passing tests, 7 skipped tests
 
 ### Changed
+
 - **Code Formatting**: All source files formatted with Prettier for consistency
 - **Documentation**: Updated inline code comments and JSDoc where appropriate
 - **QuickBooks Integration**: Automatically refresh and persist QuickBooks OAuth tokens so manual environment updates are not typically required
 
 ### Quality Assurance
+
 - ✅ All tests passing (104 passed, 7 skipped)
 - ✅ TypeScript compilation successful with no errors
 - ✅ Type checking passes with `tsc --noEmit`
@@ -25,6 +28,7 @@
 - ✅ CI pipeline (`npm run ci`) executes successfully
 
 ### Project Structure
+
 ```
 payment-processor/
 ├── __tests__/              # 20 comprehensive test files
@@ -44,12 +48,14 @@ payment-processor/
 ```
 
 ### Testing Improvements
+
 - Added utility function tests to increase code coverage
 - All existing tests maintained and passing
 - Integration tests verify complete payment flows
 - Idempotency tests ensure duplicate prevention
 
 ### Code Quality
+
 - Consistent code style enforced via Prettier
 - TypeScript strict mode enabled
 - No linting errors
@@ -57,6 +63,7 @@ payment-processor/
 - Clean git repository structure
 
 ### Production Readiness Checklist
+
 - [x] All tests passing
 - [x] Build process successful
 - [x] TypeScript compilation with no errors
@@ -71,6 +78,7 @@ payment-processor/
 - [x] Azure Functions v4 compatible
 
 ### Next Steps for Deployment
+
 1. Review and update `local.settings.json` with production values
 2. Configure Azure Function App settings
 3. Set up Stripe webhooks for production

@@ -11,6 +11,28 @@ class ServiceContainer implements IServiceContainer {
   private responseFormatter?: import('../handlers/webhook/WebhookResponseFormatter').DefaultWebhookResponseFormatter;
   private testDependencies?: import('../stripe/types').StripeWebhookDependencies;
 
+  private getOrCreate<T>(current: T | undefined, create: () => T): T {
+    return current ?? create();
+  }
+
+  private createStripeWebhookProcessor(): import('../handlers/webhook/StripeWebhookProcessor').StripeWebhookProcessor {
+    const dependencies = this.getStripeWebhookDependencies();
+    const { StripeWebhookProcessor } = require('../handlers/webhook/StripeWebhookProcessor');
+    return new StripeWebhookProcessor(dependencies);
+  }
+
+  private createEventRouter(): import('../handlers/webhook/StripeEventRouter').StripeEventRouter {
+    const { StripeEventRouter } = require('../handlers/webhook/StripeEventRouter');
+    return new StripeEventRouter();
+  }
+
+  private createResponseFormatter(): import('../handlers/webhook/WebhookResponseFormatter').DefaultWebhookResponseFormatter {
+    const {
+      DefaultWebhookResponseFormatter,
+    } = require('../handlers/webhook/WebhookResponseFormatter');
+    return new DefaultWebhookResponseFormatter();
+  }
+
   setTestDependencies(deps?: import('../stripe/types').StripeWebhookDependencies): void {
     this.testDependencies = deps;
     // Reset cached instances so they use new dependencies
@@ -18,29 +40,21 @@ class ServiceContainer implements IServiceContainer {
   }
 
   getStripeWebhookProcessor(): import('../handlers/webhook/StripeWebhookProcessor').StripeWebhookProcessor {
-    if (!this.stripeWebhookProcessor) {
-      const dependencies = this.getStripeWebhookDependencies();
-      const { StripeWebhookProcessor } = require('../handlers/webhook/StripeWebhookProcessor');
-      this.stripeWebhookProcessor = new StripeWebhookProcessor(dependencies);
-    }
+    this.stripeWebhookProcessor = this.getOrCreate(this.stripeWebhookProcessor, () =>
+      this.createStripeWebhookProcessor()
+    );
     return this.stripeWebhookProcessor!;
   }
 
   getEventRouter(): import('../handlers/webhook/StripeEventRouter').StripeEventRouter {
-    if (!this.eventRouter) {
-      const { StripeEventRouter } = require('../handlers/webhook/StripeEventRouter');
-      this.eventRouter = new StripeEventRouter();
-    }
+    this.eventRouter = this.getOrCreate(this.eventRouter, () => this.createEventRouter());
     return this.eventRouter!;
   }
 
   getResponseFormatter(): import('../handlers/webhook/WebhookResponseFormatter').DefaultWebhookResponseFormatter {
-    if (!this.responseFormatter) {
-      const {
-        DefaultWebhookResponseFormatter,
-      } = require('../handlers/webhook/WebhookResponseFormatter');
-      this.responseFormatter = new DefaultWebhookResponseFormatter();
-    }
+    this.responseFormatter = this.getOrCreate(this.responseFormatter, () =>
+      this.createResponseFormatter()
+    );
     return this.responseFormatter!;
   }
 

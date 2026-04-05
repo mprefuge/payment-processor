@@ -33,10 +33,8 @@ const toCents = (value: unknown): number => {
   return 0;
 };
 
-const hasRequiredPayoutTransactionFields = (
-  status: unknown,
-  amountGross: unknown
-): boolean => status != null && status !== '' && amountGross != null;
+const hasRequiredPayoutTransactionFields = (status: unknown, amountGross: unknown): boolean =>
+  status != null && status !== '' && amountGross != null;
 
 const upsertPayoutTransaction = async (
   context: HttpContext,
@@ -596,6 +594,43 @@ const linkTransactionsInSalesforce = async (
   }
 };
 
+const syncPayoutTransaction = async (
+  context: HttpContext,
+  deps: StripeWebhookDependencies,
+  salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
+  stripe: Stripe,
+  payout: Stripe.Payout,
+  depositInput: UpsertPayoutDepositInput | null,
+  eventType: string,
+  options: {
+    successMessage: string;
+    failureMessage: string;
+    buildSuccessPayload: (payoutTransaction: any) => Record<string, unknown>;
+    failurePayload: Record<string, unknown>;
+  }
+): Promise<void> => {
+  await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
+    const payoutTransaction = await buildPayoutTransaction(
+      stripe,
+      payout,
+      depositInput,
+      eventType,
+      context.log
+    );
+
+    await upsertPayoutTransaction(
+      context,
+      salesforce,
+      payout.id,
+      payoutTransaction,
+      options.successMessage,
+      options.buildSuccessPayload(payoutTransaction),
+      options.failureMessage,
+      options.failurePayload
+    );
+  });
+};
+
 export const handlePayoutEvent = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -614,32 +649,18 @@ export const handlePayoutEvent = async (
       automatic: payout.automatic,
     });
 
-    await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
-      const payoutTransaction = await buildPayoutTransaction(
-        stripe,
-        payout,
-        null,
+    await syncPayoutTransaction(context, deps, salesforce, stripe, payout, null, eventType, {
+      successMessage: '[StripeWebhook] Tracked payout in Salesforce',
+      buildSuccessPayload: (payoutTransaction) => ({
+        payoutId: payout.id,
         eventType,
-        context.log
-      );
-
-      await upsertPayoutTransaction(
-        context,
-        salesforce,
-        payout.id,
-        payoutTransaction,
-        '[StripeWebhook] Tracked payout in Salesforce',
-        {
-          payoutId: payout.id,
-          eventType,
-          amount: payoutTransaction.amount_net__c,
-        },
-        '[StripeWebhook] Failed to track payout in Salesforce',
-        {
-          payoutId: payout.id,
-          eventType,
-        }
-      );
+        amount: payoutTransaction.amount_net__c,
+      }),
+      failureMessage: '[StripeWebhook] Failed to track payout in Salesforce',
+      failurePayload: {
+        payoutId: payout.id,
+        eventType,
+      },
     });
 
     return;
@@ -698,34 +719,29 @@ export const handlePayoutEvent = async (
 
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
 
-    await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
-      const payoutTransaction = await buildPayoutTransaction(
-        stripe,
-        payout,
-        depositInput,
-        eventType,
-        context.log
-      );
-
-      await upsertPayoutTransaction(
-        context,
-        salesforce,
-        payout.id,
-        payoutTransaction,
-        '[StripeWebhook] Upserted payout transaction in Salesforce',
-        {
+    await syncPayoutTransaction(
+      context,
+      deps,
+      salesforce,
+      stripe,
+      payout,
+      depositInput,
+      eventType,
+      {
+        successMessage: '[StripeWebhook] Upserted payout transaction in Salesforce',
+        buildSuccessPayload: (payoutTransaction) => ({
           payoutId: payout.id,
           eventType,
           hasTransactions: !!depositInput,
           amount: payoutTransaction.amount_net__c,
-        },
-        '[StripeWebhook] Failed to upsert payout transaction in Salesforce',
-        {
+        }),
+        failureMessage: '[StripeWebhook] Failed to upsert payout transaction in Salesforce',
+        failurePayload: {
           payoutId: payout.id,
           eventType,
-        }
-      );
-    });
+        },
+      }
+    );
 
     if (!depositInput) {
       context.log('[StripeWebhook] No deposit input created, skipping QBO sync', {
@@ -784,33 +800,28 @@ export const handlePayoutEvent = async (
   if (eventType === 'payout.failed' || eventType === 'payout.canceled') {
     const depositInput = await buildDepositInput(context, stripe, payout, transactions, event.id);
 
-    await deps.idempotencyStore.withLock(`payout_${payout.id}`, async () => {
-      const payoutTransaction = await buildPayoutTransaction(
-        stripe,
-        payout,
-        depositInput,
-        eventType,
-        context.log
-      );
-
-      await upsertPayoutTransaction(
-        context,
-        salesforce,
-        payout.id,
-        payoutTransaction,
-        '[StripeWebhook] Updated payout transaction status in Salesforce',
-        {
+    await syncPayoutTransaction(
+      context,
+      deps,
+      salesforce,
+      stripe,
+      payout,
+      depositInput,
+      eventType,
+      {
+        successMessage: '[StripeWebhook] Updated payout transaction status in Salesforce',
+        buildSuccessPayload: (payoutTransaction) => ({
           payoutId: payout.id,
           eventType,
           status: payoutTransaction.status__c,
-        },
-        '[StripeWebhook] Failed to update payout transaction in Salesforce',
-        {
+        }),
+        failureMessage: '[StripeWebhook] Failed to update payout transaction in Salesforce',
+        failurePayload: {
           payoutId: payout.id,
           eventType,
-        }
-      );
-    });
+        },
+      }
+    );
 
     const markForReview = adapter?.markDepositForReview;
     if (markForReview) {

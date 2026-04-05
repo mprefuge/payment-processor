@@ -295,7 +295,7 @@ describe('createSalesforceSvc', () => {
     ]);
 
     query.mockImplementation((soql: string) => {
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
       }
       if (soql.includes("QBO_Doc_Id__c = '7764'")) {
@@ -325,10 +325,9 @@ describe('createSalesforceSvc', () => {
     expect(query).toHaveBeenCalledWith(
       "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '7764' AND RecordTypeId = '012000000000000AAA' LIMIT 1"
     );
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ QBO_Doc_Id__c: '7764' }),
-      { allOrNone: true }
-    );
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ QBO_Doc_Id__c: '7764' }), {
+      allOrNone: true,
+    });
     expect(result).toEqual({ success: true, id: 'a01_created', errors: [], created: true });
   });
 
@@ -351,7 +350,7 @@ describe('createSalesforceSvc', () => {
       .mockResolvedValueOnce([{ success: true, id: 'a01_existing', errors: [] }]);
 
     query.mockImplementation((soql: string) => {
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
       }
       if (soql.includes("QBO_Doc_Id__c = '7764'")) {
@@ -391,7 +390,7 @@ describe('createSalesforceSvc', () => {
       if (soql.includes('Stripe_Charge_Id__c')) {
         return Promise.resolve({ records: [{ Id: 'existing_123' }] });
       }
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         // use the normal record type lookup behaviour from createMockConnection
         return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
       }
@@ -439,7 +438,7 @@ describe('createSalesforceSvc', () => {
         sawPayoutQuery = true;
         return Promise.resolve({ records: [{ Id: 'bad' }] });
       }
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
       }
       return Promise.resolve({ records: [] });
@@ -611,7 +610,7 @@ describe('createSalesforceSvc', () => {
         });
       }
 
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
       }
 
@@ -667,7 +666,7 @@ describe('createSalesforceSvc', () => {
         });
       }
 
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
       }
 
@@ -717,7 +716,7 @@ describe('createSalesforceSvc', () => {
       if (soql.includes('FROM Contact')) {
         return Promise.resolve({ records: [] });
       }
-      if (soql.includes("SELECT Id FROM RecordType")) {
+      if (soql.includes('SELECT Id FROM RecordType')) {
         return Promise.resolve({ records: [{ Id: 'rt-con' }] });
       }
       return Promise.resolve({ records: [] });
@@ -741,8 +740,6 @@ describe('createSalesforceSvc', () => {
     });
 
     expect(result).toMatchObject({ success: true, created: true, id: '003new' });
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ RecordTypeId: 'rt-con' })
-    );
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ RecordTypeId: 'rt-con' }));
   });
 });

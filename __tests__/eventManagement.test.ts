@@ -98,9 +98,7 @@ describe('Event Management Service', () => {
       expect(mockSalesforceConnection.sobject).toHaveBeenCalledWith('Contact');
 
       // record creation payload should contain the record type id
-      expect(createFn).toHaveBeenCalledWith(
-        expect.objectContaining({ RecordTypeId: 'rt123' })
-      );
+      expect(createFn).toHaveBeenCalledWith(expect.objectContaining({ RecordTypeId: 'rt123' }));
     });
   });
 
@@ -280,6 +278,69 @@ describe('Event Management Service', () => {
       expect(result.paymentStatus).toBe('completed');
       expect(mockStripeClient.customers.create).toHaveBeenCalled();
       expect(mockStripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    it('should prefer the exact-name Stripe customer when multiple customers share an email', async () => {
+      const eventSvc = createEventSvc({
+        salesforceConnection: mockSalesforceConnection as any,
+        stripeClient: mockStripeClient,
+      });
+
+      mockSalesforceConnection.query.mockResolvedValue({
+        records: [{ Id: 'contact123' }],
+      });
+
+      mockSalesforceConnection.sobject.mockReturnValue({
+        create: vi.fn().mockResolvedValue({
+          success: true,
+          id: 'campaignMember123',
+        }),
+      });
+
+      mockStripeClient.customers.list.mockResolvedValue({
+        data: [
+          { id: 'cus_wrong', name: 'Other Person' },
+          { id: 'cus_right', name: 'John Doe' },
+        ],
+      });
+
+      mockStripeClient.paymentIntents.create.mockResolvedValue({
+        id: 'pi_123',
+        status: 'succeeded',
+      });
+
+      const event: Event = {
+        id: 'paid-event-2',
+        name: 'Paid Conference',
+        description: 'Premium conference',
+        type: 'paid_onetime' as EventType,
+        campaignId: 'campaign123',
+        startDate: '2025-12-01T10:00:00Z',
+        endDate: '2025-12-01T11:00:00Z',
+        price: 15000,
+        currency: 'USD',
+        isActive: true,
+      };
+
+      const request: EventRegistrationRequest = {
+        eventId: 'paid-event-2',
+        contact: {
+          email: 'test@example.com',
+          firstName: 'John',
+          lastName: 'Doe',
+        },
+        paymentMethodId: 'pm_123',
+      };
+
+      const result = await eventSvc.registerForEvent(request, event);
+
+      expect(result.success).toBe(true);
+      expect(mockStripeClient.customers.create).not.toHaveBeenCalled();
+      expect(mockStripeClient.paymentIntents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          customer: 'cus_right',
+        })
+      );
     });
   });
 

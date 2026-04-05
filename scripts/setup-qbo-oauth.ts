@@ -27,16 +27,11 @@ interface SetupOptions {
 
 async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
   const port = options.port || DEFAULT_PORT;
-  const redirectUri =
-    options.redirectUri ||
-    env.quickBooks.redirectUri ||
-    DEFAULT_REDIRECT_URI;
+  const redirectUri = options.redirectUri || env.quickBooks.redirectUri || DEFAULT_REDIRECT_URI;
 
   // Check required environment variables
   if (!env.quickBooks.clientId || !env.quickBooks.clientSecret) {
-    throw new Error(
-      'QBO_CLIENT_ID and QBO_CLIENT_SECRET environment variables must be set'
-    );
+    throw new Error('QBO_CLIENT_ID and QBO_CLIENT_SECRET environment variables must be set');
   }
 
   console.log('🔧 QuickBooks Online OAuth Setup (Local Development)');
@@ -61,8 +56,12 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
     try {
       // Try to open browser (platform dependent)
       const { exec } = await import('child_process');
-      const command = process.platform === 'darwin' ? 'open' :
-                     process.platform === 'win32' ? 'start' : 'xdg-open';
+      const command =
+        process.platform === 'darwin'
+          ? 'open'
+          : process.platform === 'win32'
+            ? 'start'
+            : 'xdg-open';
       exec(`${command} "${authUrl}"`);
     } catch (error) {
       console.warn('Could not open browser automatically. Please copy and paste the URL above.');
@@ -90,7 +89,9 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
 
           if (error) {
             const errorDescription = url.searchParams.get('error_description');
-            throw new Error(`OAuth error: ${error}${errorDescription ? ` - ${errorDescription}` : ''}`);
+            throw new Error(
+              `OAuth error: ${error}${errorDescription ? ` - ${errorDescription}` : ''}`
+            );
           }
 
           if (!code) {
@@ -178,10 +179,13 @@ async function setupQBOOAuth(options: SetupOptions = {}): Promise<void> {
     });
 
     // Timeout after 10 minutes
-    setTimeout(() => {
-      server.close();
-      reject(new Error('Setup timed out after 10 minutes'));
-    }, 10 * 60 * 1000);
+    setTimeout(
+      () => {
+        server.close();
+        reject(new Error('Setup timed out after 10 minutes'));
+      },
+      10 * 60 * 1000
+    );
   });
 }
 
