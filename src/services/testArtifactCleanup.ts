@@ -348,14 +348,17 @@ const cleanupSalesforceArtifacts = async (
   stripeCustomerIds: string[]
 ): Promise<TestArtifactCleanupSystemSummary> => {
   const summary = createSummary('salesforce', request.dryRun);
-  const marker = buildTestArtifactMarker(request.tag);
-  const escapedMarker = escapeSoqlLiteral(marker);
+  const transactionConditions: string[] = [];
 
-  const transactionConditions = [`Memo__c LIKE '%${escapedMarker}%'`];
   if (stripeCustomerIds.length > 0) {
     transactionConditions.push(
       ...buildStripeCustomerConditions('Stripe_Customer_Id__c', stripeCustomerIds)
     );
+  } else {
+    // Memo__c is often a long-text area and cannot be filtered with LIKE in SOQL.
+    // Cleanup by Salesforce transaction is only supported when the transaction has
+    // an associated Stripe customer ID to search for.
+    return summary;
   }
 
   const transactionIds = await querySalesforceIds(
