@@ -3555,9 +3555,11 @@ export const findDocumentsByPrivateNoteTag = async (
       records = await queryQuickBooks<Record<string, unknown>>(queryText, context);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes("property 'PrivateNote' is not queryable") ||
-          errorMessage.includes('PrivateNote is not queryable') ||
-          errorMessage.includes('Property \"PrivateNote\" is not queryable')) {
+      if (
+        errorMessage.includes("property 'PrivateNote' is not queryable") ||
+        errorMessage.includes('PrivateNote is not queryable') ||
+        errorMessage.includes('Property \"PrivateNote\" is not queryable')
+      ) {
         logger.warn('[QuickBooks] Skipping entity lookup for unsupported PrivateNote query field', {
           entity: metadata.queryEntity,
           type,
