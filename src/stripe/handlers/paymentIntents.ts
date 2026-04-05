@@ -336,11 +336,14 @@ const findExistingTransactionId = async (
       );
 
       if (existingAcrossTypes) {
-        context.log('[StripeWebhook] Found existing transaction by external ID across record types', {
-          [lookupStep.identifierKey]: lookupStep.externalValue,
-          transactionId: existingAcrossTypes,
-          lookupMode: 'anyRecordType',
-        });
+        context.log(
+          '[StripeWebhook] Found existing transaction by external ID across record types',
+          {
+            [lookupStep.identifierKey]: lookupStep.externalValue,
+            transactionId: existingAcrossTypes,
+            lookupMode: 'anyRecordType',
+          }
+        );
         return existingAcrossTypes;
       }
 
