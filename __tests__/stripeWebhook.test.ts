@@ -381,7 +381,8 @@ describe('stripeWebhook', () => {
       expect.objectContaining({
         campaign__c: '701TESTID',
       }),
-      'stripe_payment_intent_id__c'
+      'stripe_payment_intent_id__c',
+      undefined
     );
   });
 
