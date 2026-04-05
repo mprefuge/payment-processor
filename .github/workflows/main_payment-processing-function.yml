@@ -65,7 +65,7 @@ jobs:
     needs: build
     environment:
       name: staging
-      url: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL != '' && vars.AZURE_FUNCTIONAPP_STAGING_URL || format('https://{0}-{1}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME, env.STAGING_SLOT_NAME) }}
+      url: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL != '' && vars.AZURE_FUNCTIONAPP_STAGING_URL || format('https://{0}-{1}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME, vars.STAGING_SLOT_NAME) }}
 
     steps:
       - name: Download artifact from build job
@@ -132,7 +132,7 @@ jobs:
     needs: smoke-test-staging
     environment:
       name: production
-      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME) }}
+      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
 
     steps:
       - name: Download artifact from build job
