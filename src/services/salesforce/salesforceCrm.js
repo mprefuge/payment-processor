@@ -68,11 +68,14 @@ class SalesforceCrmService extends BaseCrmService {
       'Stripe_Checkout_Session_Id__c',
       'Stripe_Charge_Id__c',
       'Stripe_Subscription_Id__c',
-      'Stripe_Invoice_Id__c',
+      'Stripe_Invoice_ID__c',
       'Stripe_Credit_Note_Id__c',
     ];
 
-    if (transactionData.Transaction_Type__c === 'payout') {
+    const transactionType =
+      transactionData.transaction_type__c || transactionData.Transaction_Type__c;
+
+    if (transactionType === 'payout') {
       uniqueFields.push('Stripe_Payout_Id__c');
     }
 

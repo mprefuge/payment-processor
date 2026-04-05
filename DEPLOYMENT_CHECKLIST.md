@@ -43,6 +43,12 @@ Complete these items before calling a deployment production-ready:
 - [ ] Enable Application Insights
 - [ ] Configure deployment credentials
 - [ ] Set up deployment slots (staging/production)
+- [ ] Create GitHub environments named `staging` and `production`
+- [ ] Add production environment protection rules or required reviewers before enabling auto-promotion
+- [ ] Add GitHub Actions secrets `AZURE_FUNCTIONAPP_STAGING_PUBLISH_PROFILE` and `AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE`
+- [ ] Add GitHub Actions secrets `AZURE_FUNCTIONAPP_STAGING_FUNCTION_KEY` and `AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY` for smoke tests against function-auth endpoints
+- [ ] Add GitHub Actions secrets `AZURE_FUNCTIONAPP_STAGING_SMOKE_TRANSACTION_PAYLOAD` and `AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD` for deploy-time test transactions
+- [ ] Add GitHub Actions variables `AZURE_FUNCTIONAPP_STAGING_URL` and `AZURE_FUNCTIONAPP_PRODUCTION_URL` if the default slot URLs are not used
 
 ### Stripe Integration
 
@@ -136,12 +142,12 @@ QBO_ACCOUNT_REVENUE=Revenue|789
 QBO_ACCOUNT_FEES=Stripe Fees|012
 QBO_ACCOUNT_REFUNDS=Refunds|345
 QBO_ACCOUNT_DISPUTES=Dispute Losses|678
-QBO_DEFAULT_SALES_ITEM=Donation
+QBO_DEFAULT_SALES_ITEM=Donation|901
 
 # Accounting
 ACCOUNTING_POSTING_STRATEGY=sales-receipt
 ACCOUNTING_SYNC_ENABLED=true
-ACCOUNTING_AUTOCREATE_ACCOUNTS=true
+ACCOUNTING_AUTOCREATE_ACCOUNTS=false
 
 # Application Insights
 APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=...;IngestionEndpoint=...
@@ -189,11 +195,14 @@ az functionapp config appsettings set \
 - [ ] Run at least one staging Stripe checkout + webhook flow end-to-end
 - [ ] If QuickBooks is enabled, run a staging accounting sync and verify the posted document
 - [ ] If Salesforce is enabled, verify contact and transaction creation/update behavior
+- [ ] Confirm the GitHub Actions `smoke-test-staging` job passes before production approval
+- [ ] Confirm the GitHub Actions `smoke-test-production` job passes and that the tagged cleanup step removes the deploy-time test artifacts
 
 ### 5. Promote to Production
 
 - [ ] Swap staging to production or publish only after staging validation is complete
 - [ ] Confirm rollback command works before cutover
+- [ ] Approve the `production` GitHub environment only after staging smoke checks pass
 
 ## Post-Deployment Validation
 
@@ -205,11 +214,13 @@ az functionapp config appsettings set \
 - [ ] `/api/stripe/payout-sync` - Syncs payouts to QBO
 - [ ] `/api/qbo/manual-sync` - Manual QBO sync
 - [ ] `/api/stripe/true-up` - Stripe reconciliation
+- [ ] `/api/ops/test-artifact-cleanup` - Tagged deploy-time artifact cleanup
 
 ### Integration Testing
 
 - [ ] Create test checkout session
 - [ ] Complete test payment
+- [ ] Run deploy-time tagged checkout smoke test and confirm cleanup deletes the test Stripe, Salesforce, and QuickBooks artifacts
 - [ ] Verify webhook processing
 - [ ] Check Salesforce transaction creation
 - [ ] Verify QuickBooks sync

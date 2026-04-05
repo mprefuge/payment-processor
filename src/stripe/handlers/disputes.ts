@@ -12,6 +12,8 @@ import {
 import { markPosted } from './common';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 
+const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
+
 const resolveDisputeBalanceTransactions = async (
   stripe: Stripe,
   dispute: Stripe.Dispute
@@ -68,13 +70,21 @@ export const handleDisputeClosed = async (
   const primaryBalanceTransaction = lossTransactions[0] || balanceTransactions[0] || null;
 
   const parentId = chargeId
-    ? await salesforce.findTransactionIdByExternalId('stripe_charge_id__c', chargeId, 'General')
+    ? await salesforce.findTransactionIdByExternalId(
+        'stripe_charge_id__c',
+        chargeId,
+        STRIPE_TRANSACTION_RECORD_TYPE_NAME
+      )
     : null;
 
   const transaction: TransactionUpsertDTO = {
     transaction_type__c: 'dispute',
     status__c: 'disputed',
     stripe_dispute_id__c: dispute.id,
+    stripe_event_id__c: event.id,
+    stripe_livemode__c: typeof event.livemode === 'boolean' ? event.livemode : null,
+    stripe_receipt_url__c:
+      (charge as (Stripe.Charge & { receipt_url?: string | null }) | null)?.receipt_url ?? null,
     stripe_charge_id__c: chargeId,
     stripe_payment_intent_id__c: normalizeStripeId(
       (charge as Stripe.Charge | null)?.payment_intent ?? dispute.payment_intent
@@ -94,6 +104,24 @@ export const handleDisputeClosed = async (
     parent_transaction__c: parentId,
     payment_brand__c: (charge as Stripe.Charge | null)?.payment_method_details?.card?.brand ?? null,
     payment_last4__c: (charge as Stripe.Charge | null)?.payment_method_details?.card?.last4 ?? null,
+    error_message__c: dispute.reason ?? null,
+    dispute_status__c: dispute.status ?? null,
+    dispute_reason__c: dispute.reason ?? null,
+    billing_name__c: (charge as Stripe.Charge | null)?.billing_details?.name ?? null,
+    billing_email__c: (charge as Stripe.Charge | null)?.billing_details?.email ?? null,
+    billing_phone__c: (charge as Stripe.Charge | null)?.billing_details?.phone ?? null,
+    statement_descriptor__c:
+      (
+        charge as
+          | (Stripe.Charge & {
+              statement_descriptor?: string | null;
+              calculated_statement_descriptor?: string | null;
+            })
+          | null
+      )?.statement_descriptor ??
+      (charge as (Stripe.Charge & { calculated_statement_descriptor?: string | null }) | null)
+        ?.calculated_statement_descriptor ??
+      null,
     posted_to_qbo__c: false,
   };
 

@@ -41,8 +41,16 @@ describe('stripeWebhook', () => {
               status: 'succeeded',
               amount: 1_000,
               currency: 'usd',
+              livemode: false,
               balance_transaction: 'bt_123',
               created: 1_700_000_000,
+              receipt_url: 'https://pay.stripe.test/receipts/ch_test',
+              billing_details: {
+                name: 'Donor Example',
+                email: 'donor@example.com',
+                phone: '+15555550123',
+              },
+              statement_descriptor: 'REFUGE INTL',
               payment_method_details: {
                 type: 'card',
                 card: {
@@ -249,12 +257,19 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_checkout_session_id__c',
       'cs_test',
-      'General'
+      'Stripe Transaction'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
         stripe_payment_intent_id__c: 'pi_test',
         stripe_checkout_session_id__c: 'cs_test',
+        stripe_event_id__c: 'evt_test',
+        stripe_livemode__c: false,
+        stripe_receipt_url__c: 'https://pay.stripe.test/receipts/ch_test',
+        billing_name__c: 'Donor Example',
+        billing_email__c: 'donor@example.com',
+        billing_phone__c: '+15555550123',
+        statement_descriptor__c: 'REFUGE INTL',
       }),
       'stripe_payment_intent_id__c',
       { overrideId: 'sf_existing' }
@@ -359,7 +374,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       'sub_123',
-      'General'
+      'Stripe Transaction'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -498,7 +513,7 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       'sub_999',
-      'General'
+      'Stripe Transaction'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -631,5 +646,164 @@ describe('stripeWebhook', () => {
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
     expect(store.markProcessed).toHaveBeenCalledWith('evt_invoice_paid');
+  });
+
+  it('processes lost dispute events and posts dispute accounting entries', async () => {
+    const store = mockIdempotencyStore();
+    const disputeEvent: any = {
+      id: 'evt_dispute',
+      type: 'charge.dispute.closed',
+      data: {
+        object: {
+          id: 'dp_123',
+          status: 'lost',
+          charge: 'ch_dispute',
+          payment_intent: 'pi_dispute',
+          currency: 'usd',
+          created: 1_700_000_900,
+          balance_transactions: ['bt_dispute_loss', 'bt_dispute_fee'],
+        },
+      },
+      livemode: false,
+    };
+
+    const stripeClient = {
+      charges: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'ch_dispute',
+          payment_intent: 'pi_dispute',
+          customer: 'cus_dispute',
+          receipt_url: 'https://pay.stripe.test/receipts/ch_dispute',
+          billing_details: {
+            name: 'Micah Palmquist',
+            email: 'micah@example.com',
+            phone: '+15555550999',
+          },
+          statement_descriptor: 'REFUGE INTL',
+          payment_method_details: {
+            type: 'card',
+            card: {
+              brand: 'visa',
+              last4: '4242',
+            },
+          },
+        }),
+      },
+      balanceTransactions: {
+        retrieve: vi.fn().mockImplementation(async (id: string) => {
+          if (id === 'bt_dispute_loss') {
+            return {
+              id,
+              amount: -1_000,
+              fee: 0,
+              net: -1_000,
+              currency: 'usd',
+              created: 1_700_000_900,
+              available_on: 1_700_000_901,
+              type: 'adjustment',
+              reporting_category: 'chargeback',
+            };
+          }
+
+          if (id === 'bt_dispute_fee') {
+            return {
+              id,
+              amount: -150,
+              fee: 0,
+              net: -150,
+              currency: 'usd',
+              created: 1_700_000_900,
+              available_on: 1_700_000_901,
+              type: 'stripe_fee',
+              reporting_category: 'chargeback_fee',
+            };
+          }
+
+          throw new Error(`Unexpected balance transaction ${id}`);
+        }),
+      },
+    };
+
+    const accounting = {
+      postChargeToQbo: vi.fn(),
+      postRefundToQbo: vi.fn(),
+      postDisputeToQbo: vi
+        .fn()
+        .mockResolvedValue({ qboId: 'qbo_dispute_1', type: 'journal-entry' }),
+    };
+
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'sf_dispute', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn().mockResolvedValue(undefined),
+      findTransactionIdByExternalId: vi
+        .fn()
+        .mockImplementation(async (field: string) =>
+          field === 'stripe_charge_id__c' ? 'sf_charge_parent' : null
+        ),
+    };
+
+    const stripe = {
+      verifyEvent: vi.fn(() => disputeEvent),
+      getClient: vi.fn(() => stripeClient),
+    };
+
+    internals?.setDependencies({
+      stripe,
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce,
+      accounting,
+    });
+
+    const { context } = createContext();
+    const req = baseRequest();
+
+    const result = await handler(req, context);
+
+    expect(stripeClient.charges.retrieve).toHaveBeenCalledWith('ch_dispute');
+    expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
+      'stripe_charge_id__c',
+      'ch_dispute',
+      'Stripe Transaction'
+    );
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transaction_type__c: 'dispute',
+        status__c: 'disputed',
+        stripe_dispute_id__c: 'dp_123',
+        stripe_charge_id__c: 'ch_dispute',
+        stripe_payment_intent_id__c: 'pi_dispute',
+        stripe_customer_id__c: 'cus_dispute',
+        stripe_livemode__c: false,
+        stripe_receipt_url__c: 'https://pay.stripe.test/receipts/ch_dispute',
+        parent_transaction__c: 'sf_charge_parent',
+        amount_gross__c: 10,
+        amount_fee__c: 1.5,
+        amount_net__c: -11.5,
+        dispute_status__c: 'lost',
+        billing_name__c: 'Micah Palmquist',
+        billing_email__c: 'micah@example.com',
+        billing_phone__c: '+15555550999',
+        statement_descriptor__c: 'REFUGE INTL',
+      }),
+      'stripe_dispute_id__c'
+    );
+    expect(accounting.postDisputeToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lossAmount: 1_000,
+        feeAmount: 150,
+        memo: 'Stripe dispute dp_123 (charge ch_dispute)',
+      })
+    );
+    expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_dispute', {
+      id: 'qbo_dispute_1',
+      type: 'journal-entry',
+    });
+    expect(store.markProcessed).toHaveBeenCalledWith('evt_dispute');
+    expect(result.status).toBe(200);
+    expect(result.jsonBody).toMatchObject({
+      received: true,
+      eventType: 'charge.dispute.closed',
+    });
   });
 });

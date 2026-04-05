@@ -22,6 +22,7 @@ describe('processTransaction', () => {
     delete process.env.SF_CLIENT_ID;
     delete process.env.SF_CLIENT_SECRET;
     delete process.env.SF_LOGIN_URL;
+    delete process.env.TEST_ARTIFACT_RUN_ID;
   });
 
   it('returns checkout URL when valid request body is provided', async () => {
@@ -35,6 +36,8 @@ describe('processTransaction', () => {
         sessions: {
           create: vi.fn().mockResolvedValue({
             id: 'cs_test',
+            payment_intent: 'pi_test',
+            customer: 'cus_test',
             url: 'https://stripe.test/session',
           }),
         },
@@ -71,6 +74,88 @@ describe('processTransaction', () => {
 
     expect(stripeMock.customers.search).toHaveBeenCalled();
     expect(stripeMock.checkout.sessions.create).toHaveBeenCalled();
+  });
+
+  it('propagates a configured test artifact tag into Stripe customer and checkout metadata', async () => {
+    process.env.TEST_ARTIFACT_RUN_ID = 'deploy-smoke-123';
+
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+        update: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test',
+            payment_intent: 'pi_test',
+            customer: 'cus_test',
+            url: 'https://stripe.test/session',
+          }),
+        },
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 5000,
+        frequency: 'onetime',
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+        },
+        metadata: {
+          attribution: 'newsletter',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(stripeMock.customers.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          source_test_tag: 'deploy-smoke-123',
+          memo__c: expect.stringContaining('[source_test_tag:deploy-smoke-123]'),
+        }),
+      })
+    );
+
+    expect(stripeMock.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          source_test_tag: 'deploy-smoke-123',
+          memo__c: expect.stringContaining('[source_test_tag:deploy-smoke-123]'),
+        }),
+      })
+    );
+  });
+
+  it('returns detailed validation errors for invalid request payloads', async () => {
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: -1,
+        frequency: 'invalid',
+        customer: {
+          email: 'bad@example.com',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(context.res.status).toBe(400);
+    const body = JSON.parse(context.res.body);
+    expect(body.error).toContain('Number must be greater than 0');
+    expect(body.error).toContain('Invalid enum value');
+    expect(body.error).toContain('Customer first name is required');
+    expect(body.error).toContain('Customer last name is required');
   });
 
   it('searchStripeCustomer queries email and filters name locally', async () => {
@@ -127,6 +212,7 @@ describe('processTransaction', () => {
   });
 
   it('upserts a pending Salesforce transaction when CRM is configured', async () => {
+    process.env.TEST_ARTIFACT_RUN_ID = 'deploy-smoke-123';
     const stripeMock = {
       customers: {
         search: vi.fn().mockResolvedValue({ data: [] }),
@@ -137,6 +223,8 @@ describe('processTransaction', () => {
         sessions: {
           create: vi.fn().mockResolvedValue({
             id: 'cs_test',
+            payment_intent: 'pi_test',
+            customer: 'cus_test',
             url: 'https://stripe.test/session',
           }),
         },
@@ -194,7 +282,7 @@ describe('processTransaction', () => {
     expect(upsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
-        Transaction_Type__c: 'charge',
+        transaction_type__c: 'charge',
         Status__c: 'Pending',
         Contact__c: '003TEST',
         Frequency__c: 'month',
@@ -202,6 +290,7 @@ describe('processTransaction', () => {
         Amount_Gross__c: 75,
         Currency_ISO_Code__c: 'USD',
         Attribution__c: 'referral-program',
+        Memo__c: expect.stringContaining('[source_test_tag:deploy-smoke-123]'),
       }),
       'Stripe_Checkout_Session_Id__c'
     );
@@ -334,8 +423,82 @@ describe('processTransaction', () => {
     expect(upsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
-        Transaction_Type__c: 'charge',
+        transaction_type__c: 'charge',
         Status__c: 'Pending',
+        Stripe_Customer_Id__c: 'cus_test',
+      }),
+      'Stripe_Checkout_Session_Id__c'
+    );
+  });
+
+  it('includes cover fee fields and total amount in pending Salesforce transactions', async () => {
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+        update: vi.fn().mockResolvedValue({ id: 'cus_test' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test',
+            payment_intent: 'pi_test',
+            customer: 'cus_test',
+            currency: 'usd',
+            url: 'https://stripe.test/session',
+          }),
+        },
+      },
+    };
+
+    internals.setStripeClientFactory(() => stripeMock);
+
+    process.env.CRM_PROVIDER = 'salesforce';
+    process.env.SF_CLIENT_ID = 'sf_client_id';
+    process.env.SF_CLIENT_SECRET = 'sf_client_secret';
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
+    const crmServiceMock = {
+      authenticate: vi.fn().mockResolvedValue(undefined),
+      searchContact: vi.fn().mockResolvedValue([]),
+      createContact: vi.fn().mockResolvedValue({ Id: '003TEST' }),
+      updateContact: vi.fn(),
+      upsertTransactionsRecord: upsertMock,
+      createTransaction: vi.fn(),
+      findCampaignIdByName: vi.fn().mockResolvedValue('701GENERALGIVING001'),
+      getRecordTypeIdByName: vi.fn().mockResolvedValue('012GENERALTXN00001'),
+      addCampaignMember: vi.fn().mockResolvedValue({ id: 'cm_test', isNew: true }),
+    };
+
+    const CrmFactory = require('../dist/services/salesforce/crmFactory');
+    vi.spyOn(CrmFactory, 'validateConfig').mockReturnValue({ isValid: true });
+    vi.spyOn(CrmFactory, 'createCrmService').mockReturnValue(crmServiceMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 5000,
+        frequency: 'month',
+        coverFee: true,
+        feeAmount: 175,
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(upsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Stripe_Checkout_Session_Id__c: 'cs_test',
+        Stripe_Payment_Intent_Id__c: 'pi_test',
+        Stripe_Customer_Id__c: 'cus_test',
+        Amount_Gross__c: 51.75,
+        Cover_Fees__c: true,
+        Cover_Fees_Amount__c: 1.75,
       }),
       'Stripe_Checkout_Session_Id__c'
     );
@@ -434,7 +597,7 @@ describe('processTransaction', () => {
     expect(upsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
         Stripe_Checkout_Session_Id__c: 'cs_test',
-        Transaction_Type__c: 'charge',
+        transaction_type__c: 'charge',
         Status__c: 'Pending',
         Contact__c: '003TEST',
         Campaign__c: '701xx000000000AAA',
@@ -506,7 +669,7 @@ describe('processTransaction', () => {
     );
   });
 
-  it('defaults campaign to General Giving and resolves General transaction record type', async () => {
+  it('defaults campaign to General Giving and resolves Stripe Transaction record type', async () => {
     const stripeMock = {
       customers: {
         search: vi.fn().mockResolvedValue({ data: [] }),
@@ -531,7 +694,7 @@ describe('processTransaction', () => {
 
     const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'txn_test' });
     const findCampaignIdByNameMock = vi.fn().mockResolvedValue('701GENERALGIVING001');
-    const getRecordTypeIdByNameMock = vi.fn().mockResolvedValue('012GENERALTXN00001');
+    const getRecordTypeIdByNameMock = vi.fn().mockResolvedValue('012STRIPETXN00001');
 
     const crmServiceMock = {
       authenticate: vi.fn().mockResolvedValue(undefined),
@@ -569,11 +732,11 @@ describe('processTransaction', () => {
     await handler(context, req);
 
     expect(findCampaignIdByNameMock).toHaveBeenCalledWith('General Giving');
-    expect(getRecordTypeIdByNameMock).toHaveBeenCalledWith('Transaction__c', 'General');
+    expect(getRecordTypeIdByNameMock).toHaveBeenCalledWith('Transaction__c', 'Stripe Transaction');
     expect(upsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
         Campaign__c: '701GENERALGIVING001',
-        RecordTypeId: '012GENERALTXN00001',
+        RecordTypeId: '012STRIPETXN00001',
         Status__c: 'Pending',
       }),
       'Stripe_Checkout_Session_Id__c'

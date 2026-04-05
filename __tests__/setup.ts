@@ -1,3 +1,7 @@
+import { installPunycodeAlias } from '../src/lib/installPunycodeAlias';
+
+installPunycodeAlias();
+
 // Test setup file to configure environment variables for tests
 process.env.STRIPE_SECRET = 'sk_test_dummy';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec_dummy';

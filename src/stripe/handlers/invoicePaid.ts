@@ -15,7 +15,11 @@ import {
 } from './paymentIntents';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 
-const buildInvoiceTransaction = (invoice: Stripe.Invoice): TransactionUpsertDTO => {
+const buildInvoiceTransaction = (
+  invoice: Stripe.Invoice,
+  eventId: string | null = null,
+  livemode: boolean | null = null
+): TransactionUpsertDTO => {
   const receivedAt =
     timestampToIsoString(invoice.status_transitions?.paid_at ?? null) ??
     timestampToIsoString(invoice.created ?? null);
@@ -26,11 +30,15 @@ const buildInvoiceTransaction = (invoice: Stripe.Invoice): TransactionUpsertDTO 
     transaction_type__c: 'charge',
     status__c: 'paid',
     stripe_invoice_id__c: invoice.id,
+    stripe_event_id__c: eventId,
+    stripe_livemode__c:
+      livemode ?? (typeof invoice.livemode === 'boolean' ? invoice.livemode : null),
     stripe_subscription_id__c: normalizeStripeId(invoice.subscription),
     stripe_customer_id__c: normalizeStripeId(invoice.customer),
     amount_gross__c: amountPaid,
     amount_net__c: centsToMajorUnits(invoice.total ?? null) ?? amountPaid,
     currency_iso_code__c: invoice.currency ? invoice.currency.toUpperCase() : null,
+    billing_email__c: invoice.customer_email ?? null,
     received_at__c: receivedAt,
   };
 };
@@ -97,13 +105,11 @@ const updateInvoicePaymentIntentStatus = async (
     return;
   }
 
-  await updatePaymentIntentStatus(
-    context,
-    paymentIntent,
-    status,
-    deps,
-    buildPaymentIntentStatusOptions(invoice, paymentIntent)
-  );
+  await updatePaymentIntentStatus(context, paymentIntent, status, deps, {
+    ...buildPaymentIntentStatusOptions(invoice, paymentIntent),
+    eventId: event.id,
+    livemode: event.livemode,
+  });
 };
 
 export const handleInvoicePaidNoPI = async (
@@ -122,7 +128,7 @@ export const handleInvoicePaidNoPI = async (
     return;
   }
 
-  const transaction = buildInvoiceTransaction(invoice);
+  const transaction = buildInvoiceTransaction(invoice, event.id, event.livemode);
   const amountPaid = centsToPositiveMajorUnits(invoice.amount_paid ?? null) ?? 0;
   const memo =
     `Invoice ${invoice.id} marked paid without payment intent; ` +

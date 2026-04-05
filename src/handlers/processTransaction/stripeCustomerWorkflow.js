@@ -47,6 +47,20 @@ const toComparableName = (value) => {
   return typeof comparableValue === 'string' ? comparableValue.toLowerCase() : comparableValue;
 };
 
+const toComparableMetadata = (metadata) => {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return {};
+  }
+
+  return Object.entries(metadata).reduce((accumulator, [key, value]) => {
+    const comparableValue = toComparableValue(value);
+    if (comparableValue !== null) {
+      accumulator[key] = comparableValue;
+    }
+    return accumulator;
+  }, {});
+};
+
 const addressesMatch = (left, right) => {
   const comparableLeft = toComparableAddress(left);
   const comparableRight = toComparableAddress(right);
@@ -65,6 +79,9 @@ const buildStripeCustomerPayload = (customerData) => ({
   name: buildCustomerFullName(customerData),
   phone: customerData.phone || null,
   address: normalizeAddressInput(customerData),
+  ...(customerData.metadata && Object.keys(customerData.metadata).length > 0
+    ? { metadata: customerData.metadata }
+    : {}),
 });
 
 const escapeStripeQueryValue = (value) => {
@@ -119,6 +136,13 @@ const shouldUpdateStripeCustomer = (existingCustomer, customerData) => {
     return true;
   }
 
+  const existingMetadata = toComparableMetadata(existingCustomer?.metadata);
+  const payloadMetadata = toComparableMetadata(payload.metadata);
+
+  if (JSON.stringify(existingMetadata) !== JSON.stringify(payloadMetadata)) {
+    return true;
+  }
+
   return !addressesMatch(existingAddress, payload.address);
 };
 
@@ -129,6 +153,7 @@ const updateStripeCustomer = async (stripe, customerId, customerData) => {
       name: payload.name,
       phone: payload.phone,
       address: payload.address,
+      metadata: payload.metadata,
     });
   } catch (error) {
     logger.error('Error updating Stripe customer:', error);

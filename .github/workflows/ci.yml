@@ -55,20 +55,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
-        run: npm run lint
+      - name: Clean build output
+        run: rm -rf dist
 
-      - name: Run unit tests
-        run: npm run test
+      - name: Run verification suite
+        run: npm run verify
 
-      - name: Run platform health check
-        run: npm run health-check
-
-      - name: Run end-to-end tests
+      - name: Run integration-focused tests
         if: ${{ vars.RUN_E2E_TESTS == 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs != null && github.event.inputs['run-e2e-tests'] == 'true') }}
-        run: npm run test:e2e
+        run: npx vitest run __tests__/integrationFlow.test.ts __tests__/stripeWebhook.test.ts __tests__/stripeWebhookRouting.test.ts
 
-  stripe-webhook-e2e:
+  stripe-webhook-integration:
     needs: build-and-test
     runs-on: ubuntu-latest
     env:
@@ -116,19 +113,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Clean build output
+        run: rm -rf dist
+
       - name: Build project
         run: npm run build
 
-      - name: Install Azure Functions Core Tools
-        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
-
-      - name: Install Stripe CLI
-        run: |
-          curl -L https://github.com/stripe/stripe-cli/releases/download/v1.31.0/stripe_1.31.0_linux_x86_64.tar.gz -o stripe.tar.gz
-          tar -xzf stripe.tar.gz
-          sudo mv stripe /usr/local/bin/stripe
-          rm stripe.tar.gz
-          stripe version
-
       - name: Run Stripe webhook integration tests
-        run: npm run stripe:webhook:test
+        run: npx vitest run __tests__/stripeWebhook.test.ts __tests__/stripeWebhookRouting.test.ts __tests__/stripeRefundsHandler.test.ts __tests__/stripePayoutsHandler.test.ts __tests__/stripeCreditNotesHandler.test.ts

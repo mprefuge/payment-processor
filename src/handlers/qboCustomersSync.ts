@@ -1,7 +1,11 @@
 import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 
 import { logger } from '../lib/logger';
-import { query as qboQuery, updateQuickBooksCustomerSalesforceId } from '../services/qboSvc';
+import {
+  getQuickBooksCustomerById,
+  query as qboQuery,
+  updateQuickBooksCustomerSalesforceId,
+} from '../services/qboSvc';
 import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
 
 type QboEmailAddress = { Address?: string | null };
@@ -27,6 +31,7 @@ type QboCustomField = {
 
 type QboCustomer = {
   Id?: string | number | null;
+  sparse?: boolean | null;
   DisplayName?: string | null;
   GivenName?: string | null;
   MiddleName?: string | null;
@@ -100,6 +105,7 @@ type SyncDependencies = {
     maxResults: number;
     includeInactive: boolean;
   }) => Promise<QboCustomer[]>;
+  getQboCustomerById: (customerId: string) => Promise<QboCustomer>;
   getSalesforceConnection: () => Promise<SalesforceConnectionLike>;
   updateQboCustomerSalesforceId: (customerId: string, salesforceId: string) => Promise<void>;
 };
@@ -149,6 +155,10 @@ type MatchResult =
         | 'created_new_salesforce_record';
       shouldBackfillQuickBooksSalesforceId?: boolean;
     }
+  | {
+      status: 'authoritative-link-missing';
+      salesforceId: string;
+    }
   | { status: 'not-found' }
   | { status: 'duplicate'; reason: string; candidates: SalesforceContact[] };
 
@@ -169,6 +179,7 @@ type SyncCounts = {
   totalQboCustomers: number;
   alreadyExistInSalesforce: number;
   notInSalesforce: number;
+  authoritativeLinkMissing: number;
   willBeCreated: number;
   wouldUpdate: number;
   duplicateConflicts: number;
@@ -182,6 +193,7 @@ type SyncSamples = {
   duplicates: Array<Record<string, unknown>>;
   willCreate: Array<Record<string, unknown>>;
   matched: Array<Record<string, unknown>>;
+  authoritativeLinkMissing: Array<Record<string, unknown>>;
   errors: Array<Record<string, unknown>>;
 };
 
@@ -200,6 +212,17 @@ type SyncWorkflowResult = {
   pagination: SyncPagination;
 };
 
+type PreloadedSalesforceMatches = {
+  contactBySalesforceId: Map<string, SalesforceContact>;
+  accountBySalesforceId: Map<string, SalesforceAccount>;
+  contactByQuickBooksId: Map<string, SalesforceContact>;
+  accountByQuickBooksId: Map<string, SalesforceAccount>;
+  quickBooksIdSupport: {
+    Contact: boolean;
+    Account: boolean;
+  };
+};
+
 const DEFAULT_PAGE_SIZE = 250;
 const MAX_PAGE_SIZE = 1000;
 const DEFAULT_MAX_PAGES = 25;
@@ -209,6 +232,9 @@ const MIN_MAX_RUNTIME_MS = 5_000;
 const MAX_MAX_RUNTIME_MS = 110_000;
 const DEFAULT_EXAMPLE_LIMIT = 10;
 const MAX_EXAMPLE_LIMIT = 50;
+const SOQL_IN_CHUNK_SIZE = 500;
+const QBO_HYDRATE_CONCURRENCY = 20;
+const QBO_HYDRATE_RETRY_DELAYS_MS = [250, 500, 1000] as const;
 
 const QBO_MARKER_PREFIX = '[QBO_CUSTOMER_ID:';
 
@@ -230,6 +256,16 @@ const toRecords = <T>(result: QueryResult<T> | T[] | null | undefined): T[] => {
 
 const escapeSoqlLiteral = (value: string): string =>
   value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+const chunkArray = <T>(items: T[], size: number): T[][] => {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+};
 
 const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
   if (typeof value === 'boolean') {
@@ -292,6 +328,9 @@ const normalizeEmail = (value: unknown): string | null => {
   const email = toTrimmed(value);
   return email ? email.toLowerCase() : null;
 };
+
+const normalizeFieldName = (value: unknown): string =>
+  (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const splitDisplayName = (name: string): { firstName: string | null; lastName: string | null } => {
   const trimmed = name.trim();
@@ -364,7 +403,9 @@ const normalizeQboCustomer = (customer: QboCustomer): NormalizedQboCustomer | nu
 
 const getQboSalesforceId = (customer: QboCustomer): string | null => {
   const customFields = Array.isArray(customer.CustomField) ? customer.CustomField : [];
-  const salesforceField = customFields.find((field) => field?.Name === 'Salesforce ID');
+  const salesforceField = customFields.find(
+    (field) => normalizeFieldName(field?.Name) === 'salesforceid'
+  );
   return toTrimmed(salesforceField?.StringValue);
 };
 
@@ -497,7 +538,7 @@ const buildCreatePayload = (
   const marker = markerForQboCustomer(customer.id);
   const description = mergeDescriptionWithMarker(buildQboDescription(customer), marker);
 
-  return compactObject({
+  const payload: Record<string, unknown> = {
     RecordTypeId: contactRecordTypeId,
     Salutation: customer.salutation,
     FirstName: customer.firstName,
@@ -520,10 +561,30 @@ const buildCreatePayload = (
     OtherPostalCode: customer.otherAddress.postalCode,
     OtherCountry: customer.otherAddress.country,
     Description: description,
-  });
+  };
+
+  for (const fieldName of Object.keys(payload)) {
+    if (fieldName !== 'RecordTypeId' && isUnsupportedContactField(fieldName)) {
+      delete payload[fieldName];
+    }
+  }
+
+  return compactObject(payload);
 };
 
 let cachedContactRecordTypeId: string | null | undefined;
+const unsupportedContactFields = new Set<string>();
+
+const isUnsupportedContactField = (fieldName: string): boolean => {
+  return unsupportedContactFields.has(fieldName.toLowerCase());
+};
+
+const markUnsupportedContactField = (fieldName: string): void => {
+  const normalized = fieldName.trim().toLowerCase();
+  if (normalized) {
+    unsupportedContactFields.add(normalized);
+  }
+};
 
 const resolveContactRecordTypeId = async (
   connection: SalesforceConnectionLike
@@ -560,6 +621,10 @@ const buildUpdatePayload = (
     incoming: string | null | undefined,
     existingValue?: string | null
   ) => {
+    if (isUnsupportedContactField(field as string)) {
+      return;
+    }
+
     if (shouldUpdateField(existingValue, incoming, overwrite)) {
       payload[field as string] = toTrimmed(incoming);
     }
@@ -604,12 +669,17 @@ const buildUpdatePayload = (
 const findSalesforceMatch = async (
   connection: SalesforceConnectionLike,
   rawCustomer: QboCustomer,
-  customer: NormalizedQboCustomer
+  customer: NormalizedQboCustomer,
+  preloadedMatches?: PreloadedSalesforceMatches
 ): Promise<MatchResult> => {
   const quickBooksSalesforceId = getQboSalesforceId(rawCustomer);
 
   if (quickBooksSalesforceId) {
-    const contact = await findContactBySalesforceId(connection, quickBooksSalesforceId);
+    const preloadedContact = preloadedMatches
+      ? (preloadedMatches.contactBySalesforceId.get(quickBooksSalesforceId) ?? null)
+      : null;
+    const contact =
+      preloadedContact ?? (await findContactBySalesforceId(connection, quickBooksSalesforceId));
     if (contact) {
       return {
         status: 'matched',
@@ -619,7 +689,11 @@ const findSalesforceMatch = async (
       };
     }
 
-    const account = await findAccountBySalesforceId(connection, quickBooksSalesforceId);
+    const preloadedAccount = preloadedMatches
+      ? (preloadedMatches.accountBySalesforceId.get(quickBooksSalesforceId) ?? null)
+      : null;
+    const account =
+      preloadedAccount ?? (await findAccountBySalesforceId(connection, quickBooksSalesforceId));
     if (account) {
       return {
         status: 'matched',
@@ -628,12 +702,19 @@ const findSalesforceMatch = async (
         path: 'quickbooks_salesforce_id',
       };
     }
+
+    return {
+      status: 'authoritative-link-missing',
+      salesforceId: quickBooksSalesforceId,
+    };
   } else {
-    const contactByQboId = await findByQuickBooksId<SalesforceContact>(
-      connection,
-      'Contact',
-      customer.id
-    );
+    const preloadedContactByQboId =
+      preloadedMatches?.contactByQuickBooksId.get(customer.id) ?? null;
+    const contactByQboId = preloadedContactByQboId
+      ? { supported: true, record: preloadedContactByQboId }
+      : preloadedMatches
+        ? { supported: preloadedMatches.quickBooksIdSupport.Contact, record: null }
+        : await findByQuickBooksId<SalesforceContact>(connection, 'Contact', customer.id);
     if (contactByQboId.record) {
       return {
         status: 'matched',
@@ -644,11 +725,13 @@ const findSalesforceMatch = async (
       };
     }
 
-    const accountByQboId = await findByQuickBooksId<SalesforceAccount>(
-      connection,
-      'Account',
-      customer.id
-    );
+    const preloadedAccountByQboId =
+      preloadedMatches?.accountByQuickBooksId.get(customer.id) ?? null;
+    const accountByQboId = preloadedAccountByQboId
+      ? { supported: true, record: preloadedAccountByQboId }
+      : preloadedMatches
+        ? { supported: preloadedMatches.quickBooksIdSupport.Account, record: null }
+        : await findByQuickBooksId<SalesforceAccount>(connection, 'Account', customer.id);
     if (accountByQboId.record) {
       return {
         status: 'matched',
@@ -749,17 +832,114 @@ const parseUnsupportedObjectField = (
   return null;
 };
 
+const CONTACT_COMPARISON_FIELDS = [
+  'Id',
+  'Salutation',
+  'FirstName',
+  'LastName',
+  'Email',
+  'OtherEmail',
+  'Phone',
+  'MobilePhone',
+  'OtherPhone',
+  'Fax',
+  'Department',
+  'MailingStreet',
+  'MailingCity',
+  'MailingState',
+  'MailingPostalCode',
+  'MailingCountry',
+  'OtherStreet',
+  'OtherCity',
+  'OtherState',
+  'OtherPostalCode',
+  'OtherCountry',
+  'Description',
+  'QuickBooks_ID__c',
+];
+
+const getSupportedContactComparisonFields = (): string[] => {
+  return CONTACT_COMPARISON_FIELDS.filter((field) => !isUnsupportedContactField(field));
+};
+
+const executeContactQueryWithSelectFieldFallback = async <T>(
+  connection: SalesforceConnectionLike,
+  buildSoql: (selectFields: string[]) => string
+): Promise<T[]> => {
+  const selectFields = getSupportedContactComparisonFields();
+
+  while (selectFields.length > 0) {
+    try {
+      return toRecords(await connection.query<T>(buildSoql(selectFields)));
+    } catch (error) {
+      const unsupportedField = parseUnsupportedContactField(error);
+      if (!unsupportedField) {
+        throw error;
+      }
+
+      const index = selectFields.findIndex(
+        (field) => field.toLowerCase() === unsupportedField.toLowerCase()
+      );
+
+      if (index === -1) {
+        throw error;
+      }
+
+      const [removedField] = selectFields.splice(index, 1);
+      markUnsupportedContactField(removedField);
+      logger.warn(
+        '[qboCustomersSync] Salesforce contact field unsupported; retrying query without field',
+        {
+          removedField,
+        }
+      );
+    }
+  }
+
+  return [];
+};
+
 const findContactBySalesforceId = async (
   connection: SalesforceConnectionLike,
   salesforceId: string
 ): Promise<SalesforceContact | null> => {
-  const soql =
-    `SELECT Id, FirstName, LastName, Email FROM Contact ` +
-    `WHERE Id = '${escapeSoqlLiteral(salesforceId)}' LIMIT 1`;
-  const records = toRecords(await connection.query<SalesforceContact>(soql));
+  const records = await executeContactQueryWithSelectFieldFallback<SalesforceContact>(
+    connection,
+    (selectFields) =>
+      `SELECT ${selectFields.join(', ')} FROM Contact ` +
+      `WHERE Id = '${escapeSoqlLiteral(salesforceId)}' LIMIT 1`
+  );
   return (
     records.find((record) => typeof record.Id === 'string' && record.Id.trim().length > 0) ?? null
   );
+};
+
+const fetchContactsBySalesforceIds = async (
+  connection: SalesforceConnectionLike,
+  salesforceIds: string[]
+): Promise<Map<string, SalesforceContact>> => {
+  const recordsById = new Map<string, SalesforceContact>();
+  if (!salesforceIds.length) {
+    return recordsById;
+  }
+
+  for (const chunk of chunkArray(salesforceIds, SOQL_IN_CHUNK_SIZE)) {
+    const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
+    const records = await executeContactQueryWithSelectFieldFallback<SalesforceContact>(
+      connection,
+      (selectFields) =>
+        `SELECT ${selectFields.join(', ')} FROM Contact ` + `WHERE Id IN (${inClause})`
+    );
+
+    for (const record of records) {
+      const id = toTrimmed(record.Id);
+      if (id) {
+        recordsById.set(id, record);
+      }
+    }
+  }
+
+  return recordsById;
 };
 
 const findAccountBySalesforceId = async (
@@ -773,15 +953,66 @@ const findAccountBySalesforceId = async (
   );
 };
 
+const fetchAccountsBySalesforceIds = async (
+  connection: SalesforceConnectionLike,
+  salesforceIds: string[]
+): Promise<Map<string, SalesforceAccount>> => {
+  const recordsById = new Map<string, SalesforceAccount>();
+  if (!salesforceIds.length) {
+    return recordsById;
+  }
+
+  for (const chunk of chunkArray(salesforceIds, SOQL_IN_CHUNK_SIZE)) {
+    const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
+    const soql = `SELECT Id, Name FROM Account WHERE Id IN (${inClause})`;
+    const records = toRecords(await connection.query<SalesforceAccount>(soql));
+
+    for (const record of records) {
+      const id = toTrimmed(record.Id);
+      if (id) {
+        recordsById.set(id, record);
+      }
+    }
+  }
+
+  return recordsById;
+};
+
 const findByQuickBooksId = async <T extends { Id?: string }>(
   connection: SalesforceConnectionLike,
   objectName: 'Contact' | 'Account',
   qboCustomerId: string
 ): Promise<{ supported: boolean; record: T | null }> => {
-  const selectFields =
-    objectName === 'Contact'
-      ? 'Id, FirstName, LastName, Email, QuickBooks_ID__c'
-      : 'Id, Name, QuickBooks_ID__c';
+  if (objectName === 'Contact') {
+    try {
+      const records = await executeContactQueryWithSelectFieldFallback<T>(
+        connection,
+        (selectFields) =>
+          `SELECT ${selectFields.join(', ')} FROM Contact ` +
+          `WHERE QuickBooks_ID__c = '${escapeSoqlLiteral(qboCustomerId)}' LIMIT 1`
+      );
+      const record =
+        records.find(
+          (candidate) => typeof candidate.Id === 'string' && candidate.Id.trim().length > 0
+        ) ?? null;
+      return { supported: true, record };
+    } catch (error) {
+      const unsupportedField = parseUnsupportedObjectField(error, objectName);
+      if (unsupportedField?.toLowerCase() === 'quickbooks_id__c') {
+        logger.info(
+          '[qboCustomersSync] Salesforce object does not support QuickBooks_ID__c lookup',
+          {
+            objectName,
+          }
+        );
+        return { supported: false, record: null };
+      }
+
+      throw error;
+    }
+  }
+
+  const selectFields = 'Id, Name, QuickBooks_ID__c';
   const soql =
     `SELECT ${selectFields} FROM ${objectName} ` +
     `WHERE QuickBooks_ID__c = '${escapeSoqlLiteral(qboCustomerId)}' LIMIT 1`;
@@ -804,6 +1035,118 @@ const findByQuickBooksId = async <T extends { Id?: string }>(
 
     throw error;
   }
+};
+
+const fetchByQuickBooksIds = async <T extends { Id?: string; QuickBooks_ID__c?: string | null }>(
+  connection: SalesforceConnectionLike,
+  objectName: 'Contact' | 'Account',
+  qboCustomerIds: string[]
+): Promise<{ supported: boolean; recordsByQboId: Map<string, T> }> => {
+  const recordsByQboId = new Map<string, T>();
+  if (!qboCustomerIds.length) {
+    return { supported: true, recordsByQboId };
+  }
+
+  if (objectName === 'Contact') {
+    try {
+      for (const chunk of chunkArray(qboCustomerIds, SOQL_IN_CHUNK_SIZE)) {
+        const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
+        const records = await executeContactQueryWithSelectFieldFallback<T>(
+          connection,
+          (selectFields) =>
+            `SELECT ${selectFields.join(', ')} FROM Contact ` +
+            `WHERE QuickBooks_ID__c IN (${inClause})`
+        );
+
+        for (const record of records) {
+          const qboId = toTrimmed(record.QuickBooks_ID__c);
+          const id = toTrimmed(record.Id);
+          if (qboId && id) {
+            recordsByQboId.set(qboId, record);
+          }
+        }
+      }
+
+      return { supported: true, recordsByQboId };
+    } catch (error) {
+      const unsupportedField = parseUnsupportedObjectField(error, objectName);
+      if (unsupportedField?.toLowerCase() === 'quickbooks_id__c') {
+        logger.info(
+          '[qboCustomersSync] Salesforce object does not support QuickBooks_ID__c lookup',
+          {
+            objectName,
+          }
+        );
+        return { supported: false, recordsByQboId };
+      }
+
+      throw error;
+    }
+  }
+
+  const selectFields = 'Id, Name, QuickBooks_ID__c';
+
+  try {
+    for (const chunk of chunkArray(qboCustomerIds, SOQL_IN_CHUNK_SIZE)) {
+      const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
+      const soql =
+        `SELECT ${selectFields} FROM ${objectName} ` + `WHERE QuickBooks_ID__c IN (${inClause})`;
+      const records = toRecords(await connection.query<T>(soql));
+
+      for (const record of records) {
+        const qboId = toTrimmed(record.QuickBooks_ID__c);
+        const id = toTrimmed(record.Id);
+        if (qboId && id) {
+          recordsByQboId.set(qboId, record);
+        }
+      }
+    }
+
+    return { supported: true, recordsByQboId };
+  } catch (error) {
+    const unsupportedField = parseUnsupportedObjectField(error, objectName);
+    if (unsupportedField?.toLowerCase() === 'quickbooks_id__c') {
+      logger.info('[qboCustomersSync] Salesforce object does not support QuickBooks_ID__c lookup', {
+        objectName,
+      });
+      return { supported: false, recordsByQboId };
+    }
+
+    throw error;
+  }
+};
+
+const preloadSalesforceMatches = async (
+  connection: SalesforceConnectionLike,
+  customers: Array<{ rawCustomer: QboCustomer; normalized: NormalizedQboCustomer }>
+): Promise<PreloadedSalesforceMatches> => {
+  const quickBooksSalesforceIds = [
+    ...new Set(
+      customers
+        .map(({ rawCustomer }) => getQboSalesforceId(rawCustomer))
+        .filter((value): value is string => Boolean(value))
+    ),
+  ];
+  const qboCustomerIds = [...new Set(customers.map(({ normalized }) => normalized.id))];
+
+  const [contactBySalesforceId, accountBySalesforceId, contactsByQboId, accountsByQboId] =
+    await Promise.all([
+      fetchContactsBySalesforceIds(connection, quickBooksSalesforceIds),
+      fetchAccountsBySalesforceIds(connection, quickBooksSalesforceIds),
+      fetchByQuickBooksIds<SalesforceContact>(connection, 'Contact', qboCustomerIds),
+      fetchByQuickBooksIds<SalesforceAccount>(connection, 'Account', qboCustomerIds),
+    ]);
+
+  return {
+    contactBySalesforceId,
+    accountBySalesforceId,
+    contactByQuickBooksId: contactsByQboId.recordsByQboId,
+    accountByQuickBooksId: accountsByQboId.recordsByQboId,
+    quickBooksIdSupport: {
+      Contact: contactsByQboId.supported,
+      Account: accountsByQboId.supported,
+    },
+  };
 };
 
 const executeContactQueryWithFieldFallback = async (
@@ -833,7 +1176,7 @@ const executeContactQueryWithFieldFallback = async (
     'OtherPostalCode',
     'OtherCountry',
     'Description',
-  ];
+  ].filter((field) => !isUnsupportedContactField(field));
 
   while (selectFields.length > 2) {
     const whereClauses: string[] = [];
@@ -889,6 +1232,7 @@ const executeContactQueryWithFieldFallback = async (
       }
 
       const [removedField] = selectFields.splice(index, 1);
+      markUnsupportedContactField(removedField);
       logger.warn(
         '[qboCustomersSync] Salesforce contact field unsupported; retrying query without field',
         {
@@ -924,6 +1268,12 @@ const executeContactSaveWithFieldFallback = async (
 ): Promise<SaveResult> => {
   const workingPayload: Record<string, unknown> = { ...payload };
 
+  for (const fieldName of Object.keys(workingPayload)) {
+    if (fieldName !== 'Id' && isUnsupportedContactField(fieldName)) {
+      delete workingPayload[fieldName];
+    }
+  }
+
   while (Object.keys(workingPayload).length > (operation === 'update' ? 1 : 0)) {
     try {
       const rawResult =
@@ -942,6 +1292,7 @@ const executeContactSaveWithFieldFallback = async (
         throw new Error(details || `Failed to ${operation} Salesforce contact.`);
       }
 
+      markUnsupportedContactField(unsupportedField);
       delete workingPayload[unsupportedField];
       logger.warn(
         '[qboCustomersSync] Salesforce contact field unsupported; retrying save without field',
@@ -956,6 +1307,7 @@ const executeContactSaveWithFieldFallback = async (
         throw error;
       }
 
+      markUnsupportedContactField(unsupportedField);
       delete workingPayload[unsupportedField];
       logger.warn(
         '[qboCustomersSync] Salesforce contact field unsupported; retrying save without field',
@@ -980,6 +1332,62 @@ const parseUnsupportedCustomerField = (error: unknown): string | null => {
   }
 
   return match[1] ?? null;
+};
+
+const hydrateSparseQboCustomer = async (
+  deps: SyncDependencies,
+  customer: QboCustomer
+): Promise<QboCustomer> => {
+  if (customer.sparse !== true) {
+    return customer;
+  }
+
+  const customerId = toTrimmed(customer.Id);
+  if (!customerId) {
+    return customer;
+  }
+
+  for (let attempt = 0; attempt <= QBO_HYDRATE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await deps.getQboCustomerById(customerId);
+    } catch (error) {
+      const retryDelayMs = QBO_HYDRATE_RETRY_DELAYS_MS[attempt];
+      if (retryDelayMs !== undefined && isQboThrottleError(error)) {
+        logger.warn('[qboCustomersSync] QBO customer hydration throttled; retrying', {
+          qboCustomerId: customerId,
+          attempt: attempt + 1,
+          retryDelayMs,
+          error: getErrorMessage(error),
+        });
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      logger.warn('[qboCustomersSync] Failed to hydrate sparse QBO customer; using sparse record', {
+        qboCustomerId: customerId,
+        error: getErrorMessage(error),
+      });
+      return customer;
+    }
+  }
+
+  return customer;
+};
+
+const hydrateSparseQboCustomers = async (
+  deps: SyncDependencies,
+  customers: QboCustomer[]
+): Promise<QboCustomer[]> => {
+  const hydratedCustomers: QboCustomer[] = [];
+
+  for (const chunk of chunkArray(customers, QBO_HYDRATE_CONCURRENCY)) {
+    const resolvedChunk = await Promise.all(
+      chunk.map((customer) => hydrateSparseQboCustomer(deps, customer))
+    );
+    hydratedCustomers.push(...resolvedChunk);
+  }
+
+  return hydratedCustomers;
 };
 
 const queryQboCustomersWithFieldFallback = async (
@@ -1078,6 +1486,9 @@ const createDefaultDependencies = (): SyncDependencies => ({
   fetchQboCustomersPage: async ({ startPosition, maxResults, includeInactive }) => {
     return queryQboCustomersWithFieldFallback(startPosition, maxResults, includeInactive);
   },
+  getQboCustomerById: async (customerId: string) => {
+    return (await getQuickBooksCustomerById(customerId)) as QboCustomer;
+  },
   getSalesforceConnection: async () => {
     const service = new SalesforceService(buildSalesforceConfig());
     return (await service.authenticate()) as unknown as SalesforceConnectionLike;
@@ -1126,6 +1537,7 @@ const buildInitialCounts = (): SyncCounts => ({
   totalQboCustomers: 0,
   alreadyExistInSalesforce: 0,
   notInSalesforce: 0,
+  authoritativeLinkMissing: 0,
   willBeCreated: 0,
   wouldUpdate: 0,
   duplicateConflicts: 0,
@@ -1139,6 +1551,7 @@ const buildInitialSamples = (): SyncSamples => ({
   duplicates: [],
   willCreate: [],
   matched: [],
+  authoritativeLinkMissing: [],
   errors: [],
 });
 
@@ -1154,6 +1567,16 @@ const addSample = (
 
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const isQboThrottleError = (error: unknown): boolean => {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('throttleexceeded') || message.includes('status 429');
+};
 
 const resolveContactRecordTypeIdSafely = async (
   salesforce: SalesforceConnectionLike
@@ -1310,9 +1733,37 @@ const processUnmatchedCustomer = async (input: {
   }
 };
 
+const processAuthoritativeLinkMissingCustomer = (input: {
+  normalized: NormalizedQboCustomer;
+  salesforceId: string;
+  counts: SyncCounts;
+  samples: SyncSamples;
+  exampleLimit: number;
+}): void => {
+  const { normalized, salesforceId, counts, samples, exampleLimit } = input;
+
+  counts.authoritativeLinkMissing += 1;
+  addSample(samples.authoritativeLinkMissing, exampleLimit, {
+    qboCustomerId: normalized.id,
+    qboDisplayName: normalized.displayName,
+    reason: 'authoritative_salesforce_id_missing',
+    salesforceId,
+  });
+
+  logger.warn(
+    '[qboCustomersSync] QBO customer has authoritative Salesforce ID that does not resolve',
+    {
+      qboCustomerId: normalized.id,
+      qboDisplayName: normalized.displayName,
+      salesforceId,
+    }
+  );
+};
+
 const processCustomerSync = async (input: {
   rawCustomer: QboCustomer;
   normalized: NormalizedQboCustomer;
+  preloadedMatches: PreloadedSalesforceMatches;
   salesforce: SalesforceConnectionLike;
   deps: SyncDependencies;
   counts: SyncCounts;
@@ -1323,6 +1774,7 @@ const processCustomerSync = async (input: {
   const {
     rawCustomer,
     normalized,
+    preloadedMatches,
     salesforce,
     deps,
     counts,
@@ -1331,7 +1783,7 @@ const processCustomerSync = async (input: {
     options,
   } = input;
 
-  const match = await findSalesforceMatch(salesforce, rawCustomer, normalized);
+  const match = await findSalesforceMatch(salesforce, rawCustomer, normalized, preloadedMatches);
 
   if (match.status === 'duplicate') {
     processDuplicateMatch(normalized, match, counts, samples, options.exampleLimit);
@@ -1348,6 +1800,17 @@ const processCustomerSync = async (input: {
       counts,
       samples,
       options,
+    });
+    return;
+  }
+
+  if (match.status === 'authoritative-link-missing') {
+    processAuthoritativeLinkMissingCustomer({
+      normalized,
+      salesforceId: match.salesforceId,
+      counts,
+      samples,
+      exampleLimit: options.exampleLimit,
     });
     return;
   }
@@ -1404,9 +1867,15 @@ const runSyncWorkflow = async (input: {
     nextStartPosition += qboCustomers.length;
     hasMore = qboCustomers.length === options.pageSize;
 
-    for (const rawCustomer of qboCustomers) {
-      counts.totalQboCustomers += 1;
+    counts.totalQboCustomers += qboCustomers.length;
 
+    const hydratedQboCustomers = await hydrateSparseQboCustomers(deps, qboCustomers);
+
+    const normalizedCustomers: Array<{
+      rawCustomer: QboCustomer;
+      normalized: NormalizedQboCustomer;
+    }> = [];
+    for (const rawCustomer of hydratedQboCustomers) {
       const normalized = normalizeQboCustomer(rawCustomer);
       if (!normalized) {
         counts.errors += 1;
@@ -1417,10 +1886,17 @@ const runSyncWorkflow = async (input: {
         continue;
       }
 
+      normalizedCustomers.push({ rawCustomer, normalized });
+    }
+
+    const preloadedMatches = await preloadSalesforceMatches(salesforce, normalizedCustomers);
+
+    for (const { rawCustomer, normalized } of normalizedCustomers) {
       try {
         await processCustomerSync({
           rawCustomer,
           normalized,
+          preloadedMatches,
           salesforce,
           deps,
           counts,
@@ -1546,10 +2022,12 @@ const syncQboCustomersToSalesforce = async (
   setDependencies(overrides: Partial<SyncDependencies> | null = null) {
     dependencyOverrides = overrides;
     cachedContactRecordTypeId = undefined;
+    unsupportedContactFields.clear();
   },
   resetDependencies() {
     dependencyOverrides = null;
     cachedContactRecordTypeId = undefined;
+    unsupportedContactFields.clear();
   },
 };
 

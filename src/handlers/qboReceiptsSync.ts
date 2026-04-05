@@ -41,8 +41,19 @@ type QboSalesReceipt = {
   TxnDate?: string | null;
   TotalAmt?: number | null;
   PrivateNote?: string | null;
+  MetaData?: {
+    CreateTime?: string | null;
+    LastUpdatedTime?: string | null;
+  } | null;
+  CurrencyRef?: { value?: string | null; name?: string | null } | null;
   CustomerRef?: { value?: string | null; name?: string | null } | null;
   ClassRef?: { value?: string | null; name?: string | null } | null;
+  Line?: Array<{
+    DetailType?: string | null;
+    SalesItemLineDetail?: {
+      ClassRef?: { value?: string | null; name?: string | null } | null;
+    } | null;
+  }> | null;
 };
 
 type ReceiptSyncStatus =
@@ -106,7 +117,17 @@ type PlannedCreate = {
   receipt: QboSalesReceipt;
   resolvedRecord: ResolvedSalesforceRecord;
   customer: QboCustomer;
+  campaignId: string | null;
+  fund: string | null;
+  designation: string | null;
   resultIndex: number;
+};
+
+type ReceiptAssociationResolution = {
+  campaignId: string | null;
+  fund: string | null;
+  designation: string | null;
+  manualReviewMessage: string | null;
 };
 
 type Dependencies = {
@@ -118,6 +139,9 @@ type Dependencies = {
 
 const DEFAULT_QBO_PAGE_SIZE = 200;
 const SOQL_IN_CHUNK_SIZE = 500;
+const CUSTOMER_FETCH_CONCURRENCY = 8;
+const SALESFORCE_LOOKUP_CONCURRENCY = 8;
+const SALESFORCE_CREATE_CONCURRENCY = 4;
 let dependencyOverrides: Partial<Dependencies> | null = null;
 
 const toTrimmed = (value: unknown): string | null => {
@@ -228,6 +252,34 @@ const chunkArray = <T>(items: T[], size: number): T[][] => {
   return chunks;
 };
 
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> => {
+  if (!items.length) return [];
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= items.length) {
+        return;
+      }
+
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
+};
+
 const normalizeFieldName = (value: unknown): string =>
   (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -329,33 +381,442 @@ const fetchCampaignIdByName = async (
   return toTrimmed(toRecords(result)[0]?.Id);
 };
 
-const resolveCampaignIdForReceipt = async (
+const normalizeReceiptClassRef = (
+  classRef: { value?: string | null; name?: string | null } | null | undefined
+): { value?: string; name?: string } | null => {
+  const value = toTrimmed(classRef?.value);
+  const name = toTrimmed(classRef?.name);
+
+  if (!value && !name) return null;
+
+  return {
+    ...(value ? { value } : {}),
+    ...(name ? { name } : {}),
+  };
+};
+
+const resolveReceiptClassRef = (
+  receipt: QboSalesReceipt
+): { classRef: { value?: string; name?: string } | null; manualReviewMessage: string | null } => {
+  const headerClassRef = normalizeReceiptClassRef(receipt.ClassRef);
+  if (headerClassRef) {
+    return headerClassRef.name
+      ? { classRef: headerClassRef, manualReviewMessage: null }
+      : {
+          classRef: null,
+          manualReviewMessage:
+            'Receipt has a QuickBooks class reference without a class name, so it cannot be mapped safely.',
+        };
+  }
+
+  const lineClassRefs = Array.isArray(receipt.Line)
+    ? receipt.Line.map((line) =>
+        normalizeReceiptClassRef(line?.SalesItemLineDetail?.ClassRef)
+      ).filter((classRef): classRef is { value?: string; name?: string } => classRef !== null)
+    : [];
+
+  const uniqueLineClassRefs = Array.from(
+    new Map(
+      lineClassRefs.map((classRef) => [`${classRef.value ?? ''}::${classRef.name ?? ''}`, classRef])
+    ).values()
+  );
+
+  if (uniqueLineClassRefs.length === 0) {
+    return { classRef: null, manualReviewMessage: null };
+  }
+
+  if (uniqueLineClassRefs.length > 1) {
+    return {
+      classRef: null,
+      manualReviewMessage:
+        'Receipt has multiple distinct QuickBooks classes across its line items, so it cannot be mapped safely.',
+    };
+  }
+
+  const [lineClassRef] = uniqueLineClassRefs;
+  return lineClassRef.name
+    ? { classRef: lineClassRef, manualReviewMessage: null }
+    : {
+        classRef: null,
+        manualReviewMessage:
+          'Receipt line items include a QuickBooks class reference without a class name, so it cannot be mapped safely.',
+      };
+};
+
+const parseReceiptClassSegments = (
+  className: string | null
+): {
+  fund: string | null;
+  designation: string | null;
+  manualReviewMessage: string | null;
+} => {
+  if (!className) {
+    return {
+      fund: null,
+      designation: null,
+      manualReviewMessage: null,
+    };
+  }
+
+  const segments = className.split(':').map((segment) => segment.trim());
+  if (segments.length === 1) {
+    return {
+      fund: null,
+      designation: null,
+      manualReviewMessage: null,
+    };
+  }
+
+  const [fund, ...designationSegments] = segments;
+  const designation = designationSegments.join(':').trim();
+
+  if (!fund || !designation) {
+    return {
+      fund: null,
+      designation: null,
+      manualReviewMessage: `QuickBooks class "${className}" must follow the "Fund:Designation" format to populate Salesforce Fund__c and Designation__c safely.`,
+    };
+  }
+
+  return {
+    fund,
+    designation,
+    manualReviewMessage: null,
+  };
+};
+
+const normalizeComparableDate = (value: string | null | undefined): string | null => {
+  const trimmed = toTrimmed(value);
+  if (!trimmed) return null;
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString().slice(0, 10);
+};
+
+const findPotentialExistingChargeMatches = async (
+  connection: SalesforceConnection,
+  resolvedRecord: ResolvedSalesforceRecord,
+  receipt: QboSalesReceipt
+): Promise<string[]> => {
+  const recordId = toTrimmed(resolvedRecord.record.Id);
+  const receiptAmount =
+    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
+      ? receipt.TotalAmt
+      : null;
+  const receiptDate = normalizeComparableDate(receipt.TxnDate);
+
+  if (!recordId || receiptAmount === null || !receiptDate) {
+    return [];
+  }
+
+  const lookupField = resolvedRecord.objectType === 'Contact' ? 'Contact__c' : 'Account__c';
+  const records = toRecords(
+    await connection.query<{
+      Id?: string;
+      Received_At__c?: string | null;
+    }>(
+      `SELECT Id, Received_At__c FROM Transaction__c ` +
+        `WHERE ${lookupField} = '${escapeSoqlLiteral(recordId)}' ` +
+        "AND Transaction_Type__c IN ('charge', 'sales-receipt') " +
+        `AND Amount_Gross__c = ${receiptAmount}`
+    )
+  );
+
+  return records
+    .filter((record) => normalizeComparableDate(record.Received_At__c) === receiptDate)
+    .map((record) => toTrimmed(record.Id))
+    .filter((id): id is string => id !== null);
+};
+
+type ExistingChargeMatchQueryRecord = {
+  Id?: string;
+  Received_At__c?: string | null;
+  Amount_Gross__c?: number | null;
+  Contact__c?: string | null;
+  Account__c?: string | null;
+};
+
+const buildPotentialMatchKey = (
+  objectType: SalesforceObjectType,
+  recordId: string,
+  amount: number,
+  receiptDate: string
+): string => `${objectType}:${recordId}:${amount}:${receiptDate}`;
+
+const getPotentialExistingChargeMatches = (
+  potentialMatchIndex: Map<string, string[]>,
+  resolvedRecord: ResolvedSalesforceRecord,
+  receipt: QboSalesReceipt
+): string[] => {
+  const recordId = toTrimmed(resolvedRecord.record.Id);
+  const receiptAmount =
+    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
+      ? receipt.TotalAmt
+      : null;
+  const receiptDate = normalizeComparableDate(receipt.TxnDate);
+
+  if (!recordId || receiptAmount === null || !receiptDate) {
+    return [];
+  }
+
+  return (
+    potentialMatchIndex.get(
+      buildPotentialMatchKey(resolvedRecord.objectType, recordId, receiptAmount, receiptDate)
+    ) ?? []
+  );
+};
+
+const buildPotentialExistingChargeMatchIndex = async (
+  connection: SalesforceConnection,
+  receipts: QboSalesReceipt[],
+  customerCache: Map<string, QboCustomer | null>,
+  sfRecordCache: Map<string, ResolvedSalesforceRecord | null>,
+  existingQboDocIds: Set<string>,
+  context: InvocationContext
+): Promise<Map<string, string[]>> => {
+  const targets = receipts
+    .map((receipt) => {
+      const receiptId = normalizeQboId(receipt.Id);
+      const customerId = normalizeQboId(receipt.CustomerRef?.value);
+      const customer = customerId ? (customerCache.get(customerId) ?? null) : null;
+      const salesforceId = extractQboSalesforceId(customer);
+      const resolvedRecord = salesforceId ? (sfRecordCache.get(salesforceId) ?? null) : null;
+      const recordId = toTrimmed(resolvedRecord?.record.Id);
+      const amount =
+        typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
+          ? receipt.TotalAmt
+          : null;
+      const receiptDate = normalizeComparableDate(receipt.TxnDate);
+
+      if (
+        !resolvedRecord ||
+        !recordId ||
+        amount === null ||
+        !receiptDate ||
+        (receiptId !== null && existingQboDocIds.has(receiptId))
+      ) {
+        return null;
+      }
+
+      return {
+        objectType: resolvedRecord.objectType,
+        recordId,
+        amount,
+        receiptDate,
+      };
+    })
+    .filter(
+      (
+        target
+      ): target is {
+        objectType: SalesforceObjectType;
+        recordId: string;
+        amount: number;
+        receiptDate: string;
+      } => target !== null
+    );
+
+  const index = new Map<string, string[]>();
+  if (!targets.length) {
+    return index;
+  }
+
+  const lookupConfig: Array<{
+    objectType: SalesforceObjectType;
+    lookupField: 'Contact__c' | 'Account__c';
+  }> = [
+    { objectType: 'Contact', lookupField: 'Contact__c' },
+    { objectType: 'Account', lookupField: 'Account__c' },
+  ];
+
+  context.log('[qboReceiptsSync] Preloading duplicate-detection candidates', {
+    candidateReceiptCount: targets.length,
+  });
+
+  for (const { objectType, lookupField } of lookupConfig) {
+    const scopedTargets = targets.filter((target) => target.objectType === objectType);
+    if (!scopedTargets.length) {
+      continue;
+    }
+
+    const targetKeys = new Set(
+      scopedTargets.map((target) =>
+        buildPotentialMatchKey(
+          target.objectType,
+          target.recordId,
+          target.amount,
+          target.receiptDate
+        )
+      )
+    );
+    const recordIds = [...new Set(scopedTargets.map((target) => target.recordId))];
+    const amounts = [...new Set(scopedTargets.map((target) => target.amount))];
+
+    for (const recordIdChunk of chunkArray(recordIds, SOQL_IN_CHUNK_SIZE)) {
+      for (const amountChunk of chunkArray(amounts, SOQL_IN_CHUNK_SIZE)) {
+        const recordIdClause = recordIdChunk
+          .map((recordId) => `'${escapeSoqlLiteral(recordId)}'`)
+          .join(', ');
+        const amountClause = amountChunk.join(', ');
+        const records = toRecords(
+          await connection.query<ExistingChargeMatchQueryRecord>(
+            `SELECT Id, ${lookupField}, Amount_Gross__c, Received_At__c FROM Transaction__c ` +
+              `WHERE ${lookupField} IN (${recordIdClause}) ` +
+              "AND Transaction_Type__c IN ('charge', 'sales-receipt') " +
+              `AND Amount_Gross__c IN (${amountClause})`
+          )
+        );
+
+        for (const record of records) {
+          const existingId = toTrimmed(record.Id);
+          const existingRecordId = toTrimmed(record[lookupField]);
+          const existingAmount =
+            typeof record.Amount_Gross__c === 'number' && Number.isFinite(record.Amount_Gross__c)
+              ? record.Amount_Gross__c
+              : null;
+          const existingDate = normalizeComparableDate(record.Received_At__c);
+
+          if (!existingId || !existingRecordId || existingAmount === null || !existingDate) {
+            continue;
+          }
+
+          const key = buildPotentialMatchKey(
+            objectType,
+            existingRecordId,
+            existingAmount,
+            existingDate
+          );
+          if (!targetKeys.has(key)) {
+            continue;
+          }
+
+          const matches = index.get(key) ?? [];
+          matches.push(existingId);
+          index.set(key, matches);
+        }
+      }
+    }
+  }
+
+  return index;
+};
+
+const resolveReceiptAssociationsForReceipt = async (
   connection: Connection,
   receipt: QboSalesReceipt,
   generalGivingCampaignId: string | null,
   classCampaignCache: Map<string, string | null>
-): Promise<string | null> => {
-  const className = toTrimmed(receipt.ClassRef?.name);
-  if (!className) return generalGivingCampaignId;
+): Promise<ReceiptAssociationResolution> => {
+  const resolvedClassRef = resolveReceiptClassRef(receipt);
+  if (resolvedClassRef.manualReviewMessage) {
+    return {
+      campaignId: null,
+      fund: null,
+      designation: null,
+      manualReviewMessage: resolvedClassRef.manualReviewMessage,
+    };
+  }
+
+  const className = toTrimmed(resolvedClassRef.classRef?.name);
+
+  if (!className) {
+    return generalGivingCampaignId
+      ? {
+          campaignId: generalGivingCampaignId,
+          fund: null,
+          designation: null,
+          manualReviewMessage: null,
+        }
+      : {
+          campaignId: null,
+          fund: null,
+          designation: null,
+          manualReviewMessage:
+            'Receipt has no QuickBooks class and no General Giving campaign is available in Salesforce.',
+        };
+  }
+
+  const classSegments = parseReceiptClassSegments(className);
+  if (classSegments.manualReviewMessage) {
+    return {
+      campaignId: null,
+      fund: null,
+      designation: null,
+      manualReviewMessage: classSegments.manualReviewMessage,
+    };
+  }
 
   if (classCampaignCache.has(className)) {
-    return classCampaignCache.get(className) ?? generalGivingCampaignId;
+    const cachedCampaignId = classCampaignCache.get(className) ?? null;
+    return cachedCampaignId
+      ? {
+          campaignId: cachedCampaignId,
+          fund: classSegments.fund,
+          designation: classSegments.designation,
+          manualReviewMessage: null,
+        }
+      : {
+          campaignId: null,
+          fund: null,
+          designation: null,
+          manualReviewMessage: `QuickBooks class "${className}" could not be mapped to a unique Salesforce campaign.`,
+        };
   }
 
   try {
-    const result = await connection.query<{ Id?: string }>(
-      `SELECT Id FROM Campaign WHERE Class__c = '${escapeSoqlLiteral(className)}' ` +
-        'ORDER BY IsActive DESC, CreatedDate DESC LIMIT 2'
+    const records = toRecords(
+      await connection.query<{ Id?: string }>(
+        `SELECT Id FROM Campaign WHERE Class__c = '${escapeSoqlLiteral(className)}' ` +
+          'ORDER BY IsActive DESC, CreatedDate DESC LIMIT 2'
+      )
     );
-    const records = toRecords(result);
-    const campaignId = records.length === 1 ? (toTrimmed(records[0]?.Id) ?? null) : null;
 
-    classCampaignCache.set(className, campaignId);
-    return campaignId ?? generalGivingCampaignId;
+    if (records.length === 1) {
+      const campaignId = toTrimmed(records[0]?.Id) ?? null;
+      classCampaignCache.set(className, campaignId);
+      return campaignId
+        ? {
+            campaignId,
+            fund: classSegments.fund,
+            designation: classSegments.designation,
+            manualReviewMessage: null,
+          }
+        : {
+            campaignId: null,
+            fund: null,
+            designation: null,
+            manualReviewMessage: `QuickBooks class "${className}" resolved to a Salesforce campaign row without an Id.`,
+          };
+    }
+
+    classCampaignCache.set(className, null);
+    return records.length === 0
+      ? {
+          campaignId: null,
+          fund: null,
+          designation: null,
+          manualReviewMessage: `QuickBooks class "${className}" does not map to a Salesforce campaign; review before import.`,
+        }
+      : {
+          campaignId: null,
+          fund: null,
+          designation: null,
+          manualReviewMessage: `QuickBooks class "${className}" maps to multiple Salesforce campaigns; review before import.`,
+        };
   } catch (error) {
     if (parseUnsupportedField(error, 'Campaign') !== 'Class__c') throw error;
+
     classCampaignCache.set(className, null);
-    return generalGivingCampaignId;
+    return {
+      campaignId: null,
+      fund: null,
+      designation: null,
+      manualReviewMessage: `Salesforce Campaign.Class__c is unavailable, so QuickBooks class "${className}" cannot be mapped safely.`,
+    };
   }
 };
 
@@ -374,22 +835,44 @@ const buildTransactionDtoFromReceipt = (
 
   const docNumber = toTrimmed(receipt.DocNumber);
   const note = toTrimmed(receipt.PrivateNote);
-  const currencyCode = toTrimmed(customer.CurrencyRef?.value)?.toUpperCase() ?? null;
+  const currencyCode =
+    toTrimmed(receipt.CurrencyRef?.value)?.toUpperCase() ??
+    toTrimmed(customer.CurrencyRef?.value)?.toUpperCase() ??
+    null;
+  const qboCustomerId = normalizeQboId(receipt.CustomerRef?.value) ?? normalizeQboId(customer.Id);
+  const qboCustomerName = toTrimmed(receipt.CustomerRef?.name) ?? toTrimmed(customer.DisplayName);
+  const resolvedClassRef = resolveReceiptClassRef(receipt).classRef;
+  const qboClassId = normalizeQboId(resolvedClassRef?.value);
+  const qboClassName = toTrimmed(resolvedClassRef?.name);
+  const qboSourceCreatedAt = toTrimmed(receipt.MetaData?.CreateTime);
+  const qboSourceUpdatedAt = toTrimmed(receipt.MetaData?.LastUpdatedTime);
+  const importMemo = docNumber
+    ? `Imported from QuickBooks SalesReceipt ${docNumber}`
+    : 'Imported from QuickBooks SalesReceipt';
 
   return {
-    transaction_type__c: 'charge',
+    transaction_type__c: 'sales-receipt',
     status__c: 'paid',
     amount_gross__c: amountGross,
     amount_fee__c: 0,
     amount_net__c: amountGross,
     currency_iso_code__c: currencyCode,
-    memo__c: note ?? (docNumber ? `Imported from QuickBooks SalesReceipt ${docNumber}` : null),
+    memo__c: importMemo,
     contact__c: resolvedRecord.objectType === 'Contact' ? (resolvedRecord.record.Id ?? null) : null,
     account__c: resolvedRecord.objectType === 'Account' ? (resolvedRecord.record.Id ?? null) : null,
+    source_system__c: 'QuickBooks',
     received_at__c: toTrimmed(receipt.TxnDate),
     posted_to_qbo__c: true,
     qbo_doc_type__c: 'sales-receipt',
     qbo_doc_id__c: qboDocId,
+    qbo_doc_number__c: docNumber,
+    qbo_customer_id__c: qboCustomerId,
+    qbo_customer_name__c: qboCustomerName,
+    qbo_class_id__c: qboClassId,
+    qbo_class_name__c: qboClassName,
+    qbo_private_note__c: note,
+    qbo_source_created_at__c: qboSourceCreatedAt,
+    qbo_source_updated_at__c: qboSourceUpdatedAt,
   };
 };
 
@@ -473,7 +956,7 @@ const initializeReceiptSyncRuntime = async (
 };
 
 const buildReceiptQuery = ({ startPosition, maxResults }: HandlerOptions): string =>
-  'SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote, CustomerRef, ClassRef ' +
+  'SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote, MetaData, CurrencyRef, CustomerRef, ClassRef, Line ' +
   `FROM SalesReceipt STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
 
 const fetchReceiptPage = async (
@@ -546,11 +1029,12 @@ const buildCacheFromIds = async <T>(
   ids: string[],
   fetchValue: (id: string) => Promise<T>,
   onSuccess?: (id: string, value: T) => void,
-  onError?: (id: string, error: unknown) => void
+  onError?: (id: string, error: unknown) => void,
+  concurrency = 1
 ): Promise<Map<string, T | null>> => {
   const cache = new Map<string, T | null>();
 
-  for (const id of ids) {
+  await mapWithConcurrency(ids, concurrency, async (id) => {
     try {
       const value = await fetchValue(id);
       cache.set(id, value);
@@ -559,7 +1043,7 @@ const buildCacheFromIds = async <T>(
       cache.set(id, null);
       onError?.(id, error);
     }
-  }
+  });
 
   return cache;
 };
@@ -596,7 +1080,8 @@ const fetchCustomerCache = async (
         customerId,
         error: error instanceof Error ? error.message : String(error),
       });
-    }
+    },
+    CUSTOMER_FETCH_CONCURRENCY
   );
 };
 
@@ -692,7 +1177,8 @@ const fetchSalesforceRecordCache = async (
         salesforceId,
         error: error instanceof Error ? error.message : String(error),
       });
-    }
+    },
+    SALESFORCE_LOOKUP_CONCURRENCY
   );
 };
 
@@ -720,6 +1206,7 @@ const prepareSalesforceReceiptSyncData = async (
   existingQboDocIds: Set<string>;
   sfRecordCache: Map<string, ResolvedSalesforceRecord | null>;
   generalGivingCampaignId: string | null;
+  potentialChargeMatchIndex: Map<string, string[]>;
 }> => {
   const allQboDocIds = collectQboDocIds(receipts);
   const existingQboDocIds = await fetchExistingQboDocIdsWithLogging(
@@ -735,11 +1222,20 @@ const prepareSalesforceReceiptSyncData = async (
     context
   );
   const generalGivingCampaignId = await fetchGeneralGivingCampaignId(connection, context);
+  const potentialChargeMatchIndex = await buildPotentialExistingChargeMatchIndex(
+    connection,
+    receipts,
+    customerCache,
+    sfRecordCache,
+    existingQboDocIds,
+    context
+  );
 
   return {
     existingQboDocIds,
     sfRecordCache,
     generalGivingCampaignId,
+    potentialChargeMatchIndex,
   };
 };
 
@@ -795,14 +1291,18 @@ const markReceiptCreated = (summary: HandlerSummary, result: ReceiptResult, labe
     `Created Salesforce Transaction__c for QBO SalesReceipt ${label}.`
   );
 
-const evaluateReceiptForSync = (
+const evaluateReceiptForSync = async (
   receipt: QboSalesReceipt,
   dryRun: boolean,
   customerCache: Map<string, QboCustomer | null>,
   sfRecordCache: Map<string, ResolvedSalesforceRecord | null>,
   existingQboDocIds: Set<string>,
+  generalGivingCampaignId: string | null,
+  potentialChargeMatchIndex: Map<string, string[]>,
+  connection: SalesforceConnection,
+  classCampaignCache: Map<string, string | null>,
   summary: HandlerSummary
-): PlannedCreate | null => {
+): Promise<PlannedCreate | null> => {
   summary.processedCount++;
 
   const receiptId = normalizeQboId(receipt.Id);
@@ -879,6 +1379,41 @@ const evaluateReceiptForSync = (
     return null;
   }
 
+  const potentialMatches = getPotentialExistingChargeMatches(
+    potentialChargeMatchIndex,
+    resolvedRecord,
+    receipt
+  );
+  if (potentialMatches.length > 0) {
+    markReceiptStatus(
+      summary,
+      result,
+      'skipped',
+      'skippedCount',
+      potentialMatches.length === 1
+        ? `Receipt ${getReceiptLabel(receiptId, result.docNumber)} may already exist as Salesforce transaction ${potentialMatches[0]} with the same amount and date; review before import.`
+        : `Receipt ${getReceiptLabel(receiptId, result.docNumber)} matches multiple Salesforce charge transactions by amount and date; review before import.`
+    );
+    return null;
+  }
+
+  const associationResolution = await resolveReceiptAssociationsForReceipt(
+    connection,
+    receipt,
+    generalGivingCampaignId,
+    classCampaignCache
+  );
+  if (associationResolution.manualReviewMessage) {
+    markReceiptStatus(
+      summary,
+      result,
+      'skipped',
+      'skippedCount',
+      associationResolution.manualReviewMessage
+    );
+    return null;
+  }
+
   const label = getReceiptLabel(receiptId, result.docNumber);
   markReceiptStatus(
     summary,
@@ -894,27 +1429,38 @@ const evaluateReceiptForSync = (
     receipt,
     resolvedRecord,
     customer,
+    campaignId: associationResolution.campaignId,
+    fund: associationResolution.fund,
+    designation: associationResolution.designation,
     resultIndex: summary.results.length - 1,
   };
 };
 
-const planReceiptCreates = (
+const planReceiptCreates = async (
+  connection: SalesforceConnection,
   receipts: QboSalesReceipt[],
   dryRun: boolean,
   customerCache: Map<string, QboCustomer | null>,
   sfRecordCache: Map<string, ResolvedSalesforceRecord | null>,
   existingQboDocIds: Set<string>,
+  generalGivingCampaignId: string | null,
+  potentialChargeMatchIndex: Map<string, string[]>,
   summary: HandlerSummary
-): PlannedCreate[] => {
+): Promise<PlannedCreate[]> => {
   const plannedCreates: PlannedCreate[] = [];
+  const classCampaignCache = new Map<string, string | null>();
 
   for (const receipt of receipts) {
-    const plannedCreate = evaluateReceiptForSync(
+    const plannedCreate = await evaluateReceiptForSync(
       receipt,
       dryRun,
       customerCache,
       sfRecordCache,
       existingQboDocIds,
+      generalGivingCampaignId,
+      potentialChargeMatchIndex,
+      connection,
+      classCampaignCache,
       summary
     );
 
@@ -928,14 +1474,11 @@ const planReceiptCreates = (
 
 const syncPlannedReceiptCreate = async (
   planned: PlannedCreate,
-  connection: Connection,
   salesforceSvc: ReturnType<typeof createSalesforceSvc>,
-  generalGivingCampaignId: string | null,
-  classCampaignCache: Map<string, string | null>,
   summary: HandlerSummary,
   context: InvocationContext
 ): Promise<void> => {
-  const { receipt, resolvedRecord, customer, resultIndex } = planned;
+  const { receipt, resolvedRecord, customer, campaignId, fund, designation, resultIndex } = planned;
   const result = summary.results[resultIndex];
   const receiptId = normalizeQboId(receipt.Id);
   const label = getReceiptLabel(receiptId, result.docNumber);
@@ -956,12 +1499,9 @@ const syncPlannedReceiptCreate = async (
       return;
     }
 
-    transactionDto.campaign__c = await resolveCampaignIdForReceipt(
-      connection,
-      receipt,
-      generalGivingCampaignId,
-      classCampaignCache
-    );
+    transactionDto.campaign__c = campaignId;
+    transactionDto.fund__c = fund;
+    transactionDto.designation__c = designation;
 
     await salesforceSvc.upsertTransactionByExternalId(transactionDto, 'qbo_doc_id__c');
 
@@ -986,25 +1526,13 @@ const syncPlannedReceiptCreate = async (
 
 const executePlannedCreates = async (
   plannedCreates: PlannedCreate[],
-  connection: Connection,
   salesforceSvc: ReturnType<typeof createSalesforceSvc>,
-  generalGivingCampaignId: string | null,
   summary: HandlerSummary,
   context: InvocationContext
 ): Promise<void> => {
-  const classCampaignCache = new Map<string, string | null>();
-
-  for (const planned of plannedCreates) {
-    await syncPlannedReceiptCreate(
-      planned,
-      connection,
-      salesforceSvc,
-      generalGivingCampaignId,
-      classCampaignCache,
-      summary,
-      context
-    );
-  }
+  await mapWithConcurrency(plannedCreates, SALESFORCE_CREATE_CONCURRENCY, async (planned) => {
+    await syncPlannedReceiptCreate(planned, salesforceSvc, summary, context);
+  });
 };
 
 const buildCompletionLogData = (options: HandlerOptions, summary: HandlerSummary) => ({
@@ -1072,26 +1600,22 @@ const runReceiptSyncWorkflow = async (
     qboDebugLogger,
     context
   );
-  const { existingQboDocIds, sfRecordCache, generalGivingCampaignId } =
+  const { existingQboDocIds, sfRecordCache, generalGivingCampaignId, potentialChargeMatchIndex } =
     await prepareSalesforceReceiptSyncData(connection, receipts, customerCache, options, context);
-  const plannedCreates = planReceiptCreates(
+  const plannedCreates = await planReceiptCreates(
+    connection,
     receipts,
     options.dryRun,
     customerCache,
     sfRecordCache,
     existingQboDocIds,
+    generalGivingCampaignId,
+    potentialChargeMatchIndex,
     summary
   );
 
   if (!options.dryRun) {
-    await executePlannedCreates(
-      plannedCreates,
-      connection,
-      salesforceSvc,
-      generalGivingCampaignId,
-      summary,
-      context
-    );
+    await executePlannedCreates(plannedCreates, salesforceSvc, summary, context);
   }
 };
 

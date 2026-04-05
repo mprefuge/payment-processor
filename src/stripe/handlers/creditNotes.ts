@@ -19,6 +19,8 @@ import type {
 } from '../types';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 
+const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
+
 const SALES_RECEIPT_DOC_NUMBER_KEYS = [
   'qbo_sales_receipt_number',
   'qbo_doc_number',
@@ -87,6 +89,7 @@ const resolveSalesReceiptDocNumber = (
 const buildCreditNoteTransaction = (
   creditNote: Stripe.CreditNote,
   options: {
+    eventId: string | null;
     invoiceId: string | null;
     parentId: string | null;
     paymentIntent: Stripe.PaymentIntent | null;
@@ -111,6 +114,8 @@ const buildCreditNoteTransaction = (
     status__c: mapStatus(creditNote.status ?? null),
     stripe_credit_note_id__c: creditNote.id,
     stripe_invoice_id__c: options.invoiceId,
+    stripe_event_id__c: options.eventId,
+    stripe_livemode__c: typeof creditNote.livemode === 'boolean' ? creditNote.livemode : null,
     stripe_payment_intent_id__c: normalizeStripeId(paymentIntent?.id),
     stripe_charge_id__c: normalizeStripeId(charge?.id),
     stripe_customer_id__c:
@@ -131,6 +136,23 @@ const buildCreditNoteTransaction = (
         : null,
     received_at__c: timestampToIsoString(creditNote.created ?? null),
     memo__c: memoParts.join('; '),
+    credit_note_number__c: creditNote.number ?? null,
+    credit_note_reason__c: creditNote.reason ?? null,
+    billing_name__c: charge?.billing_details?.name ?? null,
+    billing_email__c: charge?.billing_details?.email ?? null,
+    billing_phone__c: charge?.billing_details?.phone ?? null,
+    statement_descriptor__c:
+      (
+        charge as
+          | (Stripe.Charge & {
+              statement_descriptor?: string | null;
+              calculated_statement_descriptor?: string | null;
+            })
+          | null
+      )?.statement_descriptor ??
+      (charge as (Stripe.Charge & { calculated_statement_descriptor?: string | null }) | null)
+        ?.calculated_statement_descriptor ??
+      null,
     posted_to_qbo__c: false,
   };
 };
@@ -360,7 +382,7 @@ const findParentInvoiceTransactionId = async (
     return await salesforce.findTransactionIdByExternalId(
       'stripe_invoice_id__c',
       invoiceId,
-      'General'
+      STRIPE_TRANSACTION_RECORD_TYPE_NAME
     );
   } catch (error) {
     context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {
@@ -395,6 +417,7 @@ const upsertCreditNoteTransaction = async (
   salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
   creditNote: Stripe.CreditNote,
   options: {
+    eventId: string | null;
     invoiceId: string | null;
     parentId: string | null;
     paymentIntent: Stripe.PaymentIntent | null;
@@ -431,6 +454,7 @@ export const handleCreditNoteEvent = async (
   const invoiceId = normalizeStripeId(invoice?.id) || normalizeStripeId(creditNote.invoice);
   const parentId = await findParentInvoiceTransactionId(context, salesforce, creditNote, invoiceId);
   const upsertResult = await upsertCreditNoteTransaction(context, salesforce, creditNote, {
+    eventId: event.id,
     invoiceId,
     parentId,
     paymentIntent,

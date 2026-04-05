@@ -39,6 +39,7 @@ export interface UpsertRefundReceiptInput {
   docNumber: string | null;
   txnDate: Date;
   lines: RefundReceiptLineInput[];
+  feeAmountCents?: number | null;
   customerContext: {
     charge: Stripe.Charge | null;
     paymentIntent: Stripe.PaymentIntent | null;

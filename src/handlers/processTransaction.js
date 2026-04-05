@@ -6,6 +6,7 @@ const { ensureSalesforceIdOnCustomer } = require('../stripe/utils');
 const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const { AzureIdempotencyStore } = require('../services/idempotencyStore');
+const { applyTestArtifactMetadata } = require('../lib/testArtifactTagging');
 const {
   createStripeCustomer,
   escapeStripeQueryValue,
@@ -340,6 +341,33 @@ const legacyRequestSchema = z
 
 const requestSchema = z.union([modernRequestSchema, legacyRequestSchema]);
 
+const collectValidationMessages = (issues, seen = new Set()) => {
+  const messages = [];
+
+  for (const issue of issues || []) {
+    if (!issue || typeof issue !== 'object') {
+      continue;
+    }
+
+    if (issue.code === 'invalid_union' && Array.isArray(issue.unionErrors)) {
+      for (const unionError of issue.unionErrors) {
+        messages.push(...collectValidationMessages(unionError?.issues || unionError?.errors, seen));
+      }
+      continue;
+    }
+
+    if (typeof issue.message === 'string') {
+      const message = issue.message.trim();
+      if (message.length > 0 && message !== 'Required' && !seen.has(message)) {
+        seen.add(message);
+        messages.push(message);
+      }
+    }
+  }
+
+  return messages;
+};
+
 function ensurePlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
@@ -597,11 +625,18 @@ const validateRequest = (body) => {
   const result = requestSchema.safeParse(body);
 
   if (!result.success) {
+    const modernResult = modernRequestSchema.safeParse(body);
+    const legacyResult = legacyRequestSchema.safeParse(body);
+    const allMessages = collectValidationMessages([
+      ...result.error.issues,
+      ...(modernResult.success ? [] : modernResult.error.issues),
+      ...(legacyResult.success ? [] : legacyResult.error.issues),
+    ]).filter(Boolean);
+
+    const filteredMessages = allMessages.filter((message) => message !== 'Required');
     const message =
-      result.error.issues
-        .map((issue) => issue.message)
-        .filter(Boolean)
-        .join('; ') || 'Invalid request body';
+      (filteredMessages.length > 0 ? filteredMessages : allMessages).join('; ') ||
+      'Invalid request body';
 
     return {
       isValid: false,
@@ -935,11 +970,20 @@ module.exports = async function (request, context) {
       });
     }
 
+    const isLiveMode = getConfiguredMode(actualRequest, actualContext);
     const requestData = validation.value;
-    const customerDetails = requestData.customer;
+    requestData.metadata = applyTestArtifactMetadata(requestData.metadata, {
+      headers: actualRequest?.headers,
+      isLiveMode,
+      requestId,
+    });
+    const customerDetails = {
+      ...requestData.customer,
+      metadata: requestData.metadata,
+    };
+    requestData.customer = customerDetails;
 
     // Initialize services
-    const isLiveMode = getConfiguredMode(actualRequest, actualContext);
     const { stripe } = initializeServices(isLiveMode);
 
     customerDetails.stripeCustomerId = await resolveStripeCustomerId(stripe, customerDetails, log);

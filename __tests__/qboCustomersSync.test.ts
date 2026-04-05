@@ -323,6 +323,99 @@ describe('qboCustomersSync', () => {
     expect(updateQboCustomerSalesforceId).toHaveBeenCalledWith('c2', '003_new');
   });
 
+  it('does not report updates for authoritative contact matches after unsupported fields are filtered out', async () => {
+    const fetchQboCustomersPage = vi.fn().mockResolvedValue([
+      {
+        Id: 'cUnsupported',
+        DisplayName: 'Unsupported Field Contact',
+        GivenName: 'Unsupported',
+        FamilyName: 'Field Contact',
+        PrimaryEmailAddr: { Address: 'supported@example.com' },
+        AlternateEmailAddr: { Address: 'alternate@example.com' },
+        CustomField: [{ DefinitionId: '1', Name: 'Salesforce ID', StringValue: '003_unsupported' }],
+      },
+    ]);
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      if (
+        soql.includes("FROM Contact WHERE Id IN ('003_unsupported')") &&
+        soql.includes('OtherEmail')
+      ) {
+        throw new Error(
+          "No such column 'OtherEmail' on entity 'Contact'. If you are attempting to use a custom field, be sure to append the '__c' after the custom field name."
+        );
+      }
+
+      if (soql.includes("FROM Contact WHERE Id IN ('003_unsupported')")) {
+        return {
+          records: [
+            {
+              Id: '003_unsupported',
+              FirstName: 'Unsupported',
+              LastName: 'Field Contact',
+              Email: 'supported@example.com',
+              Description: '[QBO_CUSTOMER_ID:cUnsupported]',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('003_unsupported')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cUnsupported')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cUnsupported')")) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    const update = vi.fn();
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      updateQboCustomerSalesforceId: vi.fn(),
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create: vi.fn(), update }),
+      }),
+    });
+
+    const { context } = createContext();
+
+    const dryRunResult = await handler(
+      {
+        method: 'GET',
+        url: 'http://localhost/api/qbo/customers-salesforce-sync?dryRun=true&syncMode=update-only',
+        query: {
+          dryRun: 'true',
+          syncMode: 'update-only',
+        },
+      },
+      context
+    );
+
+    expect(dryRunResult.status).toBe(200);
+    expect(dryRunResult.jsonBody.counts.wouldUpdate).toBe(0);
+    expect(update).not.toHaveBeenCalled();
+    expect(
+      query.mock.calls.filter(
+        ([soql]) =>
+          String(soql).includes('OtherEmail') &&
+          String(soql).includes("FROM Contact WHERE Id IN ('003_unsupported')")
+      )
+    ).toHaveLength(1);
+  });
+
   it('uses Contact record type id when available during create', async () => {
     const fetchQboCustomersPage = vi
       .fn()
@@ -399,8 +492,20 @@ describe('qboCustomersSync', () => {
       .mockResolvedValueOnce([]);
 
     const query = vi.fn(async (soql: string) => {
-      if (soql.includes("FROM Contact WHERE Id = '003ValidContact'")) {
+      if (soql.includes("FROM Contact WHERE Id IN ('003ValidContact')")) {
         return { records: [{ Id: '003ValidContact', FirstName: 'Valid', LastName: 'Contact' }] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('003ValidContact')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cSFContact')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cSFContact')")) {
+        return { records: [] };
       }
 
       if (soql.includes('FROM RecordType')) {
@@ -436,7 +541,9 @@ describe('qboCustomersSync', () => {
       salesforceObject: 'Contact',
       matchPath: 'quickbooks_salesforce_id',
     });
-    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('FROM Account WHERE Id ='));
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("FROM Account WHERE Id IN ('003ValidContact')")
+    );
     expect(updateQboCustomerSalesforceId).not.toHaveBeenCalled();
   });
 
@@ -455,12 +562,28 @@ describe('qboCustomersSync', () => {
       .mockResolvedValueOnce([]);
 
     const query = vi.fn(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id IN ('001ValidAccount')")) {
+        return { records: [] };
+      }
+
       if (soql.includes("FROM Contact WHERE Id = '001ValidAccount'")) {
         return { records: [] };
       }
 
+      if (soql.includes("FROM Account WHERE Id IN ('001ValidAccount')")) {
+        return { records: [{ Id: '001ValidAccount', Name: 'Acme Org' }] };
+      }
+
       if (soql.includes("FROM Account WHERE Id = '001ValidAccount'")) {
         return { records: [{ Id: '001ValidAccount', Name: 'Acme Org' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cSFAccount')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cSFAccount')")) {
+        return { records: [] };
       }
 
       if (soql.includes('FROM RecordType')) {
@@ -498,6 +621,387 @@ describe('qboCustomersSync', () => {
     expect(updateQboCustomerSalesforceId).not.toHaveBeenCalled();
   });
 
+  it('recognizes Salesforce ID custom fields with alternate label formatting', async () => {
+    const fetchQboCustomersPage = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          Id: 'cAltLabel',
+          DisplayName: 'Alt Label Account',
+          CustomField: [{ DefinitionId: '1', Name: 'Salesforce_Id', StringValue: '001ALTACCOUNT' }],
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id IN ('001ALTACCOUNT')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE Id = '001ALTACCOUNT'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('001ALTACCOUNT')")) {
+        return { records: [{ Id: '001ALTACCOUNT', Name: 'Existing Account' }] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001ALTACCOUNT'")) {
+        return { records: [{ Id: '001ALTACCOUNT', Name: 'Existing Account' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cAltLabel')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cAltLabel')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      updateQboCustomerSalesforceId: vi.fn(),
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create: vi.fn(), update: vi.fn() }),
+      }),
+    });
+
+    const { context } = createContext();
+    const result = await handler(
+      { method: 'GET', url: 'http://localhost', query: { dryRun: 'true' } },
+      context
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.samples.matched[0]).toMatchObject({
+      qboCustomerId: 'cAltLabel',
+      salesforceId: '001ALTACCOUNT',
+      salesforceObject: 'Account',
+      matchPath: 'quickbooks_salesforce_id',
+    });
+  });
+
+  it('falls back to direct Salesforce ID lookup when preload maps miss the QBO Salesforce ID', async () => {
+    const fetchQboCustomersPage = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          Id: 'cDirectLookup',
+          DisplayName: 'Direct Lookup Account',
+          CustomField: [
+            { DefinitionId: '1', Name: 'Salesforce ID', StringValue: '001DIRECTACCOUNT' },
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id IN ('001DIRECTACCOUNT')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('001DIRECTACCOUNT')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE Id = '001DIRECTACCOUNT'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001DIRECTACCOUNT'")) {
+        return { records: [{ Id: '001DIRECTACCOUNT', Name: 'Direct Account Match' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cDirectLookup')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cDirectLookup')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      updateQboCustomerSalesforceId: vi.fn(),
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create: vi.fn(), update: vi.fn() }),
+      }),
+    });
+
+    const { context } = createContext();
+    const result = await handler(
+      { method: 'GET', url: 'http://localhost', query: { dryRun: 'true' } },
+      context
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.samples.matched[0]).toMatchObject({
+      qboCustomerId: 'cDirectLookup',
+      salesforceId: '001DIRECTACCOUNT',
+      salesforceObject: 'Account',
+      matchPath: 'quickbooks_salesforce_id',
+    });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("FROM Account WHERE Id = '001DIRECTACCOUNT'")
+    );
+  });
+
+  it('does not classify a customer as creatable when its authoritative QBO Salesforce ID is missing in Salesforce', async () => {
+    const fetchQboCustomersPage = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          Id: 'cAuthoritativeMissing',
+          DisplayName: 'Authoritative Missing',
+          CustomField: [
+            { DefinitionId: '1', Name: 'Salesforce ID', StringValue: '001MISSINGACCOUNT' },
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id IN ('001MISSINGACCOUNT')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('001MISSINGACCOUNT')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cAuthoritativeMissing')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cAuthoritativeMissing')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE Id = '001MISSINGACCOUNT'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001MISSINGACCOUNT'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    const create = vi.fn();
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      updateQboCustomerSalesforceId: vi.fn(),
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create, update: vi.fn() }),
+      }),
+    });
+
+    const { context } = createContext();
+    const result = await handler(
+      { method: 'GET', url: 'http://localhost', query: { dryRun: 'true' } },
+      context
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.counts.notInSalesforce).toBe(0);
+    expect(result.jsonBody.counts.willBeCreated).toBe(0);
+    expect(result.jsonBody.counts.authoritativeLinkMissing).toBe(1);
+    expect(result.jsonBody.counts.errors).toBe(0);
+    expect(result.jsonBody.samples.authoritativeLinkMissing[0]).toMatchObject({
+      qboCustomerId: 'cAuthoritativeMissing',
+      reason: 'authoritative_salesforce_id_missing',
+      salesforceId: '001MISSINGACCOUNT',
+    });
+    expect(result.jsonBody.samples.errors).toEqual([]);
+    expect(result.jsonBody.samples.willCreate).toEqual([]);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('hydrates sparse QBO customers before matching by Salesforce ID', async () => {
+    const fetchQboCustomersPage = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          Id: 'cSparseAccount',
+          DisplayName: 'Sparse Account',
+          sparse: true,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const getQboCustomerById = vi.fn().mockResolvedValue({
+      Id: 'cSparseAccount',
+      DisplayName: 'Sparse Account',
+      CustomField: [{ DefinitionId: '1', Name: 'Salesforce ID', StringValue: '001SPARSEACCOUNT' }],
+    });
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id IN ('001SPARSEACCOUNT')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('001SPARSEACCOUNT')")) {
+        return { records: [{ Id: '001SPARSEACCOUNT', Name: 'Sparse Account Match' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE Id = '001SPARSEACCOUNT'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001SPARSEACCOUNT'")) {
+        return { records: [{ Id: '001SPARSEACCOUNT', Name: 'Sparse Account Match' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cSparseAccount')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cSparseAccount')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      getQboCustomerById,
+      updateQboCustomerSalesforceId: vi.fn(),
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create: vi.fn(), update: vi.fn() }),
+      }),
+    });
+
+    const { context } = createContext();
+    const result = await handler(
+      { method: 'GET', url: 'http://localhost', query: { dryRun: 'true' } },
+      context
+    );
+
+    expect(result.status).toBe(200);
+    expect(getQboCustomerById).toHaveBeenCalledWith('cSparseAccount');
+    expect(result.jsonBody.samples.matched[0]).toMatchObject({
+      qboCustomerId: 'cSparseAccount',
+      salesforceId: '001SPARSEACCOUNT',
+      salesforceObject: 'Account',
+      matchPath: 'quickbooks_salesforce_id',
+    });
+  });
+
+  it('retries sparse QBO hydration when QuickBooks throttles before matching by Salesforce ID', async () => {
+    const fetchQboCustomersPage = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          Id: 'cSparseThrottle',
+          DisplayName: 'Sparse Throttle',
+          sparse: true,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const getQboCustomerById = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error(
+          'Failed to load QuickBooks customer "cSparseThrottle" (status 429): ThrottleExceeded'
+        )
+      )
+      .mockResolvedValueOnce({
+        Id: 'cSparseThrottle',
+        DisplayName: 'Sparse Throttle',
+        CustomField: [
+          { DefinitionId: '1', Name: 'Salesforce ID', StringValue: '001SPARSETHROTTLE' },
+        ],
+      });
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id IN ('001SPARSETHROTTLE')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('001SPARSETHROTTLE')")) {
+        return { records: [{ Id: '001SPARSETHROTTLE', Name: 'Sparse Throttle Account' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE Id = '001SPARSETHROTTLE'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE Id = '001SPARSETHROTTLE'")) {
+        return { records: [{ Id: '001SPARSETHROTTLE', Name: 'Sparse Throttle Account' }] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cSparseThrottle')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cSparseThrottle')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      getQboCustomerById,
+      updateQboCustomerSalesforceId: vi.fn(),
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create: vi.fn(), update: vi.fn() }),
+      }),
+    });
+
+    const { context } = createContext();
+    const result = await handler(
+      { method: 'GET', url: 'http://localhost', query: { dryRun: 'true' } },
+      context
+    );
+
+    expect(result.status).toBe(200);
+    expect(getQboCustomerById).toHaveBeenCalledTimes(2);
+    expect(result.jsonBody.counts.willBeCreated).toBe(0);
+    expect(result.jsonBody.samples.matched[0]).toMatchObject({
+      qboCustomerId: 'cSparseThrottle',
+      salesforceId: '001SPARSETHROTTLE',
+      salesforceObject: 'Account',
+      matchPath: 'quickbooks_salesforce_id',
+    });
+  });
+
   it('backfills QuickBooks Salesforce ID when Contact is matched by QuickBooks_ID__c', async () => {
     const fetchQboCustomersPage = vi
       .fn()
@@ -516,7 +1020,7 @@ describe('qboCustomersSync', () => {
         return { records: [] };
       }
 
-      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c = 'cQboLookup'")) {
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cQboLookup')")) {
         return {
           records: [
             {
@@ -529,7 +1033,15 @@ describe('qboCustomersSync', () => {
         };
       }
 
-      if (soql.includes("FROM Account WHERE QuickBooks_ID__c = 'cQboLookup'")) {
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cQboLookup')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM Contact WHERE Id IN')) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM Account WHERE Id IN')) {
         return { records: [] };
       }
 
@@ -577,16 +1089,24 @@ describe('qboCustomersSync', () => {
         return { records: [] };
       }
 
-      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c = 'cAccountLookup'")) {
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cAccountLookup')")) {
         return { records: [] };
       }
 
-      if (soql.includes("FROM Account WHERE QuickBooks_ID__c = 'cAccountLookup'")) {
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cAccountLookup')")) {
         return {
           records: [
             { Id: '001FromQboField', Name: 'Matched Account', QuickBooks_ID__c: 'cAccountLookup' },
           ],
         };
+      }
+
+      if (soql.includes('FROM Contact WHERE Id IN')) {
+        return { records: [] };
+      }
+
+      if (soql.includes('FROM Account WHERE Id IN')) {
+        return { records: [] };
       }
 
       throw new Error(`Unexpected query: ${soql}`);
@@ -689,6 +1209,98 @@ describe('qboCustomersSync', () => {
       salesforceObject: 'Contact',
     });
     expect(update).toHaveBeenCalled();
+    expect(updateQboCustomerSalesforceId).not.toHaveBeenCalled();
+  });
+
+  it('preloads deterministic Salesforce matches once per page', async () => {
+    const fetchQboCustomersPage = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          Id: 'cBulk1',
+          DisplayName: 'Bulk One',
+          GivenName: 'Bulk',
+          FamilyName: 'One',
+          CustomField: [{ Name: 'Salesforce ID', StringValue: '003BulkOne' }],
+        },
+        {
+          Id: 'cBulk2',
+          DisplayName: 'Bulk Two',
+          GivenName: 'Bulk',
+          FamilyName: 'Two',
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const query = vi.fn(async (soql: string) => {
+      if (soql.includes('FROM RecordType')) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE Id IN ('003BulkOne')")) {
+        return {
+          records: [
+            { Id: '003BulkOne', FirstName: 'Bulk', LastName: 'One', Email: 'one@example.com' },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Account WHERE Id IN ('003BulkOne')")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Contact WHERE QuickBooks_ID__c IN ('cBulk1', 'cBulk2')")) {
+        return {
+          records: [
+            {
+              Id: '003BulkTwo',
+              FirstName: 'Bulk',
+              LastName: 'Two',
+              Email: 'two@example.com',
+              QuickBooks_ID__c: 'cBulk2',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Account WHERE QuickBooks_ID__c IN ('cBulk1', 'cBulk2')")) {
+        return { records: [] };
+      }
+
+      throw new Error(`Unexpected query: ${soql}`);
+    });
+
+    const updateQboCustomerSalesforceId = vi.fn();
+
+    internals.setDependencies({
+      fetchQboCustomersPage,
+      updateQboCustomerSalesforceId,
+      getSalesforceConnection: vi.fn().mockResolvedValue({
+        query,
+        sobject: vi.fn().mockReturnValue({ create: vi.fn(), update: vi.fn() }),
+      }),
+    });
+
+    const { context } = createContext();
+    const result = await handler(
+      { method: 'GET', url: 'http://localhost', query: { dryRun: 'true' } },
+      context
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.jsonBody.counts.alreadyExistInSalesforce).toBe(2);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("FROM Contact WHERE Id IN ('003BulkOne')")
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("FROM Contact WHERE QuickBooks_ID__c IN ('cBulk1', 'cBulk2')")
+    );
+    expect(query).not.toHaveBeenCalledWith(
+      expect.stringContaining("FROM Contact WHERE Id = '003BulkOne'")
+    );
+    expect(query).not.toHaveBeenCalledWith(
+      expect.stringContaining("FROM Contact WHERE QuickBooks_ID__c = 'cBulk2'")
+    );
     expect(updateQboCustomerSalesforceId).not.toHaveBeenCalled();
   });
 });

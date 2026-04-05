@@ -191,7 +191,8 @@ describe('handleCreditNoteEvent', () => {
   });
 
   it('upserts Salesforce and posts refund receipt for created credit note', async () => {
-    const { context, event, deps, refundAdapter, salesforce, creditNote } = setup();
+    const creditNote = createCreditNote({ reason: 'duplicate' });
+    const { context, event, deps, refundAdapter, salesforce } = setup({ creditNote });
 
     await handleCreditNoteEvent(context, event, deps);
 
@@ -199,6 +200,10 @@ describe('handleCreditNoteEvent', () => {
     const payload = salesforce.upsertTransactionByExternalId.mock.calls[0][0];
     expect(payload.stripe_credit_note_id__c).toBe(creditNote.id);
     expect(payload.stripe_invoice_id__c).toBe('in_123');
+    expect(payload.stripe_event_id__c).toBe(event.id);
+    expect(payload.stripe_livemode__c).toBe(false);
+    expect(payload.credit_note_number__c).toBe('CN-1001');
+    expect(payload.credit_note_reason__c).toBe('duplicate');
     expect(payload.parent_transaction__c).toBe('sf_invoice_1');
 
     expect(deps.idempotencyStore.withLock).toHaveBeenCalledWith(

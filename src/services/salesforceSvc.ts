@@ -3,21 +3,30 @@ import type { UpsertResult } from 'jsforce/lib/types';
 
 import type { TransactionUpsertDTO } from '../domain/transactions';
 
+const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
+const PAYOUT_TRANSACTION_RECORD_TYPE_NAME = 'Payout';
+const SALES_RECEIPT_RECORD_TYPE_NAME = 'Sales Receipt';
+const JOURNAL_ENTRY_RECORD_TYPE_NAME = 'Journal Entry';
+const BANK_DEPOSIT_RECORD_TYPE_NAME = 'Bank Deposit';
+
 export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, string> = {
   Name: 'Name',
-  transaction_type__c: 'Transaction_Type__c',
+  transaction_type__c: 'transaction_type__c',
   status__c: 'Status__c',
   stripe_payment_intent_id__c: 'Stripe_Payment_Intent_Id__c',
   stripe_charge_id__c: 'Stripe_Charge_Id__c',
   stripe_balance_transaction_id__c: 'Stripe_Balance_Transaction_Id__c',
   stripe_refund_id__c: 'Stripe_Refund_Id__c',
   stripe_dispute_id__c: 'Stripe_Dispute_Id__c',
-  stripe_invoice_id__c: 'Stripe_Invoice_Id__c',
+  stripe_invoice_id__c: 'Stripe_Invoice_ID__c',
   stripe_credit_note_id__c: 'Stripe_Credit_Note_Id__c',
   stripe_checkout_session_id__c: 'Stripe_Checkout_Session_Id__c',
   stripe_customer_id__c: 'Stripe_Customer_Id__c',
   stripe_subscription_id__c: 'Stripe_Subscription_Id__c',
   stripe_payout_id__c: 'Stripe_Payout_Id__c',
+  stripe_event_id__c: 'Stripe_Event_Id__c',
+  stripe_livemode__c: 'Stripe_Livemode__c',
+  stripe_receipt_url__c: 'Stripe_Receipt_URL__c',
   parent_transaction__c: 'Parent_Transaction__c',
   amount_gross__c: 'Amount_Gross__c',
   amount_fee__c: 'Amount_Fee__c',
@@ -37,12 +46,33 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   payment_method__c: 'Payment_Method__c',
   payment_brand__c: 'Payment_Brand__c',
   payment_last4__c: 'Payment_Last4__c',
+  source_system__c: 'Source_System__c',
   received_at__c: 'Received_At__c',
+  available_on_date__c: 'Available_On_Date__c',
   next_retry_at__c: 'Next_Retry_At__c',
   dunning_required__c: 'Dunning_Required__c',
+  error_message__c: 'Error_Message__c',
+  failure_code__c: 'Failure_Code__c',
+  decline_code__c: 'Decline_Code__c',
+  dispute_status__c: 'Dispute_Status__c',
+  dispute_reason__c: 'Dispute_Reason__c',
+  credit_note_number__c: 'Credit_Note_Number__c',
+  credit_note_reason__c: 'Credit_Note_Reason__c',
+  billing_name__c: 'Billing_Name__c',
+  billing_email__c: 'Billing_Email__c',
+  billing_phone__c: 'Billing_Phone__c',
+  statement_descriptor__c: 'Statement_Descriptor__c',
   posted_to_qbo__c: 'Posted_to_QBO__c',
   qbo_doc_type__c: 'QBO_Doc_Type__c',
   qbo_doc_id__c: 'QBO_Doc_Id__c',
+  qbo_doc_number__c: 'QBO_Doc_Number__c',
+  qbo_customer_id__c: 'QBO_Customer_Id__c',
+  qbo_customer_name__c: 'QBO_Customer_Name__c',
+  qbo_class_id__c: 'QBO_Class_Id__c',
+  qbo_class_name__c: 'QBO_Class_Name__c',
+  qbo_private_note__c: 'QBO_Private_Note__c',
+  qbo_source_created_at__c: 'QBO_Source_Created_At__c',
+  qbo_source_updated_at__c: 'QBO_Source_Updated_At__c',
   qbo_posted_at__c: 'QBO_Posted_At__c',
   posting_error__c: 'Posting_Error__c',
 };
@@ -77,6 +107,7 @@ const TRANSACTION_EXTERNAL_ID_FIELDS: TransactionExternalIdField[] = [
 export interface QuickBooksDocumentReference {
   type: string;
   id: string;
+  postedAt?: string;
 }
 
 export interface SalesforceSvcOptions {
@@ -95,6 +126,33 @@ export interface CustomerUpsertDTO {
   LastName?: string | null;
 }
 
+export interface StripeBackfillTransactionRecord {
+  id: string;
+  stripeChargeId: string | null;
+  stripePaymentIntentId: string | null;
+  stripeCustomerId: string | null;
+  sourceSystem: string | null;
+  contactId: string | null;
+  accountId: string | null;
+  campaignId: string | null;
+  fundId: string | null;
+  designationId: string | null;
+  restrictionId: string | null;
+  postedToQbo: boolean | null;
+  qboDocType: string | null;
+  qboDocId: string | null;
+  qboDocNumber: string | null;
+  qboCustomerId: string | null;
+  qboCustomerName: string | null;
+  qboClassId: string | null;
+  qboClassName: string | null;
+  qboPrivateNote: string | null;
+  qboSourceCreatedAt: string | null;
+  qboSourceUpdatedAt: string | null;
+  qboPostedAt: string | null;
+  postingError: string | null;
+}
+
 export interface SalesforceSvc {
   upsertTransactionByExternalId: (
     dto: TransactionUpsertDTO,
@@ -106,7 +164,8 @@ export interface SalesforceSvc {
   findTransactionIdByExternalId: (
     key: TransactionExternalIdField,
     value: string,
-    recordTypeName?: string
+    recordTypeName?: string,
+    transactionType?: string
   ) => Promise<string | null>;
   findTransactionRecordByExternalId?: (
     key: TransactionExternalIdField,
@@ -114,6 +173,21 @@ export interface SalesforceSvc {
     recordTypeName?: string
   ) => Promise<{ id: string; contactId: string | null } | null>;
   upsertCustomerByStripeId: (dto: CustomerUpsertDTO) => Promise<UpsertResult>;
+  findTransactionForStripeBackfill?: (
+    salesforceId: string
+  ) => Promise<StripeBackfillTransactionRecord | null>;
+  findTransactionForStripeBackfillByStripeIds?: (options: {
+    stripeChargeId?: string | null;
+    stripePaymentIntentId?: string | null;
+    stripeBalanceTransactionId?: string | null;
+    stripeRefundId?: string | null;
+    stripeDisputeId?: string | null;
+    stripeCheckoutSessionId?: string | null;
+    stripeSubscriptionId?: string | null;
+    stripeInvoiceId?: string | null;
+    stripeCreditNoteId?: string | null;
+    stripePayoutId?: string | null;
+  }) => Promise<StripeBackfillTransactionRecord | null>;
   findContactIdById?: (contactId: string) => Promise<string | null>;
   findAccountIdById?: (accountId: string) => Promise<string | null>;
 }
@@ -126,6 +200,13 @@ type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
 type TransactionRecord = Record<string, TransactionFieldValue>;
 
 type TransactionLookupRecord = { Id?: string };
+
+type TransactionDateMatchRecord = {
+  Id?: string;
+  Posted_to_QBO__c?: boolean | null;
+  QBO_Doc_Id__c?: string | null;
+  CreatedDate?: string | null;
+};
 
 type TransactionContactLookupRecord = {
   Id?: string;
@@ -140,7 +221,53 @@ type ContactLookupRecord = {
   Stripe_Customer_Id__c?: string | null;
 };
 
+type StripeBackfillLookupRecord = {
+  Id?: string;
+  Stripe_Charge_Id__c?: string | null;
+  Stripe_Payment_Intent_Id__c?: string | null;
+  Stripe_Balance_Transaction_Id__c?: string | null;
+  Stripe_Refund_Id__c?: string | null;
+  Stripe_Dispute_Id__c?: string | null;
+  Stripe_Checkout_Session_Id__c?: string | null;
+  Stripe_Subscription_Id__c?: string | null;
+  Stripe_Invoice_ID__c?: string | null;
+  Stripe_Credit_Note_Id__c?: string | null;
+  Stripe_Payout_Id__c?: string | null;
+  Stripe_Customer_Id__c?: string | null;
+  Source_System__c?: string | null;
+  Contact__c?: string | null;
+  Account__c?: string | null;
+  Campaign__c?: string | null;
+  Fund__c?: string | null;
+  Designation__c?: string | null;
+  Restriction__c?: string | null;
+  Posted_to_QBO__c?: boolean | null;
+  QBO_Doc_Type__c?: string | null;
+  QBO_Doc_Id__c?: string | null;
+  QBO_Doc_Number__c?: string | null;
+  QBO_Customer_Id__c?: string | null;
+  QBO_Customer_Name__c?: string | null;
+  QBO_Class_Id__c?: string | null;
+  QBO_Class_Name__c?: string | null;
+  QBO_Private_Note__c?: string | null;
+  QBO_Source_Created_At__c?: string | null;
+  QBO_Source_Updated_At__c?: string | null;
+  QBO_Posted_At__c?: string | null;
+  Posting_Error__c?: string | null;
+};
+
 const TRANSACTION_OBJECT = 'Transaction__c';
+const TRANSACTION_DML_HEADERS = {
+  'Sforce-Duplicate-Rule-Header': 'allowSave=true',
+} as const;
+const TRANSACTION_DML_OPTIONS = {
+  allOrNone: true,
+  headers: TRANSACTION_DML_HEADERS,
+} as const;
+const CONTACT_DML_OPTIONS = {
+  allOrNone: true,
+  headers: TRANSACTION_DML_HEADERS,
+} as const;
 
 const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
   if (field === 'Id') {
@@ -185,6 +312,17 @@ const collectErrorMessages = (results: UpsertResult[]): string =>
     .filter(isFailedUpsertResult)
     .flatMap((result) => result.errors.map((error) => error.message))
     .join('; ');
+
+const toFailedUpsertResultFromError = (error: unknown): FailedUpsertResult => ({
+  success: false,
+  id: undefined,
+  errors: [
+    {
+      errorCode: 'UNKNOWN_EXCEPTION',
+      message: error instanceof Error ? error.message : String(error),
+    },
+  ],
+});
 
 const ensureNonEmpty = (value: string, fieldName: string): string => {
   const trimmed = value.trim();
@@ -264,6 +402,23 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return parsedDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
   };
 
+  const toUtcDayRange = (value: string): { start: string; end: string } | null => {
+    const parsedDate = new Date(value.trim());
+    if (Number.isNaN(parsedDate.getTime())) {
+      return null;
+    }
+
+    const start = new Date(
+      Date.UTC(parsedDate.getUTCFullYear(), parsedDate.getUTCMonth(), parsedDate.getUTCDate())
+    );
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+    return {
+      start: start.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      end: end.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    };
+  };
+
   const toLookupRecords = (result: unknown): TransactionLookupRecord[] => {
     if (Array.isArray(result)) {
       return result as TransactionLookupRecord[];
@@ -324,7 +479,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const resolveExistingTransactionId = async (
     field: TransactionExternalIdField,
     value: string,
-    recordTypeId?: string
+    recordTypeId?: string,
+    transactionType?: string
   ): Promise<string | null> => {
     const apiField = resolveExternalIdField(field);
     const escapedValue = escapeForSoqlLiteral(value);
@@ -335,19 +491,56 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       soql += ` AND RecordTypeId = '${escapedRecordTypeId}'`;
     }
 
+    if (transactionType && transactionType.trim().length > 0) {
+      const escapedTransactionType = escapeForSoqlLiteral(transactionType.trim());
+      soql += ` AND transaction_type__c = '${escapedTransactionType}'`;
+    }
+
     soql += ' LIMIT 1';
 
-    const recordWithId = findFirstRecordWithId(await queryRecords<TransactionLookupRecord>(soql));
+    let records: TransactionLookupRecord[] = [];
+    try {
+      records = await queryRecords<TransactionLookupRecord>(soql);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isUnsupportedExternalIdFieldError(message)) {
+        return null;
+      }
+      throw error;
+    }
+
+    const recordWithId = findFirstRecordWithId(records);
 
     return recordWithId?.Id ?? null;
   };
 
+  const resolveExistingTransactionIdAnyRecordType = async (
+    field: TransactionExternalIdField,
+    value: string,
+    transactionType?: string
+  ): Promise<string | null> =>
+    resolveExistingTransactionId(field, value, undefined, transactionType);
+
   const findExistingTransactionIdForDto = async (
     dto: TransactionUpsertDTO,
+    key: TransactionExternalIdField,
     recordTypeId: string
   ): Promise<string | null> => {
-    const fields: TransactionExternalIdField[] = [...TRANSACTION_EXTERNAL_ID_FIELDS];
-    if (dto.transaction_type__c === 'payout') {
+    const fields: TransactionExternalIdField[] = [key];
+
+    // Only charge transactions should opportunistically merge across multiple
+    // Stripe identifiers. Refunds, disputes, credit notes, and other child
+    // transaction types must create their own Transaction__c rows even when
+    // they reference an existing charge.
+    if (dto.transaction_type__c === 'charge') {
+      for (const field of TRANSACTION_EXTERNAL_ID_FIELDS) {
+        if (!fields.includes(field)) {
+          fields.push(field);
+        }
+      }
+    }
+
+    if (dto.transaction_type__c === 'payout' && !fields.includes('stripe_payout_id__c')) {
       fields.push('stripe_payout_id__c');
     }
 
@@ -357,6 +550,15 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         const existingId = await resolveExistingTransactionId(field, value.trim(), recordTypeId);
         if (existingId) {
           return existingId;
+        }
+
+        const crossRecordTypeId = await resolveExistingTransactionIdAnyRecordType(
+          field,
+          value.trim(),
+          dto.transaction_type__c
+        );
+        if (crossRecordTypeId) {
+          return crossRecordTypeId;
         }
       }
     }
@@ -401,6 +603,57 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       const records = toLookupRecords(result);
       if (records.length === 1 && records[0].Id) {
         return records[0].Id;
+      }
+
+      if (recordTypeId) {
+        const fallbackSoql =
+          `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
+          ` AND Amount_Gross__c = ${amount}` +
+          ` AND Received_At__c = ${receivedAtLiteral}` +
+          ' LIMIT 2';
+
+        const fallbackResult = await connection.query<TransactionLookupRecord>(fallbackSoql);
+        const fallbackRecords = toLookupRecords(fallbackResult);
+        if (fallbackRecords.length === 1 && fallbackRecords[0].Id) {
+          return fallbackRecords[0].Id;
+        }
+      }
+
+      const dayRange = toUtcDayRange(received);
+      if (!dayRange) {
+        return null;
+      }
+
+      const sameDaySoql =
+        `SELECT Id, Posted_to_QBO__c, QBO_Doc_Id__c, CreatedDate FROM ${TRANSACTION_OBJECT} ` +
+        `WHERE Contact__c = '${escapedContact}'` +
+        ` AND Amount_Gross__c = ${amount}` +
+        ` AND Received_At__c >= ${dayRange.start}` +
+        ` AND Received_At__c < ${dayRange.end}` +
+        ' ORDER BY CreatedDate DESC LIMIT 10';
+
+      const sameDayRecords = await queryRecords<TransactionDateMatchRecord>(sameDaySoql);
+      const candidates = sameDayRecords
+        .filter(
+          (record): record is TransactionDateMatchRecord & { Id: string } =>
+            typeof record.Id === 'string' && record.Id.trim().length > 0
+        )
+        .map((record) => ({
+          record,
+          score:
+            (record.Posted_to_QBO__c === true ? 10 : 0) +
+            (typeof record.QBO_Doc_Id__c === 'string' && record.QBO_Doc_Id__c.trim().length > 0
+              ? 5
+              : 0),
+        }))
+        .sort((left, right) => right.score - left.score);
+
+      if (candidates.length === 1) {
+        return candidates[0].record.Id;
+      }
+
+      if (candidates.length > 1 && candidates[0].score > candidates[1].score) {
+        return candidates[0].record.Id;
       }
     }
 
@@ -534,11 +787,31 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return trimmed.length > 0 ? trimmed : null;
   };
 
-  const resolveTransactionRecordTypeName = (dto: TransactionUpsertDTO): 'General' | 'Payout' =>
-    dto.transaction_type__c === 'payout' ? 'Payout' : 'General';
+  const resolveTransactionRecordTypeName = (
+    dto: TransactionUpsertDTO
+  ):
+    | typeof STRIPE_TRANSACTION_RECORD_TYPE_NAME
+    | typeof PAYOUT_TRANSACTION_RECORD_TYPE_NAME
+    | typeof SALES_RECEIPT_RECORD_TYPE_NAME
+    | typeof JOURNAL_ENTRY_RECORD_TYPE_NAME
+    | typeof BANK_DEPOSIT_RECORD_TYPE_NAME => {
+    switch (dto.qbo_doc_type__c) {
+      case 'sales-receipt':
+        return SALES_RECEIPT_RECORD_TYPE_NAME;
+      case 'journal-entry':
+        return JOURNAL_ENTRY_RECORD_TYPE_NAME;
+      case 'bank-deposit':
+        return BANK_DEPOSIT_RECORD_TYPE_NAME;
+      default:
+        return dto.transaction_type__c === 'payout'
+          ? PAYOUT_TRANSACTION_RECORD_TYPE_NAME
+          : STRIPE_TRANSACTION_RECORD_TYPE_NAME;
+    }
+  };
 
   const resolveOverrideTransactionId = async (
     dto: TransactionUpsertDTO,
+    key: TransactionExternalIdField,
     recordTypeId: string,
     overrideId: string | null
   ): Promise<string | null> => {
@@ -546,9 +819,13 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       return overrideId;
     }
 
-    const existing = await findExistingTransactionIdForDto(dto, recordTypeId);
+    const existing = await findExistingTransactionIdForDto(dto, key, recordTypeId);
     if (existing) {
       return existing;
+    }
+
+    if (key === 'qbo_doc_id__c') {
+      return null;
     }
 
     return findExistingByCustomerAmountDate(dto, recordTypeId);
@@ -574,9 +851,12 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     externalIdField: string
   ): Promise<UpsertResult> => {
     const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, [record], externalIdField, {
-        allOrNone: true,
-      })
+      await connection.upsert(
+        TRANSACTION_OBJECT,
+        [record],
+        externalIdField,
+        TRANSACTION_DML_OPTIONS
+      )
     );
 
     return result;
@@ -587,9 +867,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     errorMessage: string
   ): Promise<UpsertResult & { created: true }> => {
     const [result] = toArray(
-      await connection.sobject(TRANSACTION_OBJECT).create(record, {
-        allOrNone: true,
-      })
+      await connection.sobject(TRANSACTION_OBJECT).create(record, TRANSACTION_DML_OPTIONS)
     );
 
     if (!result.success) {
@@ -694,17 +972,27 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const recordTypeName = resolveTransactionRecordTypeName(dto);
     const recordTypeId = await resolveRecordTypeId(recordTypeName);
 
-    const resolvedOverrideId = await resolveOverrideTransactionId(dto, recordTypeId, overrideId);
-    const result = await upsertSingleTransactionRecord(
-      buildTransactionUpsertRecord({
-        dto,
-        key,
-        normalizedExternalId,
-        recordTypeId,
-        id: resolvedOverrideId,
-      }),
-      resolvedOverrideId ? 'Id' : resolveExternalIdField(key)
+    const resolvedOverrideId = await resolveOverrideTransactionId(
+      dto,
+      key,
+      recordTypeId,
+      overrideId
     );
+    let result: UpsertResult;
+    try {
+      result = await upsertSingleTransactionRecord(
+        buildTransactionUpsertRecord({
+          dto,
+          key,
+          normalizedExternalId,
+          recordTypeId,
+          id: resolvedOverrideId,
+        }),
+        resolvedOverrideId ? 'Id' : resolveExternalIdField(key)
+      );
+    } catch (error) {
+      result = toFailedUpsertResultFromError(error);
+    }
 
     if (!result.success) {
       return recoverFailedTransactionUpsert({
@@ -745,9 +1033,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     }));
 
     const results = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, records, 'Id', {
-        allOrNone: true,
-      })
+      await connection.upsert(TRANSACTION_OBJECT, records, 'Id', TRANSACTION_DML_OPTIONS)
     );
     const failures = results.filter((result) => !result.success);
     if (failures.length > 0) {
@@ -766,18 +1052,20 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const normalizedId = ensureNonEmpty(salesforceId, 'Salesforce transaction ID');
     const normalizedDocType = ensureNonEmpty(doc.type, 'QuickBooks document type');
     const normalizedDocId = ensureNonEmpty(doc.id, 'QuickBooks document ID');
+    const normalizedPostedAt =
+      typeof doc.postedAt === 'string' && doc.postedAt.trim().length > 0
+        ? doc.postedAt.trim()
+        : new Date().toISOString();
     const record = sanitizeTransactionRecord({
       Id: normalizedId,
       posted_to_qbo__c: true,
       qbo_doc_type__c: normalizedDocType,
       qbo_doc_id__c: normalizedDocId,
-      qbo_posted_at__c: new Date().toISOString(),
+      qbo_posted_at__c: normalizedPostedAt,
       posting_error__c: null,
     });
     const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', {
-        allOrNone: true,
-      })
+      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', TRANSACTION_DML_OPTIONS)
     );
     if (!result.success) {
       const message =
@@ -790,7 +1078,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const findTransactionIdByExternalId = async (
     key: TransactionExternalIdField,
     value: string,
-    recordTypeName?: string
+    recordTypeName?: string,
+    transactionType?: string
   ): Promise<string | null> => {
     const normalizedKey = ensureNonEmpty(key, 'External ID field');
     const normalizedValue = ensureNonEmpty(value, 'External ID value');
@@ -803,7 +1092,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return resolveExistingTransactionId(
       normalizedKey as TransactionExternalIdField,
       normalizedValue,
-      recordTypeId
+      recordTypeId,
+      transactionType
     );
   };
 
@@ -839,6 +1129,273 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         typeof record.Contact__c === 'string' && record.Contact__c.trim().length > 0
           ? record.Contact__c
           : null,
+    };
+  };
+
+  const findTransactionForStripeBackfill = async (
+    salesforceId: string
+  ): Promise<StripeBackfillTransactionRecord | null> => {
+    const normalizedId = ensureNonEmpty(salesforceId, 'Salesforce transaction ID');
+    const escapedId = escapeForSoqlLiteral(normalizedId);
+    const selectClause =
+      `SELECT Id, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, Stripe_Balance_Transaction_Id__c, ` +
+      `Stripe_Refund_Id__c, Stripe_Dispute_Id__c, Stripe_Checkout_Session_Id__c, ` +
+      `Stripe_Subscription_Id__c, Stripe_Invoice_ID__c, Stripe_Credit_Note_Id__c, Stripe_Payout_Id__c, ` +
+      `Stripe_Customer_Id__c, ` +
+      `Source_System__c, Contact__c, Account__c, Campaign__c, Fund__c, Designation__c, Restriction__c, ` +
+      `Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, QBO_Doc_Number__c, ` +
+      `QBO_Customer_Id__c, QBO_Customer_Name__c, QBO_Class_Id__c, QBO_Class_Name__c, ` +
+      `QBO_Private_Note__c, QBO_Source_Created_At__c, QBO_Source_Updated_At__c, ` +
+      `QBO_Posted_At__c, Posting_Error__c `;
+    const soql = selectClause + `FROM ${TRANSACTION_OBJECT} WHERE Id = '${escapedId}' LIMIT 1`;
+
+    const record = findFirstRecordWithId(await queryRecords<StripeBackfillLookupRecord>(soql));
+    if (!record) {
+      return null;
+    }
+
+    return {
+      id: record.Id,
+      stripeChargeId: record.Stripe_Charge_Id__c ?? null,
+      stripePaymentIntentId: record.Stripe_Payment_Intent_Id__c ?? null,
+      stripeCustomerId: record.Stripe_Customer_Id__c ?? null,
+      sourceSystem: record.Source_System__c ?? null,
+      contactId: record.Contact__c ?? null,
+      accountId: record.Account__c ?? null,
+      campaignId: record.Campaign__c ?? null,
+      fundId: record.Fund__c ?? null,
+      designationId: record.Designation__c ?? null,
+      restrictionId: record.Restriction__c ?? null,
+      postedToQbo: typeof record.Posted_to_QBO__c === 'boolean' ? record.Posted_to_QBO__c : null,
+      qboDocType: record.QBO_Doc_Type__c ?? null,
+      qboDocId: record.QBO_Doc_Id__c ?? null,
+      qboDocNumber: record.QBO_Doc_Number__c ?? null,
+      qboCustomerId: record.QBO_Customer_Id__c ?? null,
+      qboCustomerName: record.QBO_Customer_Name__c ?? null,
+      qboClassId: record.QBO_Class_Id__c ?? null,
+      qboClassName: record.QBO_Class_Name__c ?? null,
+      qboPrivateNote: record.QBO_Private_Note__c ?? null,
+      qboSourceCreatedAt: record.QBO_Source_Created_At__c ?? null,
+      qboSourceUpdatedAt: record.QBO_Source_Updated_At__c ?? null,
+      qboPostedAt: record.QBO_Posted_At__c ?? null,
+      postingError: record.Posting_Error__c ?? null,
+    };
+  };
+
+  const findTransactionForStripeBackfillByStripeIds = async (options: {
+    stripeChargeId?: string | null;
+    stripePaymentIntentId?: string | null;
+    stripeBalanceTransactionId?: string | null;
+    stripeRefundId?: string | null;
+    stripeDisputeId?: string | null;
+    stripeCheckoutSessionId?: string | null;
+    stripeSubscriptionId?: string | null;
+    stripeInvoiceId?: string | null;
+    stripeCreditNoteId?: string | null;
+    stripePayoutId?: string | null;
+  }): Promise<StripeBackfillTransactionRecord | null> => {
+    const stripeChargeId = normalizeOptionalId(options.stripeChargeId);
+    const stripePaymentIntentId = normalizeOptionalId(options.stripePaymentIntentId);
+    const stripeBalanceTransactionId = normalizeOptionalId(options.stripeBalanceTransactionId);
+    const stripeRefundId = normalizeOptionalId(options.stripeRefundId);
+    const stripeDisputeId = normalizeOptionalId(options.stripeDisputeId);
+    const stripeCheckoutSessionId = normalizeOptionalId(options.stripeCheckoutSessionId);
+    const stripeSubscriptionId = normalizeOptionalId(options.stripeSubscriptionId);
+    const stripeInvoiceId = normalizeOptionalId(options.stripeInvoiceId);
+    const stripeCreditNoteId = normalizeOptionalId(options.stripeCreditNoteId);
+    const stripePayoutId = normalizeOptionalId(options.stripePayoutId);
+
+    if (
+      !stripeChargeId &&
+      !stripePaymentIntentId &&
+      !stripeBalanceTransactionId &&
+      !stripeRefundId &&
+      !stripeDisputeId &&
+      !stripeCheckoutSessionId &&
+      !stripeSubscriptionId &&
+      !stripeInvoiceId &&
+      !stripeCreditNoteId &&
+      !stripePayoutId
+    ) {
+      return null;
+    }
+
+    const whereClauses: string[] = [];
+    if (stripeChargeId) {
+      whereClauses.push(`Stripe_Charge_Id__c = '${escapeForSoqlLiteral(stripeChargeId)}'`);
+    }
+    if (stripePaymentIntentId) {
+      whereClauses.push(
+        `Stripe_Payment_Intent_Id__c = '${escapeForSoqlLiteral(stripePaymentIntentId)}'`
+      );
+    }
+    if (stripeBalanceTransactionId) {
+      whereClauses.push(
+        `Stripe_Balance_Transaction_Id__c = '${escapeForSoqlLiteral(stripeBalanceTransactionId)}'`
+      );
+    }
+    if (stripeRefundId) {
+      whereClauses.push(`Stripe_Refund_Id__c = '${escapeForSoqlLiteral(stripeRefundId)}'`);
+    }
+    if (stripeDisputeId) {
+      whereClauses.push(`Stripe_Dispute_Id__c = '${escapeForSoqlLiteral(stripeDisputeId)}'`);
+    }
+    if (stripeCheckoutSessionId) {
+      whereClauses.push(
+        `Stripe_Checkout_Session_Id__c = '${escapeForSoqlLiteral(stripeCheckoutSessionId)}'`
+      );
+    }
+    if (stripeSubscriptionId) {
+      whereClauses.push(
+        `Stripe_Subscription_Id__c = '${escapeForSoqlLiteral(stripeSubscriptionId)}'`
+      );
+    }
+    if (stripeInvoiceId) {
+      whereClauses.push(`Stripe_Invoice_ID__c = '${escapeForSoqlLiteral(stripeInvoiceId)}'`);
+    }
+    if (stripeCreditNoteId) {
+      whereClauses.push(`Stripe_Credit_Note_Id__c = '${escapeForSoqlLiteral(stripeCreditNoteId)}'`);
+    }
+    if (stripePayoutId) {
+      whereClauses.push(`Stripe_Payout_Id__c = '${escapeForSoqlLiteral(stripePayoutId)}'`);
+    }
+
+    const selectClause =
+      `SELECT Id, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, Stripe_Customer_Id__c, ` +
+      `Source_System__c, Contact__c, Account__c, Campaign__c, Fund__c, Designation__c, Restriction__c, ` +
+      `Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, QBO_Doc_Number__c, ` +
+      `QBO_Customer_Id__c, QBO_Customer_Name__c, QBO_Class_Id__c, QBO_Class_Name__c, ` +
+      `QBO_Private_Note__c, QBO_Source_Created_At__c, QBO_Source_Updated_At__c, ` +
+      `QBO_Posted_At__c, Posting_Error__c `;
+    const soql =
+      selectClause +
+      `FROM ${TRANSACTION_OBJECT} WHERE ${whereClauses.join(' OR ')} ORDER BY LastModifiedDate DESC LIMIT 10`;
+
+    const records = (await queryRecords<StripeBackfillLookupRecord>(soql)).filter(
+      (record): record is StripeBackfillLookupRecord & { Id: string } =>
+        typeof record?.Id === 'string' && record.Id.trim().length > 0
+    );
+    if (records.length === 0) {
+      return null;
+    }
+
+    const scoredRecords = records
+      .map((record) => {
+        let score = 0;
+        if (stripeChargeId && record.Stripe_Charge_Id__c === stripeChargeId) {
+          score += 8;
+        }
+        if (stripePaymentIntentId && record.Stripe_Payment_Intent_Id__c === stripePaymentIntentId) {
+          score += 5;
+        }
+        if (
+          stripeBalanceTransactionId &&
+          (
+            record as StripeBackfillLookupRecord & {
+              Stripe_Balance_Transaction_Id__c?: string | null;
+            }
+          ).Stripe_Balance_Transaction_Id__c === stripeBalanceTransactionId
+        ) {
+          score += 6;
+        }
+        if (
+          stripeRefundId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Refund_Id__c?: string | null })
+            .Stripe_Refund_Id__c === stripeRefundId
+        ) {
+          score += 7;
+        }
+        if (
+          stripeDisputeId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Dispute_Id__c?: string | null })
+            .Stripe_Dispute_Id__c === stripeDisputeId
+        ) {
+          score += 7;
+        }
+        if (
+          stripeCheckoutSessionId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Checkout_Session_Id__c?: string | null })
+            .Stripe_Checkout_Session_Id__c === stripeCheckoutSessionId
+        ) {
+          score += 4;
+        }
+        if (
+          stripeSubscriptionId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Subscription_Id__c?: string | null })
+            .Stripe_Subscription_Id__c === stripeSubscriptionId
+        ) {
+          score += 4;
+        }
+        if (
+          stripeInvoiceId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Invoice_ID__c?: string | null })
+            .Stripe_Invoice_ID__c === stripeInvoiceId
+        ) {
+          score += 4;
+        }
+        if (
+          stripeCreditNoteId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Credit_Note_Id__c?: string | null })
+            .Stripe_Credit_Note_Id__c === stripeCreditNoteId
+        ) {
+          score += 4;
+        }
+        if (
+          stripePayoutId &&
+          (record as StripeBackfillLookupRecord & { Stripe_Payout_Id__c?: string | null })
+            .Stripe_Payout_Id__c === stripePayoutId
+        ) {
+          score += 6;
+        }
+        if (record.Posted_to_QBO__c === true) {
+          score += 20;
+        }
+        if (record.QBO_Doc_Id__c) {
+          score += 12;
+        }
+        if (record.Contact__c) {
+          score += 3;
+        }
+        if (record.Account__c) {
+          score += 3;
+        }
+        if (record.Campaign__c) {
+          score += 2;
+        }
+        if (record.Source_System__c) {
+          score += 1;
+        }
+        return { record, score };
+      })
+      .sort((left, right) => right.score - left.score);
+
+    const record = scoredRecords[0].record;
+
+    return {
+      id: record.Id,
+      stripeChargeId: record.Stripe_Charge_Id__c ?? null,
+      stripePaymentIntentId: record.Stripe_Payment_Intent_Id__c ?? null,
+      stripeCustomerId: record.Stripe_Customer_Id__c ?? null,
+      sourceSystem: record.Source_System__c ?? null,
+      contactId: record.Contact__c ?? null,
+      accountId: record.Account__c ?? null,
+      campaignId: record.Campaign__c ?? null,
+      fundId: record.Fund__c ?? null,
+      designationId: record.Designation__c ?? null,
+      restrictionId: record.Restriction__c ?? null,
+      postedToQbo: typeof record.Posted_to_QBO__c === 'boolean' ? record.Posted_to_QBO__c : null,
+      qboDocType: record.QBO_Doc_Type__c ?? null,
+      qboDocId: record.QBO_Doc_Id__c ?? null,
+      qboDocNumber: record.QBO_Doc_Number__c ?? null,
+      qboCustomerId: record.QBO_Customer_Id__c ?? null,
+      qboCustomerName: record.QBO_Customer_Name__c ?? null,
+      qboClassId: record.QBO_Class_Id__c ?? null,
+      qboClassName: record.QBO_Class_Name__c ?? null,
+      qboPrivateNote: record.QBO_Private_Note__c ?? null,
+      qboSourceCreatedAt: record.QBO_Source_Created_At__c ?? null,
+      qboSourceUpdatedAt: record.QBO_Source_Updated_At__c ?? null,
+      qboPostedAt: record.QBO_Posted_At__c ?? null,
+      postingError: record.Posting_Error__c ?? null,
     };
   };
 
@@ -885,7 +1442,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       );
 
       if (Object.keys(updateFields).length > 1) {
-        const updateResult = await connection.sobject('Contact').update(updateFields as any);
+        const updateResult = await connection
+          .sobject('Contact')
+          .update(updateFields as any, CONTACT_DML_OPTIONS);
 
         const saveResult = Array.isArray(updateResult) ? updateResult[0] : updateResult;
 
@@ -930,7 +1489,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         contactRecord.RecordTypeId = cachedContactRecordTypeId;
       }
 
-      const createResult = await connection.sobject('Contact').create(contactRecord);
+      const createResult = await connection
+        .sobject('Contact')
+        .create(contactRecord, CONTACT_DML_OPTIONS);
 
       const saveResult = Array.isArray(createResult) ? createResult[0] : createResult;
 
@@ -981,6 +1542,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     findTransactionIdByExternalId,
     findTransactionRecordByExternalId,
     upsertCustomerByStripeId,
+    findTransactionForStripeBackfill,
+    findTransactionForStripeBackfillByStripeIds,
     findContactIdById,
     findAccountIdById,
   };

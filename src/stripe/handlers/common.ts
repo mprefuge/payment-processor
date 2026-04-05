@@ -168,7 +168,7 @@ export const handleCheckoutSessionCompleted = async (
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
 
   const transaction: TransactionUpsertDTO = {
-    ...buildCheckoutSessionTransaction(session, 'processing'),
+    ...buildCheckoutSessionTransaction(session, 'processing', undefined, event.id, event.livemode),
     ...(campaignId ? { campaign__c: campaignId } : {}),
   };
 
@@ -188,7 +188,9 @@ export const handleCheckoutSessionCompleted = async (
 const buildCheckoutSessionTransaction = (
   session: Stripe.Checkout.Session,
   status: TransactionUpsertDTO['status__c'],
-  memo?: string
+  memo?: string,
+  eventId?: string | null,
+  livemode?: boolean | null
 ): TransactionUpsertDTO => ({
   transaction_type__c: 'charge',
   status__c: status,
@@ -196,9 +198,14 @@ const buildCheckoutSessionTransaction = (
   stripe_payment_intent_id__c: normalizeStripeId(session.payment_intent),
   stripe_customer_id__c: normalizeStripeId(session.customer),
   stripe_subscription_id__c: normalizeStripeId(session.subscription),
+  stripe_event_id__c: eventId ?? null,
+  stripe_livemode__c: livemode ?? null,
   amount_gross__c: centsToMajorUnits(session.amount_total ?? null),
   amount_net__c: centsToMajorUnits(session.amount_subtotal ?? null),
   currency_iso_code__c: session.currency ? session.currency.toUpperCase() : null,
+  billing_name__c: session.customer_details?.name ?? null,
+  billing_email__c: session.customer_details?.email ?? null,
+  billing_phone__c: session.customer_details?.phone ?? null,
   received_at__c: timestampToIsoString(session.created ?? null),
   ...(memo ? { memo__c: memo } : {}),
 });
@@ -231,7 +238,7 @@ const upsertCheckoutSessionStatus = async (
     context,
     deps,
     session.id,
-    buildCheckoutSessionTransaction(session, status, memo),
+    buildCheckoutSessionTransaction(session, status, memo, null, null),
     '[StripeWebhook] Skipping checkout session status upsert due to missing required fields'
   );
 
@@ -247,7 +254,19 @@ const handleCheckoutSessionStatusEvent = async (
 ): Promise<void> => {
   const session = event.data.object as Stripe.Checkout.Session;
   logCheckoutSessionEvent(context, options.logMessage, session);
-  await upsertCheckoutSessionStatus(context, session, options.status, deps, options.memo);
+  await upsertCheckoutSessionTransaction(
+    context,
+    deps,
+    session.id,
+    buildCheckoutSessionTransaction(
+      session,
+      options.status,
+      options.memo,
+      event.id,
+      event.livemode
+    ),
+    '[StripeWebhook] Skipping checkout session status upsert due to missing required fields'
+  );
 };
 
 export const handleCheckoutSessionExpired = async (

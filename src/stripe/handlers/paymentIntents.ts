@@ -20,6 +20,8 @@ import {
 import { ensureStripeClient, markPosted } from './common';
 import { loadConfig, normalizeTransactionCategory } from '../../config/contactMatching';
 
+const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
+
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
   if (input === null || input === undefined) {
     return;
@@ -81,6 +83,8 @@ interface ProcessPaymentIntentOptions {
   salesforce: SalesforceSvc;
   deps: StripeWebhookDependencies;
   invoice?: Stripe.Invoice | null;
+  eventId?: string | null;
+  livemode?: boolean | null;
 }
 
 interface SuccessfulPaymentIntentResources {
@@ -304,7 +308,7 @@ const findExistingTransactionId = async (
       const existingTransactionId = await salesforce.findTransactionIdByExternalId(
         lookupStep.fieldName,
         lookupStep.externalValue,
-        'General'
+        STRIPE_TRANSACTION_RECORD_TYPE_NAME
       );
 
       if (existingTransactionId) {
@@ -648,6 +652,28 @@ const postSuccessfulPaymentIntentToAccounting = async (
   });
 };
 
+const formatPaymentIntentErrorMessage = (paymentIntent: Stripe.PaymentIntent): string | null => {
+  const lastError = paymentIntent.last_payment_error;
+  if (!lastError) {
+    return null;
+  }
+
+  const parts = [
+    lastError.message ?? null,
+    lastError.code ? `code=${lastError.code}` : null,
+    lastError.decline_code ? `decline_code=${lastError.decline_code}` : null,
+    lastError.type ? `type=${lastError.type}` : null,
+  ].filter((value): value is string => Boolean(value));
+
+  return parts.length > 0 ? parts.join('; ') : 'Stripe payment failed';
+};
+
+const getPaymentIntentFailureCode = (paymentIntent: Stripe.PaymentIntent): string | null =>
+  paymentIntent.last_payment_error?.code ?? null;
+
+const getPaymentIntentDeclineCode = (paymentIntent: Stripe.PaymentIntent): string | null =>
+  paymentIntent.last_payment_error?.decline_code ?? null;
+
 const processSuccessfulPaymentIntent = async ({
   context,
   paymentIntent,
@@ -655,6 +681,8 @@ const processSuccessfulPaymentIntent = async ({
   salesforce,
   deps,
   invoice,
+  eventId,
+  livemode,
 }: ProcessPaymentIntentOptions): Promise<void> => {
   const { charge, balanceTransaction, checkoutSession, stripeCustomer } =
     await loadSuccessfulPaymentIntentResources(context, stripe, paymentIntent);
@@ -665,6 +693,12 @@ const processSuccessfulPaymentIntent = async ({
     balanceTransaction: balanceTransaction ?? undefined,
     stripeCustomer,
   });
+  transaction.stripe_event_id__c = eventId ?? null;
+  transaction.stripe_livemode__c =
+    livemode ??
+    (typeof paymentIntent.livemode === 'boolean' ? paymentIntent.livemode : null) ??
+    transaction.stripe_livemode__c ??
+    null;
   await applyMetadataCampaignToTransaction(
     context,
     deps,
@@ -731,6 +765,8 @@ const buildFailureTransaction = (
   options: {
     nextRetry?: Date | null;
     dunningRequired?: boolean;
+    eventId?: string | null;
+    livemode?: boolean | null;
   } = {}
 ): TransactionUpsertDTO => {
   const base: TransactionUpsertDTO = {
@@ -738,9 +774,16 @@ const buildFailureTransaction = (
     status__c: status,
     stripe_payment_intent_id__c: paymentIntent.id,
     stripe_customer_id__c: normalizeStripeId(paymentIntent.customer),
+    stripe_event_id__c: options.eventId ?? null,
+    stripe_livemode__c:
+      options.livemode ??
+      (typeof paymentIntent.livemode === 'boolean' ? paymentIntent.livemode : null),
     amount_gross__c: centsToPositiveMajorUnits(paymentIntent.amount ?? null),
     currency_iso_code__c: paymentIntent.currency ? paymentIntent.currency.toUpperCase() : null,
     received_at__c: timestampToIsoString(paymentIntent.created ?? null),
+    error_message__c: formatPaymentIntentErrorMessage(paymentIntent),
+    failure_code__c: getPaymentIntentFailureCode(paymentIntent),
+    decline_code__c: getPaymentIntentDeclineCode(paymentIntent),
   };
 
   if (typeof options.dunningRequired === 'boolean') {
@@ -817,6 +860,8 @@ export const updatePaymentIntentStatus = async (
   options?: {
     nextRetry?: Date | null;
     dunningRequired?: boolean;
+    eventId?: string | null;
+    livemode?: boolean | null;
   }
 ): Promise<void> => {
   const salesforce = await deps.getSalesforceSvc();
@@ -846,6 +891,8 @@ export const handlePaymentIntentSucceeded = async (
     stripe,
     salesforce,
     deps,
+    eventId: event.id,
+    livemode: event.livemode,
   });
 };
 
@@ -866,6 +913,8 @@ export const handleSuccessfulPaymentIntent = async (
     salesforce,
     deps,
     invoice,
+    eventId: event.id,
+    livemode: event.livemode,
   });
 };
 
@@ -875,13 +924,11 @@ export const handlePaymentIntentFailed = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  await updatePaymentIntentStatus(
-    context,
-    paymentIntent,
-    'failed',
-    deps,
-    buildPaymentIntentStatusOptions(paymentIntent, true)
-  );
+  await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, {
+    ...buildPaymentIntentStatusOptions(paymentIntent, true),
+    eventId: event.id,
+    livemode: event.livemode,
+  });
 };
 
 export const handlePaymentIntentCanceled = async (
@@ -892,6 +939,8 @@ export const handlePaymentIntentCanceled = async (
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
   await updatePaymentIntentStatus(context, paymentIntent, 'failed', deps, {
     dunningRequired: false,
+    eventId: event.id,
+    livemode: event.livemode,
   });
 };
 
@@ -901,11 +950,9 @@ export const handlePaymentIntentActionRequired = async (
   deps: StripeWebhookDependencies
 ): Promise<void> => {
   const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  await updatePaymentIntentStatus(
-    context,
-    paymentIntent,
-    'pending',
-    deps,
-    buildPaymentIntentStatusOptions(paymentIntent, true)
-  );
+  await updatePaymentIntentStatus(context, paymentIntent, 'pending', deps, {
+    ...buildPaymentIntentStatusOptions(paymentIntent, true),
+    eventId: event.id,
+    livemode: event.livemode,
+  });
 };

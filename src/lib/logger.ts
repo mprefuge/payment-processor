@@ -26,6 +26,24 @@ const correlationStorage = new AsyncLocalStorage<LoggerContext>();
 let telemetryClient: TelemetryClient | undefined;
 let telemetryInitialized = false;
 
+const LEGACY_APP_INSIGHTS_ENV_KEYS = [
+  'APPLICATIONINSIGHTS_INSTRUMENTATIONKEY',
+  'APPINSIGHTS_INSTRUMENTATIONKEY',
+  'APPINSIGHTS_INSTRUMENTATION_KEY',
+] as const;
+
+function suppressLegacyInstrumentationKeyEnv(): void {
+  if (!process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
+    return;
+  }
+
+  for (const envKey of LEGACY_APP_INSIGHTS_ENV_KEYS) {
+    if (typeof process.env[envKey] !== 'undefined') {
+      delete process.env[envKey];
+    }
+  }
+}
+
 function initializeTelemetry(): TelemetryClient | undefined {
   if (telemetryInitialized) {
     return telemetryClient;
@@ -50,6 +68,8 @@ function initializeTelemetry(): TelemetryClient | undefined {
       telemetryClient = undefined;
       return undefined;
     }
+
+    suppressLegacyInstrumentationKeyEnv();
 
     appInsights
       .setup(key)

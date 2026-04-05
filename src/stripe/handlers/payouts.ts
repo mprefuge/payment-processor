@@ -474,6 +474,7 @@ const buildPayoutTransaction = async (
   stripe: Stripe,
   payout: Stripe.Payout,
   depositInput: UpsertPayoutDepositInput | null,
+  eventId: string,
   eventType: string,
   logger: Logger
 ) => {
@@ -486,6 +487,8 @@ const buildPayoutTransaction = async (
           ? 'failed'
           : 'pending') as 'paid' | 'failed' | 'pending',
       stripe_payout_id__c: payout.id,
+      stripe_event_id__c: eventId,
+      stripe_livemode__c: typeof payout.livemode === 'boolean' ? payout.livemode : null,
       stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
       amount_gross__c: toCents(payout.amount) / 100,
       amount_fee__c: 0,
@@ -496,10 +499,16 @@ const buildPayoutTransaction = async (
       ).toUpperCase(),
       memo__c: `Stripe Payout ${payout.id} - ${eventType.replace('payout.', '')} (${payout.automatic ? 'automatic' : 'manual'})`,
       received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+      available_on_date__c: timestampToDate(payout.arrival_date ?? null)?.toISOString() ?? null,
       posted_to_qbo__c: false,
       qbo_doc_type__c: null,
       qbo_doc_id__c: null,
       qbo_posted_at__c: null,
+      error_message__c:
+        payout.failure_message ??
+        (payout.failure_code ? `failure_code=${payout.failure_code}` : null),
+      failure_code__c: payout.failure_code ?? null,
+      statement_descriptor__c: payout.statement_descriptor ?? null,
       posting_error__c:
         eventType === 'payout.paid' && !depositInput
           ? 'Manual payout without balance transaction history'
@@ -551,6 +560,8 @@ const buildPayoutTransaction = async (
         ? 'failed'
         : 'pending') as 'paid' | 'failed' | 'pending',
     stripe_payout_id__c: payout.id,
+    stripe_event_id__c: eventId,
+    stripe_livemode__c: typeof payout.livemode === 'boolean' ? payout.livemode : null,
     stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction),
     amount_gross__c: grossAmount / 100,
     amount_fee__c: feeTotal / 100,
@@ -558,10 +569,16 @@ const buildPayoutTransaction = async (
     currency_iso_code__c: (depositInput.currency ?? payout.currency ?? 'usd').toUpperCase(),
     memo__c: memoLines.join(' | '),
     received_at__c: timestampToDate(payout.arrival_date ?? payout.created ?? null).toISOString(),
+    available_on_date__c: timestampToDate(payout.arrival_date ?? null)?.toISOString() ?? null,
     posted_to_qbo__c: false,
     qbo_doc_type__c: null,
     qbo_doc_id__c: null,
     qbo_posted_at__c: null,
+    error_message__c:
+      payout.failure_message ??
+      (payout.failure_code ? `failure_code=${payout.failure_code}` : null),
+    failure_code__c: payout.failure_code ?? null,
+    statement_descriptor__c: payout.statement_descriptor ?? null,
     posting_error__c: null,
   };
 };
@@ -603,6 +620,7 @@ const syncPayoutTransaction = async (
   depositInput: UpsertPayoutDepositInput | null,
   eventType: string,
   options: {
+    eventId: string;
     successMessage: string;
     failureMessage: string;
     buildSuccessPayload: (payoutTransaction: any) => Record<string, unknown>;
@@ -614,6 +632,7 @@ const syncPayoutTransaction = async (
       stripe,
       payout,
       depositInput,
+      options.eventId,
       eventType,
       context.log
     );
@@ -650,6 +669,7 @@ export const handlePayoutEvent = async (
     });
 
     await syncPayoutTransaction(context, deps, salesforce, stripe, payout, null, eventType, {
+      eventId: event.id,
       successMessage: '[StripeWebhook] Tracked payout in Salesforce',
       buildSuccessPayload: (payoutTransaction) => ({
         payoutId: payout.id,
@@ -728,6 +748,7 @@ export const handlePayoutEvent = async (
       depositInput,
       eventType,
       {
+        eventId: event.id,
         successMessage: '[StripeWebhook] Upserted payout transaction in Salesforce',
         buildSuccessPayload: (payoutTransaction) => ({
           payoutId: payout.id,
@@ -809,6 +830,7 @@ export const handlePayoutEvent = async (
       depositInput,
       eventType,
       {
+        eventId: event.id,
         successMessage: '[StripeWebhook] Updated payout transaction status in Salesforce',
         buildSuccessPayload: (payoutTransaction) => ({
           payoutId: payout.id,

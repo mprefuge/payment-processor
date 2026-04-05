@@ -1,5 +1,9 @@
 const { logger: rootLogger, createLogger } = require('../../lib/logger');
 const BaseAccountingProvider = require('./baseAccountingProvider');
+const { installPunycodeAlias } = require('../../lib/installPunycodeAlias');
+
+installPunycodeAlias();
+
 const QuickBooks = require('node-quickbooks');
 const { createPersistentStorageClients } = require('../idempotency/storage/persistentStoreFactory');
 let tokenManager;
@@ -46,7 +50,7 @@ class QuickBooksProvider extends BaseAccountingProvider {
       false, // no token secret needed for OAuth 2.0
       this.companyId,
       useSandbox,
-      true, // debug
+      false, // node-quickbooks debug logs raw auth/request payloads
       null, // minorversion - use default
       '2.0', // oauth version
       this.oauthTokens.refreshToken

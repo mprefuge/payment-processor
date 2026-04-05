@@ -1,4 +1,4 @@
-const DEFAULT_TRANSACTION_RECORD_TYPE_NAME = 'General';
+const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 const DEFAULT_CAMPAIGN_NAME = 'General Giving';
 
 const { getCrmService } = require('./crmWorkflowCommon');
@@ -47,7 +47,7 @@ const buildTransactionRecord = ({
 }) => {
   const transactionRecord = {
     Stripe_Checkout_Session_Id__c: session.id,
-    Transaction_Type__c: 'charge',
+    transaction_type__c: 'charge',
     Status__c: 'Pending',
     Payment_Method__c: 'Pending',
   };
@@ -60,17 +60,33 @@ const buildTransactionRecord = ({
     const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
     assignOptionalField(transactionRecord, 'Stripe_Payment_Intent_Id__c', paymentIntentId);
 
-    const customerId = normalizeStripeEntityId(session.customer);
+    const customerId =
+      normalizeStripeEntityId(session.customer) ||
+      normalizeStripeEntityId(transactionData?.customer?.stripeCustomerId);
     assignOptionalField(transactionRecord, 'Stripe_Customer_Id__c', customerId);
   }
 
   const amount = convertCentsToDollars(transactionData.amount);
-  assignOptionalField(transactionRecord, 'Amount_Gross__c', amount);
+  const coverFeesEnabled = Boolean(transactionData.coverFee);
+  const coverFeesAmountCents =
+    typeof transactionData.coverFeesAmount === 'number'
+      ? transactionData.coverFeesAmount
+      : typeof transactionData.feeAmount === 'number'
+        ? transactionData.feeAmount
+        : null;
+  const coverFeesAmount = convertCentsToDollars(coverFeesAmountCents);
+  const totalAmount =
+    amount !== null && coverFeesAmount !== null ? amount + coverFeesAmount : amount;
+
+  assignOptionalField(transactionRecord, 'Amount_Gross__c', totalAmount);
+  assignOptionalField(transactionRecord, 'Cover_Fees__c', coverFeesEnabled || null);
+  assignOptionalField(transactionRecord, 'Cover_Fees_Amount__c', coverFeesAmount);
 
   const currency = session.currency ? session.currency.toUpperCase() : 'USD';
   assignOptionalField(transactionRecord, 'Currency_ISO_Code__c', currency);
   assignOptionalField(transactionRecord, 'Frequency__c', frequencyValue);
   assignOptionalField(transactionRecord, 'Attribution__c', transactionData.attribution || null);
+  assignOptionalField(transactionRecord, 'Memo__c', transactionData.metadata?.memo__c || null);
 
   return transactionRecord;
 };
@@ -146,24 +162,24 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
     try {
       const recordTypeId = await crmService.getRecordTypeIdByName(
         'Transaction__c',
-        DEFAULT_TRANSACTION_RECORD_TYPE_NAME
+        STRIPE_TRANSACTION_RECORD_TYPE_NAME
       );
 
       if (recordTypeId) {
         console.log('Resolved transaction record type', {
-          recordTypeName: DEFAULT_TRANSACTION_RECORD_TYPE_NAME,
+          recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
           recordTypeId,
         });
       } else {
         console.log('Transaction record type not found by name', {
-          recordTypeName: DEFAULT_TRANSACTION_RECORD_TYPE_NAME,
+          recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
         });
       }
 
       return recordTypeId;
     } catch (error) {
       console.log('Failed to resolve transaction record type', {
-        recordTypeName: DEFAULT_TRANSACTION_RECORD_TYPE_NAME,
+        recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
         error: error.message,
       });
       logger.error('Transaction record type lookup error:', error);
@@ -273,6 +289,7 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         campaignId,
         recordTypeId,
         frequencyValue: requestData.frequency,
+        includeStripeIds: true,
       });
 
       const upsertResult = await crmService.upsertTransactionsRecord(

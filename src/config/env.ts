@@ -272,12 +272,12 @@ function loadEnv(): EnvConfig {
     }) ?? 'Stripe Transaction';
 
   const autoCreateAccountsRaw = resolveEnv('ACCOUNTING_AUTOCREATE_ACCOUNTS', {
-    defaultValue: 'true',
+    defaultValue: 'false',
   });
   const autoCreateAccounts = parseBoolean(
     'ACCOUNTING_AUTOCREATE_ACCOUNTS',
     autoCreateAccountsRaw,
-    true
+    false
   );
 
   // Account type configurations

@@ -10,6 +10,8 @@ describe('OpenAPI/Swagger setup', () => {
     expect(openAPIConfig).toBeDefined();
     expect(openAPIConfig.info).toBeDefined();
     expect(openAPIConfig.info.title).toMatch(/Payment Processor/i);
+    expect(openAPIConfig.info.description).toMatch(/post-deployment validation/i);
+    expect(openAPIConfig.info.description).toMatch(/x-functions-key/i);
     expect(Array.isArray(openAPIConfig.tags)).toBe(true);
     const healthTag = openAPIConfig.tags.find((t) => t.name === 'Health');
     expect(healthTag).toBeDefined();

@@ -15,6 +15,7 @@
     "format:check": "prettier --check .",
     "verify": "npm run lint && npm run build && npm run test",
     "ci": "npm run verify",
+    "deployment:smoke": "node scripts/run-deployment-smoke-cleanup.js",
     "test:unit": "vitest run",
     "setup:qbo": "ts-node scripts/setup-qbo-oauth.ts",
     "stripe:pi:success": "stripe trigger payment_intent.succeeded",

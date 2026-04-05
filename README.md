@@ -5,7 +5,6 @@ Azure Functions-based payment processing system with Stripe integration, QuickBo
 ## Features
 
 - **Stripe Integration**: Process one-time and recurring payments via Stripe Checkout
-- **Event Management**: Complete event registration system with ticketing, check-in, and participant tracking
 - **Webhook Handling**: Process Stripe webhook events for payment intents, invoices, refunds, and payouts
 - **QuickBooks Online Sync**: Automatic accounting synchronization with configurable posting strategies
 - **Salesforce CRM**: Contact and transaction management with campaign tracking
@@ -48,6 +47,7 @@ The local template includes the currently supported variable names. In particula
 - use `QBO_DEFAULT_SALES_ITEM`, not `DEFAULT_SALES_ITEM`
 - use `SF_AUTH_MODE=client-credentials` for Salesforce in this codebase
 - provide `QBO_ACCOUNT_REFUNDS` and `QBO_ACCOUNT_DISPUTES` if QuickBooks sync is enabled
+- prefer explicit QuickBooks `Name|Id` references and keep `ACCOUNTING_AUTOCREATE_ACCOUNTS=false` in production
 
 ## QuickBooks Online Setup
 
@@ -116,6 +116,9 @@ npm run lint
 
 # Format code
 npm run format
+
+# Run deploy-time smoke transaction + cleanup flow
+npm run deployment:smoke
 ```
 
 ### Building
@@ -164,6 +167,16 @@ Create a Stripe checkout session for payment processing.
   }
 }
 ```
+
+## Deployment Smoke Validation
+
+The production workflow now expects deploy-time smoke validation to create tagged test data and then remove it automatically.
+
+- The GitHub Actions deployment uses `scripts/run-deployment-smoke-cleanup.js` after staging deploy and again after production deploy.
+- The runner calls health, creates a tagged checkout session against `/api/transaction?mode=test`, and then calls `/api/ops/test-artifact-cleanup` with `dryRun=false`.
+- The workflow fails if the cleanup step reports any per-record errors or if it does not clean up the Stripe artifacts it just created.
+
+The payload stored in `AZURE_FUNCTIONAPP_*_SMOKE_TRANSACTION_PAYLOAD` should be a valid transaction request body. The workflow injects the cleanup tag automatically, so the stored payload does not need to include `source_test_tag`.
 
 ### QBO Sales Receipt Override Schema (Metadata)
 
@@ -245,11 +258,23 @@ Interactive API documentation is available once the function is running locally 
 
 - **JSON**: `GET /api/openapi-3.1.0.json`
 - **YAML**: `GET /api/openapi-3.1.0.yaml`
-- **Swagger UI**: open `GET /api/swagger-ui.html` in your browser to explore and exercise endpoints.
+- **Swagger UI**: open `GET /api/swagger` in your browser to explore and exercise endpoints.
 
 You can also download the raw schema to generate client libraries or SDKs.
 
-For endpoints configured with Azure Functions `authLevel: function`, click **Authorize** in Swagger UI and provide your function key using the `x-functions-key` value.
+For endpoints configured with Azure Functions `authLevel: function`, click **Authorize** in Swagger UI and provide either:
+
+- `x-functions-key` as a header value, or
+- `code` as a query-string function key.
+
+Recommended deployed verification order:
+
+1. Hit `GET /api/health` first to confirm the app is up and downstream integrations are reachable.
+2. Use test-mode transaction and reconciliation routes next, such as `/api/transaction?mode=test`, `/api/stripe/true-up?mode=test`, and `/api/stripe/payout-sync?mode=test`.
+3. Use dry-run QBO and Salesforce sync routes before any mutating run: `/api/qbo/customers-salesforce-sync?dryRun=true`, `/api/qbo/receipts-salesforce-sync?dryRun=true`, and `/api/qbo/salesforce-record-sync?dryRun=true&salesforceId=...`.
+4. Use `/api/ops/test-artifact-cleanup` to remove tagged verification artifacts after successful testing.
+
+The Swagger examples are intentionally populated with deployment-verification payloads so the UI can be used as the primary post-deploy test console.
 
 ### Stripe Webhook
 
@@ -345,30 +370,6 @@ Examples:
   - JSON mode returns `pagination.nextCursor` and `pagination.hasMore`
   - CSV mode returns `X-Next-Cursor` and `X-Has-More` response headers
 
-### Event Registration
-
-`POST /api/events/register`
-
-Register a participant for an event with automatic Salesforce contact creation and payment processing.
-
-### Event Check-In
-
-`POST /api/events/checkin`
-
-Check in a registered participant at an event.
-
-### Event Configuration
-
-`GET /api/events/config`
-
-Retrieve event configuration including available events and theme settings.
-
-### Event Landing Page
-
-`GET /api/events`
-
-Serves the event registration landing page with customizable theming.
-
 ## Project Structure
 
 ```
@@ -429,9 +430,6 @@ Select these events:
 
 ## Documentation
 
-- [Event Management Guide](docs/EVENT_MANAGEMENT_GUIDE.md) - **NEW**: Complete event system with registration, ticketing, and check-in
-- [Event Management Quick Reference](docs/event-management-quick-reference.md)
-- [Event Landing Page Theme Guide](docs/EVENT_LANDING_PAGE_THEME.md)
 - [Deployment Summary](docs/DEPLOYMENT_SUMMARY.md)
 - [Environment Variables](docs/ENVIRONMENT_VARIABLES.md)
 - [QBO Duplicate Detection](docs/QBO_DUPLICATE_DETECTION.md)

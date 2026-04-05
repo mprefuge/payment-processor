@@ -372,6 +372,37 @@ describe('postChargeToQbo', () => {
     { timeout: 20000 }
   );
 
+  it('preserves the unique tail of long Stripe charge ids in sales receipt DocNumber', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-doc-number', DisplayName: 'Donor Example' } },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-doc-number' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext({ id: 'ch_micah_test_4' }),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+
+    expect(salesReceiptBody.DocNumber).toBe('CHG-20240301-h_test_4');
+  });
+
   it('prefers donor name over checkout category when deriving QuickBooks payee/customer', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(
@@ -881,6 +912,91 @@ describe('postChargeToQbo', () => {
     expect(requests[0].url).toContain('include=enhancedAllCustomFields');
   });
 
+  it('updates a QuickBooks customer Salesforce ID when the custom field label is normalized', async () => {
+    const { fetcher, requests } = createFetchMock(
+      {
+        Customer: {
+          Id: '1205',
+          SyncToken: '7',
+          CustomField: [
+            {
+              DefinitionId: '1000000002',
+              Name: 'Salesforce_Id',
+              Type: 'StringType',
+              StringValue: '',
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: '1205',
+          SyncToken: '7',
+          CustomField: [
+            {
+              DefinitionId: '1000000002',
+              Name: 'Salesforce_Id',
+              Type: 'StringType',
+              StringValue: '',
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: '1205',
+          SyncToken: '8',
+          CustomField: [
+            {
+              DefinitionId: '1000000002',
+              Name: 'Salesforce_Id',
+              Type: 'StringType',
+              StringValue: '001ALTACCOUNT',
+            },
+          ],
+        },
+      }
+    );
+
+    const { updateQuickBooksCustomerSalesforceId } = await importQboSvc();
+    const result = await updateQuickBooksCustomerSalesforceId('1205', '001ALTACCOUNT', {
+      fetcher,
+      accessToken: 'token',
+    });
+
+    expect(result).toMatchObject({
+      Id: '1205',
+      CustomField: [
+        expect.objectContaining({
+          Name: 'Salesforce_Id',
+          StringValue: '001ALTACCOUNT',
+        }),
+      ],
+    });
+
+    expect(requests).toHaveLength(3);
+    expect(requests[0].url).toContain('/customer/1205?');
+    expect(requests[0].url).toContain('include=enhancedAllCustomFields');
+    expect(requests[1].url).toContain('/customer/1205?');
+    expect(requests[1].url).toContain('include=enhancedAllCustomFields');
+    expect(requests[2].url).toContain('/customer?operation=update');
+
+    const body = JSON.parse((requests[2].init?.body ?? '{}') as string);
+    expect(body).toMatchObject({
+      Id: '1205',
+      sparse: true,
+      SyncToken: '7',
+      CustomField: [
+        {
+          DefinitionId: '1000000002',
+          Name: 'Salesforce_Id',
+          Type: 'StringType',
+          StringValue: '001ALTACCOUNT',
+        },
+      ],
+    });
+  });
+
   it.skip('prefers the Stripe customer name over billing details when refreshing QuickBooks customers', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(
@@ -1103,6 +1219,37 @@ describe('postChargeToQbo', () => {
         amount: 4,
       },
     ]);
+  });
+
+  it('posts a sales receipt with an explicit QuickBooks customer override', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.accounting.defaultSalesItem = 'Stripe Sales Item|QBO_ITEM_REVENUE';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-customer-override' } }
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 300,
+      memo: 'Recovered charge',
+      date: new Date('2024-08-01'),
+      customer: {
+        ref: { value: '200', name: 'Ada Lovelace' },
+        email: 'ada@example.com',
+      },
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-customer-override', type: 'sales-receipt' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(salesReceiptBody.CustomerRef).toEqual({ value: '200', name: 'Ada Lovelace' });
+    expect(salesReceiptBody.BillEmail).toEqual({ Address: 'ada@example.com' });
   });
 
   it.skip('looks up account IDs when configuration only provides a name', async () => {
@@ -1364,7 +1511,7 @@ describe('postChargeToQbo', () => {
 describe('postRefundToQbo', () => {
   it('creates refund journal entry debiting refunds and crediting clearing', async () => {
     const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Duplicate check for refund journal entry
+      { QueryResponse: {} },
       { JournalEntry: { Id: 'refund-1' } }
     );
     const { postRefundToQbo } = await importQboSvc();
@@ -1404,14 +1551,83 @@ describe('postRefundToQbo', () => {
     ]);
   });
 
+  it('includes refund fees in the journal entry when present', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'refund-fee-1' } }
+    );
+    const { postRefundToQbo } = await importQboSvc();
+
+    const result = await postRefundToQbo({
+      amount: 8_500,
+      feeAmount: 300,
+      memo: 'Refund with fee',
+      date: new Date('2024-03-03'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'refund-fee-1', type: 'journal-entry' });
+
+    const journalBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    const journalLines = journalBody.Line.map((line: any) => ({
+      type: line.JournalEntryLineDetail.PostingType,
+      accountRef: line.JournalEntryLineDetail.AccountRef,
+      amount: line.Amount,
+    }));
+    expect(journalLines).toEqual([
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_REFUNDS',
+          name: 'Refunds',
+        },
+        amount: 85,
+      },
+      {
+        type: 'Debit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_FEES',
+          name: 'Stripe Fees',
+        },
+        amount: 3,
+      },
+      {
+        type: 'Credit',
+        accountRef: {
+          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+          name: 'Stripe Clearing',
+        },
+        amount: 88,
+      },
+    ]);
+  });
+
+  it('appends the cleanup marker to refund private notes when cleanupTag is provided', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'refund-tagged-1' } }
+    );
+    const { postRefundToQbo } = await importQboSvc();
+
+    await postRefundToQbo({
+      amount: 8_500,
+      memo: 'Refund memo',
+      cleanupTag: 'deploy-smoke-123',
+      date: new Date('2024-03-03'),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const journalBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(journalBody.PrivateNote).toContain('[source_test_tag:deploy-smoke-123]');
+  });
+
   it.skip('auto-creates the refunds account when configured by name', async () => {
     baseEnv.quickBooks.accounts.refunds = 'Refunds';
-    // Keep stripeClearing as the default (has both name and ID)
 
     const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Refunds account lookup - not found
-      { Account: { Id: '789', Name: 'Refunds' } }, // Refunds account create
-      { QueryResponse: {} }, // Duplicate check for refund journal entry
+      { QueryResponse: {} },
+      { Account: { Id: '789', Name: 'Refunds' } },
+      { QueryResponse: {} },
       { JournalEntry: { Id: 'refund-2' } }
     );
 
@@ -1442,9 +1658,9 @@ describe('postRefundToQbo', () => {
 describe('postPayoutToQbo', () => {
   it('creates bank deposit moving funds from clearing to operating bank', async () => {
     const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Payout ID duplicate check
-      { QueryResponse: {} }, // DocNumber duplicate check
-      { Deposit: { Id: 'deposit-1' } } // Bank deposit create
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Deposit: { Id: 'deposit-1' } }
     );
     const { postPayoutToQbo } = await importQboSvc();
 
@@ -1452,7 +1668,7 @@ describe('postPayoutToQbo', () => {
       amount: 15_000,
       memo: 'Payout memo',
       date: new Date('2024-03-04'),
-      payoutId: 'po_test123', // Added payout ID
+      payoutId: 'po_test123',
       options: { fetcher, accessToken: 'token' },
     });
 
@@ -1479,10 +1695,92 @@ describe('postPayoutToQbo', () => {
   });
 });
 
+describe('findDocumentsByPrivateNoteTag', () => {
+  it('returns tagged documents across supported QuickBooks entities', async () => {
+    const { fetcher } = createFetchMock(
+      {
+        QueryResponse: {
+          SalesReceipt: [
+            {
+              Id: 'sr_1',
+              SyncToken: '0',
+              DocNumber: 'SR-1',
+              TxnDate: '2024-03-01',
+              PrivateNote: 'cleanup | [source_test_tag:deploy-smoke-123]',
+            },
+          ],
+        },
+      },
+      {
+        QueryResponse: {
+          JournalEntry: [
+            {
+              Id: 'je_1',
+              SyncToken: '1',
+              DocNumber: 'JE-1',
+              TxnDate: '2024-03-02',
+              PrivateNote: 'cleanup | [source_test_tag:deploy-smoke-123]',
+            },
+          ],
+        },
+      },
+      {
+        QueryResponse: {
+          Deposit: [
+            {
+              Id: 'dep_1',
+              SyncToken: '2',
+              DocNumber: 'DEP-1',
+              TxnDate: '2024-03-03',
+              PrivateNote: 'cleanup | [source_test_tag:deploy-smoke-123]',
+            },
+          ],
+        },
+      }
+    );
+    const { findDocumentsByPrivateNoteTag } = await importQboSvc();
+
+    const documents = await findDocumentsByPrivateNoteTag('deploy-smoke-123', 100, {
+      fetcher,
+      accessToken: 'token',
+    } as any);
+
+    expect(documents).toEqual([
+      expect.objectContaining({ id: 'sr_1', type: 'sales-receipt', syncToken: '0' }),
+      expect.objectContaining({ id: 'je_1', type: 'journal-entry', syncToken: '1' }),
+      expect.objectContaining({ id: 'dep_1', type: 'bank-deposit', syncToken: '2' }),
+    ]);
+  });
+});
+
+describe('deleteQuickBooksDocument', () => {
+  it('posts a delete operation with Id and SyncToken', async () => {
+    const { fetcher, requests } = createFetchMock({
+      SalesReceipt: { Id: 'sr_1', status: 'Deleted' },
+    });
+    const { deleteQuickBooksDocument } = await importQboSvc();
+
+    await deleteQuickBooksDocument(
+      {
+        id: 'sr_1',
+        syncToken: '3',
+        type: 'sales-receipt',
+      },
+      { fetcher, accessToken: 'token' } as any
+    );
+
+    expect(requests[0].url).toContain('/salesreceipt?operation=delete');
+    expect(JSON.parse((requests[0].init?.body ?? '{}') as string)).toEqual({
+      Id: 'sr_1',
+      SyncToken: '3',
+    });
+  });
+});
+
 describe('postDisputeToQbo', () => {
   it('creates dispute journal entry debiting losses and fees then crediting clearing', async () => {
     const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Duplicate check for dispute journal entry
+      { QueryResponse: {} },
       { JournalEntry: { Id: 'dispute-1' } }
     );
     const { postDisputeToQbo } = await importQboSvc();
@@ -1529,5 +1827,42 @@ describe('postDisputeToQbo', () => {
         amount: 90,
       },
     ]);
+  });
+
+  it('appends the cleanup marker to sales receipt private notes from Stripe metadata', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-tagged-1' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 325,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext(
+        {},
+        {
+          metadata: {
+            source_test_tag: 'deploy-smoke-123',
+          },
+        }
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.PrivateNote).toContain('[source_test_tag:deploy-smoke-123]');
   });
 });

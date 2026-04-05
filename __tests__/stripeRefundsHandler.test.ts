@@ -111,6 +111,7 @@ const setup = ({
     bt_charge: defaultBalanceTransaction('bt_charge', Math.abs(charge.amount ?? 0)),
   },
 }: TestSetupOptions = {}) => {
+  const processedKeys = new Set<string>();
   const stripeClient = {
     charges: {
       retrieve: vi.fn().mockResolvedValue(charge),
@@ -144,8 +145,10 @@ const setup = ({
   };
 
   const idempotencyStore = {
-    isProcessed: vi.fn(),
-    markProcessed: vi.fn(),
+    isProcessed: vi.fn().mockImplementation(async (key: string) => processedKeys.has(key)),
+    markProcessed: vi.fn().mockImplementation(async (key: string) => {
+      processedKeys.add(key);
+    }),
     withLock: vi.fn().mockImplementation(async (_: string, fn: () => Promise<unknown>) => fn()),
     flush: vi.fn(),
   };
@@ -253,8 +256,10 @@ describe('handleRefundEvent', () => {
     expect(refundCall[1]).toBe('stripe_refund_id__c');
     expect(chargeCall[1]).toBe('stripe_charge_id__c');
     expect(chargeCall[2]).toEqual({ overrideId: 'sf_charge_1' });
-    expect(chargeCall[0].amount_net__c).toBe(0);
+    expect(chargeCall[0].amount_gross__c).toBe(10);
+    expect(chargeCall[0].amount_net__c).toBe(10);
     expect(chargeCall[0].status__c).toBe('refunded');
+    expect(chargeCall[0]).not.toHaveProperty('posted_to_qbo__c');
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_txn_1', {
       id: 'RR-1',
       type: 'refund-receipt',
@@ -307,8 +312,10 @@ describe('handleRefundEvent', () => {
       (call) => call[1] === 'stripe_charge_id__c'
     );
     expect(chargeCall).toBeDefined();
-    expect(chargeCall?.[0].amount_net__c).toBe(5);
+    expect(chargeCall?.[0].amount_gross__c).toBe(10);
+    expect(chargeCall?.[0].amount_net__c).toBe(10);
     expect(chargeCall?.[0].status__c).toBe('paid');
+    expect(chargeCall?.[0]).not.toHaveProperty('posted_to_qbo__c');
     expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledWith(
       expect.objectContaining({
         lines: [
@@ -319,7 +326,36 @@ describe('handleRefundEvent', () => {
     );
   });
 
-  it('updates refund receipt when refund amount changes', async () => {
+  it('does not upsert a charge row when the parent charge does not exist in Salesforce', async () => {
+    const refund = createRefund({ amount: 1_000 });
+    const { deps, event, salesforce } = setup({ refund });
+    salesforce.findTransactionIdByExternalId.mockResolvedValue(null);
+
+    const { context } = createContext();
+
+    await handleRefundEvent(context, event, deps);
+
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledTimes(1);
+    const [refundCall] = salesforce.upsertTransactionByExternalId.mock.calls;
+    expect(refundCall[1]).toBe('stripe_refund_id__c');
+  });
+
+  it('looks up the parent using only charge transactions', async () => {
+    const refund = createRefund({ id: 're_parent_lookup', amount: 1_000 });
+    const { deps, event, salesforce } = setup({ refund });
+    const { context } = createContext();
+
+    await handleRefundEvent(context, event, deps);
+
+    expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
+      'stripe_charge_id__c',
+      'ch_123',
+      'Stripe Transaction',
+      'charge'
+    );
+  });
+
+  it('does not repost a refund receipt after the refund has already been processed', async () => {
     const lineMetadata = JSON.stringify([
       { amount: 600, itemRef: { value: 'ITEM_REG' } },
       { amount: 400, itemRef: { value: 'ITEM_DON' } },
@@ -337,7 +373,7 @@ describe('handleRefundEvent', () => {
 
     charge.amount_refunded = 400;
     const firstSetup = setup({ charge, refund: firstRefund });
-    const { deps, refundAdapter } = firstSetup;
+    const { deps, refundAdapter, salesforce } = firstSetup;
     const { context } = createContext();
 
     await handleRefundEvent(context, firstSetup.event, deps);
@@ -357,13 +393,9 @@ describe('handleRefundEvent', () => {
     secondSetup.event.id = 'evt_test_2'; // Use different event ID to avoid idempotency
     await handleRefundEvent(context, secondSetup.event, deps);
 
-    expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
-    expect(
-      refundAdapter.upsertRefundReceipt.mock.calls[0][0].lines.map(
-        (line: RefundReceiptLineInput) => line.amountCents
-      )
-    ).toEqual([420, 280]);
-    expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledTimes(1);
+    expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(0);
+    expect(refundAdapter.appendSalesReceiptAdjustments).toHaveBeenCalledTimes(0);
+    expect(salesforce.markPostedToQbo).toHaveBeenCalledTimes(1);
   });
 
   it('skips refund receipt creation for failed refunds', async () => {
@@ -381,9 +413,39 @@ describe('handleRefundEvent', () => {
     );
     expect(refundAdapter.appendSalesReceiptAdjustments).not.toHaveBeenCalled();
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
-      expect.objectContaining({ status__c: 'failed' }),
+      expect.objectContaining({
+        status__c: 'failed',
+        amount_gross__c: 0,
+        amount_fee__c: 0,
+        amount_net__c: 0,
+      }),
       'stripe_refund_id__c'
     );
+  });
+
+  it('does not post the same refund to QBO more than once across refund events', async () => {
+    const refund = createRefund({ id: 're_repeat', amount: 1_000 });
+    const { deps, refundAdapter, salesforce } = setup({ refund });
+    const { context } = createContext();
+
+    const firstEvent = {
+      id: 'evt_repeat_1',
+      type: 'refund.created',
+      data: { object: refund },
+    } as Stripe.Event;
+    const secondEvent = {
+      id: 'evt_repeat_2',
+      type: 'refund.updated',
+      data: { object: refund },
+    } as Stripe.Event;
+
+    await handleRefundEvent(context, firstEvent, deps);
+    await handleRefundEvent(context, secondEvent, deps);
+
+    expect(refundAdapter.upsertRefundReceipt).toHaveBeenCalledTimes(1);
+    expect(refundAdapter.appendSalesReceiptAdjustments).not.toHaveBeenCalled();
+    expect(salesforce.markPostedToQbo).toHaveBeenCalledTimes(1);
+    expect(deps.idempotencyStore.markProcessed).toHaveBeenCalledWith('stripe_refund_qbo_re_repeat');
   });
 
   it('records negative gross and net amounts in Salesforce for refunds', async () => {

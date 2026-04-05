@@ -1,4 +1,5 @@
 import { initializeSecretRedactor, registerSecretValue } from './lib/secretRedactor';
+import { installPunycodeAlias } from './lib/installPunycodeAlias';
 import tokenManager from './services/qbo/qboTokenManager';
 
 const FORCE_REGISTER_ENV_KEYS = [
@@ -28,6 +29,7 @@ const FORCE_REGISTER_ENV_KEYS = [
 
 const DELIMITED_SECRET_ENV_KEYS = ['STRIPE_ACCOUNTS', 'STRIPE_WEBHOOK_SECRETS'];
 
+installPunycodeAlias();
 initializeSecretRedactor();
 
 for (const key of FORCE_REGISTER_ENV_KEYS) {

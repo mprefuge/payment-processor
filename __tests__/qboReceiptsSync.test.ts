@@ -94,6 +94,9 @@ describe('qboReceiptsSync', () => {
       if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
         return { records: [] };
       }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
       return { records: [] };
     });
 
@@ -189,10 +192,19 @@ describe('qboReceiptsSync', () => {
     expect(body.summary.results[0].status).toBe('synced');
     expect(upsert).toHaveBeenCalledOnce();
 
-    const [dto, key] = upsert.mock.calls[0];
+    const firstCall = upsert.mock.calls[0] as unknown as [Record<string, any>, string];
+    const [dto, key] = firstCall;
     expect(key).toBe('qbo_doc_id__c');
     expect(dto.qbo_doc_id__c).toBe('501');
-    expect(dto.transaction_type__c).toBe('charge');
+    expect(dto.qbo_doc_number__c).toBe('SR-501');
+    expect(dto.qbo_customer_id__c).toBe('100');
+    expect(dto.qbo_customer_name__c).toBe('Test Customer');
+    expect(dto.qbo_class_id__c).toBeNull();
+    expect(dto.qbo_class_name__c).toBeNull();
+    expect(dto.memo__c).toBe('Imported from QuickBooks SalesReceipt SR-501');
+    expect(dto.qbo_private_note__c).toBeNull();
+    expect(dto.source_system__c).toBe('QuickBooks');
+    expect(dto.transaction_type__c).toBe('sales-receipt');
     expect(dto.contact__c).toBe('003CONTACT');
     expect(dto.account__c).toBeNull();
     expect(dto.amount_gross__c).toBe(150);
@@ -211,6 +223,9 @@ describe('qboReceiptsSync', () => {
       }
       if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
         return { records: [] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
       }
       return { records: [] };
     });
@@ -475,6 +490,9 @@ describe('qboReceiptsSync', () => {
       if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
         return { records: [] };
       }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
       return { records: [] };
     });
 
@@ -514,6 +532,76 @@ describe('qboReceiptsSync', () => {
     expect(body.summary.plannedCount).toBe(3);
     // Customer should only be fetched once despite three receipts
     expect(getCustomer).toHaveBeenCalledOnce();
+  });
+
+  it('preloads duplicate charge matches once per page and still skips matching receipts', async () => {
+    const duplicateQueries: string[] = [];
+
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003DUPES'")) {
+        return { records: [{ Id: '003DUPES' }] };
+      }
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return { records: [] };
+      }
+      if (
+        soql.includes('FROM Transaction__c') &&
+        soql.includes("Transaction_Type__c IN ('charge', 'sales-receipt')")
+      ) {
+        duplicateQueries.push(soql);
+        return {
+          records: [
+            {
+              Id: 'a01MATCH',
+              Contact__c: '003DUPES',
+              Amount_Gross__c: 150,
+              Received_At__c: '2026-03-01',
+            },
+          ],
+        };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
+      return { records: [] };
+    });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes('FROM SalesReceipt STARTPOSITION 1')) {
+          return [makeReceipt('711', '901'), makeReceipt('712', '901', { TotalAmt: 275 })];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async (id: string) => {
+        if (id === '901') return makeCustomer('901', '003DUPES');
+        throw new Error(`Unexpected customer ${id}`);
+      }),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=true',
+          query: new URLSearchParams({ dryRun: 'true' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(duplicateQueries).toHaveLength(1);
+    expect(body.summary.processedCount).toBe(2);
+    expect(body.summary.skippedCount).toBe(1);
+    expect(body.summary.plannedCount).toBe(1);
+    expect(body.summary.results[0].message).toMatch(
+      /may already exist as Salesforce transaction a01MATCH/i
+    );
   });
 
   it('marks receipt as skipped when the QBO customer cannot be fetched', async () => {
@@ -563,6 +651,9 @@ describe('qboReceiptsSync', () => {
       if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
         // receipt 801 already exists
         return { records: [{ QBO_Doc_Id__c: '801' }] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
       }
       return { records: [] };
     });
@@ -615,7 +706,8 @@ describe('qboReceiptsSync', () => {
     expect(statuses).toEqual(['already_synced', 'synced', 'no_customer_salesforce_id', 'skipped']);
 
     expect(upsert).toHaveBeenCalledOnce();
-    expect(upsert.mock.calls[0][0].qbo_doc_id__c).toBe('802');
+    const [firstUpsertDto] = upsert.mock.calls[0] as unknown as [Record<string, any>];
+    expect(firstUpsertDto.qbo_doc_id__c).toBe('802');
   });
 
   it('resolves campaign from ClassRef when available', async () => {
@@ -672,7 +764,18 @@ describe('qboReceiptsSync', () => {
 
     expect(response.status).toBe(200);
     expect(body.summary.syncedCount).toBe(1);
-    expect(upsert.mock.calls[0][0].campaign__c).toBe('701YOUTH');
+    const [headerClassDto] = upsert.mock.calls[0] as unknown as [Record<string, any>];
+    expect(headerClassDto.campaign__c).toBe('701YOUTH');
+    expect(headerClassDto).toEqual(
+      expect.objectContaining({
+        source_system__c: 'QuickBooks',
+        qbo_doc_number__c: 'SR-901',
+        qbo_customer_id__c: '2001',
+        qbo_customer_name__c: 'Test Customer',
+        qbo_class_id__c: '10',
+        qbo_class_name__c: 'Youth Ministry',
+      })
+    );
   });
 
   it('defaults to General Giving campaign when receipt has no ClassRef', async () => {
@@ -722,7 +825,143 @@ describe('qboReceiptsSync', () => {
 
     expect(response.status).toBe(200);
     expect(body.summary.syncedCount).toBe(1);
-    expect(upsert.mock.calls[0][0].campaign__c).toBe('701GEN');
+    const [defaultCampaignDto] = upsert.mock.calls[0] as unknown as [Record<string, any>];
+    expect(defaultCampaignDto.campaign__c).toBe('701GEN');
+  });
+
+  it('resolves campaign from line-level ClassRef when the receipt header has no class', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003LINECLASS'")) {
+        return { records: [{ Id: '003LINECLASS' }] };
+      }
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return { records: [] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
+      if (soql.includes("WHERE Class__c = 'UNRESTRICTED FUNDS:General'")) {
+        return { records: [{ Id: '701LINECLASS' }] };
+      }
+      return { records: [] };
+    });
+
+    const upsert = vi.fn(async () => ({ success: true, id: 'a01', created: true }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: upsert }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes('FROM SalesReceipt STARTPOSITION 1')) {
+          return [
+            makeReceipt('904', '2004', {
+              Line: [
+                {
+                  DetailType: 'SalesItemLineDetail',
+                  SalesItemLineDetail: {
+                    ClassRef: {
+                      value: '100000000001555323',
+                      name: 'UNRESTRICTED FUNDS:General',
+                    },
+                  },
+                },
+              ],
+            }),
+          ];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async (id: string) => {
+        if (id === '2004') return makeCustomer('2004', '003LINECLASS');
+        throw new Error(`Unexpected customer ${id}`);
+      }),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false',
+          query: new URLSearchParams({ dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.syncedCount).toBe(1);
+    const [lineClassDto] = upsert.mock.calls[0] as unknown as [Record<string, any>];
+    expect(lineClassDto).toEqual(
+      expect.objectContaining({
+        campaign__c: '701LINECLASS',
+        fund__c: 'UNRESTRICTED FUNDS',
+        designation__c: 'General',
+        qbo_class_id__c: '100000000001555323',
+        qbo_class_name__c: 'UNRESTRICTED FUNDS:General',
+      })
+    );
+  });
+
+  it('skips receipt import when ClassRef does not map to a unique campaign', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003CLASSREVIEW'")) {
+        return { records: [{ Id: '003CLASSREVIEW' }] };
+      }
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return { records: [] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
+      if (soql.includes("WHERE Class__c = 'UNKNOWN:Class'")) {
+        return { records: [] };
+      }
+      return { records: [] };
+    });
+
+    const upsert = vi.fn(async () => ({ success: true, id: 'a01', created: true }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: upsert }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes('FROM SalesReceipt STARTPOSITION 1')) {
+          return [
+            {
+              ...makeReceipt('903', '2003'),
+              ClassRef: { value: '20', name: 'UNKNOWN:Class' },
+            },
+          ];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async (id: string) => {
+        if (id === '2003') return makeCustomer('2003', '003CLASSREVIEW');
+        throw new Error(`Unexpected customer ${id}`);
+      }),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false',
+          query: new URLSearchParams({ dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.skippedCount).toBe(1);
+    expect(body.summary.syncedCount).toBe(0);
+    expect(body.summary.results[0].status).toBe('skipped');
+    expect(body.summary.results[0].message).toMatch(/does not map to a Salesforce campaign/i);
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('filters receipts in-memory by date range before fetching customers', async () => {

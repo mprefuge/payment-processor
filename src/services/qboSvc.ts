@@ -4,6 +4,11 @@ import type Stripe from 'stripe';
 
 import env from '../config/env';
 import { logger } from '../lib/logger';
+import {
+  appendTestArtifactMarker,
+  buildTestArtifactMarker,
+  extractTestArtifactTagFromStripeContext,
+} from '../lib/testArtifactTagging';
 import tokenManager from './qbo/qboTokenManager';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
@@ -83,6 +88,9 @@ interface QuickBooksCustomField {
   Type?: string;
   StringValue?: string;
 }
+
+const normalizeQuickBooksCustomFieldName = (value: unknown): string =>
+  (typeof value === 'string' ? value.trim() : '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 interface QuickBooksPhysicalAddress {
   Line1?: string;
@@ -283,6 +291,8 @@ export interface PostChargeToQboInput {
   memo?: string;
   date: string | Date;
   stripe?: StripeCustomerContext;
+  customer?: SalesReceiptCustomerDetails | null;
+  cleanupTag?: string;
   options?: PostOptions;
 }
 
@@ -291,10 +301,21 @@ export interface PostChargeToQboResult {
   type: Extract<QuickBooksDocType, 'sales-receipt' | 'journal-entry' | 'bank-deposit'>;
 }
 
+export interface TaggedQuickBooksDocument {
+  type: QuickBooksDocType;
+  id: string;
+  syncToken: string;
+  docNumber?: string | null;
+  txnDate?: string | null;
+  privateNote?: string | null;
+}
+
 export interface PostRefundToQboInput {
   amount: number;
+  feeAmount?: number;
   memo?: string;
   date: string | Date;
+  cleanupTag?: string;
   options?: PostOptions;
 }
 
@@ -303,6 +324,7 @@ export interface PostDisputeToQboInput {
   feeAmount: number;
   memo?: string;
   date: string | Date;
+  cleanupTag?: string;
   options?: PostOptions;
 }
 
@@ -1044,7 +1066,9 @@ export const updateQuickBooksCustomerSalesforceId = async (
   const customFields = Array.isArray(customer.CustomField)
     ? (customer.CustomField as QuickBooksCustomField[])
     : [];
-  const salesforceField = customFields.find((field) => field?.Name === 'Salesforce ID');
+  const salesforceField = customFields.find(
+    (field) => normalizeQuickBooksCustomFieldName(field?.Name) === 'salesforceid'
+  );
 
   if (!salesforceField?.DefinitionId) {
     throw new Error(
@@ -1716,13 +1740,12 @@ const buildDocNumber = (
 ): string => {
   // If a charge ID is provided, use it for uniqueness instead of amount
   if (chargeId) {
-    // Extract the unique part from charge ID (e.g., "ch_3ABC123" -> "3ABC123")
     const chargeIdPart = chargeId.startsWith('ch_') ? chargeId.slice(3) : chargeId;
     const formattedDate = normalizeDate(date).replace(/-/g, '');
-    const suffix = `${formattedDate}-${chargeIdPart}`;
-    const maxPrefixLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - suffix.length - 1);
-    const safePrefix = prefix.slice(0, maxPrefixLength);
-    return `${safePrefix}-${suffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
+    const reservedLength = prefix.length + formattedDate.length + 2;
+    const availableChargeLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - reservedLength);
+    const uniqueChargeSuffix = chargeIdPart.slice(-availableChargeLength);
+    return `${prefix}-${formattedDate}-${uniqueChargeSuffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
   }
 
   // Fallback to original behavior using amount
@@ -3120,31 +3143,34 @@ const postChargeAsSalesReceipt = async (input: {
   normalizedMemo?: string;
   date: string | Date;
   stripe?: StripeCustomerContext;
+  customer?: SalesReceiptCustomerDetails | null;
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
-  const { grossAmount, feeAmount, normalizedMemo, date, stripe, options } = input;
+  const { grossAmount, feeAmount, normalizedMemo, date, stripe, customer, options } = input;
   const chargeId = stripe?.charge?.id ?? null;
   const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount, chargeId);
   const context = await createRequestContext(options);
-  let receiptCustomer: SalesReceiptCustomerDetails | null = null;
+  let receiptCustomer: SalesReceiptCustomerDetails | null = customer ?? null;
 
-  try {
-    const derived = deriveSalesReceiptCustomer({ ...(stripe ?? {}) });
-    const ensured = await ensureSalesReceiptCustomer(derived, context);
-    if (ensured) {
-      receiptCustomer = {
-        ref: ensured.ref,
-        email: ensured.email ?? null,
-        billingAddress: ensured.billingAddress ?? null,
-        shippingAddress: ensured.shippingAddress ?? null,
-      };
+  if (!receiptCustomer) {
+    try {
+      const derived = deriveSalesReceiptCustomer({ ...(stripe ?? {}) });
+      const ensured = await ensureSalesReceiptCustomer(derived, context);
+      if (ensured) {
+        receiptCustomer = {
+          ref: ensured.ref,
+          email: ensured.email ?? null,
+          billingAddress: ensured.billingAddress ?? null,
+          shippingAddress: ensured.shippingAddress ?? null,
+        };
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to ensure QuickBooks customer for sales receipt: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
     }
-  } catch (error) {
-    throw new Error(
-      `Failed to ensure QuickBooks customer for sales receipt: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
   }
 
   const lineOverrides = getSalesReceiptLineOverrides(stripe);
@@ -3315,11 +3341,16 @@ export const postChargeToQbo = async ({
   memo,
   date,
   stripe,
+  customer,
+  cleanupTag,
   options,
 }: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(gross, 'Gross amount');
   const feeAmount = ensurePositiveAmount(fee, 'Fee amount');
-  const normalizedMemo = memo?.trim() || undefined;
+  const normalizedMemo = appendTestArtifactMarker(
+    memo?.trim() || undefined,
+    cleanupTag ?? extractTestArtifactTagFromStripeContext(stripe ?? null)
+  );
 
   if (env.accounting.postingStrategy === 'sales-receipt') {
     return await postChargeAsSalesReceipt({
@@ -3328,6 +3359,7 @@ export const postChargeToQbo = async ({
       normalizedMemo,
       date,
       stripe,
+      customer,
       options,
     });
   }
@@ -3344,23 +3376,45 @@ export const postChargeToQbo = async ({
 
 export const postRefundToQbo = async ({
   amount,
+  feeAmount = 0,
   memo,
   date,
+  cleanupTag,
   options,
 }: PostRefundToQboInput): Promise<PostChargeToQboResult> => {
   const refundAmount = ensurePositiveAmount(amount, 'Refund amount');
+  const refundFeeAmount = ensurePositiveAmount(feeAmount, 'Refund fee amount');
+  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
 
   if (refundAmount === 0) {
     throw new Error('Refund amount must be greater than zero.');
   }
 
   return postJournalEntryFromLines({
-    docNumber: buildDocNumber('REF', date, refundAmount),
-    memo,
+    docNumber: buildDocNumber('REF', date, refundAmount + refundFeeAmount),
+    memo: normalizedMemo,
     date,
     lines: [
-      createJournalEntryLine('debit', env.quickBooks.accounts.refunds, refundAmount, memo),
-      createJournalEntryLine('credit', env.quickBooks.accounts.stripeClearing, refundAmount, memo),
+      createJournalEntryLine(
+        'debit',
+        env.quickBooks.accounts.refunds,
+        refundAmount,
+        normalizedMemo
+      ),
+      refundFeeAmount > 0
+        ? createJournalEntryLine(
+            'debit',
+            env.quickBooks.accounts.fees,
+            refundFeeAmount,
+            normalizedMemo
+          )
+        : null,
+      createJournalEntryLine(
+        'credit',
+        env.quickBooks.accounts.stripeClearing,
+        refundAmount + refundFeeAmount,
+        normalizedMemo
+      ),
     ],
     emptyLineError: 'Refund journal entry must include at least one non-zero line.',
     options,
@@ -3372,6 +3426,7 @@ interface PostPayoutToQboInput {
   memo?: string;
   date: Date;
   payoutId?: string;
+  cleanupTag?: string;
   options?: PostOptions;
 }
 
@@ -3380,9 +3435,11 @@ export const postPayoutToQbo = async ({
   memo,
   date,
   payoutId,
+  cleanupTag,
   options,
 }: PostPayoutToQboInput): Promise<PostChargeToQboResult> => {
   const payoutAmount = ensurePositiveAmount(amount, 'Payout amount');
+  const normalizedMemo = appendTestArtifactMarker(toTrimmed(memo) ?? undefined, cleanupTag);
 
   if (payoutAmount === 0) {
     throw new Error('Payout amount must be greater than zero.');
@@ -3401,7 +3458,7 @@ export const postPayoutToQbo = async ({
   const deposit = await buildResolvedPayoutDeposit({
     docNumber: buildDocNumber('PO', date, payoutAmount, payoutId),
     amountCents: payoutAmount,
-    memo: toTrimmed(memo) ?? undefined,
+    memo: normalizedMemo,
     date,
     options,
   });
@@ -3415,10 +3472,12 @@ export const postDisputeToQbo = async ({
   feeAmount,
   memo,
   date,
+  cleanupTag,
   options,
 }: PostDisputeToQboInput): Promise<PostChargeToQboResult> => {
   const normalizedLoss = ensurePositiveAmount(lossAmount, 'Dispute loss amount');
   const normalizedFee = ensurePositiveAmount(feeAmount, 'Dispute fee amount');
+  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
   const total = normalizedLoss + normalizedFee;
 
   if (total === 0) {
@@ -3427,7 +3486,7 @@ export const postDisputeToQbo = async ({
 
   return postJournalEntryFromLines({
     docNumber: buildDocNumber('DSP', date, total),
-    memo,
+    memo: normalizedMemo,
     date,
     lines: [
       normalizedLoss > 0
@@ -3435,13 +3494,23 @@ export const postDisputeToQbo = async ({
             'debit',
             env.quickBooks.accounts.disputeLosses,
             normalizedLoss,
-            memo
+            normalizedMemo
           )
         : null,
       normalizedFee > 0
-        ? createJournalEntryLine('debit', env.quickBooks.accounts.fees, normalizedFee, memo)
+        ? createJournalEntryLine(
+            'debit',
+            env.quickBooks.accounts.fees,
+            normalizedFee,
+            normalizedMemo
+          )
         : null,
-      createJournalEntryLine('credit', env.quickBooks.accounts.stripeClearing, total, memo),
+      createJournalEntryLine(
+        'credit',
+        env.quickBooks.accounts.stripeClearing,
+        total,
+        normalizedMemo
+      ),
     ],
     emptyLineError: 'Dispute journal entry must contain at least one non-zero line.',
     options,
@@ -3454,6 +3523,104 @@ export const ensureItem = async (
 ): Promise<QuickBooksReference> => {
   const context = await createRequestContext(options);
   return ensureSalesReceiptItem(itemName, context);
+};
+
+export const findDocumentsByPrivateNoteTag = async (
+  tag: string,
+  maxResultsPerEntity = 100,
+  options?: PostOptions
+): Promise<TaggedQuickBooksDocument[]> => {
+  const trimmedTag = tag.trim();
+  if (!trimmedTag) {
+    throw new Error('Cleanup tag is required to query QuickBooks documents.');
+  }
+
+  const normalizedLimit = Number.isFinite(maxResultsPerEntity)
+    ? Math.max(1, Math.min(1000, Math.trunc(maxResultsPerEntity)))
+    : 100;
+  const marker = buildTestArtifactMarker(trimmedTag);
+  const escapedMarker = escapeQueryValue(marker);
+  const context = await createRequestContext(options);
+  const documents: TaggedQuickBooksDocument[] = [];
+
+  for (const [type, metadata] of Object.entries(QUICKBOOKS_ENTITY_METADATA) as Array<
+    [QuickBooksDocType, QuickBooksEntityMetadata]
+  >) {
+    const queryText =
+      `SELECT Id, SyncToken, DocNumber, TxnDate, PrivateNote FROM ${metadata.queryEntity} ` +
+      `WHERE PrivateNote LIKE '%${escapedMarker}%' MAXRESULTS ${normalizedLimit}`;
+    const records = await queryQuickBooks<Record<string, unknown>>(queryText, context);
+
+    for (const record of records) {
+      const id =
+        typeof record.Id === 'string'
+          ? record.Id.trim()
+          : typeof record.Id === 'number'
+            ? String(record.Id)
+            : '';
+      const syncToken =
+        typeof record.SyncToken === 'string'
+          ? record.SyncToken.trim()
+          : typeof record.SyncToken === 'number'
+            ? String(record.SyncToken)
+            : '';
+
+      if (!id || !syncToken) {
+        continue;
+      }
+
+      documents.push({
+        type,
+        id,
+        syncToken,
+        docNumber: typeof record.DocNumber === 'string' ? record.DocNumber : null,
+        txnDate: typeof record.TxnDate === 'string' ? record.TxnDate : null,
+        privateNote: typeof record.PrivateNote === 'string' ? record.PrivateNote : null,
+      });
+    }
+  }
+
+  return documents;
+};
+
+export const deleteQuickBooksDocument = async (
+  document: TaggedQuickBooksDocument,
+  options?: PostOptions
+): Promise<void> => {
+  if (!document.id?.trim()) {
+    throw new Error('QuickBooks document id is required for deletion.');
+  }
+
+  if (!document.syncToken?.trim()) {
+    throw new Error(`QuickBooks document ${document.id} is missing SyncToken.`);
+  }
+
+  const context = await createRequestContext(options);
+  const metadata = QUICKBOOKS_ENTITY_METADATA[document.type];
+  const url =
+    `${QBO_BASE_URL[env.quickBooks.environment]}/${encodeURIComponent(getRealmId())}/` +
+    `${metadata.apiPath}?operation=delete`;
+
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      Id: document.id,
+      SyncToken: document.syncToken,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to delete QuickBooks ${document.type} ${document.id} (status ${response.status}): ${
+        errorText ?? response.statusText
+      }`
+    );
+  }
 };
 
 export const ensureCustomer = async (

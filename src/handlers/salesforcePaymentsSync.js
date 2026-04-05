@@ -180,6 +180,27 @@ const normalizeStripeId = (value) => {
   return null;
 };
 
+const trimToNull = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const extractMetadataSalesforceId = (metadata) => {
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+
+  return (
+    trimToNull(metadata.salesforce_id) ||
+    trimToNull(metadata.salesforceId) ||
+    trimToNull(metadata.SalesforceId)
+  );
+};
+
 const splitName = (name) => {
   if (typeof name !== 'string') {
     return { firstName: null, lastName: null };
@@ -269,8 +290,10 @@ const resolveSyncOptions = ({ query, deps }) => {
     MAX_MAX_RECORDS
   );
   const includeCustomerLookup = parseBoolean(query.includeCustomerLookup, !dryRun && !exportCsv);
+  const includeNonSucceeded = parseBoolean(query.includeNonSucceeded, false);
   const requestedCursor =
     typeof query.cursor === 'string' && query.cursor.trim().length > 0 ? query.cursor.trim() : null;
+  const salesforceId = trimToNull(query.salesforceId);
 
   return {
     dryRun,
@@ -283,7 +306,9 @@ const resolveSyncOptions = ({ query, deps }) => {
     maxRuntimeMs,
     maxRecords,
     includeCustomerLookup,
+    includeNonSucceeded,
     requestedCursor,
+    salesforceId,
   };
 };
 
@@ -356,6 +381,513 @@ const fetchPaymentIntentForCharge = async (stripe, charge) => {
   } catch (error) {
     return null;
   }
+};
+
+const fetchPaymentIntentById = async (stripe, paymentIntentId) => {
+  const normalizedPaymentIntentId = trimToNull(paymentIntentId);
+  if (!normalizedPaymentIntentId) {
+    return null;
+  }
+
+  const paymentIntentApi = stripe?.paymentIntents;
+  if (!paymentIntentApi || typeof paymentIntentApi.retrieve !== 'function') {
+    return null;
+  }
+
+  try {
+    return await paymentIntentApi.retrieve(normalizedPaymentIntentId);
+  } catch (error) {
+    return null;
+  }
+};
+
+const fetchChargeById = async (stripe, chargeId) => {
+  const normalizedChargeId = trimToNull(chargeId);
+  if (!normalizedChargeId) {
+    return null;
+  }
+
+  const chargesApi = stripe?.charges;
+  if (!chargesApi || typeof chargesApi.retrieve !== 'function') {
+    return null;
+  }
+
+  try {
+    return await chargesApi.retrieve(normalizedChargeId);
+  } catch (error) {
+    return null;
+  }
+};
+
+const fetchChargeForPaymentIntent = async (stripe, paymentIntent) => {
+  const latestChargeId = normalizeStripeId(paymentIntent?.latest_charge);
+  if (!latestChargeId) {
+    return null;
+  }
+
+  return fetchChargeById(stripe, latestChargeId);
+};
+
+const preserveExistingTransactionLookups = (transactionPayload, existingTransaction) => ({
+  ...transactionPayload,
+  contact__c: transactionPayload.contact__c || existingTransaction.contactId || null,
+  account__c: transactionPayload.account__c || existingTransaction.accountId || null,
+  campaign__c: transactionPayload.campaign__c || existingTransaction.campaignId || null,
+  fund__c: transactionPayload.fund__c || existingTransaction.fundId || null,
+  designation__c: transactionPayload.designation__c || existingTransaction.designationId || null,
+  restriction__c: transactionPayload.restriction__c || existingTransaction.restrictionId || null,
+});
+
+const preserveExistingSourceSystem = (transactionPayload, existingTransaction) => ({
+  ...transactionPayload,
+  source_system__c:
+    coalesceString(transactionPayload.source_system__c, existingTransaction?.sourceSystem) ||
+    'Stripe',
+});
+
+const coalesceString = (incomingValue, existingValue) => {
+  if (typeof incomingValue === 'string' && incomingValue.trim().length > 0) {
+    return incomingValue;
+  }
+
+  if (typeof existingValue === 'string' && existingValue.trim().length > 0) {
+    return existingValue;
+  }
+
+  return null;
+};
+
+const coalesceBooleanTrue = (incomingValue, existingValue) => {
+  if (incomingValue === true || existingValue === true) {
+    return true;
+  }
+
+  if (incomingValue === false || existingValue === false) {
+    return false;
+  }
+
+  return null;
+};
+
+const preserveExistingQboFields = (transactionPayload, existingTransaction) => ({
+  ...transactionPayload,
+  posted_to_qbo__c: coalesceBooleanTrue(
+    transactionPayload.posted_to_qbo__c,
+    existingTransaction.postedToQbo
+  ),
+  qbo_doc_type__c: coalesceString(
+    transactionPayload.qbo_doc_type__c,
+    existingTransaction.qboDocType
+  ),
+  qbo_doc_id__c: coalesceString(transactionPayload.qbo_doc_id__c, existingTransaction.qboDocId),
+  qbo_doc_number__c: coalesceString(
+    transactionPayload.qbo_doc_number__c,
+    existingTransaction.qboDocNumber
+  ),
+  qbo_customer_id__c: coalesceString(
+    transactionPayload.qbo_customer_id__c,
+    existingTransaction.qboCustomerId
+  ),
+  qbo_customer_name__c: coalesceString(
+    transactionPayload.qbo_customer_name__c,
+    existingTransaction.qboCustomerName
+  ),
+  qbo_class_id__c: coalesceString(
+    transactionPayload.qbo_class_id__c,
+    existingTransaction.qboClassId
+  ),
+  qbo_class_name__c: coalesceString(
+    transactionPayload.qbo_class_name__c,
+    existingTransaction.qboClassName
+  ),
+  qbo_private_note__c: coalesceString(
+    transactionPayload.qbo_private_note__c,
+    existingTransaction.qboPrivateNote
+  ),
+  qbo_source_created_at__c: coalesceString(
+    transactionPayload.qbo_source_created_at__c,
+    existingTransaction.qboSourceCreatedAt
+  ),
+  qbo_source_updated_at__c: coalesceString(
+    transactionPayload.qbo_source_updated_at__c,
+    existingTransaction.qboSourceUpdatedAt
+  ),
+  qbo_posted_at__c: coalesceString(
+    transactionPayload.qbo_posted_at__c,
+    existingTransaction.qboPostedAt
+  ),
+  posting_error__c: coalesceString(
+    transactionPayload.posting_error__c,
+    existingTransaction.postingError
+  ),
+});
+
+const sanitizeLookupField = async ({
+  salesforceSvc,
+  transactionPayload,
+  dtoField,
+  validatorName,
+}) => {
+  if (typeof salesforceSvc?.[validatorName] !== 'function') {
+    return transactionPayload;
+  }
+
+  const lookupId = trimToNull(transactionPayload?.[dtoField]);
+  if (!lookupId) {
+    return transactionPayload;
+  }
+
+  try {
+    const validatedId = await salesforceSvc[validatorName](lookupId);
+    if (validatedId) {
+      return transactionPayload;
+    }
+  } catch (error) {
+    return {
+      ...transactionPayload,
+      [dtoField]: null,
+    };
+  }
+
+  return {
+    ...transactionPayload,
+    [dtoField]: null,
+  };
+};
+
+const sanitizePreservedLookupFields = async (salesforceSvc, transactionPayload) => {
+  let sanitizedPayload = transactionPayload;
+
+  sanitizedPayload = await sanitizeLookupField({
+    salesforceSvc,
+    transactionPayload: sanitizedPayload,
+    dtoField: 'contact__c',
+    validatorName: 'findContactIdById',
+  });
+
+  sanitizedPayload = await sanitizeLookupField({
+    salesforceSvc,
+    transactionPayload: sanitizedPayload,
+    dtoField: 'account__c',
+    validatorName: 'findAccountIdById',
+  });
+
+  return sanitizedPayload;
+};
+
+const resolveSalesforceReferenceFromMetadata = async (salesforceSvc, metadata) => {
+  const salesforceId = extractMetadataSalesforceId(metadata);
+  if (!salesforceId) {
+    return null;
+  }
+
+  if (typeof salesforceSvc?.findContactIdById === 'function') {
+    try {
+      const contactId = await salesforceSvc.findContactIdById(salesforceId);
+      if (contactId) {
+        return { target: 'contact__c', id: contactId, salesforceId };
+      }
+    } catch (error) {}
+  }
+
+  if (typeof salesforceSvc?.findAccountIdById === 'function') {
+    try {
+      const accountId = await salesforceSvc.findAccountIdById(salesforceId);
+      if (accountId) {
+        return { target: 'account__c', id: accountId, salesforceId };
+      }
+    } catch (error) {}
+  }
+
+  return null;
+};
+
+const resolveSalesforceReferenceFromStripeObjects = async (
+  salesforceSvc,
+  paymentIntent,
+  charge,
+  stripeCustomer
+) => {
+  const metadataSources = [stripeCustomer?.metadata, charge?.metadata, paymentIntent?.metadata];
+
+  for (const metadata of metadataSources) {
+    const resolvedReference = await resolveSalesforceReferenceFromMetadata(salesforceSvc, metadata);
+    if (resolvedReference) {
+      return resolvedReference;
+    }
+  }
+
+  return null;
+};
+
+const applyResolvedSalesforceReference = (transactionPayload, resolvedReference) => {
+  if (!resolvedReference) {
+    return transactionPayload;
+  }
+
+  if (resolvedReference.target === 'contact__c') {
+    return {
+      ...transactionPayload,
+      contact__c: transactionPayload.contact__c || resolvedReference.id,
+      account__c:
+        transactionPayload.account__c === resolvedReference.salesforceId
+          ? null
+          : transactionPayload.account__c || null,
+    };
+  }
+
+  return {
+    ...transactionPayload,
+    account__c: transactionPayload.account__c || resolvedReference.id,
+    contact__c:
+      transactionPayload.contact__c === resolvedReference.salesforceId
+        ? null
+        : transactionPayload.contact__c || null,
+  };
+};
+
+const findExistingTransactionForStripePayload = async (salesforceSvc, transactionPayload) => {
+  if (typeof salesforceSvc?.findTransactionForStripeBackfillByStripeIds !== 'function') {
+    return null;
+  }
+
+  return salesforceSvc.findTransactionForStripeBackfillByStripeIds({
+    stripeChargeId: transactionPayload?.stripe_charge_id__c || null,
+    stripePaymentIntentId: transactionPayload?.stripe_payment_intent_id__c || null,
+    stripeBalanceTransactionId: transactionPayload?.stripe_balance_transaction_id__c || null,
+    stripeRefundId: transactionPayload?.stripe_refund_id__c || null,
+    stripeDisputeId: transactionPayload?.stripe_dispute_id__c || null,
+    stripeCheckoutSessionId: transactionPayload?.stripe_checkout_session_id__c || null,
+    stripeSubscriptionId: transactionPayload?.stripe_subscription_id__c || null,
+    stripeInvoiceId: transactionPayload?.stripe_invoice_id__c || null,
+    stripeCreditNoteId: transactionPayload?.stripe_credit_note_id__c || null,
+    stripePayoutId: transactionPayload?.stripe_payout_id__c || null,
+  });
+};
+
+const buildTargetedPagination = (summary, salesforceId) => ({
+  pageSize: 1,
+  maxPages: 1,
+  maxRuntimeMs: 0,
+  maxRecords: 1,
+  pagesProcessed: 1,
+  recordsProcessed: summary.totalPayments,
+  requestedCursor: salesforceId,
+  nextCursor: null,
+  hasMore: false,
+  stopReason: 'targeted_salesforce_record',
+  continuationRecommended: false,
+});
+
+const buildExamplePayload = ({
+  existingTransaction,
+  charge,
+  paymentIntent,
+  stripeCustomer,
+  transactionPayload,
+  customerPayload,
+  paymentType,
+}) => ({
+  salesforceTransaction: {
+    id: existingTransaction.id,
+    stripeChargeId: existingTransaction.stripeChargeId,
+    stripePaymentIntentId: existingTransaction.stripePaymentIntentId,
+  },
+  stripeCharge: {
+    id: charge?.id || null,
+    amount: toAmount(charge?.amount),
+    currency: charge?.currency || paymentIntent?.currency || null,
+    customerId: normalizeStripeId(charge?.customer) || normalizeStripeId(paymentIntent?.customer),
+    status: charge?.status || paymentIntent?.status || null,
+    paymentType,
+  },
+  salesforceCustomerPayload: customerPayload,
+  salesforcePaymentPayload: {
+    stripe_charge_id__c: transactionPayload.stripe_charge_id__c || null,
+    stripe_payment_intent_id__c: transactionPayload.stripe_payment_intent_id__c || null,
+    transaction_type__c: transactionPayload.transaction_type__c,
+    status__c: transactionPayload.status__c,
+    amount_gross__c: transactionPayload.amount_gross__c,
+    amount_fee__c: transactionPayload.amount_fee__c,
+    amount_net__c: transactionPayload.amount_net__c,
+    currency_iso_code__c: transactionPayload.currency_iso_code__c,
+    stripe_customer_id__c: transactionPayload.stripe_customer_id__c || null,
+    received_at__c: transactionPayload.received_at__c || null,
+  },
+});
+
+const syncExistingSalesforceTransaction = async ({
+  runtimeDeps,
+  ensureSalesforce,
+  salesforceId,
+  dryRun,
+  includeCustomerLookup,
+  exampleLimit,
+  exportCsv,
+}) => {
+  const summary = createSummary();
+  const examples = [];
+  const errorSamples = [];
+  const csvRows = [];
+
+  const salesforceSvc = await ensureSalesforce();
+  if (typeof salesforceSvc.findTransactionForStripeBackfill !== 'function') {
+    throw new Error('Salesforce backfill lookup is not available.');
+  }
+
+  const existingTransaction = await salesforceSvc.findTransactionForStripeBackfill(salesforceId);
+  if (!existingTransaction) {
+    return {
+      response: {
+        status: 404,
+        jsonBody: {
+          error: 'salesforce_transaction_not_found',
+          message: `No Salesforce Transaction__c was found for Id ${salesforceId}.`,
+        },
+      },
+    };
+  }
+
+  const charge = await fetchChargeById(runtimeDeps.stripe, existingTransaction.stripeChargeId);
+  const paymentIntent =
+    (charge && (await fetchPaymentIntentForCharge(runtimeDeps.stripe, charge))) ||
+    (await fetchPaymentIntentById(runtimeDeps.stripe, existingTransaction.stripePaymentIntentId));
+  const resolvedCharge =
+    charge || (await fetchChargeForPaymentIntent(runtimeDeps.stripe, paymentIntent));
+
+  if (!resolvedCharge && !paymentIntent) {
+    return {
+      response: {
+        status: 404,
+        jsonBody: {
+          error: 'stripe_record_not_found',
+          message:
+            'The Salesforce transaction did not contain a resolvable Stripe Charge or Payment Intent.',
+          salesforceId: existingTransaction.id,
+          stripeChargeId: existingTransaction.stripeChargeId,
+          stripePaymentIntentId: existingTransaction.stripePaymentIntentId,
+        },
+      },
+    };
+  }
+
+  summary.totalPayments = 1;
+  const effectiveCharge = resolvedCharge;
+  const customerId =
+    normalizeStripeId(effectiveCharge?.customer) ||
+    normalizeStripeId(paymentIntent?.customer) ||
+    existingTransaction.stripeCustomerId;
+  if (customerId) {
+    summary.customers.withCustomerId = 1;
+    summary.customers.uniqueCustomerCount = 1;
+  } else {
+    summary.customers.withoutCustomerId = 1;
+  }
+
+  let balanceTransaction = null;
+  const balanceTransactionId = normalizeStripeId(effectiveCharge?.balance_transaction);
+  if (balanceTransactionId) {
+    try {
+      balanceTransaction =
+        await runtimeDeps.stripe.balanceTransactions.retrieve(balanceTransactionId);
+    } catch (error) {
+      balanceTransaction = null;
+    }
+  }
+
+  const stripeCustomer = await fetchStripeCustomerSafely(runtimeDeps.stripe, customerId);
+  const resolvedMetadataReference = await resolveSalesforceReferenceFromStripeObjects(
+    salesforceSvc,
+    paymentIntent,
+    effectiveCharge,
+    stripeCustomer
+  );
+  let transactionPayload = preserveExistingQboFields(
+    preserveExistingTransactionLookups(
+      mapStripeToTransaction({
+        paymentIntent,
+        charge: effectiveCharge,
+        balanceTransaction,
+        stripeCustomer,
+      }),
+      existingTransaction
+    ),
+    existingTransaction
+  );
+  transactionPayload = preserveExistingSourceSystem(transactionPayload, existingTransaction);
+  transactionPayload = applyResolvedSalesforceReference(
+    transactionPayload,
+    resolvedMetadataReference
+  );
+  transactionPayload = await sanitizePreservedLookupFields(salesforceSvc, transactionPayload);
+
+  const paymentType =
+    transactionPayload.status__c === 'refunded'
+      ? 'refunded'
+      : transactionPayload.status__c === 'disputed'
+        ? 'disputed'
+        : derivePaymentType(effectiveCharge);
+  summary.paymentTypes[paymentType] += 1;
+  if (effectiveCharge?.status === 'succeeded' || transactionPayload.status__c === 'paid') {
+    summary.successfulPayments = 1;
+  }
+
+  let customerPayload = null;
+  if (customerId && includeCustomerLookup) {
+    customerPayload = buildSalesforceCustomerPayload(stripeCustomer);
+  }
+
+  if (examples.length < exampleLimit) {
+    examples.push(
+      buildExamplePayload({
+        existingTransaction,
+        charge: effectiveCharge,
+        paymentIntent,
+        stripeCustomer,
+        transactionPayload,
+        customerPayload,
+        paymentType,
+      })
+    );
+  }
+
+  if (exportCsv) {
+    csvRows.push(toSalesforceTransactionCsvRow(transactionPayload, customerId));
+  }
+
+  if (!dryRun && !exportCsv) {
+    if (customerPayload) {
+      try {
+        await salesforceSvc.upsertCustomerByStripeId(customerPayload);
+        summary.salesforce.customerUpserts += 1;
+      } catch (error) {
+        errorSamples.push({
+          salesforceId: existingTransaction.id,
+          customerId,
+          stage: 'customer_upsert',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const externalIdField =
+      transactionPayload.stripe_charge_id__c || !transactionPayload.stripe_payment_intent_id__c
+        ? 'stripe_charge_id__c'
+        : 'stripe_payment_intent_id__c';
+
+    await salesforceSvc.upsertTransactionByExternalId(transactionPayload, externalIdField, {
+      overrideId: existingTransaction.id,
+    });
+    summary.salesforce.paymentUpserts += 1;
+  }
+
+  return {
+    pagination: buildTargetedPagination(summary, salesforceId),
+    summary,
+    examples,
+    errorSamples,
+    csvRows,
+  };
 };
 
 const resolveStripeSecret = (testMode) => {
@@ -439,6 +971,7 @@ const readQuery = (request) => {
     return {
       mode: request.query.get('mode') || readHeaderValue(request, 'x-stripe-mode') || undefined,
       dryRun: request.query.get('dryRun') || undefined,
+      salesforceId: request.query.get('salesforceId') || undefined,
       exampleLimit: request.query.get('exampleLimit') || undefined,
       format: request.query.get('format') || undefined,
       cursor: request.query.get('cursor') || undefined,
@@ -447,6 +980,7 @@ const readQuery = (request) => {
       maxRuntimeMs: request.query.get('maxRuntimeMs') || undefined,
       maxRecords: request.query.get('maxRecords') || undefined,
       includeCustomerLookup: request.query.get('includeCustomerLookup') || undefined,
+      includeNonSucceeded: request.query.get('includeNonSucceeded') || undefined,
     };
   }
 
@@ -464,6 +998,7 @@ const readQuery = (request) => {
         mode:
           parsed.searchParams.get('mode') || readHeaderValue(request, 'x-stripe-mode') || undefined,
         dryRun: parsed.searchParams.get('dryRun') || undefined,
+        salesforceId: parsed.searchParams.get('salesforceId') || undefined,
         exampleLimit: parsed.searchParams.get('exampleLimit') || undefined,
         format: parsed.searchParams.get('format') || undefined,
         cursor: parsed.searchParams.get('cursor') || undefined,
@@ -472,6 +1007,7 @@ const readQuery = (request) => {
         maxRuntimeMs: parsed.searchParams.get('maxRuntimeMs') || undefined,
         maxRecords: parsed.searchParams.get('maxRecords') || undefined,
         includeCustomerLookup: parsed.searchParams.get('includeCustomerLookup') || undefined,
+        includeNonSucceeded: parsed.searchParams.get('includeNonSucceeded') || undefined,
       };
     }
   } catch (error) {}
@@ -624,7 +1160,9 @@ const syncSalesforcePayments = async (request, context) => {
       maxRuntimeMs,
       maxRecords,
       includeCustomerLookup,
+      includeNonSucceeded,
       requestedCursor,
+      salesforceId,
     } = resolveSyncOptions({ query, deps: runtimeDeps });
     const startedAt = Date.now();
     const summary = createSummary();
@@ -646,6 +1184,41 @@ const syncSalesforcePayments = async (request, context) => {
       return salesforce;
     };
 
+    if (salesforceId) {
+      const targetedResult = await syncExistingSalesforceTransaction({
+        runtimeDeps,
+        ensureSalesforce,
+        salesforceId,
+        dryRun,
+        includeCustomerLookup,
+        exampleLimit,
+        exportCsv,
+      });
+
+      if (targetedResult.response) {
+        return targetedResult.response;
+      }
+
+      if (exportCsv) {
+        return buildCsvResponse({
+          csvRows: targetedResult.csvRows,
+          hasMore: false,
+          nextCursor: null,
+          stopReason: 'targeted_salesforce_record',
+        });
+      }
+
+      return buildJsonResponse({
+        dryRun,
+        testMode,
+        forcedByTestMode,
+        pagination: targetedResult.pagination,
+        summary: targetedResult.summary,
+        examples: targetedResult.examples,
+        errorSamples: targetedResult.errorSamples,
+      });
+    }
+
     while (pagesProcessed < maxPages) {
       if (hasReachedRecordLimit(summary.totalPayments, maxRecords)) {
         stopReason = 'max_records_reached';
@@ -664,7 +1237,8 @@ const syncSalesforcePayments = async (request, context) => {
 
       pagesProcessed += 1;
       hasMore = page.hasMore;
-      nextCursor = page.nextCursor;
+      let processedAllChargesOnPage = true;
+      let lastProcessedChargeId = nextCursor;
 
       for (const charge of page.data) {
         summary.totalPayments += 1;
@@ -672,7 +1246,9 @@ const syncSalesforcePayments = async (request, context) => {
         try {
           const isSucceededCharge = charge.status === 'succeeded';
 
-          if (!isSucceededCharge) {
+          const shouldSkipNonSucceeded = !isSucceededCharge && !includeNonSucceeded;
+
+          if (shouldSkipNonSucceeded) {
             summary.skippedPayments += 1;
 
             if (!exportCsv) {
@@ -720,7 +1296,7 @@ const syncSalesforcePayments = async (request, context) => {
                 ? 'disputed'
                 : derivePaymentType(charge);
 
-          if (exportCsv || isSucceededCharge) {
+          if (exportCsv || isSucceededCharge || includeNonSucceeded) {
             summary.paymentTypes[paymentType] += 1;
           }
 
@@ -760,7 +1336,7 @@ const syncSalesforcePayments = async (request, context) => {
             csvRows.push(toSalesforceTransactionCsvRow(transactionPayload, customerId));
           }
 
-          if (!isSucceededCharge) {
+          if (shouldSkipNonSucceeded) {
             continue;
           }
 
@@ -770,13 +1346,45 @@ const syncSalesforcePayments = async (request, context) => {
 
           const salesforceSvc = await ensureSalesforce();
 
+          const existingTransaction = await findExistingTransactionForStripePayload(
+            salesforceSvc,
+            transactionPayload
+          );
+          const resolvedMetadataReference = await resolveSalesforceReferenceFromStripeObjects(
+            salesforceSvc,
+            paymentIntent,
+            charge,
+            stripeCustomer
+          );
+
+          let enrichedTransactionPayload = transactionPayload;
+          if (existingTransaction) {
+            enrichedTransactionPayload = preserveExistingQboFields(
+              preserveExistingTransactionLookups(enrichedTransactionPayload, existingTransaction),
+              existingTransaction
+            );
+          }
+          enrichedTransactionPayload = preserveExistingSourceSystem(
+            enrichedTransactionPayload,
+            existingTransaction
+          );
+          enrichedTransactionPayload = applyResolvedSalesforceReference(
+            enrichedTransactionPayload,
+            resolvedMetadataReference
+          );
+
+          const sanitizedTransactionPayload = await sanitizePreservedLookupFields(
+            salesforceSvc,
+            enrichedTransactionPayload
+          );
+
           if (customerPayload) {
             await salesforceSvc.upsertCustomerByStripeId(customerPayload);
             summary.salesforce.customerUpserts += 1;
           }
 
           await salesforceSvc.upsertTransactionByExternalId(
-            transactionPayload,
+            sanitizedTransactionPayload,
             'stripe_charge_id__c'
           );
           summary.salesforce.paymentUpserts += 1;
@@ -796,15 +1404,24 @@ const syncSalesforcePayments = async (request, context) => {
           });
         }
 
+        lastProcessedChargeId = charge?.id || lastProcessedChargeId;
+
         if (hasReachedRecordLimit(summary.totalPayments, maxRecords)) {
           stopReason = 'max_records_reached';
+          processedAllChargesOnPage = false;
           break;
         }
 
         if (hasReachedRuntimeLimit(startedAt, maxRuntimeMs)) {
           stopReason = 'max_runtime_reached';
+          processedAllChargesOnPage = false;
           break;
         }
+      }
+
+      nextCursor = processedAllChargesOnPage ? page.nextCursor : lastProcessedChargeId;
+      if (!processedAllChargesOnPage) {
+        hasMore = true;
       }
 
       if (!hasMore) {

@@ -265,7 +265,7 @@ describe('stripeTrueUp handler overrides', () => {
     expect(salesforce.findTransactionRecordByExternalId).toHaveBeenCalledWith(
       'stripe_charge_id__c',
       'ch_needs_contact',
-      'General'
+      'Stripe Transaction'
     );
     expect(salesforce.findContactIdById).toHaveBeenCalledWith('003Meta000000001AAA');
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
@@ -669,6 +669,141 @@ describe('stripeTrueUp handler overrides', () => {
     expect(transactionPayload.contact__c).toBeUndefined();
     expect(externalIdField).toBe('stripe_charge_id__c');
     expect(upsertOptions).toBeUndefined();
+
+    internals.resetDependencies();
+  });
+
+  it('populates refund-specific fields from the refund object during true-up', async () => {
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_refund', success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi
+        .fn()
+        .mockImplementation(async (field: string, value: string) => {
+          if (field === 'stripe_charge_id__c' && value === 'ch_refund_source') {
+            return 'a01_charge_parent';
+          }
+
+          return null;
+        }),
+      upsertCustomerByStripeId: vi.fn(),
+      findContactIdById: vi.fn().mockResolvedValue('003RefundMetaAAA'),
+      findAccountIdById: vi.fn().mockResolvedValue(null),
+    };
+
+    const charge = {
+      id: 'ch_refund_source',
+      status: 'succeeded',
+      customer: 'cus_refund_123',
+      currency: 'usd',
+      created: 1_700_000_000,
+      livemode: false,
+      metadata: {
+        salesforce_id: '003RefundMetaAAA',
+      },
+      billing_details: {
+        name: 'Refund Donor',
+        email: 'refund@example.com',
+        phone: '+15555550124',
+      },
+      payment_method_details: {
+        type: 'card',
+        card: {
+          brand: 'visa',
+          last4: '4242',
+        },
+      },
+      refunds: {
+        data: [],
+      },
+    };
+
+    const stripe = {
+      charges: {
+        retrieve: vi.fn().mockResolvedValue(charge),
+      },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'cus_refund_123',
+          deleted: false,
+          metadata: {},
+        }),
+      },
+      invoices: {
+        retrieve: vi.fn(),
+      },
+      paymentIntents: {
+        retrieve: vi.fn(),
+      },
+      subscriptions: {
+        retrieve: vi.fn(),
+      },
+      products: {
+        retrieve: vi.fn(),
+      },
+      prices: {
+        retrieve: vi.fn(),
+      },
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripe) },
+      fetchers: {
+        refunds: vi.fn().mockResolvedValue([
+          {
+            id: 're_trueup_1',
+            status: 'succeeded',
+            created: 1_700_000_500,
+            livemode: false,
+            charge: 'ch_refund_source',
+            balance_transaction: {
+              id: 'bt_refund_1',
+              amount: -500,
+              fee: 0,
+              type: 'refund',
+              currency: 'usd',
+              created: 1_700_000_500,
+            },
+          },
+        ]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: {
+        postRefundToQbo: vi.fn(),
+      },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({
+      from: '2026-01-01T00:00:00Z',
+      type: 'refunds',
+      bypassQbo: 'true',
+    });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.counts.processed).toBe(1);
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transaction_type__c: 'refund',
+        stripe_refund_id__c: 're_trueup_1',
+        stripe_charge_id__c: 'ch_refund_source',
+        parent_transaction__c: 'a01_charge_parent',
+        contact__c: '003RefundMetaAAA',
+        received_at__c: new Date(1_700_000_500_000).toISOString(),
+        stripe_livemode__c: false,
+        billing_name__c: 'Refund Donor',
+        billing_email__c: 'refund@example.com',
+        billing_phone__c: '+15555550124',
+      }),
+      'stripe_refund_id__c'
+    );
 
     internals.resetDependencies();
   });

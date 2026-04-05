@@ -194,7 +194,7 @@ describe('handlePayoutEvent', () => {
 
   it('creates deposit lines for charges and fees', async () => {
     const context = createContext();
-    const payout = createPayout({ amount: 9_700 });
+    const payout = createPayout({ amount: 9_700, statement_descriptor: 'REFUGE INTL' });
     const chargeTxn = createTransaction({
       id: 'txn_charge',
       amount: 10_000,
@@ -226,6 +226,15 @@ describe('handlePayoutEvent', () => {
     await handlePayoutEvent(context, event, deps);
 
     expect(upsertDeposit).toHaveBeenCalledTimes(1);
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_event_id__c: 'evt_1',
+        stripe_livemode__c: false,
+        available_on_date__c: new Date(payout.arrival_date * 1000).toISOString(),
+        statement_descriptor__c: 'REFUGE INTL',
+      }),
+      'stripe_payout_id__c'
+    );
     const input = upsertDeposit.mock.calls[0][0] as UpsertPayoutDepositInput;
     expect(input.stripeEventId).toBe('evt_1');
     expect(input.depositExternalRef).toBe('po_123');
@@ -406,23 +415,35 @@ describe('handlePayoutEvent', () => {
 
   it('marks payout for review when canceled or failed', async () => {
     const context = createContext();
-    const payout = createPayout({ status: 'canceled' });
+    const payout = createPayout({
+      status: 'failed',
+      failure_code: 'account_closed',
+      failure_message: 'Bank account closed',
+    });
     const { deps, markDepositForReview } = createDeps();
 
     const event = {
       id: 'evt_cancel',
-      type: 'payout.canceled',
+      type: 'payout.failed',
       data: { object: payout },
     } as Stripe.Event;
 
     await handlePayoutEvent(context, event, deps);
 
+    expect((await deps.getSalesforceSvc()).upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stripe_event_id__c: 'evt_cancel',
+        failure_code__c: 'account_closed',
+        error_message__c: 'Bank account closed',
+      }),
+      'stripe_payout_id__c'
+    );
     expect(markDepositForReview).toHaveBeenCalledTimes(1);
     expect(markDepositForReview.mock.calls[0][0]).toMatchObject({
       payout,
       stripeEventId: 'evt_cancel',
       depositExternalRef: 'po_123',
-      reason: 'payout.canceled',
+      reason: 'payout.failed',
     });
   });
 });

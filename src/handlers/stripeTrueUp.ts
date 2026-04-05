@@ -22,6 +22,8 @@ import {
   type SalesforceSvc,
   type QuickBooksDocumentReference,
 } from '../services/salesforceSvc';
+
+const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
 import { ensureSalesforceIdOnCustomer } from '../stripe/utils';
@@ -686,6 +688,24 @@ const applyCampaignFromCategory = async (
   }
 };
 
+const isLikelySalesforceId = (value: string | null | undefined): boolean =>
+  typeof value === 'string' && /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/.test(value.trim());
+
+const normalizeCampaignReference = async (
+  context: HttpContext,
+  transaction: TransactionUpsertDTO,
+  chargeId: string
+): Promise<void> => {
+  if (!transaction.campaign__c || isLikelySalesforceId(transaction.campaign__c)) {
+    return;
+  }
+
+  const campaignName = transaction.campaign__c;
+  delete transaction.campaign__c;
+
+  await applyCampaignFromCategory(context, transaction, campaignName, chargeId);
+};
+
 const markPosted = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown,
@@ -1154,7 +1174,7 @@ const processPayments = async (
             const existingRecord = await salesforce.findTransactionRecordByExternalId(
               'stripe_charge_id__c',
               charge.id,
-              'General'
+              STRIPE_TRANSACTION_RECORD_TYPE_NAME
             );
 
             if (existingRecord?.id) {
@@ -1184,7 +1204,7 @@ const processPayments = async (
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             charge.id,
-            'General'
+            STRIPE_TRANSACTION_RECORD_TYPE_NAME
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
@@ -1340,6 +1360,8 @@ const processPayments = async (
           balanceTransaction,
           stripeCustomer,
         });
+
+        await normalizeCampaignReference(context, transaction, charge.id);
 
         if (!transaction.frequency__c && chargeObj.invoice) {
           try {
@@ -1580,7 +1602,7 @@ const processRefunds = async (
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_refund_id__c',
             refund.id,
-            'General'
+            STRIPE_TRANSACTION_RECORD_TYPE_NAME
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
@@ -1611,7 +1633,7 @@ const processRefunds = async (
           parentId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             chargeId,
-            'General'
+            STRIPE_TRANSACTION_RECORD_TYPE_NAME
           );
         }
 
@@ -1779,6 +1801,8 @@ const processRefunds = async (
           stripeCustomer,
         });
 
+        applyRefundSpecificFields(transaction, refund);
+
         const config = loadConfig();
         const metadata = chargeFragment?.metadata || {};
 
@@ -1881,6 +1905,7 @@ const processRefunds = async (
 
           const posting = await dependencies.accounting.postRefundToQbo({
             amount: refundAmount,
+            feeAmount: Math.abs(balanceTransaction.fee ?? 0),
             memo: `Stripe refund ${refund.id}`,
             date: timestampToDate(
               balanceTransaction.created ?? balanceTransaction.available_on ?? null
@@ -1904,6 +1929,23 @@ const processRefunds = async (
   }
 
   return summary;
+};
+
+const applyRefundSpecificFields = (
+  transaction: TransactionUpsertDTO,
+  refund: Stripe.Refund
+): void => {
+  const refundWithLivemode = refund as Stripe.Refund & { livemode?: boolean };
+
+  transaction.stripe_refund_id__c = refund.id;
+
+  if (typeof refund.created === 'number' && Number.isFinite(refund.created)) {
+    transaction.received_at__c = new Date(refund.created * 1000).toISOString();
+  }
+
+  if (typeof refundWithLivemode.livemode === 'boolean') {
+    transaction.stripe_livemode__c = refundWithLivemode.livemode;
+  }
 };
 
 const processPayouts = async (

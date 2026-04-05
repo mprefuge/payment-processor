@@ -1,7 +1,13 @@
 import type Stripe from 'stripe';
 import { z } from 'zod';
 
-export const transactionTypeSchema = z.enum(['charge', 'refund', 'dispute', 'payout']);
+export const transactionTypeSchema = z.enum([
+  'charge',
+  'refund',
+  'dispute',
+  'payout',
+  'sales-receipt',
+]);
 export type TransactionType = z.infer<typeof transactionTypeSchema>;
 
 export const transactionStatusSchema = z.enum([
@@ -34,6 +40,9 @@ export const transactionUpsertSchema = z
     stripe_customer_id__c: stringOrNullSchema.optional(),
     stripe_subscription_id__c: stringOrNullSchema.optional(),
     stripe_payout_id__c: stringOrNullSchema.optional(),
+    stripe_event_id__c: stringOrNullSchema.optional(),
+    stripe_livemode__c: booleanOrNullSchema.optional(),
+    stripe_receipt_url__c: stringOrNullSchema.optional(),
     parent_transaction__c: stringOrNullSchema.optional(),
     amount_gross__c: numberOrNullSchema.optional(),
     amount_fee__c: numberOrNullSchema.optional(),
@@ -53,12 +62,33 @@ export const transactionUpsertSchema = z
     payment_method__c: stringOrNullSchema.optional(),
     payment_brand__c: stringOrNullSchema.optional(),
     payment_last4__c: stringOrNullSchema.optional(),
+    source_system__c: stringOrNullSchema.optional(),
     received_at__c: stringOrNullSchema.optional(),
+    available_on_date__c: stringOrNullSchema.optional(),
     next_retry_at__c: stringOrNullSchema.optional(),
     dunning_required__c: booleanOrNullSchema.optional(),
+    error_message__c: stringOrNullSchema.optional(),
+    failure_code__c: stringOrNullSchema.optional(),
+    decline_code__c: stringOrNullSchema.optional(),
+    dispute_status__c: stringOrNullSchema.optional(),
+    dispute_reason__c: stringOrNullSchema.optional(),
+    credit_note_number__c: stringOrNullSchema.optional(),
+    credit_note_reason__c: stringOrNullSchema.optional(),
+    billing_name__c: stringOrNullSchema.optional(),
+    billing_email__c: stringOrNullSchema.optional(),
+    billing_phone__c: stringOrNullSchema.optional(),
+    statement_descriptor__c: stringOrNullSchema.optional(),
     posted_to_qbo__c: booleanOrNullSchema.optional(),
     qbo_doc_type__c: stringOrNullSchema.optional(),
     qbo_doc_id__c: stringOrNullSchema.optional(),
+    qbo_doc_number__c: stringOrNullSchema.optional(),
+    qbo_customer_id__c: stringOrNullSchema.optional(),
+    qbo_customer_name__c: stringOrNullSchema.optional(),
+    qbo_class_id__c: stringOrNullSchema.optional(),
+    qbo_class_name__c: stringOrNullSchema.optional(),
+    qbo_private_note__c: stringOrNullSchema.optional(),
+    qbo_source_created_at__c: stringOrNullSchema.optional(),
+    qbo_source_updated_at__c: stringOrNullSchema.optional(),
     qbo_posted_at__c: stringOrNullSchema.optional(),
     posting_error__c: stringOrNullSchema.optional(),
   })
@@ -555,6 +585,33 @@ const derivePaymentLast4 = (charge: Stripe.Charge | null | undefined): string | 
   return last4 ?? null;
 };
 
+const deriveReceiptUrl = (charge: Stripe.Charge | null | undefined): string | null => {
+  const receiptUrl = (charge as Stripe.Charge & { receipt_url?: string | null })?.receipt_url;
+  return receiptUrl ?? null;
+};
+
+const deriveBillingName = (charge: Stripe.Charge | null | undefined): string | null =>
+  charge?.billing_details?.name ?? null;
+
+const deriveBillingEmail = (charge: Stripe.Charge | null | undefined): string | null =>
+  charge?.billing_details?.email ?? null;
+
+const deriveBillingPhone = (charge: Stripe.Charge | null | undefined): string | null =>
+  charge?.billing_details?.phone ?? null;
+
+const deriveStatementDescriptor = (charge: Stripe.Charge | null | undefined): string | null => {
+  const chargeWithStatementDescriptor = charge as Stripe.Charge & {
+    statement_descriptor?: string | null;
+    calculated_statement_descriptor?: string | null;
+  };
+
+  return (
+    chargeWithStatementDescriptor.statement_descriptor ??
+    chargeWithStatementDescriptor.calculated_statement_descriptor ??
+    null
+  );
+};
+
 export const mapStripeToTransaction = (
   input: MapStripeToTransactionInput
 ): TransactionUpsertDTO => {
@@ -596,6 +653,13 @@ export const mapStripeToTransaction = (
       normalizeStripeId(charge?.customer) || normalizeStripeId(paymentIntent?.customer),
     stripe_subscription_id__c: extractSubscriptionId(paymentIntent, charge, combinedMetadata),
     stripe_payout_id__c: extractPayoutId(balanceTransaction),
+    stripe_livemode__c:
+      typeof charge?.livemode === 'boolean'
+        ? charge.livemode
+        : typeof paymentIntent?.livemode === 'boolean'
+          ? paymentIntent.livemode
+          : null,
+    stripe_receipt_url__c: deriveReceiptUrl(charge),
     amount_gross__c:
       centsToMajorUnits(balanceTransaction?.amount ?? charge?.amount) ??
       parseMetadataNumber(combinedMetadata, 'amount_gross__c', 'Amount_Gross__c', 'amount_gross'),
@@ -613,6 +677,7 @@ export const mapStripeToTransaction = (
         'Currency_ISO_Code__c',
         'currency'
       ),
+    memo__c: parseMetadataString(combinedMetadata, 'memo__c', 'Memo__c', 'memo'),
     frequency__c: parseMetadataString(
       combinedMetadata,
       'frequency__c',
@@ -640,6 +705,10 @@ export const mapStripeToTransaction = (
     payment_method__c: derivePaymentMethod(paymentIntent, charge),
     payment_brand__c: derivePaymentBrand(charge),
     payment_last4__c: derivePaymentLast4(charge),
+    billing_name__c: deriveBillingName(charge),
+    billing_email__c: deriveBillingEmail(charge),
+    billing_phone__c: deriveBillingPhone(charge),
+    statement_descriptor__c: deriveStatementDescriptor(charge),
     received_at__c: deriveReceivedAt(paymentIntent, charge),
     posted_to_qbo__c:
       parseMetadataBoolean(

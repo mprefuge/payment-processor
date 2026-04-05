@@ -235,6 +235,7 @@ describe('invoice handlers', () => {
     await handleInvoicePaymentFailed(
       context,
       {
+        id: 'evt_invoice_failed',
         type: 'invoice.payment_failed',
         data: { object: invoice },
         livemode: false,
@@ -248,6 +249,13 @@ describe('invoice handlers', () => {
     const payload = (salesforce.upsertTransactionByExternalId as any).mock.calls[0][0];
 
     expect(payload.status__c).toBe('failed');
+    expect(payload.stripe_event_id__c).toBe('evt_invoice_failed');
+    expect(payload.stripe_livemode__c).toBe(false);
+    expect(payload.error_message__c).toBe(
+      'Card was declined; code=card_declined; decline_code=insufficient_funds; type=card_error'
+    );
+    expect(payload.failure_code__c).toBe('card_declined');
+    expect(payload.decline_code__c).toBe('insufficient_funds');
     expect(payload.next_retry_at__c).toBe(new Date(nextAttempt * 1000).toISOString());
     expect(context.log).toHaveBeenCalledWith(
       '[StripeWebhook] Updating payment intent status',

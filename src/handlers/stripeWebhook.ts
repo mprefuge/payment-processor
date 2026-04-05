@@ -274,6 +274,7 @@ const createRefundReceiptAdapter = (): RefundReceiptAccountingAdapter => ({
     return postWhenAmountPositive(totalCents, () =>
       postRefundToQbo({
         amount: totalCents,
+        feeAmount: Math.max(0, Math.trunc(input.feeAmountCents ?? 0)),
         memo: input.memo,
         date: input.txnDate,
       })

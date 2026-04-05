@@ -9,6 +9,11 @@ describe('salesforceRecordQboSync', () => {
   let internals: any;
 
   beforeEach(async () => {
+    vi.resetModules();
+    vi.doMock('../src/config/env', () => ({
+      env: { accounting: { postingStrategy: 'sales-receipt' } },
+      default: { accounting: { postingStrategy: 'sales-receipt' } },
+    }));
     const loaded = await import(`../src/handlers/salesforceRecordQboSync?t=${Date.now()}`);
     handler = loaded.default || loaded;
     internals = handler.__internals;
@@ -1048,6 +1053,119 @@ describe('salesforceRecordQboSync', () => {
     );
   });
 
+  it('recreates charge documents as sales receipts when a linked QuickBooks customer exists', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003CHARGE'")) {
+        return {
+          records: [
+            {
+              Id: '003CHARGE',
+              FirstName: 'Ada',
+              LastName: 'Lovelace',
+              QuickBooks_ID__c: '200',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003CHARGE'")) {
+        return {
+          records: [
+            {
+              Id: 'a01Charge',
+              Name: 'Charge Transaction',
+              transaction_type__c: 'charge',
+              Amount_Gross__c: 100,
+              Amount_Fee__c: 3,
+              Posted_to_QBO__c: false,
+              QBO_Doc_Id__c: null,
+              QBO_Doc_Type__c: null,
+            },
+          ],
+        };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '200'")) {
+        return [
+          {
+            Id: '200',
+            DisplayName: 'Ada Lovelace',
+            PrimaryEmailAddr: { Address: 'ada@example.com' },
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '003CHARGE' }],
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '200'")) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const postChargeToQbo = vi.fn().mockResolvedValue({ qboId: 'SR-1', type: 'sales-receipt' });
+    const markPostedToQbo = vi.fn();
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ markPostedToQbo }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '200',
+        DisplayName: 'Ada Lovelace',
+        PrimaryEmailAddr: { Address: 'ada@example.com' },
+        CustomField: [{ Name: 'Salesforce ID', StringValue: '003CHARGE' }],
+      })),
+      postChargeToQbo,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003CHARGE&dryRun=false',
+          query: new URLSearchParams({ salesforceId: '003CHARGE', dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.plannedCreates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'create_qbo_document',
+          salesforceTransactionId: 'a01Charge',
+          transactionType: 'charge',
+        }),
+      ])
+    );
+    expect(postChargeToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gross: 10000,
+        fee: 300,
+        customer: {
+          ref: { value: '200', name: 'Ada Lovelace' },
+          email: 'ada@example.com',
+        },
+      })
+    );
+    expect(markPostedToQbo).toHaveBeenCalledWith('a01Charge', {
+      id: 'SR-1',
+      type: 'sales-receipt',
+    });
+  });
+
   it('uses an authoritative QuickBooks customer read to recognize the Salesforce custom field', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003AUTHORITATIVE'")) {
@@ -1213,12 +1331,15 @@ describe('salesforceRecordQboSync', () => {
           type: 'create_salesforce_transaction_from_qbo_sales_receipt',
           qboDocId: '7301',
           salesforceId: '003IMPORT',
+          campaignId: '701CLASSMATCH',
+          fund: 'UNRESTRICTED FUNDS',
+          designation: 'General',
         }),
       ])
     );
     expect(upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
-        transaction_type__c: 'charge',
+        transaction_type__c: 'sales-receipt',
         status__c: 'paid',
         contact__c: '003IMPORT',
         amount_gross__c: 125,
@@ -1226,8 +1347,18 @@ describe('salesforceRecordQboSync', () => {
         amount_net__c: 125,
         currency_iso_code__c: 'USD',
         campaign__c: '701CLASSMATCH',
+        fund__c: 'UNRESTRICTED FUNDS',
+        designation__c: 'General',
+        source_system__c: 'QuickBooks',
+        memo__c: 'Imported from QuickBooks SalesReceipt 7301',
         qbo_doc_type__c: 'sales-receipt',
         qbo_doc_id__c: '7301',
+        qbo_doc_number__c: '7301',
+        qbo_customer_id__c: '517',
+        qbo_customer_name__c: 'QBO Import Contact',
+        qbo_class_id__c: null,
+        qbo_class_name__c: 'UNRESTRICTED FUNDS:General',
+        qbo_private_note__c: 'Imported from QBO',
         posted_to_qbo__c: true,
       }),
       'qbo_doc_id__c'
@@ -1236,7 +1367,120 @@ describe('salesforceRecordQboSync', () => {
     expect(body.summary.manualReviewItems).toEqual([]);
   });
 
-  it('defaults imported QBO sales receipts to the General Giving campaign when class matching is unknown', async () => {
+  it('imports QBO-only sales receipts using a line-level ClassRef when the receipt header has no class', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003LINEIMPORT'")) {
+        return {
+          records: [
+            {
+              Id: '003LINEIMPORT',
+              FirstName: 'Line',
+              LastName: 'Import',
+              QuickBooks_ID__c: '519',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003LINEIMPORT'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Class__c = 'UNRESTRICTED FUNDS:General'")) {
+        return { records: [{ Id: '701LINECLASS' }] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GENERAL' }] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '519'")) {
+        return [{ Id: '519', DisplayName: 'Line Import Contact' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '519'")) {
+        return [
+          {
+            Id: '7302',
+            DocNumber: '7302',
+            TxnDate: '2026-03-23',
+            TotalAmt: 90,
+            PrivateNote: 'Imported from QBO',
+            Line: [
+              {
+                DetailType: 'SalesItemLineDetail',
+                SalesItemLineDetail: {
+                  ClassRef: {
+                    value: '100000000001555323',
+                    name: 'UNRESTRICTED FUNDS:General',
+                  },
+                },
+              },
+            ],
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const upsertTransactionByExternalId = vi
+      .fn()
+      .mockResolvedValue({ success: true, id: 'a01ImportedLine' });
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () =>
+        ({ markPostedToQbo: vi.fn(), upsertTransactionByExternalId }) as any,
+      qboQuery,
+      getQuickBooksCustomerById: vi.fn(async () => ({
+        Id: '519',
+        DisplayName: 'Line Import Contact',
+        CurrencyRef: { value: 'USD' },
+        CustomField: [{ Name: 'Salesforce ID', StringValue: '003LINEIMPORT' }],
+      })),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003LINEIMPORT&dryRun=false&importQboReceipts=true',
+          query: new URLSearchParams({
+            salesforceId: '003LINEIMPORT',
+            dryRun: 'false',
+            importQboReceipts: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.manualReviewItems).toEqual([]);
+    expect(upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaign__c: '701LINECLASS',
+        fund__c: 'UNRESTRICTED FUNDS',
+        designation__c: 'General',
+        qbo_class_id__c: '100000000001555323',
+        qbo_class_name__c: 'UNRESTRICTED FUNDS:General',
+      }),
+      'qbo_doc_id__c'
+    );
+  });
+
+  it('requires manual review when imported QBO sales receipt class matching is unknown', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003GENERAL'")) {
         return {
@@ -1286,9 +1530,7 @@ describe('salesforceRecordQboSync', () => {
       return [];
     });
 
-    const upsertTransactionByExternalId = vi
-      .fn()
-      .mockResolvedValue({ success: true, id: 'a01GeneralCampaign' });
+    const upsertTransactionByExternalId = vi.fn();
     const getQuickBooksCustomerById = vi.fn(async () => ({
       Id: '518',
       DisplayName: 'General Giving Contact',
@@ -1322,17 +1564,19 @@ describe('salesforceRecordQboSync', () => {
     const body = JSON.parse(response.body);
 
     expect(response.status).toBe(200);
-    expect(upsertTransactionByExternalId).toHaveBeenCalledWith(
-      expect.objectContaining({
-        qbo_doc_id__c: '7303',
-        campaign__c: '701GENERAL',
-      }),
-      'qbo_doc_id__c'
+    expect(upsertTransactionByExternalId).not.toHaveBeenCalled();
+    expect(body.summary.plannedCreates).toEqual([]);
+    expect(body.summary.manualReviewItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'quickbooks_sales_receipt_campaign_review_required',
+          qboDocId: '7303',
+        }),
+      ])
     );
-    expect(body.summary.manualReviewItems).toEqual([]);
   });
 
-  it('defaults imported QBO sales receipts to General Giving campaign and skips duplicate transaction imports', async () => {
+  it('sends duplicate-like and unknown-class QBO sales receipts to manual review', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003DUPLICATE'")) {
         return {
@@ -1447,29 +1691,24 @@ describe('salesforceRecordQboSync', () => {
     const body = JSON.parse(response.body);
 
     expect(response.status).toBe(200);
-    expect(body.summary.plannedCreates).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: 'create_salesforce_transaction_from_qbo_sales_receipt',
-          qboDocId: '7302',
-        }),
-      ])
-    );
     expect(body.summary.plannedCreates).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'create_salesforce_transaction_from_qbo_sales_receipt',
-          qboDocId: '7301',
         }),
       ])
     );
-    expect(body.summary.plannedUpdates).toEqual(
+    expect(body.summary.plannedUpdates).toEqual([]);
+    expect(body.summary.manualReviewItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          type: 'mark_salesforce_posted_to_qbo',
-          salesforceTransactionId: 'a01Existing',
+          code: 'quickbooks_sales_receipt_possible_existing_salesforce_charge',
           qboDocId: '7301',
-          qboDocType: 'sales-receipt',
+          salesforceTransactionId: 'a01Existing',
+        }),
+        expect.objectContaining({
+          code: 'quickbooks_sales_receipt_campaign_review_required',
+          qboDocId: '7302',
         }),
       ])
     );
