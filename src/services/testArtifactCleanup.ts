@@ -68,7 +68,7 @@ interface TestArtifactCleanupDependencies {
 
 type StripeCustomerRecord = Pick<Stripe.Customer, 'id' | 'email'>;
 type StripeSubscriptionRecord = Pick<Stripe.Subscription, 'id' | 'customer' | 'status'>;
-type StripeSessionRecord = Pick<Stripe.Checkout.Session, 'id' | 'status'>;
+type StripeSessionRecord = Pick<Stripe.Checkout.Session, 'id' | 'status' | 'customer'>;
 
 const DEFAULT_SYSTEMS: CleanupSystem[] = ['stripe', 'salesforce', 'qbo'];
 
@@ -226,7 +226,7 @@ const listStripeSessionsForCustomer = async (
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
 
-    sessions.push(...response.data.map((session) => ({ id: session.id, status: session.status })));
+    sessions.push(...response.data.map((session) => ({ id: session.id, status: session.status, customer: session.customer })));
 
     if (!response.has_more || response.data.length === 0) {
       break;
@@ -238,41 +238,88 @@ const listStripeSessionsForCustomer = async (
   return sessions;
 };
 
+const listTaggedStripeSessions = async (
+  stripe: Stripe,
+  tag: string,
+  limit: number
+): Promise<StripeSessionRecord[]> => {
+  const sessions: StripeSessionRecord[] = [];
+  let page: string | undefined;
+
+  while (sessions.length < limit) {
+    const response: any = await (stripe.checkout.sessions as any).search({
+      query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
+      limit: Math.min(100, limit - sessions.length),
+      ...(page ? { page } : {}),
+    });
+
+    sessions.push(
+      ...((response.data as any[]).map((session) => ({
+        id: session.id,
+        status: session.status,
+        customer: session.customer,
+      })) as StripeSessionRecord[])
+    );
+
+    if (!response.has_more || !response.next_page) {
+      break;
+    }
+
+    page = response.next_page;
+  }
+
+  return sessions;
+};
+
 const cleanupStripeArtifacts = async (
   stripe: Stripe,
   request: Required<Pick<TestArtifactCleanupRequest, 'tag' | 'dryRun' | 'maxStripeCustomers'>>
 ): Promise<{ summary: TestArtifactCleanupSystemSummary; stripeCustomerIds: string[] }> => {
   const summary = createSummary('stripe', request.dryRun);
   const customers = await listStripeCustomersByTag(stripe, request.tag, request.maxStripeCustomers);
-  const stripeCustomerIds = customers.map((customer) => customer.id);
+  const taggedSessions = await listTaggedStripeSessions(stripe, request.tag, request.maxStripeCustomers * 5);
 
-  for (const customer of customers) {
-    const sessions = await listStripeSessionsForCustomer(stripe, customer.id);
-    for (const session of sessions) {
-      if (session.status !== 'open') {
-        continue;
-      }
+  const stripeCustomerIds = new Set(customers.map((customer) => customer.id));
+  const sessionsById = new Map<string, StripeSessionRecord>();
 
-      if (request.dryRun) {
-        pushResult(summary, {
-          id: session.id,
-          type: 'checkout-session',
-          action: 'expire',
-          status: 'dry-run',
-          message: `Would expire open checkout session for customer ${customer.id}.`,
-        });
-      } else {
-        await stripe.checkout.sessions.expire(session.id);
-        pushResult(summary, {
-          id: session.id,
-          type: 'checkout-session',
-          action: 'expire',
-          status: 'expired',
-        });
-      }
+  for (const session of taggedSessions) {
+    if (typeof session.customer === 'string' && session.customer.trim().length > 0) {
+      stripeCustomerIds.add(session.customer);
+    }
+    sessionsById.set(session.id, session);
+  }
+
+  for (const customerId of Array.from(stripeCustomerIds)) {
+    const sessions = await listStripeSessionsForCustomer(stripe, customerId);
+    sessions.forEach((session) => sessionsById.set(session.id, session));
+  }
+
+  for (const session of sessionsById.values()) {
+    if (session.status !== 'open') {
+      continue;
     }
 
-    const subscriptions = await listStripeSubscriptionsForCustomer(stripe, customer.id);
+    if (request.dryRun) {
+      pushResult(summary, {
+        id: session.id,
+        type: 'checkout-session',
+        action: 'expire',
+        status: 'dry-run',
+        message: `Would expire open checkout session ${session.id}.`,
+      });
+    } else {
+      await stripe.checkout.sessions.expire(session.id);
+      pushResult(summary, {
+        id: session.id,
+        type: 'checkout-session',
+        action: 'expire',
+        status: 'expired',
+      });
+    }
+  }
+
+  for (const customerId of Array.from(stripeCustomerIds)) {
+    const subscriptions = await listStripeSubscriptionsForCustomer(stripe, customerId);
     for (const subscription of subscriptions) {
       if (subscription.status === 'canceled' || subscription.status === 'incomplete_expired') {
         pushResult(summary, {
@@ -305,26 +352,26 @@ const cleanupStripeArtifacts = async (
 
     if (request.dryRun) {
       pushResult(summary, {
-        id: customer.id,
+        id: customerId,
         type: 'customer',
         action: 'delete',
         status: 'dry-run',
-        message: customer.email ? `Would delete Stripe customer ${customer.email}.` : undefined,
+        message: `Would delete Stripe customer ${customerId}.`,
       });
       continue;
     }
 
-    await stripe.customers.del(customer.id);
+    await stripe.customers.del(customerId);
     pushResult(summary, {
-      id: customer.id,
+      id: customerId,
       type: 'customer',
       action: 'delete',
       status: 'deleted',
-      message: customer.email ?? undefined,
+      message: undefined,
     });
   }
 
-  return { summary, stripeCustomerIds };
+  return { summary, stripeCustomerIds: Array.from(stripeCustomerIds) };
 };
 
 const querySalesforceIds = async (connection: Connection, soql: string): Promise<string[]> => {
