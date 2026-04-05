@@ -325,8 +325,23 @@ const findExistingTransactionId = async (
         context.log(lookupStep.successLog, {
           [lookupStep.identifierKey]: lookupStep.externalValue,
           transactionId: existingTransactionId,
+          lookupMode: 'recordTypeRestricted',
         });
         return existingTransactionId;
+      }
+
+      const existingAcrossTypes = await salesforce.findTransactionIdByExternalId(
+        lookupStep.fieldName,
+        lookupStep.externalValue
+      );
+
+      if (existingAcrossTypes) {
+        context.log('[StripeWebhook] Found existing transaction by external ID across record types', {
+          [lookupStep.identifierKey]: lookupStep.externalValue,
+          transactionId: existingAcrossTypes,
+          lookupMode: 'anyRecordType',
+        });
+        return existingAcrossTypes;
       }
 
       if (lookupStep.noMatchLog) {
