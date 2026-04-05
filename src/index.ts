@@ -1056,7 +1056,10 @@ registerFunction('stripeTrueUp', 'Stripe true-up support', {
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,
-          example: { error: 'internal_error', message: 'Failed to complete Stripe true-up operation.' },
+          example: {
+            error: 'internal_error',
+            message: 'Failed to complete Stripe true-up operation.',
+          },
         },
       },
     },
@@ -1105,7 +1108,10 @@ registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,
-          example: { error: 'validation_error', message: 'Unsupported QuickBooks document payload.' },
+          example: {
+            error: 'validation_error',
+            message: 'Unsupported QuickBooks document payload.',
+          },
         },
       },
     },
@@ -1231,7 +1237,10 @@ registerFunction('salesforcePaymentsSync', 'Salesforce payments synchronization'
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,
-          example: { error: 'internal_error', message: 'Failed to sync Stripe payments to Salesforce.' },
+          example: {
+            error: 'internal_error',
+            message: 'Failed to sync Stripe payments to Salesforce.',
+          },
         },
       },
     },
@@ -1277,7 +1286,10 @@ registerFunction('qboCustomersSync', 'QBO customer sync to Salesforce contacts',
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,
-          example: { error: 'internal_error', message: 'Failed to sync QBO customers to Salesforce.' },
+          example: {
+            error: 'internal_error',
+            message: 'Failed to sync QBO customers to Salesforce.',
+          },
         },
       },
     },
@@ -1325,7 +1337,10 @@ registerFunction('qboReceiptsSync', 'Sync QuickBooks sales receipts to Salesforc
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,
-          example: { error: 'internal_error', message: 'Failed to sync QuickBooks receipts to Salesforce.' },
+          example: {
+            error: 'internal_error',
+            message: 'Failed to sync QuickBooks receipts to Salesforce.',
+          },
         },
       },
     },
@@ -1383,7 +1398,10 @@ registerFunction(
         content: {
           'application/json': {
             schema: GenericErrorResponseSchema,
-            example: { error: 'salesforce_record_not_found', message: 'No Contact or Account was found for Salesforce ID 003xx0000000001.' },
+            example: {
+              error: 'salesforce_record_not_found',
+              message: 'No Contact or Account was found for Salesforce ID 003xx0000000001.',
+            },
           },
         },
       },
@@ -1392,7 +1410,10 @@ registerFunction(
         content: {
           'application/json': {
             schema: GenericErrorResponseSchema,
-            example: { error: 'link_conflict', message: 'Conflicting Salesforce/QuickBooks linking data was found.' },
+            example: {
+              error: 'link_conflict',
+              message: 'Conflicting Salesforce/QuickBooks linking data was found.',
+            },
           },
         },
       },
@@ -1401,7 +1422,10 @@ registerFunction(
         content: {
           'application/json': {
             schema: GenericErrorResponseSchema,
-            example: { error: 'internal_error', message: 'Failed to sync the Salesforce record with QuickBooks.' },
+            example: {
+              error: 'internal_error',
+              message: 'Failed to sync the Salesforce record with QuickBooks.',
+            },
           },
         },
       },
