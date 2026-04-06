@@ -150,33 +150,70 @@ const pushResult = (
   summary.counts.changed += 1;
 };
 
-const listStripeCustomersByTag = async (
+const listStripeCustomersByTagUsingList = async (
   stripe: Stripe,
   tag: string,
   limit: number
 ): Promise<StripeCustomerRecord[]> => {
   const customers: StripeCustomerRecord[] = [];
-  let page: string | undefined;
+  let startingAfter: string | undefined;
 
   while (customers.length < limit) {
-    const response = await stripe.customers.search({
-      query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
+    const response = await stripe.customers.list({
       limit: Math.min(100, limit - customers.length),
-      ...(page ? { page } : {}),
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
 
-    customers.push(
-      ...response.data.filter((customer): customer is Stripe.Customer => !('deleted' in customer))
+    const taggedCustomers = response.data.filter(
+      (customer): customer is Stripe.Customer =>
+        !('deleted' in customer) && customer.metadata?.source_test_tag === tag
     );
 
-    if (!response.has_more || !response.next_page) {
+    customers.push(...taggedCustomers);
+
+    if (!response.has_more || response.data.length === 0) {
       break;
     }
 
-    page = response.next_page;
+    startingAfter = response.data[response.data.length - 1]?.id;
   }
 
   return customers.map((customer) => ({ id: customer.id, email: customer.email }));
+};
+
+const listStripeCustomersByTag = async (
+  stripe: Stripe,
+  tag: string,
+  limit: number
+): Promise<StripeCustomerRecord[]> => {
+  if (typeof (stripe.customers as any).search === 'function') {
+    try {
+      const customers: StripeCustomerRecord[] = [];
+      let page: string | undefined;
+
+      while (customers.length < limit) {
+        const response = await (stripe.customers as any).search({
+          query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
+          limit: Math.min(100, limit - customers.length),
+          ...(page ? { page } : {}),
+        });
+
+        customers.push(...response.data.filter((customer: any) => !('deleted' in customer)));
+
+        if (!response.has_more || !response.next_page) {
+          break;
+        }
+
+        page = response.next_page;
+      }
+
+      return customers.map((customer) => ({ id: customer.id, email: customer.email }));
+    } catch {
+      return listStripeCustomersByTagUsingList(stripe, tag, limit);
+    }
+  }
+
+  return listStripeCustomersByTagUsingList(stripe, tag, limit);
 };
 
 const listStripeSubscriptionsForCustomer = async (
@@ -312,21 +349,71 @@ const listTaggedStripeSessionsUsingGlobalSearch = async (
   return sessions;
 };
 
+const listTaggedStripeSessionsUsingList = async (
+  stripe: Stripe,
+  tag: string,
+  limit: number
+): Promise<StripeSessionRecord[]> => {
+  const sessions: StripeSessionRecord[] = [];
+  let startingAfter: string | undefined;
+
+  while (sessions.length < limit) {
+    const response = await stripe.checkout.sessions.list({
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+
+    const taggedSessions = response.data.filter(
+      (session): session is Stripe.Checkout.Session => session.metadata?.source_test_tag === tag
+    );
+
+    sessions.push(
+      ...(taggedSessions.map((session) => ({
+        id: session.id,
+        status: session.status,
+        customer: session.customer,
+      })) as StripeSessionRecord[])
+    );
+
+    if (!response.has_more || response.data.length === 0) {
+      break;
+    }
+
+    startingAfter = response.data[response.data.length - 1]?.id;
+  }
+
+  return sessions.slice(0, limit);
+};
+
 const listTaggedStripeSessions = async (
   stripe: Stripe,
   tag: string,
   limit: number
 ): Promise<StripeSessionRecord[]> => {
   if (typeof (stripe.checkout.sessions as any).search === 'function') {
-    return listTaggedStripeSessionsUsingCheckoutSearch(stripe, tag, limit);
+    try {
+      const sessions = await listTaggedStripeSessionsUsingCheckoutSearch(stripe, tag, limit);
+      if (sessions.length > 0) {
+        return sessions;
+      }
+    } catch {
+      // continue to fallback
+    }
   }
 
   const globalSearch = (stripe as any).search;
   if (globalSearch && typeof globalSearch.search === 'function') {
-    return listTaggedStripeSessionsUsingGlobalSearch(stripe, tag, limit);
+    try {
+      const sessions = await listTaggedStripeSessionsUsingGlobalSearch(stripe, tag, limit);
+      if (sessions.length > 0) {
+        return sessions;
+      }
+    } catch {
+      // continue to fallback
+    }
   }
 
-  return [];
+  return listTaggedStripeSessionsUsingList(stripe, tag, limit);
 };
 
 const cleanupStripeArtifacts = async (
