@@ -177,6 +177,11 @@ const readModeToggleFromRequest = (request) => {
     }
   }
 
+  if (request.body && typeof request.body === 'object' && !Array.isArray(request.body)) {
+    candidates.push(request.body.mode);
+    candidates.push(request.body.livemode);
+  }
+
   candidates.push(readHeaderValue(headers, 'x-stripe-mode'));
   candidates.push(readHeaderValue(headers, 'x-livemode'));
 
@@ -190,9 +195,30 @@ const readModeToggleFromRequest = (request) => {
   return null;
 };
 
-const getConfiguredMode = (requestOrContext, maybeContext) => {
+const readModeToggleFromBody = (body) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return null;
+  }
+
+  const candidates = [body.mode, body.livemode];
+  for (const candidate of candidates) {
+    const normalized = normalizeModeToggle(candidate);
+    if (normalized !== null) {
+      return normalized;
+    }
+  }
+
+  return null;
+};
+
+const getConfiguredMode = (requestOrContext, maybeContext, requestBody) => {
   const request = maybeContext ? requestOrContext : null;
   const context = maybeContext || requestOrContext;
+
+  const bodyMode = readModeToggleFromBody(requestBody);
+  if (bodyMode !== null) {
+    return bodyMode;
+  }
 
   const requestMode = readModeToggleFromRequest(request);
   if (requestMode !== null) {
@@ -970,7 +996,7 @@ module.exports = async function (request, context) {
       });
     }
 
-    const isLiveMode = getConfiguredMode(actualRequest, actualContext);
+    const isLiveMode = getConfiguredMode(actualRequest, actualContext, body);
     const requestData = validation.value;
     requestData.metadata = applyTestArtifactMetadata(requestData.metadata, {
       headers: actualRequest?.headers,

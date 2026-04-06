@@ -133,51 +133,125 @@ const main = async () => {
   const cleanupUrl = joinUrl(baseUrl, cleanupPath);
 
   console.log(`Running deployment smoke flow against ${baseUrl} with tag ${tag}`);
+  console.log('');
 
-  const healthBody = await request(
-    healthUrl,
-    { method: 'GET', headers: commonHeaders },
-    'Health check'
-  );
-  if (healthBody == null || typeof healthBody !== 'object') {
-    throw new Error('Health check did not return a JSON object.');
+  const results = {
+    healthCheck: { status: 'pending', message: '', duration: 0 },
+    transaction: { status: 'pending', message: '', duration: 0 },
+    cleanup: { status: 'pending', message: '', duration: 0 },
+  };
+
+  // Test health check
+  try {
+    const startTime = Date.now();
+    const healthBody = await request(
+      healthUrl,
+      { method: 'GET', headers: commonHeaders },
+      'Health check'
+    );
+    results.healthCheck.duration = Date.now() - startTime;
+
+    if (healthBody == null || typeof healthBody !== 'object') {
+      throw new Error('Health check did not return a JSON object.');
+    }
+
+    results.healthCheck.status = 'passed';
+    results.healthCheck.message = 'Health check returned valid response';
+  } catch (error) {
+    results.healthCheck.status = 'failed';
+    results.healthCheck.message = error instanceof Error ? error.message : String(error);
   }
 
-  const transactionBody = await request(
-    transactionUrl,
-    {
-      method: 'POST',
-      headers: {
-        ...commonHeaders,
-        'Content-Type': 'application/json',
+  // Test transaction endpoint
+  try {
+    const startTime = Date.now();
+    const transactionBody = await request(
+      transactionUrl,
+      {
+        method: 'POST',
+        headers: {
+          ...commonHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildTaggedPayload(payload, tag)),
       },
-      body: JSON.stringify(buildTaggedPayload(payload, tag)),
-    },
-    'Transaction smoke test'
-  );
-  assertTransactionResponse(transactionBody);
+      'Transaction smoke test'
+    );
+    results.transaction.duration = Date.now() - startTime;
 
-  const cleanupBody = await request(
-    cleanupUrl,
-    {
-      method: 'POST',
-      headers: {
-        ...commonHeaders,
-        'Content-Type': 'application/json',
+    assertTransactionResponse(transactionBody);
+    results.transaction.status = 'passed';
+    results.transaction.message = 'Transaction endpoint created checkout session';
+  } catch (error) {
+    results.transaction.status = 'failed';
+    results.transaction.message = error instanceof Error ? error.message : String(error);
+  }
+
+  // Test cleanup endpoint
+  try {
+    const startTime = Date.now();
+    const cleanupBody = await request(
+      cleanupUrl,
+      {
+        method: 'POST',
+        headers: {
+          ...commonHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          tag,
+          dryRun: false,
+          liveMode: cleanupLiveMode,
+          systems,
+          deleteSalesforceContacts,
+        }),
       },
-      body: JSON.stringify({
-        tag,
-        dryRun: false,
-        liveMode: cleanupLiveMode,
-        systems,
-        deleteSalesforceContacts,
-      }),
-    },
-    'Cleanup verification'
-  );
-  assertCleanupResponse(cleanupBody);
+      'Cleanup verification'
+    );
+    results.cleanup.duration = Date.now() - startTime;
 
-  console.log('Deployment smoke flow completed successfully.');
+    assertCleanupResponse(cleanupBody);
+    results.cleanup.status = 'passed';
+    results.cleanup.message = 'Cleanup endpoint found and cleaned tagged artifacts';
+  } catch (error) {
+    results.cleanup.status = 'failed';
+    results.cleanup.message = error instanceof Error ? error.message : String(error);
+  }
+
+  // Report results
+  console.log('Deployment Smoke Test Results');
+  console.log('============================');
+  console.log('');
+
+  const endpointNames = [
+    { key: 'healthCheck', display: 'Health Check' },
+    { key: 'transaction', display: 'Transaction' },
+    { key: 'cleanup', display: 'Cleanup' },
+  ];
+
+  let allPassed = true;
+  for (const endpoint of endpointNames) {
+    const result = results[endpoint.key];
+    const statusIcon = result.status === 'passed' ? '✓' : '✗';
+    const durationStr = result.duration ? ` (${result.duration}ms)` : '';
+    console.log(`${statusIcon} ${endpoint.display}: ${result.status.toUpperCase()}${durationStr}`);
+    if (result.message) {
+      console.log(`  ${result.message}`);
+    }
+    if (result.status !== 'passed') {
+      allPassed = false;
+    }
+  }
+
+  console.log('');
+  if (allPassed) {
+    console.log('Deployment smoke flow completed successfully.');
+    console.log('All endpoints are operating as expected.');
+  } else {
+    console.error('Deployment smoke flow completed with failures.');
+    console.error('One or more endpoints did not pass validation.');
+    process.exitCode = 1;
+  }
 };
 
 main().catch((error) => {
