@@ -55,6 +55,7 @@ const buildTransactionRecord = ({
   assignOptionalField(transactionRecord, 'Contact__c', contactId);
   assignOptionalField(transactionRecord, 'Campaign__c', campaignId);
   assignOptionalField(transactionRecord, 'RecordTypeId', recordTypeId);
+  assignOptionalField(transactionRecord, 'Source_System__c', 'Stripe');
 
   if (includeStripeIds) {
     const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
