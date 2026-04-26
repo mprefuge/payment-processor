@@ -1,4 +1,4 @@
-name: Build and deploy Node.js project to Azure Function App - payment-processing-function
+﻿name: Build and deploy Node.js project to Azure Function App - payment-processing-function
 
 on:
   push:
@@ -73,22 +73,6 @@ jobs:
         with:
           name: function-package
 
-      - name: Clear any stuck deployment lock
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          USERNAME=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
-          PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
-          PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
-          KUDU_HOST="${PUBLISH_URL%%:*}"
-          echo "Clearing deployment lock on ${KUDU_HOST} (if any)..."
-          curl -sS -o /dev/null -w "Lock delete status: %{http_code}\n" \
-            -X DELETE "https://${KUDU_HOST}/api/vfs/site/locks/deployment.lock" \
-            -H "If-Match: *" \
-            -u "$USERNAME:$PASSWORD" || true
-
       - name: Deploy verified release to production
         timeout-minutes: 15
         env:
@@ -102,7 +86,6 @@ jobs:
           KUDU_HOST="${PUBLISH_URL%%:*}"
           echo "Deploying async to ${KUDU_HOST}..."
 
-          # Submit async deploy - returns 202 with Location header immediately after upload
           DEPLOY_RESPONSE=$(curl -sS -D - -o /dev/null \
             -X POST "https://${KUDU_HOST}/api/zipdeploy?isAsync=true" \
             -H "Content-Type: application/zip" \
@@ -125,8 +108,6 @@ jobs:
             exit 1
           fi
 
-          # Kudu DeployStatus: 0=None 1=Pending 2=Building 3=Deploying 4=Failed 5=Success 6=Conflict
-          # Poll for up to ~13 minutes (50 x 15s)
           for i in $(seq 1 50); do
             sleep 15
             POLL_BODY=$(curl -sS -u "$USERNAME:$PASSWORD" "$POLL_URL")
@@ -143,6 +124,19 @@ jobs:
             fi
           done
           echo "Deployment polling timed out after 50 attempts" >&2
+          exit 1
+
+  smoke-test-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: deploy-production
+    environment:
+      name: production
+      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
+    env:
+      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
+      PRODUCTION_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
+      PRODUCTION_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
       PRODUCTION_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
       PRODUCTION_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
       PRODUCTION_SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
