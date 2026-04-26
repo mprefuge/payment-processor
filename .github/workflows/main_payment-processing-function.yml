@@ -61,7 +61,7 @@ jobs:
 
   deploy-production:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: build
     environment:
       name: production
@@ -90,7 +90,7 @@ jobs:
             -d '{"command":"rm -f /home/site/locks/deployment.lock","dir":"/"}' || true
 
       - name: Deploy verified release to production
-        timeout-minutes: 15
+        timeout-minutes: 25
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
