@@ -102,19 +102,31 @@ jobs:
           KUDU_HOST="${PUBLISH_URL%%:*}"
           KUDU_URL="https://${KUDU_HOST}/api/zipdeploy"
           echo "Deploying to ${KUDU_HOST}..."
-          HTTP_STATUS=$(curl -sS -o deploy-response.txt -w "%{http_code}" \
-            -X POST "$KUDU_URL" \
-            -H "Content-Type: application/zip" \
-            -u "$USERNAME:$PASSWORD" \
-            --data-binary @release.zip \
-            --max-time 600)
-          cat deploy-response.txt || true
-          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-            echo "Deployment succeeded (HTTP $HTTP_STATUS)"
-          else
-            echo "Deployment failed (HTTP $HTTP_STATUS)" >&2
-            exit 1
-          fi
+
+          MAX_ATTEMPTS=8
+          RETRY_DELAY=60
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_STATUS=$(curl -sS -o deploy-response.txt -w "%{http_code}" \
+              -X POST "$KUDU_URL" \
+              -H "Content-Type: application/zip" \
+              -u "$USERNAME:$PASSWORD" \
+              --data-binary @release.zip \
+              --max-time 600)
+            echo "Attempt ${attempt}/${MAX_ATTEMPTS}: HTTP ${HTTP_STATUS}"
+            cat deploy-response.txt || true
+            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+              echo "Deployment succeeded"
+              exit 0
+            elif [ "$HTTP_STATUS" -eq 409 ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "Another deployment is in progress. Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            else
+              echo "Deployment failed (HTTP $HTTP_STATUS)" >&2
+              exit 1
+            fi
+          done
+          echo "All ${MAX_ATTEMPTS} attempts failed" >&2
+          exit 1
 
   smoke-test-production:
     runs-on: ubuntu-latest
