@@ -1,4 +1,4 @@
-﻿name: Build and deploy Node.js project to Azure Function App - payment-processing-function
+name: Build and deploy Node.js project to Azure Function App - payment-processing-function
 
 on:
   push:
@@ -75,56 +75,11 @@ jobs:
 
       - name: Deploy verified release to production
         timeout-minutes: 15
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          USERNAME=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
-          PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
-          PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
-          KUDU_HOST="${PUBLISH_URL%%:*}"
-          echo "Deploying async to ${KUDU_HOST}..."
-
-          DEPLOY_RESPONSE=$(curl -sS -D - -o /dev/null \
-            -X POST "https://${KUDU_HOST}/api/zipdeploy?isAsync=true" \
-            -H "Content-Type: application/zip" \
-            -u "$USERNAME:$PASSWORD" \
-            --data-binary @release.zip \
-            --max-time 300)
-
-          HTTP_STATUS=$(echo "$DEPLOY_RESPONSE" | grep -oP 'HTTP/\S+ \K\d+' | tail -1)
-          POLL_URL=$(echo "$DEPLOY_RESPONSE" | grep -i '^location:' | tr -d '\r\n' | sed 's/[Ll]ocation: *//')
-          echo "Submit status: $HTTP_STATUS"
-          echo "Poll URL: $POLL_URL"
-
-          if [ "$HTTP_STATUS" -ne 202 ]; then
-            echo "Failed to submit deployment (HTTP $HTTP_STATUS)" >&2
-            exit 1
-          fi
-
-          if [ -z "$POLL_URL" ]; then
-            echo "No Location header returned - cannot poll" >&2
-            exit 1
-          fi
-
-          for i in $(seq 1 50); do
-            sleep 15
-            POLL_BODY=$(curl -sS -u "$USERNAME:$PASSWORD" "$POLL_URL")
-            DEPLOY_STATUS=$(echo "$POLL_BODY" | grep -oP '"status":\s*\K\d+')
-            COMPLETE=$(echo "$POLL_BODY" | grep -oP '"complete":\s*\K(true|false)')
-            DEPLOY_MSG=$(echo "$POLL_BODY" | grep -oP '"status_text":\s*"\K[^"]*')
-            echo "Poll ${i}/50: status=${DEPLOY_STATUS} complete=${COMPLETE} msg=${DEPLOY_MSG}"
-            if [ "$DEPLOY_STATUS" -eq 5 ] 2>/dev/null; then
-              echo "Deployment succeeded"
-              exit 0
-            elif [ "$DEPLOY_STATUS" -eq 4 ] || [ "$DEPLOY_STATUS" -eq 6 ] 2>/dev/null; then
-              echo "Deployment failed (status=${DEPLOY_STATUS}): $DEPLOY_MSG" >&2
-              exit 1
-            fi
-          done
-          echo "Deployment polling timed out after 50 attempts" >&2
-          exit 1
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: release.zip
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
 
   smoke-test-production:
     runs-on: ubuntu-latest
