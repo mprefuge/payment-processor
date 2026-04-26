@@ -61,6 +61,7 @@ jobs:
 
   deploy-production:
     runs-on: ubuntu-latest
+    timeout-minutes: 1
     needs: build
     environment:
       name: production
@@ -73,6 +74,7 @@ jobs:
           name: function-package
 
       - name: Deploy verified release to production
+        timeout-minutes: 1
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
@@ -81,6 +83,7 @@ jobs:
 
   smoke-test-production:
     runs-on: ubuntu-latest
+    timeout-minutes: 1
     needs: deploy-production
     environment:
       name: production
