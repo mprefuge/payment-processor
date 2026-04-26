@@ -588,49 +588,6 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
-  async findOrCreateAccount(orgName, email, stripeCustomerId) {
-    await this.authenticate();
-
-    const trimmedName = typeof orgName === 'string' ? orgName.trim() : '';
-    if (!trimmedName) {
-      throw new Error('Organization name is required to find or create an Account');
-    }
-
-    const escapedName = this.escapeSoqlLiteral(trimmedName);
-
-    try {
-      const query = `SELECT Id, Name FROM Account WHERE Name = '${escapedName}' LIMIT 1`;
-      logger.info('Searching for existing Salesforce Account:', { orgName: trimmedName });
-
-      const result = await this.conn.query(query);
-      if (result.records && result.records.length > 0) {
-        const account = result.records[0];
-        logger.info(`Found existing Account: ${account.Id}`, { orgName: trimmedName });
-        return account.Id;
-      }
-
-      logger.info('Account not found, creating new Account:', { orgName: trimmedName });
-
-      const accountRecord = {
-        Name: trimmedName,
-        ...(email ? { Email__c: email } : {}),
-        ...(stripeCustomerId ? { Stripe_Customer_ID__c: stripeCustomerId } : {}),
-      };
-
-      const createResult = await this.conn.sobject('Account').create(accountRecord);
-
-      if (!createResult.success) {
-        throw new Error(`Account creation failed: ${JSON.stringify(createResult.errors)}`);
-      }
-
-      logger.info(`Created new Salesforce Account: ${createResult.id}`, { orgName: trimmedName });
-      return createResult.id;
-    } catch (error) {
-      logger.error('Error finding or creating Salesforce Account:', error);
-      throw new Error(`Salesforce account lookup/creation failed: ${error.message}`);
-    }
-  }
-
   async addCampaignMember(campaignId, contactId, status = 'Sent') {
     await this.authenticate();
 

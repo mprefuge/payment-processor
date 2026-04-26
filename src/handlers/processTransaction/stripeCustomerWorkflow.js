@@ -6,19 +6,8 @@ const {
   trimToNull,
 } = require('../../stripe/customerIdentity');
 
-const buildCustomerFullName = (customerData) => {
-  const explicitDisplayName = trimToNull(customerData?.displayName);
-  if (explicitDisplayName) {
-    return explicitDisplayName;
-  }
-
-  const organizationName = trimToNull(customerData?.organizationName);
-  if (organizationName) {
-    return organizationName;
-  }
-
-  return buildFullName(customerData?.firstname, customerData?.lastname);
-};
+const buildCustomerFullName = (customerData) =>
+  buildFullName(customerData?.firstname, customerData?.lastname);
 
 const normalizeAddressInput = (customerData) => {
   const nestedAddress =

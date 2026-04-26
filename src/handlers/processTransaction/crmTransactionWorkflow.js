@@ -40,7 +40,6 @@ const buildTransactionRecord = ({
   session,
   transactionData,
   contactId = null,
-  accountId = null,
   campaignId = null,
   recordTypeId = null,
   frequencyValue = undefined,
@@ -54,10 +53,8 @@ const buildTransactionRecord = ({
   };
 
   assignOptionalField(transactionRecord, 'Contact__c', contactId);
-  assignOptionalField(transactionRecord, 'Account__c', accountId);
   assignOptionalField(transactionRecord, 'Campaign__c', campaignId);
   assignOptionalField(transactionRecord, 'RecordTypeId', recordTypeId);
-  assignOptionalField(transactionRecord, 'Source_System__c', 'Stripe');
 
   if (includeStripeIds) {
     const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
@@ -231,15 +228,10 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
     }
   };
 
-  const createPendingTransaction = async (
-    session,
-    contactId,
-    transactionData,
-    accountId = null
-  ) => {
+  const createPendingTransaction = async (session, contactId, transactionData) => {
     try {
-      if (!contactId && !accountId) {
-        console.log('No contact or account ID provided - skipping pending transaction creation');
+      if (!contactId) {
+        console.log('No contact ID provided - skipping pending transaction creation');
         return null;
       }
 
@@ -251,15 +243,12 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       const campaignId = await resolveCampaignId(crmService, transactionData);
       const recordTypeId = await resolveTransactionRecordTypeId(crmService);
 
-      if (contactId) {
-        await addContactToCampaignIfNeeded(crmService, campaignId, contactId);
-      }
+      await addContactToCampaignIfNeeded(crmService, campaignId, contactId);
 
       const transactionRecord = buildTransactionRecord({
         session,
         transactionData,
         contactId,
-        accountId,
         campaignId,
         recordTypeId,
         frequencyValue: transactionData.frequency || 'onetime',
@@ -271,10 +260,9 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         'Stripe_Checkout_Session_Id__c'
       );
 
-      console.log('Upserted pending transaction in CRM', {
+      console.log('Upserted pending transaction in CRM with contact association', {
         sessionId: session.id,
         contactId,
-        accountId,
       });
 
       return upsertResult;

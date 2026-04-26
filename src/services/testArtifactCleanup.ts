@@ -68,7 +68,7 @@ interface TestArtifactCleanupDependencies {
 
 type StripeCustomerRecord = Pick<Stripe.Customer, 'id' | 'email'>;
 type StripeSubscriptionRecord = Pick<Stripe.Subscription, 'id' | 'customer' | 'status'>;
-type StripeSessionRecord = Pick<Stripe.Checkout.Session, 'id' | 'status' | 'customer'>;
+type StripeSessionRecord = Pick<Stripe.Checkout.Session, 'id' | 'status'>;
 
 const DEFAULT_SYSTEMS: CleanupSystem[] = ['stripe', 'salesforce', 'qbo'];
 
@@ -150,70 +150,33 @@ const pushResult = (
   summary.counts.changed += 1;
 };
 
-const listStripeCustomersByTagUsingList = async (
-  stripe: Stripe,
-  tag: string,
-  limit: number
-): Promise<StripeCustomerRecord[]> => {
-  const customers: StripeCustomerRecord[] = [];
-  let startingAfter: string | undefined;
-
-  while (customers.length < limit) {
-    const response = await stripe.customers.list({
-      limit: Math.min(100, limit - customers.length),
-      ...(startingAfter ? { starting_after: startingAfter } : {}),
-    });
-
-    const taggedCustomers = response.data.filter(
-      (customer): customer is Stripe.Customer =>
-        !('deleted' in customer) && customer.metadata?.source_test_tag === tag
-    );
-
-    customers.push(...taggedCustomers);
-
-    if (!response.has_more || response.data.length === 0) {
-      break;
-    }
-
-    startingAfter = response.data[response.data.length - 1]?.id;
-  }
-
-  return customers.map((customer) => ({ id: customer.id, email: customer.email }));
-};
-
 const listStripeCustomersByTag = async (
   stripe: Stripe,
   tag: string,
   limit: number
 ): Promise<StripeCustomerRecord[]> => {
-  if (typeof (stripe.customers as any).search === 'function') {
-    try {
-      const customers: StripeCustomerRecord[] = [];
-      let page: string | undefined;
+  const customers: StripeCustomerRecord[] = [];
+  let page: string | undefined;
 
-      while (customers.length < limit) {
-        const response = await (stripe.customers as any).search({
-          query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
-          limit: Math.min(100, limit - customers.length),
-          ...(page ? { page } : {}),
-        });
+  while (customers.length < limit) {
+    const response = await stripe.customers.search({
+      query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
+      limit: Math.min(100, limit - customers.length),
+      ...(page ? { page } : {}),
+    });
 
-        customers.push(...response.data.filter((customer: any) => !('deleted' in customer)));
+    customers.push(
+      ...response.data.filter((customer): customer is Stripe.Customer => !('deleted' in customer))
+    );
 
-        if (!response.has_more || !response.next_page) {
-          break;
-        }
-
-        page = response.next_page;
-      }
-
-      return customers.map((customer) => ({ id: customer.id, email: customer.email }));
-    } catch {
-      return listStripeCustomersByTagUsingList(stripe, tag, limit);
+    if (!response.has_more || !response.next_page) {
+      break;
     }
+
+    page = response.next_page;
   }
 
-  return listStripeCustomersByTagUsingList(stripe, tag, limit);
+  return customers.map((customer) => ({ id: customer.id, email: customer.email }));
 };
 
 const listStripeSubscriptionsForCustomer = async (
@@ -263,13 +226,7 @@ const listStripeSessionsForCustomer = async (
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
 
-    sessions.push(
-      ...response.data.map((session) => ({
-        id: session.id,
-        status: session.status,
-        customer: session.customer,
-      }))
-    );
+    sessions.push(...response.data.map((session) => ({ id: session.id, status: session.status })));
 
     if (!response.has_more || response.data.length === 0) {
       break;
@@ -279,141 +236,6 @@ const listStripeSessionsForCustomer = async (
   }
 
   return sessions;
-};
-
-const listTaggedStripeSessionsUsingCheckoutSearch = async (
-  stripe: Stripe,
-  tag: string,
-  limit: number
-): Promise<StripeSessionRecord[]> => {
-  const sessions: StripeSessionRecord[] = [];
-  let page: string | undefined;
-
-  while (sessions.length < limit) {
-    const response: any = await (stripe.checkout.sessions as any).search({
-      query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
-      limit: Math.min(100, limit - sessions.length),
-      ...(page ? { page } : {}),
-    });
-
-    sessions.push(
-      ...((response.data as any[]).map((session) => ({
-        id: session.id,
-        status: session.status,
-        customer: session.customer,
-      })) as StripeSessionRecord[])
-    );
-
-    if (!response.has_more || !response.next_page) {
-      break;
-    }
-
-    page = response.next_page;
-  }
-
-  return sessions;
-};
-
-const listTaggedStripeSessionsUsingGlobalSearch = async (
-  stripe: Stripe,
-  tag: string,
-  limit: number
-): Promise<StripeSessionRecord[]> => {
-  const sessions: StripeSessionRecord[] = [];
-  let page: string | undefined;
-  const globalSearch: any = (stripe as any).search;
-
-  while (sessions.length < limit) {
-    const response: any = await globalSearch.search({
-      query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
-      type: 'checkout.session',
-      limit: Math.min(100, limit - sessions.length),
-      ...(page ? { page } : {}),
-    });
-
-    sessions.push(
-      ...((response.data as any[]).map((session) => ({
-        id: session.id,
-        status: session.status,
-        customer: session.customer,
-      })) as StripeSessionRecord[])
-    );
-
-    if (!response.has_more || !response.next_page) {
-      break;
-    }
-
-    page = response.next_page;
-  }
-
-  return sessions;
-};
-
-const listTaggedStripeSessionsUsingList = async (
-  stripe: Stripe,
-  tag: string,
-  limit: number
-): Promise<StripeSessionRecord[]> => {
-  const sessions: StripeSessionRecord[] = [];
-  let startingAfter: string | undefined;
-
-  while (sessions.length < limit) {
-    const response = await stripe.checkout.sessions.list({
-      limit: 100,
-      ...(startingAfter ? { starting_after: startingAfter } : {}),
-    });
-
-    const taggedSessions = response.data.filter(
-      (session): session is Stripe.Checkout.Session => session.metadata?.source_test_tag === tag
-    );
-
-    sessions.push(
-      ...(taggedSessions.map((session) => ({
-        id: session.id,
-        status: session.status,
-        customer: session.customer,
-      })) as StripeSessionRecord[])
-    );
-
-    if (!response.has_more || response.data.length === 0) {
-      break;
-    }
-
-    startingAfter = response.data[response.data.length - 1]?.id;
-  }
-
-  return sessions.slice(0, limit);
-};
-
-const listTaggedStripeSessions = async (
-  stripe: Stripe,
-  tag: string,
-  limit: number
-): Promise<StripeSessionRecord[]> => {
-  if (typeof (stripe.checkout.sessions as any).search === 'function') {
-    try {
-      const sessions = await listTaggedStripeSessionsUsingCheckoutSearch(stripe, tag, limit);
-      if (sessions.length > 0) {
-        return sessions;
-      }
-    } catch {
-      // continue to fallback
-    }
-  }
-
-  const globalSearch = (stripe as any).search;
-  if (globalSearch && typeof globalSearch.search === 'function') {
-    try {
-      const sessions = await listTaggedStripeSessionsUsingGlobalSearch(stripe, tag, limit);
-      if (sessions.length > 0) {
-        return sessions;
-      }
-    } catch {
-      // continue to fallback
-    }
-  }
-
-  return listTaggedStripeSessionsUsingList(stripe, tag, limit);
 };
 
 const cleanupStripeArtifacts = async (
@@ -422,53 +244,35 @@ const cleanupStripeArtifacts = async (
 ): Promise<{ summary: TestArtifactCleanupSystemSummary; stripeCustomerIds: string[] }> => {
   const summary = createSummary('stripe', request.dryRun);
   const customers = await listStripeCustomersByTag(stripe, request.tag, request.maxStripeCustomers);
-  const taggedSessions = await listTaggedStripeSessions(
-    stripe,
-    request.tag,
-    request.maxStripeCustomers * 5
-  );
+  const stripeCustomerIds = customers.map((customer) => customer.id);
 
-  const stripeCustomerIds = new Set(customers.map((customer) => customer.id));
-  const sessionsById = new Map<string, StripeSessionRecord>();
+  for (const customer of customers) {
+    const sessions = await listStripeSessionsForCustomer(stripe, customer.id);
+    for (const session of sessions) {
+      if (session.status !== 'open') {
+        continue;
+      }
 
-  for (const session of taggedSessions) {
-    if (typeof session.customer === 'string' && session.customer.trim().length > 0) {
-      stripeCustomerIds.add(session.customer);
+      if (request.dryRun) {
+        pushResult(summary, {
+          id: session.id,
+          type: 'checkout-session',
+          action: 'expire',
+          status: 'dry-run',
+          message: `Would expire open checkout session for customer ${customer.id}.`,
+        });
+      } else {
+        await stripe.checkout.sessions.expire(session.id);
+        pushResult(summary, {
+          id: session.id,
+          type: 'checkout-session',
+          action: 'expire',
+          status: 'expired',
+        });
+      }
     }
-    sessionsById.set(session.id, session);
-  }
 
-  for (const customerId of Array.from(stripeCustomerIds)) {
-    const sessions = await listStripeSessionsForCustomer(stripe, customerId);
-    sessions.forEach((session) => sessionsById.set(session.id, session));
-  }
-
-  for (const session of sessionsById.values()) {
-    if (session.status !== 'open') {
-      continue;
-    }
-
-    if (request.dryRun) {
-      pushResult(summary, {
-        id: session.id,
-        type: 'checkout-session',
-        action: 'expire',
-        status: 'dry-run',
-        message: `Would expire open checkout session ${session.id}.`,
-      });
-    } else {
-      await stripe.checkout.sessions.expire(session.id);
-      pushResult(summary, {
-        id: session.id,
-        type: 'checkout-session',
-        action: 'expire',
-        status: 'expired',
-      });
-    }
-  }
-
-  for (const customerId of Array.from(stripeCustomerIds)) {
-    const subscriptions = await listStripeSubscriptionsForCustomer(stripe, customerId);
+    const subscriptions = await listStripeSubscriptionsForCustomer(stripe, customer.id);
     for (const subscription of subscriptions) {
       if (subscription.status === 'canceled' || subscription.status === 'incomplete_expired') {
         pushResult(summary, {
@@ -501,26 +305,26 @@ const cleanupStripeArtifacts = async (
 
     if (request.dryRun) {
       pushResult(summary, {
-        id: customerId,
+        id: customer.id,
         type: 'customer',
         action: 'delete',
         status: 'dry-run',
-        message: `Would delete Stripe customer ${customerId}.`,
+        message: customer.email ? `Would delete Stripe customer ${customer.email}.` : undefined,
       });
       continue;
     }
 
-    await stripe.customers.del(customerId);
+    await stripe.customers.del(customer.id);
     pushResult(summary, {
-      id: customerId,
+      id: customer.id,
       type: 'customer',
       action: 'delete',
       status: 'deleted',
-      message: undefined,
+      message: customer.email ?? undefined,
     });
   }
 
-  return { summary, stripeCustomerIds: Array.from(stripeCustomerIds) };
+  return { summary, stripeCustomerIds };
 };
 
 const querySalesforceIds = async (connection: Connection, soql: string): Promise<string[]> => {
@@ -544,17 +348,14 @@ const cleanupSalesforceArtifacts = async (
   stripeCustomerIds: string[]
 ): Promise<TestArtifactCleanupSystemSummary> => {
   const summary = createSummary('salesforce', request.dryRun);
-  const transactionConditions: string[] = [];
+  const marker = buildTestArtifactMarker(request.tag);
+  const escapedMarker = escapeSoqlLiteral(marker);
 
+  const transactionConditions = [`Memo__c LIKE '%${escapedMarker}%'`];
   if (stripeCustomerIds.length > 0) {
     transactionConditions.push(
       ...buildStripeCustomerConditions('Stripe_Customer_Id__c', stripeCustomerIds)
     );
-  } else {
-    // Memo__c is often a long-text area and cannot be filtered with LIKE in SOQL.
-    // Cleanup by Salesforce transaction is only supported when the transaction has
-    // an associated Stripe customer ID to search for.
-    return summary;
   }
 
   const transactionIds = await querySalesforceIds(

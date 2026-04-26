@@ -204,17 +204,7 @@ const resolveCampaignAndMembership = async (
   failureLogMessage: string,
   failureDetails: Record<string, unknown>
 ): Promise<void> => {
-  if (!campaignMetadata) {
-    return;
-  }
-
-  const existingCampaignValue =
-    typeof transaction.campaign__c === 'string' ? transaction.campaign__c.trim() : null;
-  const existingCampaignIsSalesforceId =
-    typeof existingCampaignValue === 'string' &&
-    /^701[0-9A-Za-z]{12}(?:[0-9A-Za-z]{3})?$/.test(existingCampaignValue);
-
-  if (existingCampaignIsSalesforceId) {
+  if (!campaignMetadata || transaction.campaign__c) {
     return;
   }
 
@@ -325,26 +315,8 @@ const findExistingTransactionId = async (
         context.log(lookupStep.successLog, {
           [lookupStep.identifierKey]: lookupStep.externalValue,
           transactionId: existingTransactionId,
-          lookupMode: 'recordTypeRestricted',
         });
         return existingTransactionId;
-      }
-
-      const existingAcrossTypes = await salesforce.findTransactionIdByExternalId(
-        lookupStep.fieldName,
-        lookupStep.externalValue
-      );
-
-      if (existingAcrossTypes) {
-        context.log(
-          '[StripeWebhook] Found existing transaction by external ID across record types',
-          {
-            [lookupStep.identifierKey]: lookupStep.externalValue,
-            transactionId: existingAcrossTypes,
-            lookupMode: 'anyRecordType',
-          }
-        );
-        return existingAcrossTypes;
       }
 
       if (lookupStep.noMatchLog) {

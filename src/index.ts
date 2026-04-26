@@ -118,16 +118,12 @@ const TransactionCustomerSchema = z
     state: z.string().optional(),
     zipcode: z.string().optional(),
     postalCode: z.string().optional(),
-    organizationName: z.string().optional(),
   })
   .passthrough();
 
 const CommonTransactionFieldsSchema = {
   amount: AmountSchema,
   frequency: TransactionFrequencySchema,
-  donorType: z.enum(['individual', 'organization']).optional(),
-  donationType: z.enum(['individual', 'organization']).optional(),
-  organizationName: z.string().optional(),
   metadata: z.record(z.unknown()).optional(),
   attribution: z.string().optional(),
   coverFee: z.boolean().optional(),
@@ -148,8 +144,8 @@ const ProcessTransactionRequestSchema = z.union([
     .object({
       ...CommonTransactionFieldsSchema,
       email: z.string().email(),
-      firstname: z.string().min(1).optional(),
-      lastname: z.string().min(1).optional(),
+      firstname: z.string().min(1),
+      lastname: z.string().min(1),
       phone: z.string().optional(),
       address: z.union([TransactionAddressSchema, z.string()]).optional(),
       city: z.string().optional(),

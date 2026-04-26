@@ -17,7 +17,6 @@ const {
 const { createCrmConfigResolver } = require('./processTransaction/crmConfig');
 const { createCrmContactWorkflow } = require('./processTransaction/crmContactWorkflow');
 const { createCrmTransactionWorkflow } = require('./processTransaction/crmTransactionWorkflow');
-const { getCrmService } = require('./processTransaction/crmWorkflowCommon');
 
 // Create in-memory idempotency store
 const createInMemoryStore = () => {
@@ -178,11 +177,6 @@ const readModeToggleFromRequest = (request) => {
     }
   }
 
-  if (request.body && typeof request.body === 'object' && !Array.isArray(request.body)) {
-    candidates.push(request.body.mode);
-    candidates.push(request.body.livemode);
-  }
-
   candidates.push(readHeaderValue(headers, 'x-stripe-mode'));
   candidates.push(readHeaderValue(headers, 'x-livemode'));
 
@@ -196,30 +190,9 @@ const readModeToggleFromRequest = (request) => {
   return null;
 };
 
-const readModeToggleFromBody = (body) => {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return null;
-  }
-
-  const candidates = [body.mode, body.livemode];
-  for (const candidate of candidates) {
-    const normalized = normalizeModeToggle(candidate);
-    if (normalized !== null) {
-      return normalized;
-    }
-  }
-
-  return null;
-};
-
-const getConfiguredMode = (requestOrContext, maybeContext, requestBody) => {
+const getConfiguredMode = (requestOrContext, maybeContext) => {
   const request = maybeContext ? requestOrContext : null;
   const context = maybeContext || requestOrContext;
-
-  const bodyMode = readModeToggleFromBody(requestBody);
-  if (bodyMode !== null) {
-    return bodyMode;
-  }
 
   const requestMode = readModeToggleFromRequest(request);
   if (requestMode !== null) {
@@ -260,12 +233,6 @@ const FREQUENCY_VALUES = ['onetime', 'week', 'biweek', 'month', 'year'];
 const frequencySchema = z.preprocess(
   (value) => (typeof value === 'string' ? value.trim().toLowerCase() : value),
   z.enum(FREQUENCY_VALUES)
-);
-
-const DONOR_TYPE_VALUES = ['individual', 'organization'];
-const donorTypeSchema = z.preprocess(
-  (value) => (typeof value === 'string' ? value.trim().toLowerCase() : value),
-  z.enum(DONOR_TYPE_VALUES)
 );
 
 const amountSchema = z.preprocess((value) => {
@@ -322,17 +289,22 @@ const customerSchema = z
     state: z.string().optional(),
     zipcode: z.string().optional(),
     postalCode: z.string().optional(),
-    organizationName: z.string().min(1).optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((data, ctx) => {
+    if (!data.firstname && !data.firstName) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer first name is required' });
+    }
+
+    if (!data.lastname && !data.lastName) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer last name is required' });
+    }
+  });
 
 const modernRequestSchema = z
   .object({
     amount: amountSchema,
     frequency: frequencySchema,
-    donorType: donorTypeSchema.optional(),
-    donationType: donorTypeSchema.optional(),
-    organizationName: z.string().min(1).optional(),
     customer: customerSchema,
     metadata: metadataSchema,
     attribution: z.string().optional(),
@@ -342,44 +314,15 @@ const modernRequestSchema = z
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
-  .passthrough()
-  .superRefine((data, ctx) => {
-    const customer = data.customer || {};
-    const organizationName =
-      data.organizationName || customer.organizationName || customer.organization_name;
-    const donorType =
-      data.donorType ||
-      data.donationType ||
-      (typeof organizationName === 'string' && organizationName.trim().length > 0
-        ? 'organization'
-        : 'individual');
-    const lastname = customer.lastname || customer.lastName;
-
-    if (donorType === 'organization') {
-      if (!organizationName || String(organizationName).trim().length === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'Organization name is required for organization donations',
-        });
-      }
-      return;
-    }
-
-    if (!lastname || String(lastname).trim().length === 0) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer last name is required' });
-    }
-  });
+  .passthrough();
 
 const legacyRequestSchema = z
   .object({
     amount: amountSchema,
     frequency: frequencySchema,
-    donorType: donorTypeSchema.optional(),
-    donationType: donorTypeSchema.optional(),
-    organizationName: z.string().min(1).optional(),
     email: z.string().email(),
-    firstname: z.string().min(1).optional(),
-    lastname: z.string().min(1).optional(),
+    firstname: z.string().min(1),
+    lastname: z.string().min(1),
     phone: z.string().optional(),
     address: z.union([addressSchema, z.string().min(1)]).optional(),
     city: z.string().optional(),
@@ -394,29 +337,7 @@ const legacyRequestSchema = z
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
-  .passthrough()
-  .superRefine((data, ctx) => {
-    const donorType =
-      data.donorType ||
-      data.donationType ||
-      (typeof data.organizationName === 'string' && data.organizationName.trim().length > 0
-        ? 'organization'
-        : 'individual');
-
-    if (donorType === 'organization') {
-      if (!data.organizationName || String(data.organizationName).trim().length === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'Organization name is required for organization donations',
-        });
-      }
-      return;
-    }
-
-    if (!data.lastname || String(data.lastname).trim().length === 0) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer last name is required' });
-    }
-  });
+  .passthrough();
 
 const requestSchema = z.union([modernRequestSchema, legacyRequestSchema]);
 
@@ -506,8 +427,6 @@ function normalizeAddressData(addressInput, fallback = {}) {
 function normalizeCustomerData(customerData) {
   const firstname = customerData.firstname || customerData.firstName;
   const lastname = customerData.lastname || customerData.lastName;
-  const organizationName =
-    customerData.organizationName || customerData.organization_name || customerData.companyName;
   const fallbackAddress = {
     city: customerData.city,
     state: customerData.state,
@@ -515,14 +434,11 @@ function normalizeCustomerData(customerData) {
     country: customerData.country,
   };
   const address = normalizeAddressData(customerData.address, fallbackAddress);
-  const displayName = organizationName || [firstname, lastname].filter(Boolean).join(' ').trim();
 
   return {
     email: customerData.email,
     firstname,
     lastname,
-    organizationName: organizationName || null,
-    displayName: displayName || null,
     phone: customerData.phone || null,
     address,
     city: customerData.city || address.city,
@@ -534,18 +450,7 @@ function normalizeCustomerData(customerData) {
 function normalizeRequestData(data) {
   const metadata = ensurePlainObject(data.metadata);
   const customerSource = 'customer' in data ? data.customer : data;
-  const organizationName =
-    data.organizationName || customerSource.organizationName || customerSource.organization_name;
-  const requestedDonorType = data.donorType || data.donationType;
-  const normalizedDonorType =
-    requestedDonorType ||
-    (typeof organizationName === 'string' && organizationName.trim().length > 0
-      ? 'organization'
-      : 'individual');
-  const customer = normalizeCustomerData({
-    ...customerSource,
-    organizationName,
-  });
+  const customer = normalizeCustomerData(customerSource);
   const attribution = extractAttribution(data.attribution, metadata);
 
   const normalized = {
@@ -557,13 +462,7 @@ function normalizeRequestData(data) {
     coverFee: data.coverFee || false,
     feeAmount: data.feeAmount,
     paymentMethod: data.paymentMethod || 'card',
-    donorType: normalizedDonorType,
-    donationType: normalizedDonorType,
   };
-
-  if (organizationName) {
-    normalized.organizationName = String(organizationName).trim();
-  }
 
   if (data.category) {
     normalized.category = data.category;
@@ -571,10 +470,6 @@ function normalizeRequestData(data) {
 
   if (data.transactionType) {
     normalized.transactionType = data.transactionType;
-
-    if (organizationName) {
-      normalized.organizationName = String(organizationName).trim();
-    }
   }
 
   return normalized;
@@ -956,8 +851,7 @@ const readRequestBody = async (actualRequest, isV3, debugLog) => {
 };
 
 const resolveStripeCustomerId = async (stripe, customerDetails, log) => {
-  const fullName =
-    customerDetails.displayName || `${customerDetails.firstname} ${customerDetails.lastname}`;
+  const fullName = `${customerDetails.firstname} ${customerDetails.lastname}`;
   const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
 
   if (existingCustomers.length === 0) {
@@ -987,52 +881,14 @@ const syncPendingCrmTransaction = async (
   session,
   requestData
 ) => {
-  const isOrgDonation =
-    requestData.donorType === 'organization' &&
-    typeof requestData.organizationName === 'string' &&
-    requestData.organizationName.trim().length > 0;
-
+  const contact = await syncContactToCrm(actualContext, stripe, customerDetails);
   let pendingTransactionUpserted = false;
 
-  if (isOrgDonation) {
-    let accountId = null;
-    try {
-      const crmService = await getCrmService({
-        CrmFactory,
-        getCrmConfig,
-        operationName: 'org account lookup',
-        requiredMethods: ['findOrCreateAccount'],
-        unsupportedCapabilityLabel: 'organization account sync',
-      });
-      if (crmService) {
-        accountId = await crmService.findOrCreateAccount(
-          requestData.organizationName.trim(),
-          customerDetails.email,
-          customerDetails.stripeCustomerId
-        );
-      }
-    } catch (error) {
-      console.log('Failed to find/create Salesforce Account for org donation', {
-        orgName: requestData.organizationName,
-        error: error.message,
-      });
-    }
-
-    if (accountId) {
-      const pendingResult = await createPendingTransaction(session, null, requestData, accountId);
-      pendingTransactionUpserted = Boolean(pendingResult);
-    } else {
-      console.log('No CRM account available - skipping pending transaction creation for org');
-    }
+  if (contact?.Id) {
+    const pendingResult = await createPendingTransaction(session, contact.Id, requestData);
+    pendingTransactionUpserted = Boolean(pendingResult);
   } else {
-    const contact = await syncContactToCrm(actualContext, stripe, customerDetails);
-
-    if (contact?.Id) {
-      const pendingResult = await createPendingTransaction(session, contact.Id, requestData);
-      pendingTransactionUpserted = Boolean(pendingResult);
-    } else {
-      console.log('No CRM contact available - skipping pending transaction creation');
-    }
+    console.log('No CRM contact available - skipping pending transaction creation');
   }
 
   if (!pendingTransactionUpserted) {
@@ -1114,7 +970,7 @@ module.exports = async function (request, context) {
       });
     }
 
-    const isLiveMode = getConfiguredMode(actualRequest, actualContext, body);
+    const isLiveMode = getConfiguredMode(actualRequest, actualContext);
     const requestData = validation.value;
     requestData.metadata = applyTestArtifactMetadata(requestData.metadata, {
       headers: actualRequest?.headers,

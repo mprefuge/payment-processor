@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Donation Form Test Suite</title>
+  <script src="https://js.stripe.com/v3/"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+        sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .header {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    }
+
+    .header h1 {
+      color: #333;
+      margin-bottom: 8px;
+      font-size: 28px;
+    }
+
+    .header p {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 1200px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Control Panel */
+    .control-panel {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    }
+
+    .control-panel h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+      color: #333;
+      border-bottom: 2px solid #BD2135;
+      padding-bottom: 12px;
+    }
+
+    .control-group {
+      margin-bottom: 20px;
+    }
+
+    .control-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #555;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .control-group input[type="text"],
+    .control-group input[type="number"],
+    .control-group select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: "Courier New", monospace;
+    }
+
+    .control-group input[type="text"]:focus,
+    .control-group input[type="number"]:focus,
+    .control-group select:focus {
+      outline: none;
+      border-color: #BD2135;
+      box-shadow: 0 0 0 3px rgba(189, 33, 53, 0.1);
+    }
+
+    .button-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    button {
+      padding: 12px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #BD2135;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #a01b2a;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(189, 33, 53, 0.3);
+    }
+
+    .btn-secondary {
+      background: #f0f0f0;
+      color: #333;
+    }
+
+    .btn-secondary:hover {
+      background: #e0e0e0;
+    }
+
+    .btn-full {
+      grid-column: 1 / -1;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+
+    .badge-test {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .badge-live {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    /* Logs Panel */
+    .logs-panel {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+      max-height: 600px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .logs-panel h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+      color: #333;
+      border-bottom: 2px solid #BD2135;
+      padding-bottom: 12px;
+    }
+
+    .logs-container {
+      flex: 1;
+      overflow-y: auto;
+      background: #f8f9fa;
+      border: 1px solid #e9ecef;
+      border-radius: 6px;
+      padding: 12px;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+    }
+
+    .log-entry {
+      padding: 8px;
+      border-left: 3px solid #ddd;
+      margin-bottom: 8px;
+      background: white;
+      border-radius: 3px;
+    }
+
+    .log-entry.info {
+      border-left-color: #0066cc;
+      color: #0066cc;
+    }
+
+    .log-entry.success {
+      border-left-color: #28a745;
+      color: #28a745;
+    }
+
+    .log-entry.error {
+      border-left-color: #dc3545;
+      color: #dc3545;
+    }
+
+    .log-entry.warning {
+      border-left-color: #ffc107;
+      color: #ff9800;
+    }
+
+    .log-time {
+      color: #999;
+      font-size: 11px;
+      margin-right: 8px;
+    }
+
+    .clear-logs {
+      margin-top: 12px;
+      padding: 8px 12px;
+      background: #f0f0f0;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      color: #666;
+    }
+
+    .clear-logs:hover {
+      background: #e0e0e0;
+    }
+
+    /* Form Display Areas */
+    .form-area {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    }
+
+    .form-area h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+      color: #333;
+      border-bottom: 2px solid #BD2135;
+      padding-bottom: 12px;
+    }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      border-bottom: 2px solid #e0e0e0;
+    }
+
+    .tab {
+      padding: 12px 16px;
+      background: none;
+      border: none;
+      border-bottom: 3px solid transparent;
+      cursor: pointer;
+      font-weight: 600;
+      color: #666;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+
+    .tab.active {
+      color: #BD2135;
+      border-bottom-color: #BD2135;
+    }
+
+    .tab:hover {
+      color: #333;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    #donation-popup {
+      margin: 20px auto;
+      padding: 20px;
+      background: #f8f9fa;
+      border: 2px dashed #ddd;
+      border-radius: 8px;
+      text-align: center;
+      color: #999;
+      min-height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #donation-form-embedded {
+      min-height: 400px;
+    }
+
+    .form-instructions {
+      background: #e7f3ff;
+      border-left: 4px solid #0066cc;
+      padding: 12px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: #0c5fcc;
+    }
+
+    .test-data {
+      background: #fffade;
+      border-left: 4px solid #ffc107;
+      padding: 12px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-size: 12px;
+      color: #856404;
+      font-family: "Courier New", monospace;
+    }
+
+    .test-data strong {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .config-display {
+      background: #f0f0f0;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 12px;
+      margin-top: 12px;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      color: #333;
+    }
+
+    .status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 12px;
+    }
+
+    .status-indicator.ready {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .status-indicator.loading {
+      background: #cce5ff;
+      color: #004085;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      display: inline-block;
+    }
+
+    .status-dot.pulse {
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.5;
+      }
+      100% {
+        opacity: 1;
+      }
+    }
+
+    .section-divider {
+      height: 1px;
+      background: #e0e0e0;
+      margin: 20px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <h1>🧪 Donation Form Test Suite</h1>
+      <p>Local testing environment for donation form validation before production deployment</p>
+    </div>
+
+    <!-- Main Grid -->
+    <div class="grid">
+      <!-- Left Column: Controls & Logs -->
+      <div>
+        <!-- Control Panel -->
+        <div class="control-panel">
+          <h2>Configuration</h2>
+
+          <div class="control-group">
+            <label>API Endpoint</label>
+            <input
+              type="text"
+              id="apiEndpoint"
+              value="http://localhost:7071/api/transaction"
+              readonly
+            />
+          </div>
+
+          <div class="control-group">
+            <label>Stripe Mode</label>
+            <select id="stripeMode">
+              <option value="test">Test Mode</option>
+              <option value="live">Live Mode</option>
+            </select>
+            <div id="stripeModeInfo" class="badge badge-test">Using Test Keys</div>
+          </div>
+
+          <div class="control-group">
+            <label>Organization Name (for org donations)</label>
+            <input
+              type="text"
+              id="orgName"
+              placeholder="e.g., Acme Corp Foundation"
+              value="micah test Inc"
+            />
+          </div>
+
+          <div class="control-group">
+            <label>Donor Email</label>
+            <input
+              type="text"
+              id="donorEmail"
+              placeholder="e.g., donor@example.com"
+              value="test@micah-test.local"
+            />
+          </div>
+
+          <div class="control-group">
+            <label>Donor Last Name (individual donations)</label>
+            <input type="text" id="donorLastName" placeholder="e.g., Smith" value="Test Donor" />
+          </div>
+
+          <div class="button-group">
+            <button class="btn-primary" onclick="testPopupForm()">Open Popup Form</button>
+            <button class="btn-secondary" onclick="testEmbeddedForm()">Show Embedded</button>
+          </div>
+
+          <div class="button-group">
+            <button class="btn-secondary" onclick="testOrgDonation()">Org Donation</button>
+            <button class="btn-secondary" onclick="testIndividualDonation()">Individual</button>
+          </div>
+
+          <button class="btn-full btn-secondary" onclick="clearConfig()">
+            Reset Configuration
+          </button>
+
+          <div class="config-display" id="configDisplay" style="margin-top: 16px"></div>
+
+          <div class="section-divider"></div>
+
+          <h3 style="font-size: 14px; margin-bottom: 12px; color: #333">
+            Quick Actions
+          </h3>
+
+          <div class="button-group">
+            <button class="btn-secondary" onclick="validateForm()">Validate Form</button>
+            <button class="btn-secondary" onclick="inspectNetworkLogs()">Network Logs</button>
+          </div>
+
+          <button class="btn-full btn-secondary" onclick="downloadTestReport()">
+            Download Test Report
+          </button>
+        </div>
+
+        <!-- Logs Panel -->
+        <div class="logs-panel" style="margin-top: 24px">
+          <h2>Activity Logs</h2>
+          <div class="logs-container" id="logsContainer"></div>
+          <button class="clear-logs" onclick="clearLogs()">Clear Logs</button>
+        </div>
+      </div>
+
+      <!-- Right Column: Form Display -->
+      <div>
+        <!-- Tabs for different views -->
+        <div class="form-area">
+          <h2>Form Preview</h2>
+
+          <div class="form-instructions">
+            ℹ️ <strong>Test Instructions:</strong><br />
+            1. Configure settings on the left panel<br />
+            2. Click "Open Popup Form" or "Show Embedded" to display the form<br />
+            3. Test all donation types and amounts<br />
+            4. Monitor activity logs for errors<br />
+            5. For Stripe checkout testing, use card: <code>4242 4242 4242 4242</code>,
+            exp: <code>12/25</code>, CVC: <code>123</code>
+          </div>
+
+          <div class="tab-group">
+            <div class="tabs">
+              <button class="tab active" onclick="switchTab('popup-tab')">Popup Modal</button>
+              <button class="tab" onclick="switchTab('embedded-tab')">Embedded Form</button>
+              <button class="tab" onclick="switchTab('test-data-tab')">Test Data Reference</button>
+            </div>
+
+            <div id="popup-tab" class="tab-content active">
+              <div id="donation-popup">
+                <p>Popup form will appear here when you click "Open Popup Form"</p>
+              </div>
+              <button class="btn-full btn-primary" style="margin-top: 12px" onclick="openDonationModal()">
+                Launch Popup Form
+              </button>
+            </div>
+
+            <div id="embedded-tab" class="tab-content">
+              <div id="donation-form-embedded"></div>
+            </div>
+
+            <div id="test-data-tab" class="tab-content">
+              <div class="test-data">
+                <strong>🧪 Test Card Numbers (Stripe Test Mode)</strong>
+                <div style="line-height: 1.6; margin-bottom: 16px">
+                  <div>✅ Successful: 4242 4242 4242 4242</div>
+                  <div>❌ Failed: 4000 0000 0000 0002</div>
+                  <div>⚠️ Requires Auth: 4000 0025 0000 3155</div>
+                  <div>💳 Visa: 4242 4242 4242 4242</div>
+                  <div>💳 Mastercard: 5555 5555 5555 4444</div>
+                  <div>💳 Amex: 3782 822463 10005</div>
+                </div>
+
+                <strong>📅 Valid Expires</strong>
+                <div style="line-height: 1.6; margin-bottom: 16px">
+                  <div>Any future month/year (e.g., 12/25)</div>
+                  <div>CVC: Any 3-4 digits</div>
+                </div>
+
+                <strong>👤 Donor Info (Recommended)</strong>
+                <div style="line-height: 1.6; margin-bottom: 16px">
+                  <div>Email: test@micah-test.local</div>
+                  <div>Name: Test Donor</div>
+                  <div>Address: 123 Test St, Test City, ST 12345</div>
+                </div>
+
+                <strong>🏢 Organization Test</strong>
+                <div style="line-height: 1.6">
+                  <div>Org Name: "micah test Inc"</div>
+                  <div>Email: accounts@org-test.local</div>
+                  <div>Note: Organizations don't require last name</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="status-indicator ready" style="margin-top: 16px">
+            <span class="status-dot"></span>
+            <span id="statusText">Ready for testing</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Include the donation form script -->
+  <script src="new-popup-don.js"></script>
+
+  <script>
+    // Logger utility
+    const logger = {
+      logs: [],
+      log(message, type = "info", meta = {}) {
+        const timestamp = new Date().toLocaleTimeString();
+        const entry = {
+          timestamp,
+          message,
+          type,
+          meta,
+          fullMessage: `[${timestamp}] ${message}`,
+        };
+        this.logs.push(entry);
+        this.render();
+        console.log(entry.fullMessage, meta);
+      },
+      render() {
+        const container = document.getElementById("logsContainer");
+        container.innerHTML = this.logs
+          .slice(-50)
+          .map(
+            (entry) =>
+              `<div class="log-entry ${entry.type}">
+            <span class="log-time">${entry.timestamp}</span>
+            <span>${entry.message}</span>
+            ${
+              Object.keys(entry.meta).length > 0
+                ? ` <pre style="margin-top:4px; font-size:11px; opacity:0.7">${JSON.stringify(entry.meta, null, 2)}</pre>`
+                : ""
+            }
+          </div>`
+          )
+          .reverse()
+          .join("");
+      },
+    };
+
+    // Configuration management
+    const config = {
+      apiEndpoint: document.getElementById("apiEndpoint").value,
+      stripeMode: "test",
+      get stripeKey() {
+        return this.stripeMode === "test"
+          ? "pk_test_y47nraQZ5IFgnTMlwbDvfj8D"
+          : "pk_live_fJSacHhPB2h0mJfsFowRm8lQ";
+      },
+      orgName: () => document.getElementById("orgName").value,
+      donorEmail: () => document.getElementById("donorEmail").value,
+      donorLastName: () => document.getElementById("donorLastName").value,
+    };
+
+    // Update display
+    function updateConfigDisplay() {
+      document.getElementById("configDisplay").innerHTML = `
+        <div>
+          <strong>Current Configuration:</strong><br />
+          API: ${config.apiEndpoint}<br />
+          Mode: <code>${config.stripeMode}</code><br />
+          Stripe Key: <code>${config.stripeKey.substring(0, 10)}...</code>
+        </div>
+      `;
+    }
+
+    // Stripe mode change
+    document.getElementById("stripeMode").addEventListener("change", (e) => {
+      config.stripeMode = e.target.value;
+      const badge = document.getElementById("stripeModeInfo");
+      if (config.stripeMode === "test") {
+        badge.textContent = "Using Test Keys";
+        badge.className = "badge badge-test";
+      } else {
+        badge.textContent = "Using LIVE Keys";
+        badge.className = "badge badge-live";
+      }
+      logger.log(`Switched to ${config.stripeMode} mode`, "warning");
+      updateConfigDisplay();
+    });
+
+    // Test functions
+    function testPopupForm() {
+      logger.log("Opening donation form in popup mode", "info");
+      openDonationModal();
+    }
+
+    function testEmbeddedForm() {
+      logger.log("Switching to embedded form view", "info");
+      switchTab("embedded-tab");
+    }
+
+    function testOrgDonation() {
+      logger.log("Testing organization donation flow", "info", {
+        orgName: config.orgName(),
+        email: config.donorEmail(),
+      });
+      testPopupForm();
+    }
+
+    function testIndividualDonation() {
+      logger.log("Testing individual donation flow", "info", {
+        email: config.donorEmail(),
+        lastName: config.donorLastName(),
+      });
+      testPopupForm();
+    }
+
+    function validateForm() {
+      logger.log("Validating form configuration", "info");
+      const errors = [];
+
+      if (!config.donorEmail()) errors.push("Donor email is required");
+      if (!config.donorLastName()) errors.push("Donor last name is required for individual donations");
+
+      if (errors.length === 0) {
+        logger.log("Form validation passed ✓", "success");
+      } else {
+        errors.forEach((err) => logger.log(err, "error"));
+      }
+    }
+
+    function inspectNetworkLogs() {
+      logger.log(
+        "Network inspection - check browser DevTools Console and Network tabs for API calls",
+        "info"
+      );
+    }
+
+    function downloadTestReport() {
+      const report = {
+        timestamp: new Date().toISOString(),
+        config: {
+          stripeMode: config.stripeMode,
+          apiEndpoint: config.apiEndpoint,
+        },
+        logs: logger.logs,
+        testsPassed: logger.logs.filter((l) => l.type === "success").length,
+        testsFailed: logger.logs.filter((l) => l.type === "error").length,
+      };
+
+      const dataStr = JSON.stringify(report, null, 2);
+      const dataUri = "data:application/json;charset=utf-8," + encodeURIComponent(dataStr);
+      const exportFileDefaultName = `donation-form-test-${new Date().getTime()}.json`;
+
+      const linkElement = document.createElement("a");
+      linkElement.setAttribute("href", dataUri);
+      linkElement.setAttribute("download", exportFileDefaultName);
+      linkElement.click();
+
+      logger.log("Test report downloaded", "success");
+    }
+
+    function clearConfig() {
+      document.getElementById("orgName").value = "";
+      document.getElementById("donorEmail").value = "";
+      document.getElementById("donorLastName").value = "";
+      logger.log("Configuration cleared", "info");
+    }
+
+    function clearLogs() {
+      logger.logs = [];
+      logger.render();
+    }
+
+    function switchTab(tabId) {
+      document.querySelectorAll(".tab-content").forEach((el) => el.classList.remove("active"));
+      document.querySelectorAll(".tab").forEach((el) => el.classList.remove("active"));
+
+      document.getElementById(tabId).classList.add("active");
+      event.target.classList.add("active");
+
+      logger.log(`Switched to ${tabId}`, "info");
+    }
+
+    // Initialize
+    document.addEventListener("DOMContentLoaded", () => {
+      logger.log("Donation Form Test Suite loaded", "success");
+      logger.log(`Stripe mode: ${config.stripeMode}`, "info");
+      logger.log(`API Endpoint: ${config.apiEndpoint}`, "info");
+      updateConfigDisplay();
+
+      // Intercept form submissions for logging
+      const originalFetch = window.fetch;
+      window.fetch = function (...args) {
+        if (args[0].includes("transaction")) {
+          logger.log("Submitting donation form to payment processor", "info", {
+            endpoint: args[0],
+            method: args[1]?.method || "GET",
+          });
+        }
+        return originalFetch.apply(this, args);
+      };
+    });
+
+    // Expose functions to window
+    window.updateConfigDisplay = updateConfigDisplay;
+  </script>
+</body>
+</html>
