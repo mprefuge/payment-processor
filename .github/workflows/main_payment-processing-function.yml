@@ -75,7 +75,7 @@ jobs:
 
       - name: Deploy verified release to production
         timeout-minutes: 15
-        uses: Azure/functions-action@v1
+        uses: Azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: release.zip
