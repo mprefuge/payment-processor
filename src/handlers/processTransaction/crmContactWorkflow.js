@@ -47,6 +47,11 @@ const updateMatchedContact = async (crmService, contact, updateData, logMessage)
     return contact;
   }
 
+  if (typeof crmService.updateContact !== 'function') {
+    console.log('CRM service does not support contact update - using matched contact as-is');
+    return contact;
+  }
+
   try {
     const updatedContact = await crmService.updateContact(contact.Id, updateData);
     if (updatedContact) {
@@ -94,6 +99,8 @@ const createCrmContactWorkflow = ({
         CrmFactory,
         getCrmConfig,
         operationName: 'contact sync',
+        requiredMethods: ['searchContact', 'createContact'],
+        unsupportedCapabilityLabel: 'contact sync',
       });
       if (!crmService) {
         return null;

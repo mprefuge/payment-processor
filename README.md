@@ -14,7 +14,7 @@ Azure Functions-based payment processing system with Stripe integration, QuickBo
 
 ## Prerequisites
 
-- Node.js >= 20.0.0
+- Node.js >= 22.0.0
 - Azure Functions Core Tools v4
 - Azure Storage Emulator (Azurite) for local development
 - Stripe account with API keys
@@ -403,13 +403,15 @@ The project includes comprehensive test coverage:
 
 ### Azure Functions
 
-1. Create an Azure Function App (Node.js 20)
+1. Create an Azure Function App (Node.js 22)
 2. Configure application settings (environment variables)
 3. Deploy using Azure Functions Core Tools:
 
 ```bash
 func azure functionapp publish <APP_NAME>
 ```
+
+For Azure Functions on Windows, target Node.js 22 by setting `WEBSITE_NODE_DEFAULT_VERSION=~22`. On newer deployments, the runtime version can also be set through `properties.functionAppConfig.runtime`.
 
 ### Stripe Webhooks
 

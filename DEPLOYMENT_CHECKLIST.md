@@ -38,7 +38,7 @@ Complete these items before calling a deployment production-ready:
 
 ### Azure Configuration
 
-- [ ] Create Azure Function App (Node.js 20.x runtime)
+- [ ] Create Azure Function App (Node.js 22.x runtime)
 - [ ] Configure App Settings from `local.settings.json.template`
 - [ ] Enable Application Insights
 - [ ] Configure deployment credentials
