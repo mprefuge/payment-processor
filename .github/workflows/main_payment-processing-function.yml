@@ -109,7 +109,7 @@ jobs:
             -u "$USERNAME:$PASSWORD" \
             --data-binary @release.zip \
             --max-time 120)
-          
+
           HTTP_STATUS=$(echo "$DEPLOY_RESPONSE" | grep -oP 'HTTP/\d+\.?\d* \K\d+' | tail -1)
           POLL_URL=$(echo "$DEPLOY_RESPONSE" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
           echo "Submit status: $HTTP_STATUS"
