@@ -40,6 +40,9 @@ jobs:
       - name: Run verification suite
         run: npm run verify
 
+      - name: Prune development dependencies
+        run: npm prune --production
+
       - name: Prepare deployment package
         run: |
           mkdir -p deployment-package
