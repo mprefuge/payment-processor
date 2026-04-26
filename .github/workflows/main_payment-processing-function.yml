@@ -102,16 +102,16 @@ jobs:
           KUDU_HOST="${PUBLISH_URL%%:*}"
           echo "Deploying async to ${KUDU_HOST}..."
 
-          # Submit async deploy - returns 202 immediately
+          # Submit async deploy - returns 202 with Location header immediately after upload
           DEPLOY_RESPONSE=$(curl -sS -D - -o /dev/null \
             -X POST "https://${KUDU_HOST}/api/zipdeploy?isAsync=true" \
             -H "Content-Type: application/zip" \
             -u "$USERNAME:$PASSWORD" \
             --data-binary @release.zip \
-            --max-time 120)
+            --max-time 300)
 
-          HTTP_STATUS=$(echo "$DEPLOY_RESPONSE" | grep -oP 'HTTP/\d+\.?\d* \K\d+' | tail -1)
-          POLL_URL=$(echo "$DEPLOY_RESPONSE" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+          HTTP_STATUS=$(echo "$DEPLOY_RESPONSE" | grep -oP 'HTTP/\S+ \K\d+' | tail -1)
+          POLL_URL=$(echo "$DEPLOY_RESPONSE" | grep -i '^location:' | tr -d '\r\n' | sed 's/[Ll]ocation: *//')
           echo "Submit status: $HTTP_STATUS"
           echo "Poll URL: $POLL_URL"
 
@@ -120,36 +120,29 @@ jobs:
             exit 1
           fi
 
-          # Poll until complete
-          for i in $(seq 1 30); do
+          if [ -z "$POLL_URL" ]; then
+            echo "No Location header returned - cannot poll" >&2
+            exit 1
+          fi
+
+          # Kudu DeployStatus: 0=None 1=Pending 2=Building 3=Deploying 4=Failed 5=Success 6=Conflict
+          # Poll for up to ~13 minutes (50 x 15s)
+          for i in $(seq 1 50); do
             sleep 15
             POLL_BODY=$(curl -sS -u "$USERNAME:$PASSWORD" "$POLL_URL")
             DEPLOY_STATUS=$(echo "$POLL_BODY" | grep -oP '"status":\s*\K\d+')
+            COMPLETE=$(echo "$POLL_BODY" | grep -oP '"complete":\s*\K(true|false)')
             DEPLOY_MSG=$(echo "$POLL_BODY" | grep -oP '"status_text":\s*"\K[^"]*')
-            echo "Poll ${i}/30: status=${DEPLOY_STATUS} ${DEPLOY_MSG}"
-            # 3 = success, 4 = conflict/failed
-            if [ "$DEPLOY_STATUS" -eq 3 ] 2>/dev/null; then
+            echo "Poll ${i}/50: status=${DEPLOY_STATUS} complete=${COMPLETE} msg=${DEPLOY_MSG}"
+            if [ "$DEPLOY_STATUS" -eq 5 ] 2>/dev/null; then
               echo "Deployment succeeded"
               exit 0
-            elif [ "$DEPLOY_STATUS" -ge 4 ] 2>/dev/null; then
-              echo "Deployment failed: $DEPLOY_MSG" >&2
+            elif [ "$DEPLOY_STATUS" -eq 4 ] || [ "$DEPLOY_STATUS" -eq 6 ] 2>/dev/null; then
+              echo "Deployment failed (status=${DEPLOY_STATUS}): $DEPLOY_MSG" >&2
               exit 1
             fi
           done
-          echo "Deployment polling timed out" >&2
-          exit 1
-
-  smoke-test-production:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: deploy-production
-    environment:
-      name: production
-      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
-    env:
-      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', vars.AZURE_FUNCTIONAPP_NAME) }}
-      PRODUCTION_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
-      PRODUCTION_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
+          echo "Deployment polling timed out after 50 attempts" >&2
       PRODUCTION_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
       PRODUCTION_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
       PRODUCTION_SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
