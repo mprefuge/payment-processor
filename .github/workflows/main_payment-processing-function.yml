@@ -23,10 +23,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -54,14 +54,14 @@ jobs:
           rm -rf deployment-package
 
       - name: Upload artifact for deployment job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: function-package
           path: release.zip
 
   deploy-production:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 20
     needs: build
     environment:
       name: production
@@ -69,12 +69,12 @@ jobs:
 
     steps:
       - name: Download artifact from build job
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: function-package
 
       - name: Deploy verified release to production
-        timeout-minutes: 1
+        timeout-minutes: 15
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
@@ -83,7 +83,7 @@ jobs:
 
   smoke-test-production:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 20
     needs: deploy-production
     environment:
       name: production
@@ -97,10 +97,10 @@ jobs:
       PRODUCTION_SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
 
