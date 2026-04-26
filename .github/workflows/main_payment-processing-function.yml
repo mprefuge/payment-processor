@@ -100,32 +100,43 @@ jobs:
           PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
           PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
           KUDU_HOST="${PUBLISH_URL%%:*}"
-          KUDU_URL="https://${KUDU_HOST}/api/zipdeploy"
-          echo "Deploying to ${KUDU_HOST}..."
+          echo "Deploying async to ${KUDU_HOST}..."
 
-          MAX_ATTEMPTS=8
-          RETRY_DELAY=60
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            HTTP_STATUS=$(curl -sS -o deploy-response.txt -w "%{http_code}" \
-              -X POST "$KUDU_URL" \
-              -H "Content-Type: application/zip" \
-              -u "$USERNAME:$PASSWORD" \
-              --data-binary @release.zip \
-              --max-time 600)
-            echo "Attempt ${attempt}/${MAX_ATTEMPTS}: HTTP ${HTTP_STATUS}"
-            cat deploy-response.txt || true
-            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+          # Submit async deploy - returns 202 immediately
+          DEPLOY_RESPONSE=$(curl -sS -D - -o /dev/null \
+            -X POST "https://${KUDU_HOST}/api/zipdeploy?isAsync=true" \
+            -H "Content-Type: application/zip" \
+            -u "$USERNAME:$PASSWORD" \
+            --data-binary @release.zip \
+            --max-time 120)
+          
+          HTTP_STATUS=$(echo "$DEPLOY_RESPONSE" | grep -oP 'HTTP/\d+\.?\d* \K\d+' | tail -1)
+          POLL_URL=$(echo "$DEPLOY_RESPONSE" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+          echo "Submit status: $HTTP_STATUS"
+          echo "Poll URL: $POLL_URL"
+
+          if [ "$HTTP_STATUS" -ne 202 ]; then
+            echo "Failed to submit deployment (HTTP $HTTP_STATUS)" >&2
+            exit 1
+          fi
+
+          # Poll until complete
+          for i in $(seq 1 30); do
+            sleep 15
+            POLL_BODY=$(curl -sS -u "$USERNAME:$PASSWORD" "$POLL_URL")
+            DEPLOY_STATUS=$(echo "$POLL_BODY" | grep -oP '"status":\s*\K\d+')
+            DEPLOY_MSG=$(echo "$POLL_BODY" | grep -oP '"status_text":\s*"\K[^"]*')
+            echo "Poll ${i}/30: status=${DEPLOY_STATUS} ${DEPLOY_MSG}"
+            # 3 = success, 4 = conflict/failed
+            if [ "$DEPLOY_STATUS" -eq 3 ] 2>/dev/null; then
               echo "Deployment succeeded"
               exit 0
-            elif [ "$HTTP_STATUS" -eq 409 ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
-              echo "Another deployment is in progress. Waiting ${RETRY_DELAY}s before retry..."
-              sleep $RETRY_DELAY
-            else
-              echo "Deployment failed (HTTP $HTTP_STATUS)" >&2
+            elif [ "$DEPLOY_STATUS" -ge 4 ] 2>/dev/null; then
+              echo "Deployment failed: $DEPLOY_MSG" >&2
               exit 1
             fi
           done
-          echo "All ${MAX_ATTEMPTS} attempts failed" >&2
+          echo "Deployment polling timed out" >&2
           exit 1
 
   smoke-test-production:
