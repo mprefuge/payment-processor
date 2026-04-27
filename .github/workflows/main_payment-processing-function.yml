@@ -48,9 +48,12 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
-          # Tell Oryx/Kudu to only run `npm install`, not a build script,
-          # since dist/ is already compiled by the CI step above.
-          printf '[config]\ncommand = npm ci --omit=dev\n' > deployment-package/.deployment
+          # deploy.sh is executed by Kudu as the custom deployment command.
+          # It runs only `npm ci --omit=dev` so Oryx never tries to invoke
+          # the `build` script (which would fail since typescript is a devDependency).
+          printf '#!/bin/bash\nset -e\nnpm ci --omit=dev\n' > deployment-package/deploy.sh
+          chmod +x deployment-package/deploy.sh
+          printf '[config]\ncommand = deploy.sh\n' > deployment-package/.deployment
 
       - name: Validate deployment package
         run: |
