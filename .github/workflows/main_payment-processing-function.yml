@@ -47,12 +47,15 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
+          cd deployment-package
+          npm ci --omit=dev
 
       - name: Validate deployment package
         run: |
           test -f deployment-package/host.json
           test -f deployment-package/package.json
-          test -d deployment-package/dist
+          test -f deployment-package/dist/index.js
+          test -d deployment-package/node_modules
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -83,8 +86,8 @@ jobs:
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: deployment-package
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
 
   smoke-test-production:
