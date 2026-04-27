@@ -158,14 +158,9 @@ jobs:
               if [ -n "$LOG_URL" ]; then
                 curl -s --max-time 30 \
                   -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-                  "${LOG_URL}" | python3 -c "
-import json,sys
-entries=json.load(sys.stdin)
-for e in entries:
-    print(e.get('log_time','')[:19], e.get('message',''))
-    for d in (e.get('details_url') and [] or []):
-        pass
-" 2>/dev/null || true
+                  "${LOG_URL}" \
+                  | python3 -c "import json,sys; [print(e.get('log_time','')[:19], e.get('message','')) for e in json.load(sys.stdin)]" \
+                  2>/dev/null || true
               fi
               cat /tmp/deploy_status.json >&2
               rm -f /tmp/scm_pass.txt; exit 1
