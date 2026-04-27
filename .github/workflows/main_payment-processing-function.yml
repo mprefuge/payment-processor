@@ -57,11 +57,14 @@ jobs:
           test -f deployment-package/dist/index.js
           test -d deployment-package/node_modules
 
+      - name: Create deployment zip
+        run: cd deployment-package && zip -r ../function-app.zip .
+
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: function-package
-          path: deployment-package
+          path: function-app.zip
           if-no-files-found: error
 
   deploy-production:
@@ -76,16 +79,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: function-package
-          path: deployment-package
+          path: .
 
       - name: Show deployment package contents
-        run: ls -la deployment-package
+        run: unzip -l function-app.zip | head -40
 
       - name: Deploy verified release to production
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: deployment-package
+          package: function-app.zip
           scm-do-build-during-deployment: false
           enable-oryx-build: false
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
