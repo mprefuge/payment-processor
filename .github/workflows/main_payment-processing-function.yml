@@ -47,6 +47,9 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
+          # Tell Oryx/Kudu to only run `npm install`, not a build script,
+          # since dist/ is already compiled by the CI step above.
+          printf '[config]\ncommand = npm ci --omit=dev\n' > deployment-package/.deployment
 
       - name: Validate deployment package
         run: |
@@ -149,7 +152,20 @@ jobs:
               echo "Deployment succeeded."
               rm -f /tmp/scm_pass.txt; exit 0
             elif [ "$STATUS" = "3" ]; then
-              echo "Deployment failed." >&2
+              echo "Deployment failed. Fetching build log..." >&2
+              LOG_URL=$(python3 -c "import json; d=json.load(open('/tmp/deploy_status.json')); print(d.get('log_url',''))" 2>/dev/null || echo '')
+              if [ -n "$LOG_URL" ]; then
+                curl -s --max-time 30 \
+                  -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
+                  "${LOG_URL}" | python3 -c "
+import json,sys
+entries=json.load(sys.stdin)
+for e in entries:
+    print(e.get('log_time','')[:19], e.get('message',''))
+    for d in (e.get('details_url') and [] or []):
+        pass
+" 2>/dev/null || true
+              fi
               cat /tmp/deploy_status.json >&2
               rm -f /tmp/scm_pass.txt; exit 1
             fi
