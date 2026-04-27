@@ -35,7 +35,7 @@ jobs:
         run: npm ci
 
       - name: Clean build output
-        run: rm -rf dist release.zip deployment-package
+        run: rm -rf dist deployment-package
 
       - name: Run verification suite
         run: npm run verify
@@ -47,16 +47,19 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
-          cd deployment-package
-          zip -r ../release.zip .
-          cd ..
-          rm -rf deployment-package
+
+      - name: Validate deployment package
+        run: |
+          test -f deployment-package/host.json
+          test -f deployment-package/package.json
+          test -d deployment-package/dist
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: function-package
-          path: release.zip
+          path: deployment-package
+          if-no-files-found: error
 
   deploy-production:
     runs-on: ubuntu-latest
@@ -70,12 +73,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: function-package
+          path: deployment-package
+
+      - name: Show deployment package contents
+        run: ls -la deployment-package
 
       - name: Deploy verified release to production
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: release.zip
+          package: deployment-package
           scm-do-build-during-deployment: true
           enable-oryx-build: true
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
