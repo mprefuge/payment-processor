@@ -1008,6 +1008,7 @@ module.exports = async function (request, context) {
       jsonBody: {
         url: session.url,
         id: session.id,
+        livemode: session.livemode,
       },
     });
   } catch (error) {
