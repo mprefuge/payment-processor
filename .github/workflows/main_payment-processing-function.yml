@@ -97,13 +97,28 @@ jobs:
             echo "Could not parse publish profile; skipping settings reset." >&2; exit 0
           fi
           printf '%s' "$SCM_PASS" > /tmp/scm_pass.txt
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "https://${APP_NAME}.scm.azurewebsites.net/api/settings" \
+          SCM_BASE="https://${APP_NAME}.scm.azurewebsites.net"
+
+          # Clear settings that put wwwroot into read-only run-from-package mode
+          curl -s -o /dev/null -w "Settings reset: HTTP %{http_code}\n" \
+            -X POST "${SCM_BASE}/api/settings" \
             -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
             -H "Content-Type: application/json" \
-            -d '{"WEBSITE_RUN_FROM_PACKAGE":"0","SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}')
+            -d '{"WEBSITE_RUN_FROM_PACKAGE":"0","SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}'
+
+          # Delete WEBSITE_RUN_FROM_PACKAGE entirely so Azure doesn't keep wwwroot read-only
+          curl -s -o /dev/null -w "Delete WEBSITE_RUN_FROM_PACKAGE: HTTP %{http_code}\n" \
+            -X DELETE "${SCM_BASE}/api/settings/WEBSITE_RUN_FROM_PACKAGE" \
+            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)"
+
+          # Restart the app so the setting change takes effect and wwwroot becomes writable
+          curl -s -o /dev/null -w "App restart: HTTP %{http_code}\n" \
+            -X POST "${SCM_BASE}/api/restart?softRestart=true" \
+            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)"
+
           rm -f /tmp/scm_pass.txt
-          echo "Settings reset: HTTP ${HTTP_STATUS}"
+          echo "Waiting 30s for app to restart..."
+          sleep 30
 
       - name: Deploy verified release to production
         uses: Azure/functions-action@v1
