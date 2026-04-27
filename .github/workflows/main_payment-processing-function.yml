@@ -36,7 +36,7 @@ jobs:
         run: npm ci
 
       - name: Clean build output
-        run: rm -rf dist deployment-package
+        run: rm -rf dist release.zip deployment-package
 
       - name: Run verification suite
         run: npm run verify
@@ -45,28 +45,20 @@ jobs:
         run: |
           mkdir -p deployment-package
           cp -r dist deployment-package/
+          cp -r node_modules deployment-package/
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
           cd deployment-package
-          npm ci --omit=dev
-
-      - name: Validate deployment package
-        run: |
-          test -f deployment-package/host.json
-          test -f deployment-package/package.json
-          test -f deployment-package/dist/index.js
-          test -d deployment-package/node_modules
-
-      - name: Create deployment zip
-        run: cd deployment-package && zip -r ../function-app.zip .
+          zip -r ../release.zip .
+          cd ..
+          rm -rf deployment-package
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: function-package
-          path: function-app.zip
-          if-no-files-found: error
+          path: release.zip
 
   deploy-production:
     runs-on: ubuntu-latest
@@ -80,121 +72,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: function-package
-          path: .
 
-      - name: Show deployment package contents
-        run: unzip -l function-app.zip | head -40
-
-      - name: Clear corrupt Azure app settings from prior deployments
-        env:
-          APP_NAME: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
-        run: |
-          set -euo pipefail
-          SCM_USER=$(python3 -c "import os,re; m=re.search(r'userName=\"(\\\$[^\"]+)\"',os.environ['PUBLISH_PROFILE']); print(m.group(1) if m else '')")
-          SCM_PASS=$(python3 -c "import os,re; m=re.search(r'userPWD=\"([^\"]+)\"',os.environ['PUBLISH_PROFILE']); print(m.group(1) if m else '')")
-          if [ -z "$SCM_USER" ] || [ -z "$SCM_PASS" ]; then
-            echo "Could not parse publish profile; skipping settings reset." >&2; exit 0
-          fi
-          printf '%s' "$SCM_PASS" > /tmp/scm_pass.txt
-          SCM_BASE="https://${APP_NAME}.scm.azurewebsites.net"
-
-          echo "=== Settings BEFORE clear ==="
-          curl -s "${SCM_BASE}/api/settings" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-            | python3 -c "import sys,json; s=json.load(sys.stdin); [print(k+'='+s.get(k,'<not set>')) for k in ['WEBSITE_RUN_FROM_PACKAGE','SCM_DO_BUILD_DURING_DEPLOYMENT','ENABLE_ORYX_BUILD']]"
-
-          # Set WEBSITE_RUN_FROM_PACKAGE to 0 first (required before DELETE on some versions)
-          curl -s -o /dev/null -w "Settings reset: HTTP %{http_code}\n" \
-            -X POST "${SCM_BASE}/api/settings" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-            -H "Content-Type: application/json" \
-            -d '{"WEBSITE_RUN_FROM_PACKAGE":"0","SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}'
-
-          # Delete WEBSITE_RUN_FROM_PACKAGE entirely so Azure doesn't keep wwwroot read-only
-          curl -s -o /dev/null -w "Delete WEBSITE_RUN_FROM_PACKAGE: HTTP %{http_code}\n" \
-            -X DELETE "${SCM_BASE}/api/settings/WEBSITE_RUN_FROM_PACKAGE" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)"
-
-          # Hard restart the app so the setting change takes effect and wwwroot becomes writable
-          curl -s -o /dev/null -w "App restart: HTTP %{http_code}\n" \
-            -X POST "${SCM_BASE}/api/restart?softRestart=false" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)"
-
-          rm -f /tmp/scm_pass.txt
-          echo "Waiting 90s for app to fully restart and provision writable wwwroot..."
-          sleep 90
-
-      - name: Deploy to production via async zipdeploy
-        env:
-          APP_NAME: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
-        run: |
-          set -euo pipefail
-          SCM_USER=$(python3 -c "import os,re; m=re.search(r'userName=\"(\\\$[^\"]+)\"',os.environ['PUBLISH_PROFILE']); print(m.group(1) if m else '')")
-          SCM_PASS=$(python3 -c "import os,re; m=re.search(r'userPWD=\"([^\"]+)\"',os.environ['PUBLISH_PROFILE']); print(m.group(1) if m else '')")
-          printf '%s' "$SCM_PASS" > /tmp/scm_pass.txt
-          SCM_BASE="https://${APP_NAME}.scm.azurewebsites.net"
-
-          echo "=== Settings BEFORE deploy ==="
-          curl -s "${SCM_BASE}/api/settings" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-            | python3 -c "import sys,json; s=json.load(sys.stdin); [print(k+'='+s.get(k,'<not set>')) for k in ['WEBSITE_RUN_FROM_PACKAGE','SCM_DO_BUILD_DURING_DEPLOYMENT','ENABLE_ORYX_BUILD']]"
-          # Ensure Oryx build is disabled before deploying pre-built package
-          curl -s -o /dev/null -w "Pre-deploy settings: HTTP %{http_code}\n" \
-            -X POST "${SCM_BASE}/api/settings" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-            -H "Content-Type: application/json" \
-            -d '{"SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}'
-
-          echo "Uploading function-app.zip via async zipdeploy..."
-          HTTP_STATUS=$(curl -s -o /tmp/deploy_response_headers.txt -D /tmp/deploy_response_headers.txt \
-            -w "%{http_code}" \
-            -X POST "${SCM_BASE}/api/zipdeploy?isAsync=true" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-            -H "Content-Type: application/octet-stream" \
-            --max-time 300 \
-            --data-binary @function-app.zip)
-          echo "Upload HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" != "202" ]; then
-            echo "Upload failed with status $HTTP_STATUS"
-            rm -f /tmp/scm_pass.txt /tmp/deploy_response_headers.txt
-            exit 1
-          fi
-
-          echo "Polling for deployment completion (max 15 min)..."
-          for i in $(seq 1 60); do
-            sleep 15
-            RESULT=$(curl -s "${SCM_BASE}/api/deployments/latest" \
-              -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)")
-            STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',0))" 2>/dev/null || echo "0")
-            MSG=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status_text','')[:120])" 2>/dev/null || echo "")
-            echo "[${i}x15s] status=$STATUS $MSG"
-            if [ "$STATUS" = "4" ]; then
-              echo "Deployment succeeded!"
-              rm -f /tmp/scm_pass.txt /tmp/deploy_response_headers.txt
-              exit 0
-            elif [ "$STATUS" = "3" ]; then
-              echo "Deployment FAILED (status=3). Fetching log..."
-              curl -s "${SCM_BASE}/api/deployments/latest/log" \
-                -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-                | python3 -c "import sys,json; logs=json.load(sys.stdin); [print(str(l.get('log_time',''))[:19],l.get('message','')) for l in logs[-20:]]" 2>/dev/null || true
-              rm -f /tmp/scm_pass.txt /tmp/deploy_response_headers.txt
-              exit 1
-            fi
-          done
-          echo "Timed out waiting for deployment"
-          rm -f /tmp/scm_pass.txt /tmp/deploy_response_headers.txt
-          exit 1
+      - name: Deploy verified release to production
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: release.zip
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
 
   smoke-test-production:
     runs-on: ubuntu-latest
     needs: deploy-production
     environment:
       name: production
-      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
+      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME) }}
     env:
-      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
+      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || format('https://{0}.azurewebsites.net', env.AZURE_FUNCTIONAPP_NAME) }}
       PRODUCTION_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
       PRODUCTION_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
       PRODUCTION_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
