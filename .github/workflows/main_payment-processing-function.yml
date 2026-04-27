@@ -48,18 +48,15 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
-          # deploy.sh is executed by Kudu as the custom deployment command.
-          # It runs only `npm ci --omit=dev` so Oryx never tries to invoke
-          # the `build` script (which would fail since typescript is a devDependency).
-          printf '#!/bin/bash\nset -e\nnpm ci --omit=dev\n' > deployment-package/deploy.sh
-          chmod +x deployment-package/deploy.sh
-          printf '[config]\ncommand = deploy.sh\n' > deployment-package/.deployment
+          cd deployment-package
+          npm ci --omit=dev
 
       - name: Validate deployment package
         run: |
           test -f deployment-package/host.json
           test -f deployment-package/package.json
           test -f deployment-package/dist/index.js
+          test -d deployment-package/node_modules
 
       - name: Create deployment zip
         run: cd deployment-package && zip -r ../function-app.zip .
@@ -88,7 +85,7 @@ jobs:
       - name: Show deployment package contents
         run: unzip -l function-app.zip | head -40
 
-      - name: Deploy via async ZIP deploy with Oryx build
+      - name: Deploy via async ZIP deploy
         env:
           APP_NAME: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
@@ -113,16 +110,17 @@ jobs:
           printf '%s' "$SCM_PASS" > /tmp/scm_pass.txt
           SCM_BASE="https://${APP_NAME}.scm.azurewebsites.net"
 
-          # Ensure Oryx build is enabled and run-from-package is off
+          # node_modules are pre-bundled in the zip; disable Oryx/SCM build so Azure
+          # mounts the zip as-is (WEBSITE_RUN_FROM_PACKAGE=1) without re-building.
           curl -s -o /dev/null -w "App settings: HTTP %{http_code}\n" \
             -X POST "${SCM_BASE}/api/settings" \
             -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
             -H "Content-Type: application/json" \
-            -d '{"WEBSITE_RUN_FROM_PACKAGE":"0","WEBSITE_NODE_DEFAULT_VERSION":"~20","SCM_DO_BUILD_DURING_DEPLOYMENT":"true","ENABLE_ORYX_BUILD":"true"}'
+            -d '{"WEBSITE_RUN_FROM_PACKAGE":"1","SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}'
 
           echo "Uploading function-app.zip via async zipdeploy..."
           HTTP_STATUS=$(curl -s -D /tmp/deploy_headers.txt -o /dev/null -w "%{http_code}" \
-            --max-time 300 \
+            --max-time 600 \
             -X POST "${SCM_BASE}/api/zipdeploy?isAsync=true" \
             -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
             -H "Content-Type: application/octet-stream" \
@@ -141,17 +139,17 @@ jobs:
           PYEOF
           )
           [ -z "$POLL_URL" ] && POLL_URL="${SCM_BASE}/api/deployments/latest"
-          echo "Upload complete. Polling Oryx build: $POLL_URL"
+          echo "Upload complete. Polling deployment status: $POLL_URL"
 
-          # Poll every 30s for up to 40 iterations (20 minutes)
-          for i in $(seq 1 40); do
-            sleep 30
+          # Poll every 15s for up to 60 iterations (15 minutes)
+          for i in $(seq 1 60); do
+            sleep 15
             curl -s --max-time 30 \
               -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
               "$POLL_URL" > /tmp/deploy_status.json 2>/dev/null || true
             STATUS=$(python3 -c "import json; d=json.load(open('/tmp/deploy_status.json')); print(d.get('status',-1))" 2>/dev/null || echo -1)
             MSG=$(python3 -c "import json; d=json.load(open('/tmp/deploy_status.json')); print(d.get('status_text','') or d.get('message',''))" 2>/dev/null || echo '')
-            echo "Poll $i/40: status=$STATUS $MSG"
+            echo "Poll $i/60: status=$STATUS $MSG"
             if [ "$STATUS" = "4" ]; then
               echo "Deployment succeeded."
               rm -f /tmp/scm_pass.txt; exit 0
@@ -171,7 +169,7 @@ jobs:
           done
 
           rm -f /tmp/scm_pass.txt
-          echo "Timed out waiting for deployment after 20 minutes." >&2; exit 1
+          echo "Timed out waiting for deployment after 15 minutes." >&2; exit 1
 
   smoke-test-production:
     runs-on: ubuntu-latest
