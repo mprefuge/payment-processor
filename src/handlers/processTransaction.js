@@ -295,10 +295,6 @@ const customerSchema = z
     if (!data.firstname && !data.firstName) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer first name is required' });
     }
-
-    if (!data.lastname && !data.lastName) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Customer last name is required' });
-    }
   });
 
 const modernRequestSchema = z
@@ -322,7 +318,7 @@ const legacyRequestSchema = z
     frequency: frequencySchema,
     email: z.string().email(),
     firstname: z.string().min(1),
-    lastname: z.string().min(1),
+    lastname: z.string().min(1).optional(),
     phone: z.string().optional(),
     address: z.union([addressSchema, z.string().min(1)]).optional(),
     city: z.string().optional(),
