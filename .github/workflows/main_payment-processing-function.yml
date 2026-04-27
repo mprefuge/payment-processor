@@ -47,15 +47,12 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
-          cd deployment-package
-          npm ci --omit=dev
 
       - name: Validate deployment package
         run: |
           test -f deployment-package/host.json
           test -f deployment-package/package.json
           test -f deployment-package/dist/index.js
-          test -d deployment-package/node_modules
 
       - name: Create deployment zip
         run: cd deployment-package && zip -r ../function-app.zip .
@@ -84,14 +81,12 @@ jobs:
       - name: Show deployment package contents
         run: unzip -l function-app.zip | head -40
 
-      - name: Enable Run-From-Package deployment mode
+      - name: Configure Azure for Oryx remote build
         env:
           APP_NAME: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
         run: |
           set -euo pipefail
-          # Parse SCM credentials from publish profile XML.
-          # Credentials are written to files to avoid exposing them in process args.
           SCM_USER=$(python3 - <<'PYEOF'
           import os, re
           xml = os.environ['PUBLISH_PROFILE']
@@ -107,7 +102,7 @@ jobs:
           PYEOF
           )
           if [ -z "$SCM_USER" ] || [ -z "$SCM_PASS" ]; then
-            echo "Could not parse publish profile credentials; skipping WEBSITE_RUN_FROM_PACKAGE update." >&2
+            echo "Could not parse publish profile credentials; skipping app settings update." >&2
             exit 0
           fi
           printf '%s' "$SCM_PASS" > /tmp/scm_pass.txt
@@ -116,10 +111,10 @@ jobs:
             "https://${APP_NAME}.scm.azurewebsites.net/api/settings" \
             -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
             -H "Content-Type: application/json" \
-            -d '{"WEBSITE_RUN_FROM_PACKAGE":"1"}')
+            -d '{"WEBSITE_RUN_FROM_PACKAGE":"0","WEBSITE_NODE_DEFAULT_VERSION":"~20"}')
           rm -f /tmp/scm_pass.txt
           if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-            echo "WEBSITE_RUN_FROM_PACKAGE=1 set successfully (HTTP ${HTTP_STATUS})."
+            echo "App settings updated (HTTP ${HTTP_STATUS}): Oryx build enabled, run-from-package disabled."
           else
             echo "Warning: Kudu settings API returned HTTP ${HTTP_STATUS}:" >&2
             cat /tmp/kudu_response.txt >&2
@@ -130,8 +125,8 @@ jobs:
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: function-app.zip
-          scm-do-build-during-deployment: false
-          enable-oryx-build: false
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
 
   smoke-test-production:
