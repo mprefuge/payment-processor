@@ -157,12 +157,17 @@ const listStripeCustomersByTagUsingList = async (
 ): Promise<StripeCustomerRecord[]> => {
   const customers: StripeCustomerRecord[] = [];
   let startingAfter: string | undefined;
+  // Cap total pages so this never becomes a full-account scan on large Stripe test accounts.
+  const maxPages = 20;
+  let pagesScanned = 0;
 
-  while (customers.length < limit) {
+  while (customers.length < limit && pagesScanned < maxPages) {
     const response = await stripe.customers.list({
       limit: Math.min(100, limit - customers.length),
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
+
+    pagesScanned++;
 
     const taggedCustomers = response.data.filter(
       (customer): customer is Stripe.Customer =>
@@ -223,7 +228,9 @@ const listStripeSubscriptionsForCustomer = async (
   const subscriptions: StripeSubscriptionRecord[] = [];
 
   let startingAfter: string | undefined;
-  while (subscriptions.length < 1000) {
+  const maxPages = 20;
+  let pagesScanned = 0;
+  while (subscriptions.length < 1000 && pagesScanned < maxPages) {
     const response = await stripe.subscriptions.list({
       customer: customerId,
       status: 'all',
@@ -231,6 +238,7 @@ const listStripeSubscriptionsForCustomer = async (
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
 
+    pagesScanned++;
     subscriptions.push(
       ...response.data.map((subscription) => ({
         id: subscription.id,
@@ -256,13 +264,16 @@ const listStripeSessionsForCustomer = async (
   const sessions: StripeSessionRecord[] = [];
 
   let startingAfter: string | undefined;
-  while (sessions.length < 1000) {
+  const maxPages = 20;
+  let pagesScanned = 0;
+  while (sessions.length < 1000 && pagesScanned < maxPages) {
     const response = await stripe.checkout.sessions.list({
       customer: customerId,
       limit: 100,
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
 
+    pagesScanned++;
     sessions.push(
       ...response.data.map((session) => ({
         id: session.id,
@@ -356,12 +367,19 @@ const listTaggedStripeSessionsUsingList = async (
 ): Promise<StripeSessionRecord[]> => {
   const sessions: StripeSessionRecord[] = [];
   let startingAfter: string | undefined;
+  // Sessions are returned newest-first. Cap the total pages fetched so we never scan the
+  // entire Stripe test account history (which can be millions of records) looking for a
+  // tag that will only match a handful of recently-created sessions.
+  const maxPages = 20;
+  let pagesScanned = 0;
 
-  while (sessions.length < limit) {
+  while (sessions.length < limit && pagesScanned < maxPages) {
     const response = await stripe.checkout.sessions.list({
       limit: 100,
       ...(startingAfter ? { starting_after: startingAfter } : {}),
     });
+
+    pagesScanned++;
 
     const taggedSessions = response.data.filter(
       (session): session is Stripe.Checkout.Session => session.metadata?.source_test_tag === tag

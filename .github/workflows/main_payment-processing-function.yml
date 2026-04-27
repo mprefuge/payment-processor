@@ -130,8 +130,10 @@ jobs:
           SMOKE_CLEANUP_PATH: ${{ env.PRODUCTION_CLEANUP_PATH }}
           SMOKE_FUNCTION_KEY: ${{ env.PRODUCTION_FUNCTION_KEY }}
           SMOKE_TRANSACTION_PAYLOAD: ${{ env.PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
+          SMOKE_MAX_AMOUNT_CENTS: '5000'
           SMOKE_TEST_TAG: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           SMOKE_CLEANUP_LIVE_MODE: 'false'
           SMOKE_SYSTEMS: stripe,salesforce,qbo
           SMOKE_DELETE_SALESFORCE_CONTACTS: 'true'
+          SMOKE_SEARCH_PROPAGATION_DELAY_MS: '65000'
         run: npm run deployment:smoke

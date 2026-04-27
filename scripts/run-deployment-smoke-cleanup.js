@@ -41,6 +41,15 @@ const parseJson = async (response, label) => {
   }
 };
 
+const parsePositiveInt = (value, defaultValue) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+
+  return parsed;
+};
+
 const buildTaggedPayload = (rawPayload, tag) => {
   const payload = JSON.parse(rawPayload);
   const metadata =
@@ -53,8 +62,20 @@ const buildTaggedPayload = (rawPayload, tag) => {
     metadata.memo__c = `Deployment smoke test | [source_test_tag:${tag}]`;
   }
 
+  const defaultSmokeAmountCents = 500; // $5.00 default smoke amount
+  const maxSmokeAmountCents = parsePositiveInt(process.env.SMOKE_MAX_AMOUNT_CENTS, 5000);
+  const requestedAmount = parsePositiveInt(payload?.amount, defaultSmokeAmountCents);
+  const normalizedAmount = Math.min(requestedAmount, maxSmokeAmountCents);
+
+  if (requestedAmount !== normalizedAmount) {
+    console.warn(
+      `Clamped smoke transaction amount from ${requestedAmount} to ${normalizedAmount} cents (SMOKE_MAX_AMOUNT_CENTS=${maxSmokeAmountCents}).`
+    );
+  }
+
   return {
     ...payload,
+    amount: normalizedAmount,
     metadata,
   };
 };
@@ -185,6 +206,21 @@ const main = async () => {
   } catch (error) {
     results.transaction.status = 'failed';
     results.transaction.message = error instanceof Error ? error.message : String(error);
+  }
+
+  // Stripe's search API has a propagation delay (typically 30-60 seconds) before newly-created
+  // objects appear in search results. Without this delay the cleanup falls back to a full
+  // paginated scan of every session in the Stripe test account, which can be millions of records
+  // and will exceed the Azure Function HTTP timeout.
+  const searchPropagationDelayMs = parsePositiveInt(
+    process.env.SMOKE_SEARCH_PROPAGATION_DELAY_MS,
+    65000
+  );
+  if (results.transaction.status === 'passed' && searchPropagationDelayMs > 0) {
+    console.log(
+      `Waiting ${searchPropagationDelayMs}ms for Stripe search propagation before cleanup...`
+    );
+    await new Promise((resolve) => setTimeout(resolve, searchPropagationDelayMs));
   }
 
   // Test cleanup endpoint
