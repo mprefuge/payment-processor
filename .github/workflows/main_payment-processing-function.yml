@@ -1,6 +1,3 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-
 name: Build and deploy Node.js project to Azure Function App - payment-processing-function
 
 on:
@@ -14,80 +11,55 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  NODE_VERSION: '20.x' # set this to the node version to use (supports 8.x, 10.x, 12.x)
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+  NODE_VERSION: '20.x'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
-      - name: 'Checkout GitHub Action'
+      - name: Checkout GitHub Action
         uses: actions/checkout@v4
 
-      - name: Setup Node ${{ env.NODE_VERSION }} Environment
+      - name: Setup Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v3
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: 'Resolve Project Dependencies Using Npm'
-        shell: bash
+      - name: Install dependencies
         run: |
-          pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
           npm install
           npm run build --if-present
-          popd
 
-      - name: 'Run unit tests'
-        shell: bash
-        run: |
-          pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
-          npm run test
-          popd
+      - name: Run unit tests
+        run: npm run test --if-present
 
-      - name: Prepare deployment package
-        shell: bash
-        run: |
-          # Only include necessary files for Azure Functions runtime
-          mkdir -p deployment-package
-          cp -r dist deployment-package/
-          cp -r node_modules deployment-package/
-          cp host.json deployment-package/
-          cp package.json deployment-package/
-          cp package-lock.json deployment-package/
-          cd deployment-package
-          zip -r ../release.zip .
-          cd ..
-          rm -rf deployment-package
-
-      - name: Upload artifact for deployment job
+      # Optional but recommended: upload built output for traceability
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: node-app
-          path: release.zip
-      - name: Verify artifact
-        run: |
-          pwd
-          ls -lah
-          find . -name "release.zip"
+          path: .
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
 
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: node-app
 
-      - name: 'Run Azure Functions Action'
+      - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
-        id: fa
         with:
-          app-name: 'payment-processing-function'
-          slot-name: 'Production'
-          package: release.zip
+          app-name: payment-processing-function
+          slot-name: Production
+          package: .
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_FA090DCEEE59435FA572FA7E342A8755 }}
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true

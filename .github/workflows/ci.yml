@@ -15,13 +15,18 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+
     env:
       ACCOUNTING_POSTING_STRATEGY: ${{ secrets.ACCOUNTING_POSTING_STRATEGY }}
       ACCOUNTING_PROVIDER: ${{ secrets.ACCOUNTING_PROVIDER }}
       ACCOUNTING_SYNC_ENABLED: ${{ secrets.ACCOUNTING_SYNC_ENABLED }}
+
       AZURE_TABLES_CONNECTION_STRING: ${{ secrets.AZURE_TABLES_CONNECTION_STRING }}
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+
       CANCEL_URL: ${{ secrets.CANCEL_URL }}
       CRM_PROVIDER: ${{ secrets.CRM_PROVIDER }}
+
       QBO_ACCESS_TOKEN: ${{ secrets.QBO_ACCESS_TOKEN }}
       QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
       QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
@@ -30,20 +35,25 @@ jobs:
       QBO_ITEM_REVENUE: ${{ secrets.QBO_ITEM_REVENUE }}
       QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
       QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+
       SALESFORCE_CONTACT_LEAD_SOURCE: ${{ secrets.SALESFORCE_CONTACT_LEAD_SOURCE }}
       SALESFORCE_LOGIN_URL: ${{ secrets.SALESFORCE_LOGIN_URL }}
       SALESFORCE_PASSWORD: ${{ secrets.SALESFORCE_PASSWORD }}
       SALESFORCE_SECURITY_TOKEN: ${{ secrets.SALESFORCE_SECURITY_TOKEN }}
       SALESFORCE_USERNAME: ${{ secrets.SALESFORCE_USERNAME }}
+
       SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+
       STRIPE_LIVE_MODE_ENABLED: ${{ secrets.STRIPE_LIVE_MODE_ENABLED }}
       STRIPE_LIVE_SECRET_KEY: ${{ secrets.STRIPE_LIVE_SECRET_KEY }}
       STRIPE_SECRET: ${{ secrets.STRIPE_SECRET }}
       STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+
       SUCCESS_URL: ${{ secrets.SUCCESS_URL }}
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Use Node.js 20
@@ -55,7 +65,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
+      - name: Type check / lint
         run: npm run lint
 
       - name: Run unit tests
@@ -65,23 +75,30 @@ jobs:
         run: npm run health-check
 
       - name: Run end-to-end tests
-        if: ${{ vars.RUN_E2E_TESTS == 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs != null && github.event.inputs['run-e2e-tests'] == 'true') }}
+        if: ${{ vars.RUN_E2E_TESTS == 'true' || github.event.inputs.run-e2e-tests == 'true' }}
         run: npm run test:e2e
+
 
   stripe-webhook-e2e:
     needs: build-and-test
     runs-on: ubuntu-latest
+
     env:
       ACCOUNTING_POSTING_STRATEGY: ${{ secrets.ACCOUNTING_POSTING_STRATEGY }}
       ACCOUNTING_PROVIDER: ${{ secrets.ACCOUNTING_PROVIDER }}
       ACCOUNTING_SYNC_ENABLED: 'false'
-      AZURE_TABLES_CONNECTION_STRING: ${{ secrets.AZURE_TABLES_CONNECTION_STRING != '' && secrets.AZURE_TABLES_CONNECTION_STRING || secrets.AZURE_STORAGE_CONNECTION_STRING }}
-      AzureWebJobsStorage: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING != '' && secrets.AZURE_STORAGE_CONNECTION_STRING || secrets.AZURE_TABLES_CONNECTION_STRING }}
+
+      AZURE_TABLES_CONNECTION_STRING: ${{ secrets.AZURE_TABLES_CONNECTION_STRING }}
+      AzureWebJobsStorage: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+
       CANCEL_URL: ${{ secrets.CANCEL_URL }}
       CRM_PROVIDER: ${{ secrets.CRM_PROVIDER }}
+
       FUNCTIONS_WORKER_RUNTIME: node
+
       IDEMPOTENCY_TABLE_NAME: StripeWebhookE2E${{ github.run_id }}
       IDEMPOTENCY_PROCESSED_PARTITION: processed
+
       QBO_ACCESS_TOKEN: ${{ secrets.QBO_ACCESS_TOKEN }}
       QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
       QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
@@ -90,21 +107,26 @@ jobs:
       QBO_ITEM_REVENUE: ${{ secrets.QBO_ITEM_REVENUE }}
       QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
       QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+
       SALESFORCE_CONTACT_LEAD_SOURCE: ${{ secrets.SALESFORCE_CONTACT_LEAD_SOURCE }}
       SALESFORCE_LOGIN_URL: ${{ secrets.SALESFORCE_LOGIN_URL }}
       SALESFORCE_PASSWORD: ${{ secrets.SALESFORCE_PASSWORD }}
       SALESFORCE_SECURITY_TOKEN: ${{ secrets.SALESFORCE_SECURITY_TOKEN }}
       SALESFORCE_USERNAME: ${{ secrets.SALESFORCE_USERNAME }}
+
       SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+
       STRIPE_LIVE_MODE_ENABLED: 'false'
       STRIPE_LIVE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
       STRIPE_SECRET: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
       STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
       STRIPE_WEBHOOK_URL: http://127.0.0.1:7071/api/stripe/webhook
+
       SUCCESS_URL: ${{ secrets.SUCCESS_URL }}
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Use Node.js 20
