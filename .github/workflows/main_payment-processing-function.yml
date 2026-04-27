@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - prod
+      - last-known-working-deploy
   workflow_dispatch:
 
 concurrency:
