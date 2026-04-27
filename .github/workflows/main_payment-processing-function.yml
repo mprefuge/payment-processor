@@ -67,6 +67,11 @@ jobs:
         with:
           name: node-app
           path: release.zip
+      - name: Verify artifact
+        run: |
+          pwd
+          ls -lah
+          find . -name "release.zip"
 
   deploy:
     runs-on: ubuntu-latest
