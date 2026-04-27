@@ -85,91 +85,34 @@ jobs:
       - name: Show deployment package contents
         run: unzip -l function-app.zip | head -40
 
-      - name: Deploy via async ZIP deploy
+      - name: Clear corrupt Azure app settings from prior deployments
         env:
           APP_NAME: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
         run: |
           set -euo pipefail
-
-          SCM_USER=$(python3 - <<'PYEOF'
-          import os, re
-          m = re.search(r'userName="(\$[^"]+)"', os.environ['PUBLISH_PROFILE'])
-          print(m.group(1) if m else '')
-          PYEOF
-          )
-          SCM_PASS=$(python3 - <<'PYEOF'
-          import os, re
-          m = re.search(r'userPWD="([^"]+)"', os.environ['PUBLISH_PROFILE'])
-          print(m.group(1) if m else '')
-          PYEOF
-          )
+          SCM_USER=$(python3 -c "import os,re; m=re.search(r'userName=\"(\\\$[^\"]+)\"',os.environ['PUBLISH_PROFILE']); print(m.group(1) if m else '')")
+          SCM_PASS=$(python3 -c "import os,re; m=re.search(r'userPWD=\"([^\"]+)\"',os.environ['PUBLISH_PROFILE']); print(m.group(1) if m else '')")
           if [ -z "$SCM_USER" ] || [ -z "$SCM_PASS" ]; then
-            echo "Could not parse publish profile credentials." >&2; exit 1
+            echo "Could not parse publish profile; skipping settings reset." >&2; exit 0
           fi
           printf '%s' "$SCM_PASS" > /tmp/scm_pass.txt
-          SCM_BASE="https://${APP_NAME}.scm.azurewebsites.net"
-
-          # node_modules are pre-bundled in the zip; disable Oryx/SCM build so Azure
-          # mounts the zip as-is (WEBSITE_RUN_FROM_PACKAGE=1) without re-building.
-          curl -s -o /dev/null -w "App settings: HTTP %{http_code}\n" \
-            -X POST "${SCM_BASE}/api/settings" \
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://${APP_NAME}.scm.azurewebsites.net/api/settings" \
             -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
             -H "Content-Type: application/json" \
-            -d '{"WEBSITE_RUN_FROM_PACKAGE":"1","SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}'
-
-          echo "Uploading function-app.zip via async zipdeploy..."
-          HTTP_STATUS=$(curl -s -D /tmp/deploy_headers.txt -o /dev/null -w "%{http_code}" \
-            --max-time 600 \
-            -X POST "${SCM_BASE}/api/zipdeploy?isAsync=true" \
-            -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @function-app.zip)
-          if [ "$HTTP_STATUS" != "202" ]; then
-            echo "Zipdeploy initiation failed (HTTP $HTTP_STATUS)." >&2
-            rm -f /tmp/scm_pass.txt; exit 1
-          fi
-
-          POLL_URL=$(python3 - <<'PYEOF'
-          import re
-          with open('/tmp/deploy_headers.txt') as f:
-              headers = f.read()
-          m = re.search(r'(?im)^location:\s*(\S+)', headers)
-          print(m.group(1) if m else '')
-          PYEOF
-          )
-          [ -z "$POLL_URL" ] && POLL_URL="${SCM_BASE}/api/deployments/latest"
-          echo "Upload complete. Polling deployment status: $POLL_URL"
-
-          # Poll every 15s for up to 60 iterations (15 minutes)
-          for i in $(seq 1 60); do
-            sleep 15
-            curl -s --max-time 30 \
-              -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-              "$POLL_URL" > /tmp/deploy_status.json 2>/dev/null || true
-            STATUS=$(python3 -c "import json; d=json.load(open('/tmp/deploy_status.json')); print(d.get('status',-1))" 2>/dev/null || echo -1)
-            MSG=$(python3 -c "import json; d=json.load(open('/tmp/deploy_status.json')); print(d.get('status_text','') or d.get('message',''))" 2>/dev/null || echo '')
-            echo "Poll $i/60: status=$STATUS $MSG"
-            if [ "$STATUS" = "4" ]; then
-              echo "Deployment succeeded."
-              rm -f /tmp/scm_pass.txt; exit 0
-            elif [ "$STATUS" = "3" ]; then
-              echo "Deployment failed. Fetching build log..." >&2
-              LOG_URL=$(python3 -c "import json; d=json.load(open('/tmp/deploy_status.json')); print(d.get('log_url',''))" 2>/dev/null || echo '')
-              if [ -n "$LOG_URL" ]; then
-                curl -s --max-time 30 \
-                  -u "${SCM_USER}:$(cat /tmp/scm_pass.txt)" \
-                  "${LOG_URL}" \
-                  | python3 -c "import json,sys; [print(e.get('log_time','')[:19], e.get('message','')) for e in json.load(sys.stdin)]" \
-                  2>/dev/null || true
-              fi
-              cat /tmp/deploy_status.json >&2
-              rm -f /tmp/scm_pass.txt; exit 1
-            fi
-          done
-
+            -d '{"WEBSITE_RUN_FROM_PACKAGE":"0","SCM_DO_BUILD_DURING_DEPLOYMENT":"false","ENABLE_ORYX_BUILD":"false"}')
           rm -f /tmp/scm_pass.txt
-          echo "Timed out waiting for deployment after 15 minutes." >&2; exit 1
+          echo "Settings reset: HTTP ${HTTP_STATUS}"
+
+      - name: Deploy verified release to production
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: function-app.zip
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_PUBLISH_PROFILE }}
 
   smoke-test-production:
     runs-on: ubuntu-latest
