@@ -1,4 +1,4 @@
-name: Build and deploy Node.js project to Azure Function App - payment-processing-function
+﻿name: Build and deploy Node.js project to Azure Function App - payment-processing-function
 
 on:
   push:
@@ -13,21 +13,16 @@ concurrency:
 
 env:
   AZURE_FUNCTIONAPP_NAME: payment-processing-function
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: .
   NODE_VERSION: '20.x'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -35,13 +30,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Clean build output
-        run: rm -rf dist release.zip deployment-package
+      - name: Build and verify
+        run: |
+          rm -rf dist release.zip deployment-package
+          npm run verify
 
-      - name: Run verification suite
-        run: npm run verify
-
-      - name: Prepare deployment package
+      - name: Bundle deployment package
         run: |
           mkdir -p deployment-package
           cp -r dist deployment-package/
@@ -49,13 +43,10 @@ jobs:
           cp host.json deployment-package/
           cp package.json deployment-package/
           cp package-lock.json deployment-package/
-          cd deployment-package
-          zip -r ../release.zip .
-          cd ..
-          rm -rf deployment-package
+          cd deployment-package && zip -r ../release.zip .
+          cd .. && rm -rf deployment-package
 
-      - name: Upload artifact for deployment job
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: function-package
           path: release.zip
@@ -65,16 +56,14 @@ jobs:
     needs: build
     environment:
       name: production
-      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
+      url: https://payment-processing-function.azurewebsites.net
 
     steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: function-package
 
-      - name: Deploy verified release to production
-        uses: Azure/functions-action@v1
+      - uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: release.zip
@@ -85,45 +74,40 @@ jobs:
     needs: deploy-production
     environment:
       name: production
-      url: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
-    env:
-      PRODUCTION_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
-      PRODUCTION_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
-      PRODUCTION_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
-      PRODUCTION_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
-      PRODUCTION_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
-      PRODUCTION_SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      url: https://payment-processing-function.azurewebsites.net
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Wait for production warm-up
         run: sleep 30
 
-      - name: Validate production smoke configuration
+      - name: Validate smoke configuration
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${PRODUCTION_FUNCTION_KEY}" ] || { echo "Missing AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY" >&2; exit 1; }
-          [ -n "${PRODUCTION_SMOKE_TRANSACTION_PAYLOAD}" ] || { echo "Missing AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD" >&2; exit 1; }
-
-      - name: Run production deployment smoke test with cleanup
+          [ -n "$PRODUCTION_FUNCTION_KEY" ] || { echo "Missing AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY" >&2; exit 1; }
+          [ -n "$PRODUCTION_SMOKE_TRANSACTION_PAYLOAD" ] || { echo "Missing AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD" >&2; exit 1; }
         env:
-          SMOKE_BASE_URL: ${{ env.PRODUCTION_BASE_URL }}
-          SMOKE_HEALTH_PATH: ${{ env.PRODUCTION_HEALTH_PATH }}
-          SMOKE_TRANSACTION_PATH: ${{ env.PRODUCTION_TRANSACTION_PATH }}
-          SMOKE_CLEANUP_PATH: ${{ env.PRODUCTION_CLEANUP_PATH }}
-          SMOKE_FUNCTION_KEY: ${{ env.PRODUCTION_FUNCTION_KEY }}
-          SMOKE_TRANSACTION_PAYLOAD: ${{ env.PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
+          PRODUCTION_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
+          PRODUCTION_SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
+
+      - name: Run smoke test
+        run: npm run deployment:smoke
+        env:
+          SMOKE_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
+          SMOKE_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
+          SMOKE_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
+          SMOKE_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
+          SMOKE_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
+          SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
           SMOKE_MAX_AMOUNT_CENTS: '5000'
           SMOKE_TEST_TAG: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           SMOKE_CLEANUP_LIVE_MODE: 'false'
           SMOKE_SYSTEMS: stripe,salesforce,qbo
           SMOKE_DELETE_SALESFORCE_CONTACTS: 'true'
           SMOKE_SEARCH_PROPAGATION_DELAY_MS: '65000'
-        run: npm run deployment:smoke
