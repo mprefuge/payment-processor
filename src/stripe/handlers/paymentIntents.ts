@@ -621,6 +621,7 @@ const resolveSuccessfulPaymentIntentOverrideId = async (
 };
 
 const postSuccessfulPaymentIntentToAccounting = async (
+  context: HttpContext,
   deps: StripeWebhookDependencies,
   salesforce: SalesforceSvc,
   upsertResult: Awaited<ReturnType<SalesforceSvc['upsertTransactionByExternalId']>>,
@@ -635,20 +636,51 @@ const postSuccessfulPaymentIntentToAccounting = async (
   }
 
   await deps.idempotencyStore.withLock(`bt_${balanceTransaction.id}`, async () => {
-    const posting = await deps.accounting.postChargeToQbo({
-      gross: Math.abs(balanceTransaction.amount ?? 0),
-      fee: Math.abs(balanceTransaction.fee ?? 0),
-      memo: `Stripe charge ${charge?.id || paymentIntent.id}`,
-      date: timestampToDate(balanceTransaction.created ?? balanceTransaction.available_on ?? null),
-      stripe: {
-        charge: charge ?? undefined,
-        paymentIntent,
-        customer: stripeCustomer,
-        checkoutSession: checkoutSession ?? undefined,
-      },
-    });
+    try {
+      const posting = await deps.accounting.postChargeToQbo({
+        gross: Math.abs(balanceTransaction.amount ?? 0),
+        fee: Math.abs(balanceTransaction.fee ?? 0),
+        memo: `Stripe charge ${charge?.id || paymentIntent.id}`,
+        date: timestampToDate(
+          balanceTransaction.created ?? balanceTransaction.available_on ?? null
+        ),
+        stripe: {
+          charge: charge ?? undefined,
+          paymentIntent,
+          customer: stripeCustomer,
+          checkoutSession: checkoutSession ?? undefined,
+        },
+      });
 
-    await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
+      await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      context.log('[StripeWebhook] Failed to post charge to accounting or update Salesforce', {
+        paymentIntentId: paymentIntent.id,
+        balanceTransactionId: balanceTransaction.id,
+        error: errorMessage,
+      });
+
+      // Store the error in Salesforce so it is visible without requiring log access.
+      // Do not re-throw: letting the event complete prevents Stripe from retrying
+      // indefinitely. Use stripeTrueUp with resubmit=true to retry failed postings.
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          {
+            stripe_payment_intent_id__c: paymentIntent.id,
+            transaction_type__c: 'charge',
+            status__c: 'paid',
+            posting_error__c: errorMessage.slice(0, 255),
+          },
+          'stripe_payment_intent_id__c'
+        );
+      } catch (storeError) {
+        context.log('[StripeWebhook] Failed to store accounting error in Salesforce', {
+          paymentIntentId: paymentIntent.id,
+          error: storeError instanceof Error ? storeError.message : String(storeError),
+        });
+      }
+    }
   });
 };
 
@@ -748,6 +780,7 @@ const processSuccessfulPaymentIntent = async ({
   }
 
   await postSuccessfulPaymentIntentToAccounting(
+    context,
     deps,
     salesforce,
     upsertResult,
