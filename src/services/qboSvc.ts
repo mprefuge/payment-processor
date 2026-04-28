@@ -3029,7 +3029,24 @@ const postToQbo = async <T extends QuickBooksDocType>(
         error: errorText,
       });
 
-      // Try to find the existing document
+      // First: try to extract TxnId directly from the error message
+      // e.g. "DocNumber=CHG-... is assigned to TxnType=Sales Receipt with TxnId=10679"
+      const txnIdMatch = /TxnId=(\d+)/i.exec(errorText);
+      if (txnIdMatch) {
+        const existingId = txnIdMatch[1];
+        logger.info('[QBO] Recovered TxnId from duplicate error message', {
+          entity,
+          docNumber,
+          existingId,
+        });
+        return {
+          id: existingId,
+          type: entity,
+          raw: { duplicate: true, existingId, recoveredFromError: true },
+        };
+      }
+
+      // Fallback: query QBO for the existing document by DocNumber
       if (docNumber) {
         const existingId = await checkForDuplicate(entity, docNumber, options);
         if (existingId) {
