@@ -773,16 +773,16 @@ export const handlePayoutEvent = async (
 
     let qboDocId: string | null = null;
     let qboDocType: string | null = null;
-    await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
-      const result = await adapter.upsertDeposit(depositInput);
-      if (result && typeof result === 'object' && 'id' in result && 'type' in result) {
-        qboDocId = (result as { id: string; type: string }).id;
-        qboDocType = (result as { id: string; type: string }).type;
-      }
-    });
+    try {
+      await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
+        const result = await adapter.upsertDeposit(depositInput);
+        if (result && typeof result === 'object' && 'id' in result && 'type' in result) {
+          qboDocId = (result as { id: string; type: string }).id;
+          qboDocType = (result as { id: string; type: string }).type;
+        }
+      });
 
-    if (qboDocId && qboDocType) {
-      try {
+      if (qboDocId && qboDocType) {
         const payoutTxnId = await salesforce.findTransactionIdByExternalId(
           'stripe_payout_id__c',
           payout.id,
@@ -800,10 +800,27 @@ export const handlePayoutEvent = async (
             qboDocId,
           });
         }
-      } catch (error) {
-        context.log('[StripeWebhook] Failed to mark payout as posted to QBO in Salesforce', {
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      context.log('[StripeWebhook] Failed to post payout to QBO or update Salesforce', {
+        payoutId: payout.id,
+        error: errorMessage,
+      });
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          {
+            stripe_payout_id__c: payout.id,
+            transaction_type__c: 'payout',
+            status__c: 'paid',
+            posting_error__c: errorMessage.slice(0, 255),
+          },
+          'stripe_payout_id__c'
+        );
+      } catch (updateError) {
+        context.log('[StripeWebhook] Failed to store payout posting error in Salesforce', {
           payoutId: payout.id,
-          error: error instanceof Error ? error.message : String(error),
+          error: updateError instanceof Error ? updateError.message : String(updateError),
         });
       }
     }
