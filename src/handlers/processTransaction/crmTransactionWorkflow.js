@@ -99,7 +99,6 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       transactionData.organization ||
       transactionData.customer?.organization ||
       transactionData.metadata?.organization ||
-      transactionData.metadata?.company ||
       null;
 
     if (

@@ -284,7 +284,6 @@ const customerSchema = z
     firstName: z.string().min(1).optional(),
     lastName: z.string().min(1).optional(),
     organization: z.string().optional(),
-    company: z.string().optional(),
     phone: z.string().optional(),
     address: z.union([addressSchema, z.string().min(1)]).optional(),
     city: z.string().optional(),
@@ -322,7 +321,6 @@ const legacyRequestSchema = z
     firstname: z.string().min(1),
     lastname: z.string().min(1).optional(),
     organization: z.string().optional(),
-    company: z.string().optional(),
     phone: z.string().optional(),
     address: z.union([addressSchema, z.string().min(1)]).optional(),
     city: z.string().optional(),
@@ -427,7 +425,7 @@ function normalizeAddressData(addressInput, fallback = {}) {
 function normalizeCustomerData(customerData) {
   const firstname = customerData.firstname || customerData.firstName;
   const lastname = customerData.lastname || customerData.lastName;
-  const organization = customerData.organization || customerData.company || null;
+  const organization = customerData.organization || null;
   const fallbackAddress = {
     city: customerData.city,
     state: customerData.state,
@@ -480,7 +478,7 @@ function normalizeRequestData(data) {
   }
 
   // Carry organization from top-level or metadata
-  const orgName = customer.organization || metadata?.organization || metadata?.company || null;
+  const orgName = customer.organization || data.organization || metadata?.organization || null;
   if (orgName) {
     normalized.organization = orgName;
   }
