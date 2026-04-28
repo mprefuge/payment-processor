@@ -171,7 +171,7 @@ export interface SalesforceSvc {
     key: TransactionExternalIdField,
     value: string,
     recordTypeName?: string
-  ) => Promise<{ id: string; contactId: string | null } | null>;
+  ) => Promise<{ id: string; contactId: string | null; postedToQbo: boolean | null } | null>;
   upsertCustomerByStripeId: (dto: CustomerUpsertDTO) => Promise<UpsertResult>;
   findTransactionForStripeBackfill?: (
     salesforceId: string
@@ -211,6 +211,7 @@ type TransactionDateMatchRecord = {
 type TransactionContactLookupRecord = {
   Id?: string;
   Contact__c?: string | null;
+  Posted_to_QBO__c?: boolean | null;
 };
 
 type ContactLookupRecord = {
@@ -1107,7 +1108,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const apiField = resolveExternalIdField(normalizedKey as TransactionExternalIdField);
     const escapedValue = escapeForSoqlLiteral(normalizedValue);
 
-    let soql = `SELECT Id, Contact__c FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}'`;
+    let soql = `SELECT Id, Contact__c, Posted_to_QBO__c FROM ${TRANSACTION_OBJECT} WHERE ${apiField} = '${escapedValue}'`;
 
     if (recordTypeName) {
       const recordTypeId = await resolveRecordTypeId(recordTypeName);
@@ -1129,6 +1130,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         typeof record.Contact__c === 'string' && record.Contact__c.trim().length > 0
           ? record.Contact__c
           : null,
+      postedToQbo: typeof record.Posted_to_QBO__c === 'boolean' ? record.Posted_to_QBO__c : null,
     };
   };
 

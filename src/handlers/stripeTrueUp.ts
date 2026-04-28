@@ -1180,13 +1180,25 @@ const processPayments = async (
             if (existingRecord?.id) {
               existingTransactionId = existingRecord.id;
 
-              if (existingRecord.contactId) {
-                context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
+              if (existingRecord.contactId && existingRecord.postedToQbo === true) {
+                context.log('[StripeTrueUp] Skipping charge already in Salesforce and posted to QBO', {
                   chargeId: charge.id,
                   salesforceId: existingRecord.id,
                   contactId: existingRecord.contactId,
                 });
                 return true;
+              }
+
+              if (existingRecord.contactId && existingRecord.postedToQbo !== true) {
+                context.log(
+                  '[StripeTrueUp] Existing Salesforce transaction has contact but QBO posting incomplete; retrying QBO post',
+                  {
+                    chargeId: charge.id,
+                    salesforceId: existingRecord.id,
+                    postedToQbo: existingRecord.postedToQbo,
+                  }
+                );
+                return false;
               }
 
               context.log(
