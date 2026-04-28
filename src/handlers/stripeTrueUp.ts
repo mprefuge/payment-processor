@@ -1181,11 +1181,14 @@ const processPayments = async (
               existingTransactionId = existingRecord.id;
 
               if (existingRecord.contactId && existingRecord.postedToQbo === true) {
-                context.log('[StripeTrueUp] Skipping charge already in Salesforce and posted to QBO', {
-                  chargeId: charge.id,
-                  salesforceId: existingRecord.id,
-                  contactId: existingRecord.contactId,
-                });
+                context.log(
+                  '[StripeTrueUp] Skipping charge already in Salesforce and posted to QBO',
+                  {
+                    chargeId: charge.id,
+                    salesforceId: existingRecord.id,
+                    contactId: existingRecord.contactId,
+                  }
+                );
                 return true;
               }
 
