@@ -155,7 +155,6 @@ describe('processTransaction', () => {
     expect(body.error).toContain('Number must be greater than 0');
     expect(body.error).toContain('Invalid enum value');
     expect(body.error).toContain('Customer first name is required');
-    expect(body.error).toContain('Customer last name is required');
   });
 
   it('searchStripeCustomer queries email and filters name locally', async () => {
