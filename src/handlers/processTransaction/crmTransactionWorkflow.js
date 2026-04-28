@@ -96,7 +96,9 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
     const configuredCampaignName =
       transactionData.metadata?.campaign__c ||
       transactionData.metadata?.Campaign__c ||
-      transactionData.metadata?.campaign;
+      transactionData.metadata?.campaign ||
+      transactionData.category ||
+      transactionData.metadata?.category;
 
     const campaignName =
       typeof configuredCampaignName === 'string' && configuredCampaignName.trim().length > 0

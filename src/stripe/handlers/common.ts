@@ -113,7 +113,8 @@ const resolveCampaignId = async (
     return null;
   }
 
-  const campaignName = metadata.campaign__c || metadata.Campaign__c || metadata.campaign;
+  const campaignName =
+    metadata.campaign__c || metadata.Campaign__c || metadata.campaign || metadata.category;
 
   if (!campaignName || typeof campaignName !== 'string' || campaignName.trim().length === 0) {
     return null;
