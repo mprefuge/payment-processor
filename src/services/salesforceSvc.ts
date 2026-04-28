@@ -1102,7 +1102,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     key: TransactionExternalIdField,
     value: string,
     recordTypeName?: string
-  ): Promise<{ id: string; contactId: string | null } | null> => {
+  ): Promise<{ id: string; contactId: string | null; postedToQbo: boolean | null } | null> => {
     const normalizedKey = ensureNonEmpty(key, 'External ID field');
     const normalizedValue = ensureNonEmpty(value, 'External ID value');
     const apiField = resolveExternalIdField(normalizedKey as TransactionExternalIdField);
