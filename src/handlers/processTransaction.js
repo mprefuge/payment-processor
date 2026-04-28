@@ -427,8 +427,7 @@ function normalizeAddressData(addressInput, fallback = {}) {
 function normalizeCustomerData(customerData) {
   const firstname = customerData.firstname || customerData.firstName;
   const lastname = customerData.lastname || customerData.lastName;
-  const organization =
-    customerData.organization || customerData.company || null;
+  const organization = customerData.organization || customerData.company || null;
   const fallbackAddress = {
     city: customerData.city,
     state: customerData.state,
@@ -481,11 +480,7 @@ function normalizeRequestData(data) {
   }
 
   // Carry organization from top-level or metadata
-  const orgName =
-    customer.organization ||
-    metadata?.organization ||
-    metadata?.company ||
-    null;
+  const orgName = customer.organization || metadata?.organization || metadata?.company || null;
   if (orgName) {
     normalized.organization = orgName;
   }

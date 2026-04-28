@@ -102,7 +102,11 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       transactionData.metadata?.company ||
       null;
 
-    if (!organizationName || typeof organizationName !== 'string' || organizationName.trim().length === 0) {
+    if (
+      !organizationName ||
+      typeof organizationName !== 'string' ||
+      organizationName.trim().length === 0
+    ) {
       return null;
     }
 
@@ -110,7 +114,9 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
 
     if (typeof crmService.findOrCreateAccount === 'function') {
       try {
-        console.log('Resolving organization name to Salesforce Account ID', { organizationName: trimmedName });
+        console.log('Resolving organization name to Salesforce Account ID', {
+          organizationName: trimmedName,
+        });
         const accountId = await crmService.findOrCreateAccount(trimmedName);
         console.log('Organization resolved to Salesforce Account ID', {
           organizationName: trimmedName,
