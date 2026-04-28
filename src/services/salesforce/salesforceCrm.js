@@ -588,6 +588,57 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
+  async findOrCreateAccount(accountName) {
+    await this.authenticate();
+
+    if (!accountName || typeof accountName !== 'string') {
+      throw new Error('Account name is required');
+    }
+
+    const trimmedName = accountName.trim();
+    if (trimmedName.length === 0) {
+      throw new Error('Account name cannot be empty');
+    }
+
+    try {
+      const query = `SELECT Id, Name FROM Account WHERE Name = '${this.escapeSoqlLiteral(trimmedName)}' LIMIT 1`;
+      logger.info('Searching for existing account:', { accountName: trimmedName });
+
+      const result = await this.conn.query(query);
+
+      if (result.records && result.records.length > 0) {
+        logger.info(`Found existing account: ${result.records[0].Id}`, {
+          accountName: trimmedName,
+          accountId: result.records[0].Id,
+        });
+        return result.records[0].Id;
+      }
+
+      logger.info('Account not found, creating new account:', { accountName: trimmedName });
+
+      const accountRecord = {
+        Name: trimmedName,
+        Type: 'Organization',
+      };
+
+      const createResult = await this.conn.sobject('Account').create(accountRecord);
+
+      if (!createResult.success) {
+        throw new Error(`Account creation failed: ${JSON.stringify(createResult.errors)}`);
+      }
+
+      logger.info(`Created new Salesforce account with ID: ${createResult.id}`, {
+        accountName: trimmedName,
+        accountId: createResult.id,
+      });
+
+      return createResult.id;
+    } catch (error) {
+      logger.error('Error finding or creating Salesforce account:', error);
+      throw new Error(`Salesforce account lookup/creation failed: ${error.message}`);
+    }
+  }
+
   async addCampaignMember(campaignId, contactId, status = 'Sent') {
     await this.authenticate();
 

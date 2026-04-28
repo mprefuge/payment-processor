@@ -283,6 +283,8 @@ const customerSchema = z
     lastname: z.string().min(1).optional(),
     firstName: z.string().min(1).optional(),
     lastName: z.string().min(1).optional(),
+    organization: z.string().optional(),
+    company: z.string().optional(),
     phone: z.string().optional(),
     address: z.union([addressSchema, z.string().min(1)]).optional(),
     city: z.string().optional(),
@@ -319,6 +321,8 @@ const legacyRequestSchema = z
     email: z.string().email(),
     firstname: z.string().min(1),
     lastname: z.string().min(1).optional(),
+    organization: z.string().optional(),
+    company: z.string().optional(),
     phone: z.string().optional(),
     address: z.union([addressSchema, z.string().min(1)]).optional(),
     city: z.string().optional(),
@@ -423,6 +427,8 @@ function normalizeAddressData(addressInput, fallback = {}) {
 function normalizeCustomerData(customerData) {
   const firstname = customerData.firstname || customerData.firstName;
   const lastname = customerData.lastname || customerData.lastName;
+  const organization =
+    customerData.organization || customerData.company || null;
   const fallbackAddress = {
     city: customerData.city,
     state: customerData.state,
@@ -431,7 +437,7 @@ function normalizeCustomerData(customerData) {
   };
   const address = normalizeAddressData(customerData.address, fallbackAddress);
 
-  return {
+  const normalized = {
     email: customerData.email,
     firstname,
     lastname,
@@ -441,6 +447,12 @@ function normalizeCustomerData(customerData) {
     state: customerData.state || address.state,
     zipcode: customerData.zipcode || customerData.postalCode || address.postal_code,
   };
+
+  if (organization) {
+    normalized.organization = organization;
+  }
+
+  return normalized;
 }
 
 function normalizeRequestData(data) {
@@ -466,6 +478,16 @@ function normalizeRequestData(data) {
 
   if (data.transactionType) {
     normalized.transactionType = data.transactionType;
+  }
+
+  // Carry organization from top-level or metadata
+  const orgName =
+    customer.organization ||
+    metadata?.organization ||
+    metadata?.company ||
+    null;
+  if (orgName) {
+    normalized.organization = orgName;
   }
 
   return normalized;

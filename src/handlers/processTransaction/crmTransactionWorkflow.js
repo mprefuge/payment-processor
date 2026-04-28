@@ -40,6 +40,7 @@ const buildTransactionRecord = ({
   session,
   transactionData,
   contactId = null,
+  accountId = null,
   campaignId = null,
   recordTypeId = null,
   frequencyValue = undefined,
@@ -53,6 +54,7 @@ const buildTransactionRecord = ({
   };
 
   assignOptionalField(transactionRecord, 'Contact__c', contactId);
+  assignOptionalField(transactionRecord, 'Account__c', accountId);
   assignOptionalField(transactionRecord, 'Campaign__c', campaignId);
   assignOptionalField(transactionRecord, 'RecordTypeId', recordTypeId);
 
@@ -92,6 +94,41 @@ const buildTransactionRecord = ({
 };
 
 const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
+  const resolveAccountId = async (crmService, transactionData) => {
+    const organizationName =
+      transactionData.organization ||
+      transactionData.customer?.organization ||
+      transactionData.metadata?.organization ||
+      transactionData.metadata?.company ||
+      null;
+
+    if (!organizationName || typeof organizationName !== 'string' || organizationName.trim().length === 0) {
+      return null;
+    }
+
+    const trimmedName = organizationName.trim();
+
+    if (typeof crmService.findOrCreateAccount === 'function') {
+      try {
+        console.log('Resolving organization name to Salesforce Account ID', { organizationName: trimmedName });
+        const accountId = await crmService.findOrCreateAccount(trimmedName);
+        console.log('Organization resolved to Salesforce Account ID', {
+          organizationName: trimmedName,
+          accountId,
+        });
+        return accountId;
+      } catch (error) {
+        console.log('Failed to resolve organization account, will skip account assignment', {
+          organizationName: trimmedName,
+          error: error.message,
+        });
+        logger.error('Account resolution error:', error);
+      }
+    }
+
+    return null;
+  };
+
   const resolveCampaignId = async (crmService, transactionData) => {
     const configuredCampaignName =
       transactionData.metadata?.campaign__c ||
@@ -243,6 +280,7 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       }
 
       const campaignId = await resolveCampaignId(crmService, transactionData);
+      const accountId = await resolveAccountId(crmService, transactionData);
       const recordTypeId = await resolveTransactionRecordTypeId(crmService);
 
       await addContactToCampaignIfNeeded(crmService, campaignId, contactId);
@@ -251,6 +289,7 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         session,
         transactionData,
         contactId,
+        accountId,
         campaignId,
         recordTypeId,
         frequencyValue: transactionData.frequency || 'onetime',
@@ -283,11 +322,13 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       }
 
       const campaignId = await resolveCampaignId(crmService, requestData);
+      const accountId = await resolveAccountId(crmService, requestData);
       const recordTypeId = await resolveTransactionRecordTypeId(crmService);
 
       const transactionRecord = buildTransactionRecord({
         session,
         transactionData: requestData,
+        accountId,
         campaignId,
         recordTypeId,
         frequencyValue: requestData.frequency,
