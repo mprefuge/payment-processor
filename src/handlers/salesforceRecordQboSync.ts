@@ -85,6 +85,7 @@ type SalesforceTransaction = {
   Posted_to_QBO__c?: boolean | null;
   QBO_Doc_Type__c?: string | null;
   QBO_Doc_Id__c?: string | null;
+  Stripe_Charge_Id__c?: string | null;
   Stripe_Payout_Id__c?: string | null;
   Posting_Error__c?: string | null;
 };
@@ -615,7 +616,7 @@ const loadSalesforceTransactions = async (
   const selectClause =
     'SELECT Id, Name, Transaction_Type__c, Amount_Gross__c, Amount_Fee__c, Amount_Net__c, ' +
     'Memo__c, Received_At__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ' +
-    'Stripe_Payout_Id__c, Posting_Error__c ';
+    'Stripe_Charge_Id__c, Stripe_Payout_Id__c, Posting_Error__c ';
 
   const recordId = toTrimmed(resolvedRecord.record.Id);
   if (!recordId) {
@@ -857,12 +858,16 @@ const executeTransactionCreate = async (
         );
       }
 
+      const stripeChargeId =
+        typeof transaction.Stripe_Charge_Id__c === 'string' && transaction.Stripe_Charge_Id__c.trim()
+          ? transaction.Stripe_Charge_Id__c.trim()
+          : null;
       return await dependencies.postChargeToQbo({
         gross: toCents(transaction.Amount_Gross__c),
         fee: toCents(transaction.Amount_Fee__c),
         memo,
         date,
-        stripe: {},
+        stripe: stripeChargeId ? ({ charge: { id: stripeChargeId } } as any) : {},
         customer:
           env.accounting.postingStrategy === 'sales-receipt' && customerId
             ? {
