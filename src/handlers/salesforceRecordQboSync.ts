@@ -859,7 +859,8 @@ const executeTransactionCreate = async (
       }
 
       const stripeChargeId =
-        typeof transaction.Stripe_Charge_Id__c === 'string' && transaction.Stripe_Charge_Id__c.trim()
+        typeof transaction.Stripe_Charge_Id__c === 'string' &&
+        transaction.Stripe_Charge_Id__c.trim()
           ? transaction.Stripe_Charge_Id__c.trim()
           : null;
       return await dependencies.postChargeToQbo({
