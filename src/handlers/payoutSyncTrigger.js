@@ -222,8 +222,7 @@ const createDefaultDependencies = () => {
   return {
     stripe,
     accounting: {
-      buildBankDeposit: qbo.buildBankDeposit,
-      postBankDeposit: qbo.postBankDeposit,
+      postPayoutToQbo: qbo.postPayoutToQbo,
     },
     salesforce: {
       getService: createSalesforceGetter(),
@@ -397,7 +396,6 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   }
 
   const memo = `payout_${payout.id}`;
-  const docNumber = createDocNumber(payout.id);
   const amountCents = safeAmount(payout.amount);
   const date = toDateFromStripeTimestamp(payout.arrival_date || payout.created);
 
@@ -429,14 +427,12 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
     return { status: 'skipped', payoutId: payout.id, reason: 'blank_status' };
   }
 
-  const bankDeposit = accounting.buildBankDeposit({
-    docNumber,
-    amountCents,
+  const qboResult = await accounting.postPayoutToQbo({
+    amount: amountCents,
     memo,
     date,
+    payoutId: payout.id,
   });
-
-  const qboResult = await accounting.postBankDeposit(bankDeposit);
 
   if (salesforce && typeof salesforce.linkPayoutOnTransactions === 'function') {
     const balanceTransactionIds = uniqueIds(validTransactions);
@@ -449,7 +445,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
 
   console.log('[payoutSyncTrigger] Processed payout', {
     payoutId: payout.id,
-    bankDepositId: qboResult?.id || null,
+    bankDepositId: qboResult?.qboId || null,
     balanceTransactionCount: validTransactions.length,
     invalidTransactionCount: invalidTransactions.length,
   });
@@ -457,7 +453,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   return {
     status: 'processed',
     payoutId: payout.id,
-    bankDepositId: qboResult?.id || null,
+    bankDepositId: qboResult?.qboId || null,
   };
 };
 

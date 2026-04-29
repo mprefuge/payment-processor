@@ -54,15 +54,7 @@ describe('payoutSyncTrigger', () => {
       has_more: false,
     });
 
-    const buildBankDeposit = vi.fn(({ docNumber, amountCents, memo, date }) => ({
-      docNumber,
-      amountCents,
-      memo,
-      date,
-    }));
-
-    const bankDepositResult = { id: 'dep_1' };
-    const postBankDeposit = vi.fn().mockResolvedValue(bankDepositResult);
+    const postPayoutToQbo = vi.fn().mockResolvedValue({ qboId: 'dep_1', type: 'bank-deposit' });
     const linkPayoutOnTransactions = vi.fn().mockResolvedValue([]);
     const processedStore = {
       isProcessed: vi.fn().mockResolvedValue(false),
@@ -74,7 +66,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 8,
@@ -88,20 +80,14 @@ describe('payoutSyncTrigger', () => {
 
     expect(payoutsList).toHaveBeenCalledTimes(1);
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_123');
-    expect(buildBankDeposit).toHaveBeenCalledWith(
+    expect(postPayoutToQbo).toHaveBeenCalledWith(
       expect.objectContaining({
-        docNumber: 'payout_po_123',
-        amountCents: 2500,
+        amount: 2500,
         memo: 'payout_po_123',
+        payoutId: 'po_123',
         date: expect.any(Date),
       })
     );
-    expect(postBankDeposit).toHaveBeenCalledWith({
-      docNumber: 'payout_po_123',
-      amountCents: 2500,
-      memo: 'payout_po_123',
-      date: expect.any(Date),
-    });
     expect(linkPayoutOnTransactions).toHaveBeenCalledWith('po_123', ['bt_1', 'bt_2']);
     expect(processedStore.markProcessed).toHaveBeenCalledWith('po_po_123');
 
@@ -142,8 +128,7 @@ describe('payoutSyncTrigger', () => {
       markProcessed: vi.fn(),
     };
 
-    const buildBankDeposit = vi.fn();
-    const postBankDeposit = vi.fn();
+    const postPayoutToQbo = vi.fn();
     const linkPayoutOnTransactions = vi.fn();
 
     internals.setDependencies({
@@ -151,7 +136,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 7,
@@ -165,8 +150,7 @@ describe('payoutSyncTrigger', () => {
 
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_999');
     expect(balanceTransactionsList).not.toHaveBeenCalled();
-    expect(buildBankDeposit).not.toHaveBeenCalled();
-    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
 
     expect(result.status).toBe(200);
@@ -197,8 +181,7 @@ describe('payoutSyncTrigger', () => {
       markProcessed: vi.fn(),
     };
 
-    const buildBankDeposit = vi.fn();
-    const postBankDeposit = vi.fn();
+    const postPayoutToQbo = vi.fn();
     const linkPayoutOnTransactions = vi.fn();
 
     internals.setDependencies({
@@ -206,7 +189,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 7,
@@ -220,8 +203,7 @@ describe('payoutSyncTrigger', () => {
 
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_zero');
     expect(balanceTransactionsList).toHaveBeenCalledTimes(1);
-    expect(buildBankDeposit).not.toHaveBeenCalled();
-    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
     expect(processedStore.markProcessed).not.toHaveBeenCalled();
 
@@ -260,8 +242,7 @@ describe('payoutSyncTrigger', () => {
       markProcessed: vi.fn(),
     };
 
-    const buildBankDeposit = vi.fn();
-    const postBankDeposit = vi.fn();
+    const postPayoutToQbo = vi.fn();
     const linkPayoutOnTransactions = vi.fn();
 
     internals.setDependencies({
@@ -269,7 +250,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 7,
@@ -283,8 +264,7 @@ describe('payoutSyncTrigger', () => {
 
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_blank');
     expect(balanceTransactionsList).toHaveBeenCalledTimes(1);
-    expect(buildBankDeposit).not.toHaveBeenCalled();
-    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
     expect(processedStore.markProcessed).not.toHaveBeenCalled();
 
@@ -312,8 +292,7 @@ describe('payoutSyncTrigger', () => {
       markProcessed: vi.fn(),
     };
 
-    const buildBankDeposit = vi.fn();
-    const postBankDeposit = vi.fn();
+    const postPayoutToQbo = vi.fn();
     const linkPayoutOnTransactions = vi.fn();
 
     internals.setDependencies({
@@ -321,7 +300,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 7,
@@ -335,8 +314,7 @@ describe('payoutSyncTrigger', () => {
 
     expect(processedStore.isProcessed).not.toHaveBeenCalled();
     expect(balanceTransactionsList).not.toHaveBeenCalled();
-    expect(buildBankDeposit).not.toHaveBeenCalled();
-    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
     expect(processedStore.markProcessed).not.toHaveBeenCalled();
 
@@ -365,8 +343,7 @@ describe('payoutSyncTrigger', () => {
       markProcessed: vi.fn(),
     };
 
-    const buildBankDeposit = vi.fn();
-    const postBankDeposit = vi.fn();
+    const postPayoutToQbo = vi.fn();
     const linkPayoutOnTransactions = vi.fn();
 
     internals.setDependencies({
@@ -374,7 +351,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 7,
@@ -388,8 +365,7 @@ describe('payoutSyncTrigger', () => {
 
     expect(processedStore.isProcessed).not.toHaveBeenCalled();
     expect(balanceTransactionsList).not.toHaveBeenCalled();
-    expect(buildBankDeposit).not.toHaveBeenCalled();
-    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
     expect(processedStore.markProcessed).not.toHaveBeenCalled();
 
@@ -423,8 +399,7 @@ describe('payoutSyncTrigger', () => {
       markProcessed: vi.fn(),
     };
 
-    const buildBankDeposit = vi.fn();
-    const postBankDeposit = vi.fn();
+    const postPayoutToQbo = vi.fn();
     const linkPayoutOnTransactions = vi.fn();
 
     internals.setDependencies({
@@ -432,7 +407,7 @@ describe('payoutSyncTrigger', () => {
         payouts: { list: payoutsList },
         balanceTransactions: { list: balanceTransactionsList },
       },
-      accounting: { buildBankDeposit, postBankDeposit },
+      accounting: { postPayoutToQbo },
       salesforce: { linkPayoutOnTransactions },
       processedStore,
       lookbackDays: 7,
@@ -446,8 +421,7 @@ describe('payoutSyncTrigger', () => {
 
     expect(processedStore.isProcessed).toHaveBeenCalledWith('po_po_no_arrival');
     expect(balanceTransactionsList).toHaveBeenCalledTimes(1);
-    expect(buildBankDeposit).not.toHaveBeenCalled();
-    expect(postBankDeposit).not.toHaveBeenCalled();
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
     expect(linkPayoutOnTransactions).not.toHaveBeenCalled();
     expect(processedStore.markProcessed).not.toHaveBeenCalled();
 
