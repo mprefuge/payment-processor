@@ -3560,9 +3560,7 @@ export const findDocumentsByPrivateNoteTag = async (
   const documents: TaggedQuickBooksDocument[] = [];
 
   // PrivateNote is not queryable in QBO IQL; fetch recent documents by TxnDate and filter in memory.
-  const cutoffDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const cutoffDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   for (const [type, metadata] of Object.entries(QUICKBOOKS_ENTITY_METADATA) as Array<
     [QuickBooksDocType, QuickBooksEntityMetadata]
