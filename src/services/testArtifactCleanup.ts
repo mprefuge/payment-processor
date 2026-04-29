@@ -153,7 +153,7 @@ const pushResult = (
 // Stripe's search API is eventually consistent and may lag by up to ~60s after
 // a customer is created or updated. Retry with backoff so the cleanup finds the
 // customer that was just created by the smoke transaction.
-const STRIPE_SEARCH_RETRY_DELAYS_MS = [3000, 6000, 12000];
+const STRIPE_SEARCH_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000];
 
 const listStripeCustomersByTag = async (
   stripe: Stripe,
