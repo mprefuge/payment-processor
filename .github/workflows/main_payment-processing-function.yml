@@ -14,16 +14,15 @@ concurrency:
 env:
   AZURE_FUNCTIONAPP_NAME: payment-processing-function
   NODE_VERSION: '20.x'
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -47,7 +46,7 @@ jobs:
           cd deployment-package && zip -r ../release.zip .
           cd .. && rm -rf deployment-package
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: function-package
           path: release.zip
@@ -60,7 +59,7 @@ jobs:
       url: https://payment-processing-function.azurewebsites.net
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: function-package
 
@@ -78,9 +77,9 @@ jobs:
       url: https://payment-processing-function.azurewebsites.net
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
