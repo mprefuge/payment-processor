@@ -20,11 +20,21 @@ const QBO_ENTITY_QUERY_MAP: Record<QuickBooksDocEntityType, string> = {
 // DocNumber prefixes for documents whose suffix encodes a Stripe ID
 const STRIPE_ID_PREFIXES = new Set(['CHG', 'CHGJE', 'PO']);
 
+// Regex to extract Stripe object IDs from free-text fields (PrivateNote / memo)
+const STRIPE_ID_PATTERN = /\b(ch_|po_|pi_|py_|re_|dp_|cs_|sub_|in_|cn_|bt_)[A-Za-z0-9]+/g;
+
+const extractStripeIdsFromText = (text: string | null | undefined): string[] => {
+  if (!text?.trim()) return [];
+  const matches = [...text.matchAll(STRIPE_ID_PATTERN)].map((m) => m[0]);
+  return [...new Set(matches)];
+};
+
 type QboDocumentRecord = {
   Id?: string | number | null;
   SyncToken?: string | number | null;
   DocNumber?: string | null;
   TxnDate?: string | null;
+  PrivateNote?: string | null;
   MetaData?: {
     CreateTime?: string | null;
     LastUpdatedTime?: string | null;
@@ -42,7 +52,11 @@ type DuplicateRecord = {
 };
 
 type DuplicateGroup = {
-  /** For QBO: the Stripe ID suffix from DocNumber. For Salesforce: '{FieldName}:{StripeId}'. */
+  /**
+   * For QBO (memo present):    '{entity}:{fullStripeId}'   e.g. 'bank-deposit:po_1TRLq7...'
+   * For QBO (memo absent):     '{entity}:{PREFIX}:{suffix}' e.g. 'sales-receipt:CHG:abc123'
+   * For Salesforce:            '{FieldName}:{StripeId}'
+   */
   key: string;
   records: DuplicateRecord[];
 };
@@ -88,7 +102,7 @@ const queryQboDocuments = async (
 ): Promise<QboDocumentRecord[]> => {
   const entityName = QBO_ENTITY_QUERY_MAP[entity];
   const dateClause = buildQboDateClause(startDate, endDate);
-  const queryStr = `SELECT Id, SyncToken, DocNumber, TxnDate, MetaData FROM ${entityName}${dateClause} MAXRESULTS 1000`;
+  const queryStr = `SELECT Id, SyncToken, DocNumber, TxnDate, MetaData, PrivateNote FROM ${entityName}${dateClause} MAXRESULTS 1000`;
   const result = await qboQuery<QboDocumentRecord[]>(queryStr);
   return Array.isArray(result) ? result : [];
 };
@@ -97,7 +111,8 @@ const detectQboDuplicates = async (
   startDate?: string,
   endDate?: string
 ): Promise<{ groups: DuplicateGroup[]; checked: number }> => {
-  const allDocs: DuplicateRecord[] = [];
+  type DocWithNote = DuplicateRecord & { privateNote: string | null };
+  const allDocs: DocWithNote[] = [];
 
   for (const entity of Object.keys(QBO_ENTITY_QUERY_MAP) as QuickBooksDocEntityType[]) {
     const records = await queryQboDocuments(entity, startDate, endDate);
@@ -122,27 +137,42 @@ const detectQboDuplicates = async (
         txnDate: record.TxnDate ?? null,
         entity,
         createTime: record.MetaData?.CreateTime ?? null,
+        privateNote: record.PrivateNote ?? null,
       });
     }
   }
 
-  // Group by prefix:stripeKey — each prefix maps to a specific document type
-  // (CHG→SalesReceipt, CHGJE→JournalEntry, PO→Deposit). Grouping includes the prefix
-  // so that a CHG receipt and a CHGJE journal entry for the same charge are NOT
-  // flagged as duplicates (they're the expected accounting pair). Only two documents
-  // of the same prefix type that share a Stripe ID are true duplicates.
-  const byPrefixAndKey = new Map<string, DuplicateRecord[]>();
-  for (const doc of allDocs) {
-    const parts = parseDocNumberParts(doc.docNumber);
-    if (!parts) continue;
-    const groupKey = `${parts.prefix}:${parts.stripeKey}`;
-    const existing = byPrefixAndKey.get(groupKey) ?? [];
-    existing.push(doc);
-    byPrefixAndKey.set(groupKey, existing);
+  // Group by {entity}:{stripeId}.
+  // Primary source:  PrivateNote — extract full Stripe IDs via regex. This catches all
+  //   DocNumber formats including the legacy 'payout_{id}' pattern because the memo
+  //   always contains the untruncated Stripe ID.
+  // Fallback source: DocNumber prefix parsing — used when PrivateNote is absent. Produces
+  //   key '{entity}:{PREFIX}:{suffix}' so CHG and CHGJE records for the same charge remain
+  //   in separate groups (they're the expected accounting pair, not duplicates).
+  const byKey = new Map<string, DuplicateRecord[]>();
+  const addToGroup = (key: string, doc: DuplicateRecord) => {
+    const group = byKey.get(key) ?? [];
+    if (!group.some((d) => d.id === doc.id)) group.push(doc);
+    byKey.set(key, group);
+  };
+
+  for (const { privateNote, ...doc } of allDocs) {
+    const noteIds = extractStripeIdsFromText(privateNote);
+    if (noteIds.length > 0) {
+      for (const stripeId of noteIds) {
+        addToGroup(`${doc.entity}:${stripeId}`, doc);
+      }
+    } else {
+      // Fallback: use DocNumber prefix pattern
+      const parts = parseDocNumberParts(doc.docNumber);
+      if (parts) {
+        addToGroup(`${doc.entity}:${parts.prefix}:${parts.stripeKey}`, doc);
+      }
+    }
   }
 
   const groups: DuplicateGroup[] = [];
-  for (const [key, docs] of byPrefixAndKey) {
+  for (const [key, docs] of byKey) {
     if (docs.length > 1) {
       groups.push({ key, records: docs });
     }

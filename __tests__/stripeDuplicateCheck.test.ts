@@ -18,13 +18,15 @@ const makeQboDoc = (
   syncToken: string,
   docNumber: string,
   txnDate: string,
-  createTime: string
+  createTime: string,
+  privateNote?: string
 ) => ({
   Id: id,
   SyncToken: syncToken,
   DocNumber: docNumber,
   TxnDate: txnDate,
   MetaData: { CreateTime: createTime },
+  PrivateNote: privateNote,
 });
 
 const makeQueryResponse = (_entityName: string, docs: unknown[]) => docs;
@@ -111,12 +113,26 @@ describe('stripeDuplicateCheck', () => {
       expect(result.jsonBody.qbo.checked).toBe(1);
     });
 
-    it('detects duplicate SalesReceipts sharing the same Stripe key', async () => {
+    it('detects duplicate SalesReceipts sharing the same Stripe charge ID', async () => {
       mockQboQuery
         .mockResolvedValueOnce(
           makeQueryResponse('SalesReceipt', [
-            makeQboDoc('1', '0', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T10:00:00Z'),
-            makeQboDoc('2', '1', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T10:30:00Z'),
+            makeQboDoc(
+              '1',
+              '0',
+              'CHG-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T10:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            makeQboDoc(
+              '2',
+              '1',
+              'CHG-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T10:30:00Z',
+              'Stripe charge ch_abc123'
+            ),
           ])
         )
         .mockResolvedValueOnce(makeQueryResponse('JournalEntry', []))
@@ -128,7 +144,7 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.status).toBe(200);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
-      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('CHG:abc123');
+      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('sales-receipt:ch_abc123');
       expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
     });
 
@@ -136,12 +152,26 @@ describe('stripeDuplicateCheck', () => {
       mockQboQuery
         .mockResolvedValueOnce(
           makeQueryResponse('SalesReceipt', [
-            makeQboDoc('1', '0', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T09:00:00Z'),
+            makeQboDoc(
+              '1',
+              '0',
+              'CHG-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
           ])
         )
         .mockResolvedValueOnce(
           makeQueryResponse('JournalEntry', [
-            makeQboDoc('2', '0', 'CHGJE-20240101-abc123', '2024-01-01', '2024-01-01T09:30:00Z'),
+            makeQboDoc(
+              '2',
+              '0',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:30:00Z',
+              'Stripe charge ch_abc123'
+            ),
           ])
         )
         .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
@@ -151,7 +181,7 @@ describe('stripeDuplicateCheck', () => {
 
       const result = await handler(req, context);
       expect(result.status).toBe(200);
-      // CHG:abc123 has 1 record, CHGJE:abc123 has 1 record — neither is a duplicate
+      // sales-receipt:ch_abc123 has 1 record, journal-entry:ch_abc123 has 1 record — neither is a duplicate
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
     });
 
@@ -159,14 +189,42 @@ describe('stripeDuplicateCheck', () => {
       mockQboQuery
         .mockResolvedValueOnce(
           makeQueryResponse('SalesReceipt', [
-            makeQboDoc('1', '0', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T09:00:00Z'),
-            makeQboDoc('2', '1', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T09:05:00Z'),
+            makeQboDoc(
+              '1',
+              '0',
+              'CHG-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            makeQboDoc(
+              '2',
+              '1',
+              'CHG-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:05:00Z',
+              'Stripe charge ch_abc123'
+            ),
           ])
         )
         .mockResolvedValueOnce(
           makeQueryResponse('JournalEntry', [
-            makeQboDoc('3', '0', 'CHGJE-20240101-abc123', '2024-01-01', '2024-01-01T09:01:00Z'),
-            makeQboDoc('4', '1', 'CHGJE-20240101-abc123', '2024-01-01', '2024-01-01T09:06:00Z'),
+            makeQboDoc(
+              '3',
+              '0',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:01:00Z',
+              'Stripe charge ch_abc123 fee JE'
+            ),
+            makeQboDoc(
+              '4',
+              '1',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:06:00Z',
+              'Stripe charge ch_abc123 fee JE'
+            ),
           ])
         )
         .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
@@ -177,8 +235,47 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(2);
       const keys = result.jsonBody.qbo.duplicateGroups.map((g: any) => g.key);
-      expect(keys).toContain('CHG:abc123');
-      expect(keys).toContain('CHGJE:abc123');
+      expect(keys).toContain('sales-receipt:ch_abc123');
+      expect(keys).toContain('journal-entry:ch_abc123');
+    });
+
+    it('detects duplicate payout deposits with Stripe payout ID in PrivateNote (different DocNumber formats)', async () => {
+      // Simulates the real-world case: two bank deposits for the same payout created by
+      // different code paths — one uses PO-{date}-{suffix} DocNumber, the other uses
+      // legacy payout_{id} format. Both have the full payout ID in their memo.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(makeQueryResponse('JournalEntry', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('Deposit', [
+            makeQboDoc(
+              'd1',
+              '0',
+              'PO-20260328-1TRLq7BJf9Y',
+              '2026-03-28',
+              '2026-03-28T14:00:00Z',
+              'Stripe payout po_1TRLq7BJf9YYVP9mQUE64LZg'
+            ),
+            makeQboDoc(
+              'd2',
+              '0',
+              'payout_po_1TRLq7BJf9Y',
+              '2026-03-28',
+              '2026-03-28T14:01:00Z',
+              'Stripe PayoutID: po_1TRLq7BJf9YYVP9mQUE64LZg Initiated a payout'
+            ),
+          ])
+        );
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
+      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe(
+        'bank-deposit:po_1TRLq7BJf9YYVP9mQUE64LZg'
+      );
+      expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
     });
 
     it('ignores REF and DSP DocNumbers (no Stripe ID in suffix)', async () => {
