@@ -20,8 +20,10 @@ const QBO_ENTITY_QUERY_MAP: Record<QuickBooksDocEntityType, string> = {
 // DocNumber prefixes for documents whose suffix encodes a Stripe ID
 const STRIPE_ID_PREFIXES = new Set(['CHG', 'CHGJE', 'PO']);
 
-// Regex to extract Stripe object IDs from free-text fields (PrivateNote / memo)
-const STRIPE_ID_PATTERN = /\b(ch_|po_|pi_|py_|re_|dp_|cs_|sub_|in_|cn_|bt_)[A-Za-z0-9]+/g;
+// Regex to extract per-transaction Stripe object IDs from free-text fields (PrivateNote / memo).
+// Intentionally excludes sub_ (subscription) and in_ (invoice) because those IDs are shared
+// across every recurring billing cycle and are not unique to a single transaction.
+const STRIPE_ID_PATTERN = /\b(ch_|po_|pi_|py_|re_|dp_|cs_|cn_|bt_)[A-Za-z0-9]+/g;
 
 const extractStripeIdsFromText = (text: string | null | undefined): string[] => {
   if (!text?.trim()) return [];

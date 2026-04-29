@@ -297,6 +297,49 @@ describe('stripeDuplicateCheck', () => {
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
     });
 
+    it('does NOT flag multiple receipts sharing a subscription ID (expected recurring behaviour)', async () => {
+      // A sub_ ID appears on every receipt for a recurring subscription — each is a
+      // legitimate separate transaction so they must never be treated as duplicates.
+      mockQboQuery
+        .mockResolvedValueOnce(
+          makeQueryResponse('SalesReceipt', [
+            makeQboDoc(
+              '1',
+              '0',
+              'CHG-20240101-abc',
+              '2024-01-01',
+              '2024-01-01T10:00:00Z',
+              'Stripe charge ch_jan sub_recurring123'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'CHG-20240201-abc',
+              '2024-02-01',
+              '2024-02-01T10:00:00Z',
+              'Stripe charge ch_feb sub_recurring123'
+            ),
+            makeQboDoc(
+              '3',
+              '0',
+              'CHG-20240301-abc',
+              '2024-03-01',
+              '2024-03-01T10:00:00Z',
+              'Stripe charge ch_mar sub_recurring123'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('JournalEntry', []))
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      // Each receipt has a unique ch_ ID — no duplicates despite sharing sub_ ID
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
     it('applies date range to QBO queries', async () => {
       mockQboQuery.mockResolvedValue([]);
 
