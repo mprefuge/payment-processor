@@ -278,6 +278,45 @@ describe('stripeDuplicateCheck', () => {
       expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
     });
 
+    it('detects duplicate payout deposits when legacy PrivateNote contains payout_po_ prefix', async () => {
+      // payoutSyncTrigger.js stores memo as `payout_${payout.id}` (e.g. "payout_po_1TRLq7...").
+      // The underscore immediately before "po_" means \b would not match — only a plain
+      // prefix-agnostic regex catches it.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(makeQueryResponse('JournalEntry', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('Deposit', [
+            makeQboDoc(
+              'd1',
+              '0',
+              'PO-20260328-1TRLq7BJf9Y',
+              '2026-03-28',
+              '2026-03-28T14:00:00Z',
+              'Stripe payout po_1TRLq7BJf9YYVP9mB0NuhrM7'
+            ),
+            makeQboDoc(
+              'd2',
+              '0',
+              'payout_po_1TRLq7BJf9Y',
+              '2026-03-28',
+              '2026-03-28T14:01:00Z',
+              'payout_po_1TRLq7BJf9YYVP9mB0NuhrM7'
+            ),
+          ])
+        );
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
+      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe(
+        'bank-deposit:po_1TRLq7BJf9YYVP9mB0NuhrM7'
+      );
+      expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
+    });
+
     it('ignores REF and DSP DocNumbers (no Stripe ID in suffix)', async () => {
       mockQboQuery
         .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
