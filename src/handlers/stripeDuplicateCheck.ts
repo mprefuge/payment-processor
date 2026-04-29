@@ -55,10 +55,13 @@ type SystemResult = {
 };
 
 /**
- * Parse the Stripe ID suffix from a QBO DocNumber in pattern {PREFIX}-{YYYYMMDD}-{stripeKey}.
- * Returns null for DocNumbers that don't embed a Stripe ID (REF, DSP, or unknown prefixes).
+ * Parse the DocNumber prefix and Stripe ID suffix from a QBO DocNumber in pattern
+ * {PREFIX}-{YYYYMMDD}-{stripeKey}. Returns null for DocNumbers that don't embed a
+ * Stripe ID (REF, DSP, or unknown prefixes).
  */
-const parseStripeKey = (docNumber: string | null | undefined): string | null => {
+const parseDocNumberParts = (
+  docNumber: string | null | undefined
+): { prefix: string; stripeKey: string } | null => {
   if (!docNumber?.trim()) return null;
   const trimmed = docNumber.trim();
   const firstDash = trimmed.indexOf('-');
@@ -67,8 +70,8 @@ const parseStripeKey = (docNumber: string | null | undefined): string | null => 
   if (!STRIPE_ID_PREFIXES.has(prefix)) return null;
   const secondDash = trimmed.indexOf('-', firstDash + 1);
   if (secondDash === -1) return null;
-  const suffix = trimmed.slice(secondDash + 1);
-  return suffix || null;
+  const stripeKey = trimmed.slice(secondDash + 1);
+  return stripeKey ? { prefix, stripeKey } : null;
 };
 
 const buildQboDateClause = (startDate?: string, endDate?: string): string => {
@@ -123,18 +126,23 @@ const detectQboDuplicates = async (
     }
   }
 
-  // Group by Stripe key extracted from DocNumber suffix
-  const byStripeKey = new Map<string, DuplicateRecord[]>();
+  // Group by prefix:stripeKey — each prefix maps to a specific document type
+  // (CHG→SalesReceipt, CHGJE→JournalEntry, PO→Deposit). Grouping includes the prefix
+  // so that a CHG receipt and a CHGJE journal entry for the same charge are NOT
+  // flagged as duplicates (they're the expected accounting pair). Only two documents
+  // of the same prefix type that share a Stripe ID are true duplicates.
+  const byPrefixAndKey = new Map<string, DuplicateRecord[]>();
   for (const doc of allDocs) {
-    const stripeKey = parseStripeKey(doc.docNumber);
-    if (!stripeKey) continue;
-    const existing = byStripeKey.get(stripeKey) ?? [];
+    const parts = parseDocNumberParts(doc.docNumber);
+    if (!parts) continue;
+    const groupKey = `${parts.prefix}:${parts.stripeKey}`;
+    const existing = byPrefixAndKey.get(groupKey) ?? [];
     existing.push(doc);
-    byStripeKey.set(stripeKey, existing);
+    byPrefixAndKey.set(groupKey, existing);
   }
 
   const groups: DuplicateGroup[] = [];
-  for (const [key, docs] of byStripeKey) {
+  for (const [key, docs] of byPrefixAndKey) {
     if (docs.length > 1) {
       groups.push({ key, records: docs });
     }

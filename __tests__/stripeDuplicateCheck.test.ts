@@ -128,11 +128,11 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.status).toBe(200);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
-      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('abc123');
+      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('CHG:abc123');
       expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
     });
 
-    it('detects cross-entity duplicates (SalesReceipt + JournalEntry for same Stripe key)', async () => {
+    it('does NOT flag a SalesReceipt + JournalEntry for the same Stripe charge (expected accounting pair)', async () => {
       mockQboQuery
         .mockResolvedValueOnce(
           makeQueryResponse('SalesReceipt', [
@@ -151,7 +151,34 @@ describe('stripeDuplicateCheck', () => {
 
       const result = await handler(req, context);
       expect(result.status).toBe(200);
-      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
+      // CHG:abc123 has 1 record, CHGJE:abc123 has 1 record — neither is a duplicate
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
+    it('detects when the same Stripe charge created two SalesReceipts AND two JournalEntries', async () => {
+      mockQboQuery
+        .mockResolvedValueOnce(
+          makeQueryResponse('SalesReceipt', [
+            makeQboDoc('1', '0', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T09:00:00Z'),
+            makeQboDoc('2', '1', 'CHG-20240101-abc123', '2024-01-01', '2024-01-01T09:05:00Z'),
+          ])
+        )
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc('3', '0', 'CHGJE-20240101-abc123', '2024-01-01', '2024-01-01T09:01:00Z'),
+            makeQboDoc('4', '1', 'CHGJE-20240101-abc123', '2024-01-01', '2024-01-01T09:06:00Z'),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(2);
+      const keys = result.jsonBody.qbo.duplicateGroups.map((g: any) => g.key);
+      expect(keys).toContain('CHG:abc123');
+      expect(keys).toContain('CHGJE:abc123');
     });
 
     it('ignores REF and DSP DocNumbers (no Stripe ID in suffix)', async () => {
