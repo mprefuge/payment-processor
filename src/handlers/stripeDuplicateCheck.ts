@@ -99,6 +99,8 @@ const buildQboDateClause = (startDate?: string, endDate?: string): string => {
   return parts.length > 0 ? ` WHERE ${parts.join(' AND ')}` : '';
 };
 
+const PAGE_SIZE = 1000; // QBO API maximum per page
+
 const queryQboDocuments = async (
   entity: QuickBooksDocEntityType,
   startDate?: string,
@@ -106,9 +108,20 @@ const queryQboDocuments = async (
 ): Promise<QboDocumentRecord[]> => {
   const entityName = QBO_ENTITY_QUERY_MAP[entity];
   const dateClause = buildQboDateClause(startDate, endDate);
-  const queryStr = `SELECT Id, SyncToken, DocNumber, TxnDate, MetaData, PrivateNote FROM ${entityName}${dateClause} MAXRESULTS 1000`;
-  const result = await qboQuery<QboDocumentRecord[]>(queryStr);
-  return Array.isArray(result) ? result : [];
+
+  const allRecords: QboDocumentRecord[] = [];
+  let startPosition = 1;
+
+  while (true) {
+    const queryStr = `SELECT Id, SyncToken, DocNumber, TxnDate, MetaData, PrivateNote FROM ${entityName}${dateClause} STARTPOSITION ${startPosition} MAXRESULTS ${PAGE_SIZE}`;
+    const result = await qboQuery<QboDocumentRecord[]>(queryStr);
+    const page = Array.isArray(result) ? result : [];
+    allRecords.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    startPosition += PAGE_SIZE;
+  }
+
+  return allRecords;
 };
 
 const detectQboDuplicates = async (
