@@ -3556,17 +3556,24 @@ export const findDocumentsByPrivateNoteTag = async (
     ? Math.max(1, Math.min(1000, Math.trunc(maxResultsPerEntity)))
     : 100;
   const marker = buildTestArtifactMarker(trimmedTag);
-  const escapedMarker = escapeQueryValue(marker);
   const context = await createRequestContext(options);
   const documents: TaggedQuickBooksDocument[] = [];
+
+  // PrivateNote is not queryable in QBO IQL; fetch recent documents by TxnDate and filter in memory.
+  const cutoffDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
   for (const [type, metadata] of Object.entries(QUICKBOOKS_ENTITY_METADATA) as Array<
     [QuickBooksDocType, QuickBooksEntityMetadata]
   >) {
     const queryText =
       `SELECT Id, SyncToken, DocNumber, TxnDate, PrivateNote FROM ${metadata.queryEntity} ` +
-      `WHERE PrivateNote LIKE '%${escapedMarker}%' MAXRESULTS ${normalizedLimit}`;
-    const records = await queryQuickBooks<Record<string, unknown>>(queryText, context);
+      `WHERE TxnDate >= '${cutoffDate}' MAXRESULTS ${normalizedLimit}`;
+    const allRecords = await queryQuickBooks<Record<string, unknown>>(queryText, context);
+    const records = allRecords.filter(
+      (record) => typeof record.PrivateNote === 'string' && record.PrivateNote.includes(marker)
+    );
 
     for (const record of records) {
       const id =
