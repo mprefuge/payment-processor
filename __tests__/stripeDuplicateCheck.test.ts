@@ -335,7 +335,11 @@ describe('stripeDuplicateCheck', () => {
       mockSfConnection.query.mockResolvedValue({ records: [] });
 
       const { context } = createContext();
-      const req = createRequest({ system: 'salesforce', startDate: '2024-01-01', endDate: '2024-03-31' });
+      const req = createRequest({
+        system: 'salesforce',
+        startDate: '2024-01-01',
+        endDate: '2024-03-31',
+      });
 
       await handler(req, context);
 
@@ -392,7 +396,11 @@ describe('stripeDuplicateCheck', () => {
       mockSfConnection.sobject = vi.fn().mockReturnValue({ destroy: mockDestroy });
 
       const { context } = createContext();
-      const req = createRequest({ system: 'salesforce', deleteDuplicates: 'true', dryRun: 'false' });
+      const req = createRequest({
+        system: 'salesforce',
+        deleteDuplicates: 'true',
+        dryRun: 'false',
+      });
 
       const result = await handler(req, context);
       expect(mockDestroy).toHaveBeenCalledTimes(1);
