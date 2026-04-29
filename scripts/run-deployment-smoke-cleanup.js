@@ -107,7 +107,15 @@ const request = async (url, init, label) => {
   return parseJson(response, label);
 };
 
-const runCleanup = async (cleanupUrl, commonHeaders, tag, cleanupLiveMode, systems, deleteSalesforceContacts, propagationDelayMs) => {
+const runCleanup = async (
+  cleanupUrl,
+  commonHeaders,
+  tag,
+  cleanupLiveMode,
+  systems,
+  deleteSalesforceContacts,
+  propagationDelayMs
+) => {
   if (propagationDelayMs > 0) {
     console.log(`Waiting ${propagationDelayMs}ms for data propagation before cleanup...`);
     await new Promise((resolve) => setTimeout(resolve, propagationDelayMs));
@@ -211,7 +219,9 @@ const main = async () => {
       console.log('Test artifact cleanup completed successfully.');
     } catch (cleanupErr) {
       const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
-      console.error(`WARNING: Cleanup failed — test data tagged [${tag}] may remain in production systems. Error: ${cleanupMessage}`);
+      console.error(
+        `WARNING: Cleanup failed — test data tagged [${tag}] may remain in production systems. Error: ${cleanupMessage}`
+      );
       // Prefer surfacing the original smoke error; otherwise surface the cleanup error.
       if (!smokeError) {
         smokeError = cleanupErr;
