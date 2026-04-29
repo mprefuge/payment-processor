@@ -8,7 +8,14 @@ import {
   query as qboQuery,
   updateQuickBooksCustomerSalesforceId,
 } from '../services/qboSvc';
-import { SalesforceService, buildSalesforceConfig, escapeSoqlLiteral, toRecords, chunkArray, parseBoolean } from '../services/salesforceService';
+import {
+  SalesforceService,
+  buildSalesforceConfig,
+  escapeSoqlLiteral,
+  toRecords,
+  chunkArray,
+  parseBoolean,
+} from '../services/salesforceService';
 import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 
 type QboEmailAddress = { Address?: string | null };

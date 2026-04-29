@@ -11,7 +11,14 @@ import {
   normalizeReceiptClassRef,
   query as qboQuery,
 } from '../services/qboSvc';
-import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral, toRecords, chunkArray, parseBoolean } from '../services/salesforceService';
+import {
+  buildSalesforceConfig,
+  SalesforceService,
+  escapeSoqlLiteral,
+  toRecords,
+  chunkArray,
+  parseBoolean,
+} from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
 import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 

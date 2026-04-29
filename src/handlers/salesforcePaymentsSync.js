@@ -1,5 +1,9 @@
 const Stripe = require('stripe');
-const { SalesforceService, buildSalesforceConfig, parseBoolean } = require('../services/salesforceService');
+const {
+  SalesforceService,
+  buildSalesforceConfig,
+  parseBoolean,
+} = require('../services/salesforceService');
 const { trimToNull } = require('../stripe/customerIdentity');
 const { normalizeStripeId, centsToMajorUnits } = require('../stripe/utils');
 

@@ -26,7 +26,11 @@ export const noContent = (): HttpResponse => ({ status: 204 });
 export const badRequest = <T>(body: T): HttpResponse<T> => jsonResponse(400, body);
 export const internalError = <T>(body: T): HttpResponse<T> => jsonResponse(500, body);
 
-export const readBooleanQuery = (request: HttpRequest, key: string, defaultValue: boolean): boolean => {
+export const readBooleanQuery = (
+  request: HttpRequest,
+  key: string,
+  defaultValue: boolean
+): boolean => {
   if (request.query && typeof request.query.get === 'function') {
     return parseBoolean(request.query.get(key), defaultValue);
   }
@@ -36,4 +40,3 @@ export const readBooleanQuery = (request: HttpRequest, key: string, defaultValue
     defaultValue
   );
 };
-

@@ -142,10 +142,13 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
 
         logger.info('Campaign not found in Salesforce by name', { campaignName });
       } catch (error) {
-        logger.warn('Failed to resolve campaign by name, will continue without campaign assignment', {
-          campaignName,
-          error: error.message,
-        });
+        logger.warn(
+          'Failed to resolve campaign by name, will continue without campaign assignment',
+          {
+            campaignName,
+            error: error.message,
+          }
+        );
       }
     }
 

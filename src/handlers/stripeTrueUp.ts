@@ -24,7 +24,11 @@ import {
 } from '../services/salesforceSvc';
 
 const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
-import { SalesforceService, buildSalesforceConfig, parseBoolean } from '../services/salesforceService';
+import {
+  SalesforceService,
+  buildSalesforceConfig,
+  parseBoolean,
+} from '../services/salesforceService';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
 import { ensureSalesforceIdOnCustomer } from '../stripe/utils';
 import { trimToNull as toTrimmedString } from '../stripe/customerIdentity';

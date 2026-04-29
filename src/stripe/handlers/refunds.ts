@@ -19,7 +19,12 @@ import {
   timestampToDate,
   timestampToIsoString,
 } from '../utils';
-import { ensureStripeClient, markDocumentPosted, normalizeMetadataValue, SALES_RECEIPT_DOC_NUMBER_KEYS } from './common';
+import {
+  ensureStripeClient,
+  markDocumentPosted,
+  normalizeMetadataValue,
+  SALES_RECEIPT_DOC_NUMBER_KEYS,
+} from './common';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
 

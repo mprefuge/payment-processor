@@ -19,7 +19,13 @@ import {
   query as qboQuery,
   updateQuickBooksCustomerSalesforceId,
 } from '../services/qboSvc';
-import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral, toRecords, parseBoolean } from '../services/salesforceService';
+import {
+  buildSalesforceConfig,
+  SalesforceService,
+  escapeSoqlLiteral,
+  toRecords,
+  parseBoolean,
+} from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
 
 type SalesforceObjectType = 'Contact' | 'Account';

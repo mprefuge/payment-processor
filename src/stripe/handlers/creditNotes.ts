@@ -8,7 +8,12 @@ import {
   timestampToDate,
   timestampToIsoString,
 } from '../utils';
-import { ensureStripeClient, markDocumentPosted, normalizeMetadataValue, SALES_RECEIPT_DOC_NUMBER_KEYS } from './common';
+import {
+  ensureStripeClient,
+  markDocumentPosted,
+  normalizeMetadataValue,
+  SALES_RECEIPT_DOC_NUMBER_KEYS,
+} from './common';
 import type {
   HttpContext,
   RefundReceiptAccountingAdapter,
