@@ -17,7 +17,11 @@ describe('FileKeyValueStore', () => {
   });
 
   afterEach(() => {
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      /* ignore */
+    }
   });
 
   it('throws when no filePath provided', () => {
@@ -116,7 +120,9 @@ const makeInMemoryStorage = () => {
   const map = new Map();
   return {
     get: async (key) => map.get(key) ?? null,
-    set: async (key, value) => { map.set(key, value); },
+    set: async (key, value) => {
+      map.set(key, value);
+    },
     has: async (key) => map.has(key),
     values: async () => Array.from(map.values()),
     entries: async () => Array.from(map.entries()),
@@ -132,7 +138,12 @@ describe('WebhookEventStore', () => {
 
   it('recordEvent stores the event and returns a record', async () => {
     const store = new WebhookEventStore({ storageClient: makeInMemoryStorage() });
-    const event = { id: 'evt_1', type: 'payment_intent.succeeded', created: 1700000000, livemode: false };
+    const event = {
+      id: 'evt_1',
+      type: 'payment_intent.succeeded',
+      created: 1700000000,
+      livemode: false,
+    };
     const record = await store.recordEvent(event);
     expect(record.eventId).toBe('evt_1');
     expect(record.type).toBe('payment_intent.succeeded');
@@ -179,7 +190,9 @@ describe('WebhookEventStore', () => {
 
   it('updateEventStatus throws for unknown event id', async () => {
     const store = new WebhookEventStore({ storageClient: makeInMemoryStorage() });
-    await expect(store.updateEventStatus('no-such', 'completed')).rejects.toThrow('Event not found');
+    await expect(store.updateEventStatus('no-such', 'completed')).rejects.toThrow(
+      'Event not found'
+    );
   });
 
   it('getEventsByStatus returns only matching events', async () => {

@@ -276,10 +276,7 @@ describe('ContactMatcher.processMatch', () => {
   });
 
   it('create action when no candidates found', async () => {
-    const result = await matcher.processMatch(
-      { email: 'nobody@example.com' },
-      async () => []
-    );
+    const result = await matcher.processMatch({ email: 'nobody@example.com' }, async () => []);
     expect(result.decision.action).toBe('create');
   });
 

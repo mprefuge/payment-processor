@@ -30,21 +30,17 @@ describe('extractTestArtifactTagFromMetadata', () => {
   });
 
   it('extracts source_test_tag', () => {
-    expect(
-      extractTestArtifactTagFromMetadata({ source_test_tag: 'run-123' })
-    ).toBe('run-123');
+    expect(extractTestArtifactTagFromMetadata({ source_test_tag: 'run-123' })).toBe('run-123');
   });
 
   it('extracts sourceTestTag', () => {
-    expect(
-      extractTestArtifactTagFromMetadata({ sourceTestTag: 'run-456' })
-    ).toBe('run-456');
+    expect(extractTestArtifactTagFromMetadata({ sourceTestTag: 'run-456' })).toBe('run-456');
   });
 
   it('extracts cleanup_test_tag', () => {
-    expect(
-      extractTestArtifactTagFromMetadata({ cleanup_test_tag: 'cleanup-abc' })
-    ).toBe('cleanup-abc');
+    expect(extractTestArtifactTagFromMetadata({ cleanup_test_tag: 'cleanup-abc' })).toBe(
+      'cleanup-abc'
+    );
   });
 
   it('extracts cleanupTag', () => {

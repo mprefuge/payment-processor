@@ -146,9 +146,7 @@ describe('redactSecrets', () => {
   it('redacts a registered secret in a string', () => {
     const secret = 'sk_test_redact_inline_' + Math.random().toString(36).slice(2);
     registerSecretValue(secret);
-    expect(redactSecrets(`Bearer ${secret}`)).toBe(
-      `Bearer ${SECRET_REDACTION_PLACEHOLDER}`
-    );
+    expect(redactSecrets(`Bearer ${secret}`)).toBe(`Bearer ${SECRET_REDACTION_PLACEHOLDER}`);
   });
 
   it('redacts all occurrences of a secret', () => {

@@ -50,8 +50,7 @@ describe('normalizeSince', () => {
 // ── Mock Stripe client builder ─────────────────────────────────────────────────
 
 function makeStripe(overrides: Record<string, any> = {}) {
-  const singlePage = (items: any[]) =>
-    vi.fn().mockResolvedValue({ data: items, has_more: false });
+  const singlePage = (items: any[]) => vi.fn().mockResolvedValue({ data: items, has_more: false });
 
   return {
     charges: { list: singlePage([{ id: 'ch_1' }]) },

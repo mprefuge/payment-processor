@@ -32,7 +32,13 @@ describe('emailService – SendGrid disabled (no API key)', () => {
 
   it('returns skipped/sendgrid_disabled when SendGrid not configured', async () => {
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time' },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       {}
     );
@@ -79,7 +85,14 @@ describe('emailService – SendGrid enabled', () => {
   it('returns skipped/missing_recipient when recipient email not configured', async () => {
     delete process.env.NOTIFICATION_EMAIL_TEST;
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -89,7 +102,14 @@ describe('emailService – SendGrid enabled', () => {
 
   it('sends email with ALL policy (default)', async () => {
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe([{ status: 'succeeded' }])
     );
@@ -99,7 +119,14 @@ describe('emailService – SendGrid enabled', () => {
   it('skips email with NONE policy', async () => {
     process.env.NOTIFICATION_POLICY = 'NONE';
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -110,7 +137,14 @@ describe('emailService – SendGrid enabled', () => {
   it('sends email with FIRST policy on first successful payment', async () => {
     process.env.NOTIFICATION_POLICY = 'FIRST';
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe([{ status: 'succeeded' }])
     );
@@ -120,7 +154,14 @@ describe('emailService – SendGrid enabled', () => {
   it('skips email with FIRST policy on second+ successful payment', async () => {
     process.env.NOTIFICATION_POLICY = 'FIRST';
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe([{ status: 'succeeded' }, { status: 'succeeded' }])
     );
@@ -132,7 +173,14 @@ describe('emailService – SendGrid enabled', () => {
     process.env.NOTIFICATION_POLICY = 'ABOVE 25';
     // 5000 cents = $50, above the $25 threshold
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -143,7 +191,14 @@ describe('emailService – SendGrid enabled', () => {
     process.env.NOTIFICATION_POLICY = 'ABOVE 100';
     // 5000 cents = $50, not above the $100 threshold
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -154,7 +209,14 @@ describe('emailService – SendGrid enabled', () => {
     process.env.NOTIFICATION_POLICY = 'MINIMUM 50';
     // 5000 cents = $50, exactly meets the $50 minimum
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -165,7 +227,14 @@ describe('emailService – SendGrid enabled', () => {
     process.env.NOTIFICATION_POLICY = 'MINIMUM 100';
     // 5000 cents = $50, below the $100 minimum
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -175,7 +244,14 @@ describe('emailService – SendGrid enabled', () => {
   it('returns failed status when sgMail.send throws', async () => {
     vi.spyOn(sgMail, 'send').mockRejectedValueOnce(new Error('Network error'));
     const result = await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: false },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
       makeStripe()
     );
@@ -184,7 +260,14 @@ describe('emailService – SendGrid enabled', () => {
 
   it('uses live recipient email in live mode', async () => {
     await sendPaymentSuccessEmail(
-      { firstname: 'Jane', lastname: 'Doe', email: 'jane@example.com', amount: 5000, frequency: 'one-time', livemode: true },
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: true,
+      },
       { id: 'pi_1', customer: 'cus_1', livemode: true, amount: 5000 },
       makeStripe()
     );

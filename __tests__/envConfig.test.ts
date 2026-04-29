@@ -130,7 +130,10 @@ describe('env config', () => {
     });
 
     it('appInsights is undefined when not provided', async () => {
-      const { env } = await loadEnvWith({ ...MINIMAL_ENV, APPINSIGHTS_INSTRUMENTATIONKEY: undefined });
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        APPINSIGHTS_INSTRUMENTATIONKEY: undefined,
+      });
       expect(env.appInsights).toBeUndefined();
     });
 
@@ -157,7 +160,12 @@ describe('env config', () => {
   describe('missing required env vars', () => {
     it('throws when STRIPE_SECRET is missing', async () => {
       await expect(
-        loadEnvWith({ ...MINIMAL_ENV, STRIPE_SECRET: undefined, STRIPE_LIVE_SECRET_KEY: undefined, STRIPE_TEST_SECRET_KEY: undefined })
+        loadEnvWith({
+          ...MINIMAL_ENV,
+          STRIPE_SECRET: undefined,
+          STRIPE_LIVE_SECRET_KEY: undefined,
+          STRIPE_TEST_SECRET_KEY: undefined,
+        })
       ).rejects.toThrow();
     });
 
