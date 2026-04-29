@@ -348,20 +348,15 @@ const cleanupSalesforceArtifacts = async (
   stripeCustomerIds: string[]
 ): Promise<TestArtifactCleanupSystemSummary> => {
   const summary = createSummary('salesforce', request.dryRun);
-  const marker = buildTestArtifactMarker(request.tag);
-  const escapedMarker = escapeSoqlLiteral(marker);
 
-  const transactionConditions = [`Memo__c LIKE '%${escapedMarker}%'`];
-  if (stripeCustomerIds.length > 0) {
-    transactionConditions.push(
-      ...buildStripeCustomerConditions('Stripe_Customer_Id__c', stripeCustomerIds)
-    );
-  }
-
-  const transactionIds = await querySalesforceIds(
-    connection,
-    `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${transactionConditions.join(' OR ')}`
-  );
+  // Memo__c is a Long Text Area and cannot be filtered in SOQL; use Stripe_Customer_Id__c instead.
+  const transactionIds =
+    stripeCustomerIds.length > 0
+      ? await querySalesforceIds(
+          connection,
+          `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${buildStripeCustomerConditions('Stripe_Customer_Id__c', stripeCustomerIds).join(' OR ')}`
+        )
+      : [];
 
   if (request.dryRun) {
     transactionIds.forEach((id) =>
