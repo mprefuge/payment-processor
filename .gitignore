@@ -46,6 +46,11 @@ tmp/
 temp/
 docs/
 
+# Local test/demo files
+test-donation-form.html
+new-popup-don.js
+TEST_PAGE_GUIDE.md
+
 # Azurite local storage
 __azurite_db_*.json
 __blobstorage__/
