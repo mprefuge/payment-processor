@@ -26,6 +26,7 @@ const qboCustomersSync = loadHandler('./handlers/qboCustomersSync');
 const salesforceRecordQboSync = loadHandler('./handlers/salesforceRecordQboSync');
 const qboReceiptsSync = loadHandler('./handlers/qboReceiptsSync');
 const testArtifactCleanup = loadHandler('./handlers/testArtifactCleanup');
+const stripeDuplicateCheck = loadHandler('./handlers/stripeDuplicateCheck');
 
 // configure the Azure Functions runtime and add OpenAPI/Swagger support
 app.setup({ enableHttpStream: true });
@@ -255,6 +256,22 @@ const QboReceiptsSyncQuerySchema = z
       .optional(),
     start_position: PositiveIntLikeSchema.optional(),
     max_results: PositiveIntLikeSchema.optional(),
+  })
+  .passthrough();
+
+const StripeDuplicateCheckQuerySchema = z
+  .object({
+    system: z.enum(['qbo', 'salesforce', 'both']).optional(),
+    deleteDuplicates: BoolLikeQuerySchema.optional(),
+    dryRun: BoolLikeQuerySchema.optional(),
+    startDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
+    endDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
   })
   .passthrough();
 
@@ -1433,6 +1450,58 @@ registerFunction(
   }
 );
 
+registerFunction(
+  'stripeDuplicateCheck',
+  'Detect and optionally remove duplicate records based on matching Stripe IDs',
+  {
+    handler: stripeDuplicateCheck,
+    description:
+      'Scans QuickBooks Online and/or Salesforce for records that share the same Stripe ID. ' +
+      'Duplicate QBO documents are identified by a shared Stripe ID suffix in their DocNumber ' +
+      '(CHG-, CHGJE-, PO- prefixes). Duplicate Salesforce Transaction__c records are identified ' +
+      'by repeating values in any of the ten Stripe ID fields. ' +
+      'Set deleteDuplicates=true with dryRun=false to permanently remove extras (oldest record is kept).',
+    tags: ['QBO', 'Salesforce'],
+    operationId: 'stripeDuplicateCheck',
+    methods: ['GET'],
+    ...withFunctionAuth({}),
+    route: 'ops/stripe-duplicate-check',
+    request: {
+      query: StripeDuplicateCheckQuerySchema,
+    },
+    responses: {
+      200: {
+        description: 'Duplicate check completed — see duplicateGroups for findings',
+        content: {
+          'application/json': {
+            schema: GenericSuccessResponseSchema,
+            example: {
+              success: true,
+              dryRun: true,
+              deleteDuplicates: false,
+              dateRange: { startDate: null, endDate: null },
+              qbo: { checked: 42, duplicateGroups: [], deleted: 0, errors: [] },
+              salesforce: { checked: 38, duplicateGroups: [], deleted: 0, errors: [] },
+            },
+          },
+        },
+      },
+      500: {
+        description: 'Unhandled error during duplicate check',
+        content: {
+          'application/json': {
+            schema: GenericErrorResponseSchema,
+            example: {
+              error: 'internal_error',
+              message: 'Unexpected error during duplicate check.',
+            },
+          },
+        },
+      },
+    },
+  }
+);
+
 // Export for testing
 export {
   healthCheck,
@@ -1445,6 +1514,7 @@ export {
   salesforcePaymentsSync,
   qboCustomersSync,
   salesforceRecordQboSync,
+  stripeDuplicateCheck,
 };
 
 // expose the OpenAPI configuration/documents for testing or external use
