@@ -5,8 +5,13 @@ import env from '../config/env';
 import type { TransactionUpsertDTO } from '../domain/transactions';
 import { transactionTypeSchema } from '../domain/transactions';
 import { logger } from '../lib/logger';
+import { readBooleanQuery } from '../lib/http';
+import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 import {
   getQuickBooksCustomerById,
+  normalizeComparableDate,
+  normalizeFieldName,
+  normalizeReceiptClassRef,
   postChargeToQbo,
   postDisputeToQbo,
   postPayoutToQbo,
@@ -14,7 +19,7 @@ import {
   query as qboQuery,
   updateQuickBooksCustomerSalesforceId,
 } from '../services/qboSvc';
-import { buildSalesforceConfig, SalesforceService } from '../services/salesforceService';
+import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral, toRecords, parseBoolean } from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
 
 type SalesforceObjectType = 'Contact' | 'Account';
@@ -197,27 +202,6 @@ type HandlerOptions = {
 const DEFAULT_QBO_PAGE_SIZE = 200;
 let dependencyOverrides: Partial<Dependencies> | null = null;
 
-const toRecords = <T>(result: { records?: T[] } | T[] | null | undefined): T[] => {
-  if (!result) {
-    return [];
-  }
-
-  if (Array.isArray(result)) {
-    return result;
-  }
-
-  return Array.isArray(result.records) ? result.records : [];
-};
-
-const toTrimmed = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
-
 const expandComparableSalesforceIds = (value: string): string[] => {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -232,33 +216,6 @@ const expandComparableSalesforceIds = (value: string): string[] => {
 
   return [...variants];
 };
-
-const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  if (typeof value !== 'string') {
-    return defaultValue;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
-    return true;
-  }
-
-  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
-    return false;
-  }
-
-  return defaultValue;
-};
-
-const escapeSoqlLiteral = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-const escapeQboLiteral = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 const parseUnsupportedField = (
   error: unknown,
@@ -315,9 +272,6 @@ const normalizeQboCustomerId = (value: unknown): string | null => {
 
   return toTrimmed(value);
 };
-
-const normalizeFieldName = (value: unknown): string =>
-  (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const extractComparableCustomFieldIds = (value: unknown): string[] => {
   const trimmed = toTrimmed(value);
@@ -514,7 +468,7 @@ const findQuickBooksCustomerById = async (
 ): Promise<QboCustomer | null> => {
   const queryText =
     'SELECT Id, DisplayName, PrimaryEmailAddr, Active, CustomField FROM Customer ' +
-    `WHERE Id = '${escapeQboLiteral(customerId)}' MAXRESULTS 1`;
+    `WHERE Id = '${escapeSoqlLiteral(customerId)}' MAXRESULTS 1`;
   const records = await queryFn<QboCustomer[]>(queryText);
   const list = Array.isArray(records) ? records : [];
   return list.find((entry) => normalizeQboCustomerId(entry?.Id) === customerId) ?? null;
@@ -577,7 +531,7 @@ const findQuickBooksCustomersByDisplayName = async (
 ): Promise<QboCustomer[]> => {
   const queryText =
     'SELECT Id, DisplayName, PrimaryEmailAddr, Active, CustomField FROM Customer ' +
-    `WHERE DisplayName = '${escapeQboLiteral(displayName)}'`;
+    `WHERE DisplayName = '${escapeSoqlLiteral(displayName)}'`;
   const records = await queryFn<QboCustomer[]>(queryText);
   return Array.isArray(records) ? records : [];
 };
@@ -661,7 +615,7 @@ const fetchQuickBooksDocument = async (
       : qboDocType === 'bank-deposit'
         ? 'Deposit'
         : 'JournalEntry';
-  const queryText = `SELECT * FROM ${entityName} WHERE Id = '${escapeQboLiteral(qboDocId)}'`;
+  const queryText = `SELECT * FROM ${entityName} WHERE Id = '${escapeSoqlLiteral(qboDocId)}'`;
   const records = await queryFn<Record<string, unknown>[]>(queryText);
   const list = Array.isArray(records) ? records : [];
   return list.length > 0 ? list[0] : null;
@@ -673,25 +627,9 @@ const fetchQuickBooksSalesReceiptsForCustomer = async (
 ): Promise<QboSalesReceipt[]> => {
   const queryText =
     'SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote, MetaData, CurrencyRef, CustomerRef, ClassRef, Line FROM SalesReceipt ' +
-    `WHERE CustomerRef = '${escapeQboLiteral(customerId)}'`;
+    `WHERE CustomerRef = '${escapeSoqlLiteral(customerId)}'`;
   const records = await queryFn<QboSalesReceipt[]>(queryText);
   return Array.isArray(records) ? records : [];
-};
-
-const normalizeReceiptClassRef = (
-  classRef: { value?: string | null; name?: string | null } | null | undefined
-): { value?: string; name?: string } | null => {
-  const value = toTrimmed(classRef?.value);
-  const name = toTrimmed(classRef?.name);
-
-  if (!value && !name) {
-    return null;
-  }
-
-  return {
-    ...(value ? { value } : {}),
-    ...(name ? { name } : {}),
-  };
 };
 
 const resolveReceiptClassRef = (
@@ -782,17 +720,6 @@ const parseReceiptClassSegments = (
     designation,
     manualReviewMessage: null,
   };
-};
-
-const readBooleanQuery = (request: HttpRequest, key: string, defaultValue: boolean): boolean => {
-  if (request.query && typeof request.query.get === 'function') {
-    return parseBoolean(request.query.get(key), defaultValue);
-  }
-
-  return parseBoolean(
-    (request.query as unknown as Record<string, unknown> | undefined)?.[key],
-    defaultValue
-  );
 };
 
 const toCountMap = (types: string[]): Record<string, number> =>
@@ -948,20 +875,6 @@ const buildSalesforceTransactionFromQboSalesReceipt = (
     qbo_source_created_at__c: qboSourceCreatedAt,
     qbo_source_updated_at__c: qboSourceUpdatedAt,
   };
-};
-
-const normalizeComparableDate = (value: string | null | undefined): string | null => {
-  const trimmed = toTrimmed(value);
-  if (!trimmed) {
-    return null;
-  }
-
-  const parsed = new Date(trimmed);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-
-  return parsed.toISOString().slice(0, 10);
 };
 
 const findMatchingSalesforceTransactionForReceipt = (

@@ -1,3 +1,5 @@
+import { trimToNull as toTrimmedString } from '../stripe/customerIdentity';
+
 const TEST_ARTIFACT_METADATA_KEYS = [
   'source_test_tag',
   'sourceTestTag',
@@ -24,15 +26,6 @@ type HeaderLike =
     }
   | null
   | undefined;
-
-const toTrimmedString = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
 
 const readHeaderValue = (headers: HeaderLike, name: string): string | null => {
   if (!headers) {

@@ -10,6 +10,9 @@ import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 import { centsToMajorUnits, normalizeStripeId, timestampToIsoString } from '../utils';
 
+/** 18-character Salesforce Campaign record ID (Record Type prefix 701). */
+const SALESFORCE_CAMPAIGN_ID_PATTERN = /^701[a-zA-Z0-9]{15}$/;
+
 export const markPosted = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown,
@@ -74,6 +77,29 @@ export const markDocumentPosted = async (
 export const ensureStripeClient = (deps: StripeWebhookDependencies, event: Stripe.Event): Stripe =>
   deps.stripe.getClient(Boolean(event.livemode));
 
+export const normalizeMetadataValue = (
+  metadata: Stripe.Metadata | null | undefined,
+  key: string
+): string | null => {
+  if (!metadata) {
+    return null;
+  }
+
+  const value = metadata[key];
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+export const SALES_RECEIPT_DOC_NUMBER_KEYS: readonly string[] = [
+  'qbo_sales_receipt_number',
+  'qbo_doc_number',
+  'qbo_sales_receipt_doc_number',
+];
+
 const logCheckoutSessionEvent = (
   context: HttpContext,
   message: string,
@@ -122,7 +148,7 @@ const resolveCampaignId = async (
 
   const trimmedName = campaignName.trim();
 
-  if (trimmedName.match(/^701[a-zA-Z0-9]{15}$/)) {
+  if (trimmedName.match(SALESFORCE_CAMPAIGN_ID_PATTERN)) {
     context.log('[StripeWebhook] Campaign metadata is already a Salesforce ID', {
       campaignId: trimmedName,
     });

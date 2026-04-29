@@ -1,4 +1,6 @@
 import Stripe from 'stripe';
+import { logger } from '../lib/logger';
+import { trimToNull } from './customerIdentity';
 
 export const normalizeStripeId = (value: unknown): string | null => {
   if (!value) {
@@ -80,6 +82,10 @@ const retrieveBalanceTransactionSafely = async (
   try {
     return await stripe.balanceTransactions.retrieve(balanceTransactionId);
   } catch (error) {
+    logger.debug('[StripeUtils] Balance transaction fetch failed', {
+      balanceTransactionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 };
@@ -90,15 +96,6 @@ const buildCustomerMetadataUpdate = (
 ): Stripe.CustomerUpdateParams => ({
   metadata: { ...(metadata || {}), salesforce_id: salesforceId },
 });
-
-const trimToNull = (value: string | null | undefined): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
 
 export const resolveCharge = async (
   stripe: Stripe,
@@ -115,6 +112,10 @@ export const resolveCharge = async (
       const response = await stripe.charges.retrieve(latestChargeId);
       return response as Stripe.Charge;
     } catch (error) {
+      logger.debug('[StripeUtils] Charge retrieval failed', {
+        latestChargeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }

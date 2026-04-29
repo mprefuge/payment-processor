@@ -1,34 +1,11 @@
 const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 const DEFAULT_CAMPAIGN_NAME = 'General Giving';
 
+/** Matches an 18-character Salesforce Campaign record ID (prefix 701). */
+const SALESFORCE_RECORD_ID_PATTERN = /^701[a-zA-Z0-9]{15}$/;
+
 const { getCrmService } = require('./crmWorkflowCommon');
-
-const normalizeStripeEntityId = (value) => {
-  if (!value) {
-    return null;
-  }
-
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  if (typeof value === 'object' && value !== null && 'id' in value) {
-    const idValue = value.id;
-    if (typeof idValue === 'string') {
-      return idValue;
-    }
-  }
-
-  return null;
-};
-
-const convertCentsToDollars = (amountInCents) => {
-  if (typeof amountInCents !== 'number' || Number.isNaN(amountInCents)) {
-    return null;
-  }
-
-  return amountInCents / 100;
-};
+const { normalizeStripeId, centsToMajorUnits } = require('../../stripe/utils');
 
 const assignOptionalField = (record, key, value) => {
   if (value !== null && value !== undefined) {
@@ -59,16 +36,16 @@ const buildTransactionRecord = ({
   assignOptionalField(transactionRecord, 'RecordTypeId', recordTypeId);
 
   if (includeStripeIds) {
-    const paymentIntentId = normalizeStripeEntityId(session.payment_intent);
+    const paymentIntentId = normalizeStripeId(session.payment_intent);
     assignOptionalField(transactionRecord, 'Stripe_Payment_Intent_Id__c', paymentIntentId);
 
     const customerId =
-      normalizeStripeEntityId(session.customer) ||
-      normalizeStripeEntityId(transactionData?.customer?.stripeCustomerId);
+      normalizeStripeId(session.customer) ||
+      normalizeStripeId(transactionData?.customer?.stripeCustomerId);
     assignOptionalField(transactionRecord, 'Stripe_Customer_Id__c', customerId);
   }
 
-  const amount = convertCentsToDollars(transactionData.amount);
+  const amount = centsToMajorUnits(transactionData.amount);
   const coverFeesEnabled = Boolean(transactionData.coverFee);
   const coverFeesAmountCents =
     typeof transactionData.coverFeesAmount === 'number'
@@ -76,7 +53,7 @@ const buildTransactionRecord = ({
       : typeof transactionData.feeAmount === 'number'
         ? transactionData.feeAmount
         : null;
-  const coverFeesAmount = convertCentsToDollars(coverFeesAmountCents);
+  const coverFeesAmount = centsToMajorUnits(coverFeesAmountCents);
   const totalAmount =
     amount !== null && coverFeesAmount !== null ? amount + coverFeesAmount : amount;
 
@@ -113,21 +90,20 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
 
     if (typeof crmService.findOrCreateAccount === 'function') {
       try {
-        console.log('Resolving organization name to Salesforce Account ID', {
+        logger.info('Resolving organization name to Salesforce Account ID', {
           organizationName: trimmedName,
         });
         const accountId = await crmService.findOrCreateAccount(trimmedName);
-        console.log('Organization resolved to Salesforce Account ID', {
+        logger.info('Organization resolved to Salesforce Account ID', {
           organizationName: trimmedName,
           accountId,
         });
         return accountId;
       } catch (error) {
-        console.log('Failed to resolve organization account, will skip account assignment', {
+        logger.warn('Failed to resolve organization account, will skip account assignment', {
           organizationName: trimmedName,
           error: error.message,
         });
-        logger.error('Account resolution error:', error);
       }
     }
 
@@ -147,51 +123,46 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         ? configuredCampaignName.trim()
         : DEFAULT_CAMPAIGN_NAME;
 
-    if (campaignName.match(/^701[a-zA-Z0-9]{15}$/)) {
-      console.log('Campaign metadata is already a Salesforce ID', { campaignId: campaignName });
+    if (campaignName.match(SALESFORCE_RECORD_ID_PATTERN)) {
+      logger.info('Campaign metadata is already a Salesforce ID', { campaignId: campaignName });
       return campaignName;
     }
 
     if (typeof crmService.findCampaignIdByName === 'function') {
       try {
-        console.log('Resolving campaign name to Salesforce ID', { campaignName });
+        logger.info('Resolving campaign name to Salesforce ID', { campaignName });
         const campaignId = await crmService.findCampaignIdByName(campaignName);
         if (campaignId) {
-          console.log('Campaign resolved to Salesforce ID', {
+          logger.info('Campaign resolved to Salesforce ID', {
             campaignName,
             campaignId,
           });
           return campaignId;
         }
 
-        console.log('Campaign not found in Salesforce by name', { campaignName });
+        logger.info('Campaign not found in Salesforce by name', { campaignName });
       } catch (error) {
-        console.log(
-          'Failed to resolve campaign by name, will continue without campaign assignment',
-          {
-            campaignName,
-            error: error.message,
-          }
-        );
-        logger.error('Campaign lookup error:', error);
+        logger.warn('Failed to resolve campaign by name, will continue without campaign assignment', {
+          campaignName,
+          error: error.message,
+        });
       }
     }
 
     if (typeof crmService.findOrCreateCampaign === 'function') {
       try {
-        console.log('Resolving campaign via findOrCreateCampaign', { campaignName });
+        logger.info('Resolving campaign via findOrCreateCampaign', { campaignName });
         const campaignId = await crmService.findOrCreateCampaign(campaignName);
-        console.log('Campaign resolved to Salesforce ID', {
+        logger.info('Campaign resolved to Salesforce ID', {
           campaignName,
           campaignId,
         });
         return campaignId;
       } catch (error) {
-        console.log('Failed to resolve campaign, will skip campaign assignment', {
+        logger.warn('Failed to resolve campaign, will skip campaign assignment', {
           campaignName,
           error: error.message,
         });
-        logger.error('Campaign resolution error:', error);
       }
     }
 
@@ -210,23 +181,22 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       );
 
       if (recordTypeId) {
-        console.log('Resolved transaction record type', {
+        logger.info('Resolved transaction record type', {
           recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
           recordTypeId,
         });
       } else {
-        console.log('Transaction record type not found by name', {
+        logger.info('Transaction record type not found by name', {
           recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
         });
       }
 
       return recordTypeId;
     } catch (error) {
-      console.log('Failed to resolve transaction record type', {
+      logger.warn('Failed to resolve transaction record type', {
         recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
         error: error.message,
       });
-      logger.error('Transaction record type lookup error:', error);
       return null;
     }
   };
@@ -246,10 +216,10 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
     }
 
     try {
-      console.log('Adding contact as campaign member', { campaignId, contactId });
+      logger.info('Adding contact as campaign member', { campaignId, contactId });
       const memberResult = await crmService.addCampaignMember(campaignId, contactId);
       if (memberResult.isNew) {
-        console.log('Contact added as new campaign member', {
+        logger.info('Contact added as new campaign member', {
           campaignId,
           contactId,
           campaignMemberId: memberResult.id,
@@ -257,25 +227,24 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         return;
       }
 
-      console.log('Contact is already a campaign member', {
+      logger.info('Contact is already a campaign member', {
         campaignId,
         contactId,
         campaignMemberId: memberResult.id,
       });
     } catch (error) {
-      console.log('Failed to add contact as campaign member', {
+      logger.warn('Failed to add contact as campaign member', {
         campaignId,
         contactId,
         error: error.message,
       });
-      logger.error('Campaign member creation error:', error);
     }
   };
 
   const createPendingTransaction = async (session, contactId, transactionData) => {
     try {
       if (!contactId) {
-        console.log('No contact ID provided - skipping pending transaction creation');
+        logger.info('No contact ID provided - skipping pending transaction creation');
         return null;
       }
 
@@ -306,15 +275,14 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
         'Stripe_Checkout_Session_Id__c'
       );
 
-      console.log('Upserted pending transaction in CRM with contact association', {
+      logger.info('Upserted pending transaction in CRM with contact association', {
         sessionId: session.id,
         contactId,
       });
 
       return upsertResult;
     } catch (error) {
-      console.log(`Error creating pending transaction: ${error.message}`);
-      logger.error('Pending transaction creation error details:', error);
+      logger.error(`Error creating pending transaction: ${error.message}`, error);
       return null;
     }
   };
@@ -346,17 +314,16 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
       );
 
       if (upsertResult) {
-        console.log('Upserted pending transaction in CRM', { sessionId: session.id });
+        logger.info('Upserted pending transaction in CRM', { sessionId: session.id });
       } else {
-        console.log('Pending transaction upsert skipped by CRM validation', {
+        logger.info('Pending transaction upsert skipped by CRM validation', {
           sessionId: session.id,
         });
       }
 
       return upsertResult;
     } catch (error) {
-      console.log(`Error upserting pending transaction: ${error.message}`);
-      logger.error('Pending transaction upsert error details:', error);
+      logger.error(`Error upserting pending transaction: ${error.message}`, error);
       return null;
     }
   };

@@ -1,5 +1,7 @@
 const Stripe = require('stripe');
-const { SalesforceService, buildSalesforceConfig } = require('../services/salesforceService');
+const { SalesforceService, buildSalesforceConfig, parseBoolean } = require('../services/salesforceService');
+const { trimToNull } = require('../stripe/customerIdentity');
+const { normalizeStripeId, centsToMajorUnits } = require('../stripe/utils');
 
 const { mapStripeToTransaction } = require('../domain/transactions');
 
@@ -77,28 +79,6 @@ const toSalesforceTransactionCsvRow = (transactionPayload, fallbackCustomerId = 
   return row;
 };
 
-const parseBoolean = (value, defaultValue = false) => {
-  if (value === undefined || value === null) {
-    return defaultValue;
-  }
-
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
-      return true;
-    }
-    if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
-      return false;
-    }
-  }
-
-  return defaultValue;
-};
-
 const parseModeToggle = (value) => {
   if (value === undefined || value === null || value === '') {
     return { isValid: true };
@@ -164,31 +144,6 @@ const parseIntegerWithBounds = (value, defaultValue, min, max) => {
   return rounded;
 };
 
-const normalizeStripeId = (value) => {
-  if (!value) {
-    return null;
-  }
-
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  if (typeof value === 'object' && value !== null && typeof value.id === 'string') {
-    return value.id;
-  }
-
-  return null;
-};
-
-const trimToNull = (value) => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
-
 const extractMetadataSalesforceId = (metadata) => {
   if (!metadata || typeof metadata !== 'object') {
     return null;
@@ -231,14 +186,6 @@ const derivePaymentType = (charge) => {
   }
 
   return 'paid';
-};
-
-const toAmount = (cents) => {
-  if (typeof cents !== 'number' || Number.isNaN(cents)) {
-    return null;
-  }
-
-  return cents / 100;
 };
 
 const createSummary = () => ({
@@ -695,7 +642,7 @@ const buildExamplePayload = ({
   },
   stripeCharge: {
     id: charge?.id || null,
-    amount: toAmount(charge?.amount),
+    amount: centsToMajorUnits(charge?.amount),
     currency: charge?.currency || paymentIntent?.currency || null,
     customerId: normalizeStripeId(charge?.customer) || normalizeStripeId(paymentIntent?.customer),
     status: charge?.status || paymentIntent?.status || null,
@@ -1310,7 +1257,7 @@ const syncSalesforcePayments = async (request, context) => {
             examples.push({
               stripeCharge: {
                 id: charge.id,
-                amount: toAmount(charge.amount),
+                amount: centsToMajorUnits(charge.amount),
                 currency: charge.currency || null,
                 customerId,
                 status: charge.status,

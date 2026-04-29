@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import type { Connection } from 'jsforce/lib/connection';
 
-import { buildSalesforceConfig, SalesforceService } from './salesforceService';
+import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral } from './salesforceService';
 import { buildTestArtifactMarker } from '../lib/testArtifactTagging';
 import {
   deleteQuickBooksDocument,
@@ -86,9 +86,6 @@ const normalizePositiveInt = (value: number | undefined, fallback: number, max: 
 };
 
 const escapeStripeSearchValue = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-const escapeSoqlLiteral = (value: string): string =>
   value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 const chooseStripeSecret = (liveMode: boolean): string => {

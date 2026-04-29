@@ -1,4 +1,5 @@
 const Stripe = require('stripe');
+const { logger } = require('../lib/logger');
 const { SalesforceService, buildSalesforceConfig } = require('../services/salesforceService');
 
 let createSalesforceSvc;
@@ -366,12 +367,12 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
 
   // Validate required fields
   if (!payout || typeof payout !== 'object') {
-    console.log('[payoutSyncTrigger] Skipping invalid payout object', { payout });
+    logger.warn('[payoutSyncTrigger] Skipping invalid payout object', { payout });
     return { status: 'skipped', payoutId: null, reason: 'invalid_payout_object' };
   }
 
   if (!payout.id || typeof payout.id !== 'string') {
-    console.log('[payoutSyncTrigger] Skipping payout with missing or invalid id', { payout });
+    logger.warn('[payoutSyncTrigger] Skipping payout with missing or invalid id', { payout });
     return { status: 'skipped', payoutId: null, reason: 'missing_payout_id' };
   }
 
@@ -387,7 +388,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
   const { validTransactions, invalidTransactions } = filterValidTransactions(transactions);
 
   if (invalidTransactions.length > 0) {
-    console.log('[payoutSyncTrigger] Found invalid balance transactions for payout', {
+    logger.warn('[payoutSyncTrigger] Found invalid balance transactions for payout', {
       payoutId: payout.id,
       validCount: validTransactions.length,
       invalidCount: invalidTransactions.length,
@@ -401,28 +402,25 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
 
   // Hygiene check: skip processing if required fields are missing
   if (!payout.arrival_date || typeof payout.arrival_date !== 'number' || payout.arrival_date <= 0) {
-    console.log('[payoutSyncTrigger] Skipping payout with missing or invalid arrival_date', {
+    logger.warn('[payoutSyncTrigger] Skipping payout with missing or invalid arrival_date', {
       payoutId: payout.id,
       arrival_date: payout.arrival_date,
-      payout,
     });
     return { status: 'skipped', payoutId: payout.id, reason: 'missing_arrival_date' };
   }
 
   if (amountCents === 0) {
-    console.log('[payoutSyncTrigger] Skipping payout with zero amount', {
+    logger.warn('[payoutSyncTrigger] Skipping payout with zero amount', {
       payoutId: payout.id,
       amount: payout.amount,
-      payout,
     });
     return { status: 'skipped', payoutId: payout.id, reason: 'zero_amount' };
   }
 
   if (!payout.status || typeof payout.status !== 'string' || payout.status.trim() === '') {
-    console.log('[payoutSyncTrigger] Skipping payout with blank status', {
+    logger.warn('[payoutSyncTrigger] Skipping payout with blank status', {
       payoutId: payout.id,
       status: payout.status,
-      payout,
     });
     return { status: 'skipped', payoutId: payout.id, reason: 'blank_status' };
   }
@@ -443,7 +441,7 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
 
   await processedStore.markProcessed(payoutKey);
 
-  console.log('[payoutSyncTrigger] Processed payout', {
+  logger.info('[payoutSyncTrigger] Processed payout', {
     payoutId: payout.id,
     bankDepositId: qboResult?.qboId || null,
     balanceTransactionCount: validTransactions.length,

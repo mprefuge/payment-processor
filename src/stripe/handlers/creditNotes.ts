@@ -8,7 +8,7 @@ import {
   timestampToDate,
   timestampToIsoString,
 } from '../utils';
-import { ensureStripeClient, markDocumentPosted } from './common';
+import { ensureStripeClient, markDocumentPosted, normalizeMetadataValue, SALES_RECEIPT_DOC_NUMBER_KEYS } from './common';
 import type {
   HttpContext,
   RefundReceiptAccountingAdapter,
@@ -20,12 +20,6 @@ import type {
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 
 const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
-
-const SALES_RECEIPT_DOC_NUMBER_KEYS = [
-  'qbo_sales_receipt_number',
-  'qbo_doc_number',
-  'qbo_sales_receipt_doc_number',
-];
 
 const toPositiveCents = (value: number | null | undefined): number => {
   if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -45,23 +39,6 @@ const mapStatus = (
     default:
       return normalized ? 'refunded' : 'pending';
   }
-};
-
-const normalizeMetadataValue = (
-  metadata: Stripe.Metadata | null | undefined,
-  key: string
-): string | null => {
-  if (!metadata) {
-    return null;
-  }
-
-  const value = metadata[key];
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
 };
 
 const resolveSalesReceiptDocNumber = (

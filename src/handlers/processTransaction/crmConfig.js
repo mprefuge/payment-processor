@@ -1,20 +1,19 @@
 const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
+/** Returns true if the value is a non-empty, non-whitespace string. */
+const isNonEmptyString = (val) => typeof val === 'string' && val.trim().length > 0;
+
 const createCrmConfigResolver = ({ logger }) => {
   const getCrmConfig = () => {
     const configuredProvider = process.env.CRM_PROVIDER;
     const hasSalesforceCredentials =
-      typeof process.env.SF_CLIENT_ID === 'string' &&
-      process.env.SF_CLIENT_ID.trim().length > 0 &&
-      typeof process.env.SF_CLIENT_SECRET === 'string' &&
-      process.env.SF_CLIENT_SECRET.trim().length > 0;
+      isNonEmptyString(process.env.SF_CLIENT_ID) && isNonEmptyString(process.env.SF_CLIENT_SECRET);
 
-    const provider =
-      typeof configuredProvider === 'string' && configuredProvider.trim().length > 0
-        ? configuredProvider
-        : hasSalesforceCredentials
-          ? 'salesforce'
-          : null;
+    const provider = isNonEmptyString(configuredProvider)
+      ? configuredProvider
+      : hasSalesforceCredentials
+        ? 'salesforce'
+        : null;
 
     if (!provider) {
       logger.info('No CRM provider configured, skipping CRM integration');
@@ -23,12 +22,8 @@ const createCrmConfigResolver = ({ logger }) => {
 
     switch (provider.toLowerCase()) {
       case 'salesforce': {
-        const contactLeadSource = Object.prototype.hasOwnProperty.call(
-          process.env,
-          'SALESFORCE_CONTACT_LEAD_SOURCE'
-        )
-          ? process.env.SALESFORCE_CONTACT_LEAD_SOURCE
-          : DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE;
+        const contactLeadSource =
+          process.env.SALESFORCE_CONTACT_LEAD_SOURCE ?? DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE;
 
         return {
           provider: 'salesforce',

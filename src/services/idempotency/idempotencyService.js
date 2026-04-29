@@ -1,3 +1,4 @@
+const { createHash } = require('crypto');
 const { logger: rootLogger } = require('../../lib/logger');
 /**
  * Idempotency Service
@@ -140,19 +141,9 @@ class IdempotencyService {
    * @returns {string} Simple hash of inputs
    */
   hashInputs(inputs) {
-    // Simple hash based on key fields
     const keyFields = ['email', 'phone', 'firstName', 'lastName', 'amount', 'currency'];
     const hashString = keyFields.map((field) => `${field}:${inputs[field] || ''}`).join('|');
-
-    // Simple hash function (in production, use crypto.createHash)
-    let hash = 0;
-    for (let i = 0; i < hashString.length; i++) {
-      const char = hashString.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash = hash & hash; // Convert to 32-bit integer
-    }
-
-    return hash.toString(36);
+    return createHash('sha256').update(hashString).digest('hex');
   }
 
   /**

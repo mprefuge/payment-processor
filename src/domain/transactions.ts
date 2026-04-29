@@ -1,5 +1,6 @@
 import type Stripe from 'stripe';
 import { z } from 'zod';
+import { normalizeStripeId, centsToMajorUnits } from '../stripe/utils';
 
 export const transactionTypeSchema = z.enum([
   'charge',
@@ -198,31 +199,6 @@ export interface MapStripeToTransactionInput {
    */
   stripeCustomer?: Stripe.Customer | Stripe.DeletedCustomer | null;
 }
-
-const normalizeStripeId = (value: unknown): string | null => {
-  if (!value) {
-    return null;
-  }
-
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  if (typeof value === 'object' && 'id' in (value as Record<string, unknown>)) {
-    const idValue = (value as Record<string, unknown>).id;
-    return typeof idValue === 'string' ? idValue : null;
-  }
-
-  return null;
-};
-
-const centsToMajorUnits = (value: number | undefined): number | null => {
-  if (typeof value !== 'number') {
-    return null;
-  }
-
-  return value / 100;
-};
 
 const parseMetadataString = (
   metadata: Record<string, unknown> | undefined,

@@ -3,9 +3,17 @@ import type { Connection } from 'jsforce/lib/connection';
 
 import type { TransactionUpsertDTO } from '../domain/transactions';
 import { logger } from '../lib/logger';
-import { getQuickBooksCustomerById, query as qboQuery } from '../services/qboSvc';
-import { buildSalesforceConfig, SalesforceService } from '../services/salesforceService';
+import { readBooleanQuery } from '../lib/http';
+import {
+  getQuickBooksCustomerById,
+  normalizeComparableDate,
+  normalizeFieldName,
+  normalizeReceiptClassRef,
+  query as qboQuery,
+} from '../services/qboSvc';
+import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral, toRecords, chunkArray, parseBoolean } from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
+import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 
 type SalesforceObjectType = 'Contact' | 'Account';
 
@@ -144,45 +152,9 @@ const SALESFORCE_LOOKUP_CONCURRENCY = 8;
 const SALESFORCE_CREATE_CONCURRENCY = 4;
 let dependencyOverrides: Partial<Dependencies> | null = null;
 
-const toTrimmed = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
-
 const normalizeQboId = (value: unknown): string | null => {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return toTrimmed(value);
-};
-
-const escapeSoqlLiteral = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-const toRecords = <T>(result: { records?: T[] } | T[] | null | undefined): T[] => {
-  if (!result) return [];
-  if (Array.isArray(result)) return result;
-  return Array.isArray(result.records) ? result.records : [];
-};
-
-const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
-  if (typeof value === 'boolean') return value;
-  if (typeof value !== 'string') return defaultValue;
-
-  const normalized = value.trim().toLowerCase();
-  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
-  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
-  return defaultValue;
-};
-
-const readBooleanQuery = (request: HttpRequest, key: string, defaultValue: boolean): boolean => {
-  if (request.query && typeof request.query.get === 'function') {
-    return parseBoolean(request.query.get(key), defaultValue);
-  }
-
-  return parseBoolean(
-    (request.query as unknown as Record<string, unknown> | undefined)?.[key],
-    defaultValue
-  );
 };
 
 const readIntQuery = (request: HttpRequest, key: string): number | null => {
@@ -242,16 +214,6 @@ const parseUnsupportedField = (
   return null;
 };
 
-const chunkArray = <T>(items: T[], size: number): T[][] => {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-
-  return chunks;
-};
-
 const mapWithConcurrency = async <T, R>(
   items: T[],
   concurrency: number,
@@ -279,9 +241,6 @@ const mapWithConcurrency = async <T, R>(
   await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
   return results;
 };
-
-const normalizeFieldName = (value: unknown): string =>
-  (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const extractQboSalesforceId = (customer: QboCustomer | null | undefined): string | null => {
   const fields = Array.isArray(customer?.CustomField) ? customer.CustomField : [];
@@ -381,20 +340,6 @@ const fetchCampaignIdByName = async (
   return toTrimmed(toRecords(result)[0]?.Id);
 };
 
-const normalizeReceiptClassRef = (
-  classRef: { value?: string | null; name?: string | null } | null | undefined
-): { value?: string; name?: string } | null => {
-  const value = toTrimmed(classRef?.value);
-  const name = toTrimmed(classRef?.name);
-
-  if (!value && !name) return null;
-
-  return {
-    ...(value ? { value } : {}),
-    ...(name ? { name } : {}),
-  };
-};
-
 const resolveReceiptClassRef = (
   receipt: QboSalesReceipt
 ): { classRef: { value?: string; name?: string } | null; manualReviewMessage: string | null } => {
@@ -483,18 +428,6 @@ const parseReceiptClassSegments = (
     designation,
     manualReviewMessage: null,
   };
-};
-
-const normalizeComparableDate = (value: string | null | undefined): string | null => {
-  const trimmed = toTrimmed(value);
-  if (!trimmed) return null;
-
-  const parsed = new Date(trimmed);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-
-  return parsed.toISOString().slice(0, 10);
 };
 
 const findPotentialExistingChargeMatches = async (

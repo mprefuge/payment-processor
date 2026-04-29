@@ -6,6 +6,9 @@ const {
   trimToNull,
 } = require('../../stripe/customerIdentity');
 
+const STRIPE_CUSTOMER_SEARCH_LIMIT = 20;
+const DEFAULT_COUNTRY = 'US';
+
 const buildCustomerFullName = (customerData) =>
   buildFullName(customerData?.firstname, customerData?.lastname);
 
@@ -19,7 +22,7 @@ const normalizeAddressInput = (customerData) => {
       city: trimToNull(nestedAddress.city),
       state: trimToNull(nestedAddress.state),
       postal_code: trimToNull(nestedAddress.postal_code),
-      country: trimToNull(nestedAddress.country) || 'US',
+      country: trimToNull(nestedAddress.country) || DEFAULT_COUNTRY,
     };
   }
 
@@ -28,7 +31,7 @@ const normalizeAddressInput = (customerData) => {
     city: trimToNull(customerData?.city),
     state: trimToNull(customerData?.state),
     postal_code: trimToNull(customerData?.zipcode),
-    country: 'US',
+    country: DEFAULT_COUNTRY,
   };
 };
 
@@ -102,7 +105,7 @@ const searchStripeCustomer = async (stripe, email, fullName) => {
     const sanitizedEmail = escapeStripeQueryValue(email);
     const customers = await stripe.customers.search({
       query: `email:'${sanitizedEmail}'`,
-      limit: 20,
+      limit: STRIPE_CUSTOMER_SEARCH_LIMIT,
     });
 
     const customerRecords = Array.isArray(customers?.data) ? customers.data : [];

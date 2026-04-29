@@ -3,10 +3,13 @@ import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { logger } from '../lib/logger';
 import {
   getQuickBooksCustomerById,
+  normalizeEmail,
+  normalizeFieldName,
   query as qboQuery,
   updateQuickBooksCustomerSalesforceId,
 } from '../services/qboSvc';
-import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
+import { SalesforceService, buildSalesforceConfig, escapeSoqlLiteral, toRecords, chunkArray, parseBoolean } from '../services/salesforceService';
+import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 
 type QboEmailAddress = { Address?: string | null };
 type QboPhone = { FreeFormNumber?: string | null };
@@ -238,56 +241,6 @@ const QBO_HYDRATE_RETRY_DELAYS_MS = [250, 500, 1000] as const;
 
 const QBO_MARKER_PREFIX = '[QBO_CUSTOMER_ID:';
 
-const toRecords = <T>(result: QueryResult<T> | T[] | null | undefined): T[] => {
-  if (!result) {
-    return [];
-  }
-
-  if (Array.isArray(result)) {
-    return result;
-  }
-
-  if (Array.isArray(result.records)) {
-    return result.records;
-  }
-
-  return [];
-};
-
-const escapeSoqlLiteral = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-const chunkArray = <T>(items: T[], size: number): T[][] => {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-
-  return chunks;
-};
-
-const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  if (typeof value !== 'string') {
-    return defaultValue;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
-    return true;
-  }
-
-  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
-    return false;
-  }
-
-  return defaultValue;
-};
-
 const parseIntWithBounds = (
   value: unknown,
   defaultValue: number,
@@ -314,23 +267,6 @@ const parseIntWithBounds = (
 
   return rounded;
 };
-
-const toTrimmed = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
-
-const normalizeEmail = (value: unknown): string | null => {
-  const email = toTrimmed(value);
-  return email ? email.toLowerCase() : null;
-};
-
-const normalizeFieldName = (value: unknown): string =>
-  (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const splitDisplayName = (name: string): { firstName: string | null; lastName: string | null } => {
   const trimmed = name.trim();

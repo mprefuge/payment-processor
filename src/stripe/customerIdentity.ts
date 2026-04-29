@@ -1,4 +1,4 @@
-export const trimToNull = (value: string | null | undefined): string | null => {
+export const trimToNull = (value: unknown): string | null => {
   if (typeof value !== 'string') {
     return null;
   }

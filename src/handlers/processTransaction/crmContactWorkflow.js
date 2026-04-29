@@ -1,3 +1,4 @@
+const { logger: moduleLogger } = require('../../lib/logger');
 const {
   buildContactSearchCriteria,
   createAddressData,
@@ -36,7 +37,7 @@ const buildExistingContactUpdateData = (contact, customerData, stripeCustomerId)
     (!contact.Stripe_Customer_ID__c || contact.Stripe_Customer_ID__c.trim() === '')
   ) {
     updateData.stripeCustomerId = stripeCustomerId;
-    console.log(`Adding Stripe Customer ID to existing contact: ${stripeCustomerId}`);
+    moduleLogger.info(`Adding Stripe Customer ID to existing contact: ${stripeCustomerId}`);
   }
 
   return updateData;
@@ -50,11 +51,11 @@ const updateMatchedContact = async (crmService, contact, updateData, logMessage)
   try {
     const updatedContact = await crmService.updateContact(contact.Id, updateData);
     if (updatedContact) {
-      console.log(`${logMessage}: ${describeContact(updatedContact)}`);
+      moduleLogger.info(`${logMessage}: ${describeContact(updatedContact)}`);
       return updatedContact;
     }
   } catch (error) {
-    console.log(`Failed to update contact: ${error.message}`);
+    moduleLogger.warn(`Failed to update contact: ${error.message}`);
   }
 
   return contact;
@@ -101,7 +102,7 @@ const createCrmContactWorkflow = ({
 
       const searchCriteria = buildContactSearchCriteria(customerData);
 
-      console.log('Searching for existing contact in CRM...');
+      logger.info('Searching for existing contact in CRM...');
       const existingContacts = await crmService.searchContact(searchCriteria);
 
       let contact = null;
@@ -109,7 +110,7 @@ const createCrmContactWorkflow = ({
       if (existingContacts && existingContacts.length > 0) {
         contact = findContactByStripeCustomerId(existingContacts, searchCriteria.stripeCustomerId);
         if (contact) {
-          console.log(`Found contact by Stripe Customer ID: ${describeContact(contact)}`);
+          logger.info(`Found contact by Stripe Customer ID: ${describeContact(contact)}`);
           contact = await updateMatchedContact(
             crmService,
             contact,
@@ -136,7 +137,7 @@ const createCrmContactWorkflow = ({
         );
 
         if (contact) {
-          console.log(`Found existing contact with matching name: ${describeContact(contact)}`);
+          logger.info(`Found existing contact with matching name: ${describeContact(contact)}`);
           contact = await updateMatchedContact(
             crmService,
             contact,
@@ -144,7 +145,7 @@ const createCrmContactWorkflow = ({
             'Updated contact'
           );
         } else {
-          console.log(
+          logger.info(
             'Found contacts by email/phone but name does not match. Creating new contact...'
           );
           contact = null;
@@ -152,12 +153,12 @@ const createCrmContactWorkflow = ({
       }
 
       if (!contact) {
-        console.log('No existing contact found, creating new contact...');
+        logger.info('No existing contact found, creating new contact...');
 
         contact = await crmService.createContact(
           buildContactData(customerData, searchCriteria.stripeCustomerId || null)
         );
-        console.log(`Created new contact: ${describeContact(contact)}`);
+        logger.info(`Created new contact: ${describeContact(contact)}`);
       }
 
       await syncStripeCustomerMetadata(
@@ -171,8 +172,7 @@ const createCrmContactWorkflow = ({
 
       return contact;
     } catch (error) {
-      console.log(`Error syncing contact to CRM: ${error.message}`);
-      logger.error('CRM sync error details:', error);
+      logger.error(`Error syncing contact to CRM: ${error.message}`, error);
       return null;
     }
   };

@@ -899,7 +899,7 @@ const syncPendingCrmTransaction = async (
     const pendingResult = await createPendingTransaction(session, contact.Id, requestData);
     pendingTransactionUpserted = Boolean(pendingResult);
   } else {
-    console.log('No CRM contact available - skipping pending transaction creation');
+    logger.info('No CRM contact available - skipping pending transaction creation');
   }
 
   if (!pendingTransactionUpserted) {

@@ -24,9 +24,10 @@ import {
 } from '../services/salesforceSvc';
 
 const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
-import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
+import { SalesforceService, buildSalesforceConfig, parseBoolean } from '../services/salesforceService';
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
 import { ensureSalesforceIdOnCustomer } from '../stripe/utils';
+import { trimToNull as toTrimmedString } from '../stripe/customerIdentity';
 import { loadConfig, normalizeTransactionCategory } from '../config/contactMatching';
 import {
   fetchStripeChargesSince,
@@ -337,28 +338,6 @@ const getHeader = (req: HttpRequest, name: string): string | undefined => {
   return record[name] || record[name.toLowerCase()] || record[name.toUpperCase()];
 };
 
-const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
-  if (value === undefined || value === null) {
-    return defaultValue;
-  }
-
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
-      return true;
-    }
-    if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
-      return false;
-    }
-  }
-
-  return defaultValue;
-};
-
 const parseModeToggle = (
   value: unknown
 ): { isValid: boolean; isLiveMode?: boolean; message?: string } => {
@@ -380,15 +359,6 @@ const parseModeToggle = (
   }
 
   return { isValid: false, message: 'Query parameter "mode" must be either "test" or "live".' };
-};
-
-const toTrimmedString = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
 };
 
 const extractSalesforceIdFromMetadata = (

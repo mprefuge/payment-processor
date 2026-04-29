@@ -19,7 +19,7 @@ import {
   timestampToDate,
   timestampToIsoString,
 } from '../utils';
-import { ensureStripeClient, markDocumentPosted } from './common';
+import { ensureStripeClient, markDocumentPosted, normalizeMetadataValue, SALES_RECEIPT_DOC_NUMBER_KEYS } from './common';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
 
@@ -28,11 +28,6 @@ const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 type Nullable<T> = T | null | undefined;
 
 const SALES_RECEIPT_LINES_KEY = 'qbo_sales_receipt_lines';
-const SALES_RECEIPT_DOC_NUMBER_KEYS = [
-  'qbo_sales_receipt_number',
-  'qbo_doc_number',
-  'qbo_sales_receipt_doc_number',
-];
 const FALLBACK_ITEM_NAME = 'Refund – Unmatched';
 const FALLBACK_ITEM_VALUE = 'REFUND_UNMATCHED_ITEM';
 
@@ -291,23 +286,6 @@ const parseAmountToCents = (value: unknown): number | null => {
   }
 
   return null;
-};
-
-const normalizeMetadataValue = (
-  metadata: Nullable<Stripe.Metadata>,
-  key: string
-): string | null => {
-  if (!metadata) {
-    return null;
-  }
-
-  const value = metadata[key];
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
 };
 
 const parseSalesReceiptLines = (metadata: Nullable<Stripe.Metadata>): SalesReceiptLine[] | null => {

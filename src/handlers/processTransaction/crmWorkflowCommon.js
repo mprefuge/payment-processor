@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 const { buildFullName, normalizeName, trimToNull } = require('../../stripe/customerIdentity');
 
 const DEFAULT_COUNTRY = 'US';
@@ -85,13 +86,13 @@ const getCrmService = async ({
   const crmConfig = getCrmConfig();
 
   if (!crmConfig) {
-    console.log(`CRM integration disabled - skipping ${operationName}`);
+    logger.info(`CRM integration disabled - skipping ${operationName}`);
     return null;
   }
 
   const validation = CrmFactory.validateConfig(crmConfig.provider, crmConfig.config);
   if (!validation.isValid) {
-    console.log(`CRM configuration invalid: ${validation.error}`);
+    logger.warn(`CRM configuration invalid: ${validation.error}`);
     return null;
   }
 
@@ -105,7 +106,7 @@ const getCrmService = async ({
   );
   if (missingMethod) {
     const capabilityLabel = unsupportedCapabilityLabel || missingMethod;
-    console.log(`CRM service does not support ${capabilityLabel} - skipping ${operationName}`);
+    logger.info(`CRM service does not support ${capabilityLabel} - skipping ${operationName}`);
     return null;
   }
 

@@ -9,6 +9,7 @@ import {
   buildTestArtifactMarker,
   extractTestArtifactTagFromStripeContext,
 } from '../lib/testArtifactTagging';
+import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 import tokenManager from './qbo/qboTokenManager';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
@@ -343,18 +344,38 @@ const centsToDollars = (value: number): number => {
   return Math.round(value) / 100;
 };
 
-const toTrimmed = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
+export const normalizeEmail = (value: unknown): string | null => {
+  const trimmed = toTrimmed(value);
+  return trimmed ? trimmed.toLowerCase() : null;
+};
+
+export const normalizeFieldName = (value: unknown): string =>
+  (toTrimmed(value) ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+export const normalizeComparableDate = (value: string | null | undefined): string | null => {
+  const trimmed = toTrimmed(value);
+  if (!trimmed) return null;
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
     return null;
   }
 
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return parsed.toISOString().slice(0, 10);
 };
 
-const normalizeEmail = (value: unknown): string | null => {
-  const trimmed = toTrimmed(value);
-  return trimmed ? trimmed.toLowerCase() : null;
+export const normalizeReceiptClassRef = (
+  classRef: { value?: string | null; name?: string | null } | null | undefined
+): { value?: string; name?: string } | null => {
+  const value = toTrimmed(classRef?.value);
+  const name = toTrimmed(classRef?.name);
+
+  if (!value && !name) return null;
+
+  return {
+    ...(value ? { value } : {}),
+    ...(name ? { name } : {}),
+  };
 };
 
 const truncate = (value: string | null | undefined, length: number): string | null => {
