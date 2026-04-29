@@ -107,6 +107,33 @@ const request = async (url, init, label) => {
   return parseJson(response, label);
 };
 
+const runCleanup = async (cleanupUrl, commonHeaders, tag, cleanupLiveMode, systems, deleteSalesforceContacts, propagationDelayMs) => {
+  if (propagationDelayMs > 0) {
+    console.log(`Waiting ${propagationDelayMs}ms for data propagation before cleanup...`);
+    await new Promise((resolve) => setTimeout(resolve, propagationDelayMs));
+  }
+
+  const cleanupBody = await request(
+    cleanupUrl,
+    {
+      method: 'POST',
+      headers: {
+        ...commonHeaders,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        tag,
+        dryRun: false,
+        liveMode: cleanupLiveMode,
+        systems,
+        deleteSalesforceContacts,
+      }),
+    },
+    'Cleanup'
+  );
+  return cleanupBody;
+};
+
 const main = async () => {
   const baseUrl = requireEnv('SMOKE_BASE_URL');
   const healthPath = process.env.SMOKE_HEALTH_PATH || '/api/health';
@@ -117,6 +144,10 @@ const main = async () => {
   const tag = process.env.SMOKE_TEST_TAG?.trim() || `deploy-smoke-${Date.now()}`;
   const cleanupLiveMode = parseBoolean(process.env.SMOKE_CLEANUP_LIVE_MODE, false);
   const deleteSalesforceContacts = parseBoolean(process.env.SMOKE_DELETE_SALESFORCE_CONTACTS, true);
+  const propagationDelayMs = Math.max(
+    0,
+    parseInt(process.env.SMOKE_SEARCH_PROPAGATION_DELAY_MS || '0', 10) || 0
+  );
   const systems = (process.env.SMOKE_SYSTEMS || 'stripe,salesforce,qbo')
     .split(',')
     .map((value) => value.trim())
@@ -143,39 +174,54 @@ const main = async () => {
     throw new Error('Health check did not return a JSON object.');
   }
 
-  const transactionBody = await request(
-    transactionUrl,
-    {
-      method: 'POST',
-      headers: {
-        ...commonHeaders,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(buildTaggedPayload(payload, tag)),
-    },
-    'Transaction smoke test'
-  );
-  assertTransactionResponse(transactionBody);
+  // Once the transaction request is dispatched, real data may exist in Stripe/Salesforce/QBO.
+  // Cleanup must run in the finally block regardless of whether subsequent assertions pass.
+  let smokeError = null;
 
-  const cleanupBody = await request(
-    cleanupUrl,
-    {
-      method: 'POST',
-      headers: {
-        ...commonHeaders,
-        'Content-Type': 'application/json',
+  try {
+    const transactionBody = await request(
+      transactionUrl,
+      {
+        method: 'POST',
+        headers: {
+          ...commonHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildTaggedPayload(payload, tag)),
       },
-      body: JSON.stringify({
+      'Transaction smoke test'
+    );
+    assertTransactionResponse(transactionBody);
+  } catch (err) {
+    smokeError = err;
+  } finally {
+    // Always attempt cleanup — the server may have partially committed data even if the
+    // request threw a network error or the response assertion failed.
+    try {
+      const cleanupBody = await runCleanup(
+        cleanupUrl,
+        commonHeaders,
         tag,
-        dryRun: false,
-        liveMode: cleanupLiveMode,
+        cleanupLiveMode,
         systems,
         deleteSalesforceContacts,
-      }),
-    },
-    'Cleanup verification'
-  );
-  assertCleanupResponse(cleanupBody);
+        propagationDelayMs
+      );
+      assertCleanupResponse(cleanupBody);
+      console.log('Test artifact cleanup completed successfully.');
+    } catch (cleanupErr) {
+      const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+      console.error(`WARNING: Cleanup failed — test data tagged [${tag}] may remain in production systems. Error: ${cleanupMessage}`);
+      // Prefer surfacing the original smoke error; otherwise surface the cleanup error.
+      if (!smokeError) {
+        smokeError = cleanupErr;
+      }
+    }
+  }
+
+  if (smokeError) {
+    throw smokeError;
+  }
 
   console.log('Deployment smoke flow completed successfully.');
 };
