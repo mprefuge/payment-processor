@@ -27,9 +27,7 @@ const makeQboDoc = (
   MetaData: { CreateTime: createTime },
 });
 
-const makeQueryResponse = (entityName: string, docs: unknown[]) => ({
-  QueryResponse: { [entityName]: docs },
-});
+const makeQueryResponse = (_entityName: string, docs: unknown[]) => docs;
 
 describe('stripeDuplicateCheck', () => {
   let handler: any;
@@ -81,7 +79,7 @@ describe('stripeDuplicateCheck', () => {
     mockDeleteQboDoc = qboSvc.deleteQuickBooksDocument;
 
     // Default: return empty result sets for each entity query
-    mockQboQuery.mockResolvedValue({ QueryResponse: {} });
+    mockQboQuery.mockResolvedValue([]);
 
     const mod = await import('../src/handlers/stripeDuplicateCheck');
     handler = (mod as any).default ?? mod;
@@ -176,7 +174,7 @@ describe('stripeDuplicateCheck', () => {
     });
 
     it('applies date range to QBO queries', async () => {
-      mockQboQuery.mockResolvedValue({ QueryResponse: {} });
+      mockQboQuery.mockResolvedValue([]);
 
       const { context } = createContext();
       const req = createRequest({ system: 'qbo', startDate: '2024-01-01', endDate: '2024-03-31' });

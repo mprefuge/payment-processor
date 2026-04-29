@@ -86,9 +86,8 @@ const queryQboDocuments = async (
   const entityName = QBO_ENTITY_QUERY_MAP[entity];
   const dateClause = buildQboDateClause(startDate, endDate);
   const queryStr = `SELECT Id, SyncToken, DocNumber, TxnDate, MetaData FROM ${entityName}${dateClause} MAXRESULTS 1000`;
-  const result = await qboQuery<{ QueryResponse: Record<string, QboDocumentRecord[]> }>(queryStr);
-  const records = result?.QueryResponse?.[entityName];
-  return Array.isArray(records) ? records : [];
+  const result = await qboQuery<QboDocumentRecord[]>(queryStr);
+  return Array.isArray(result) ? result : [];
 };
 
 const detectQboDuplicates = async (
