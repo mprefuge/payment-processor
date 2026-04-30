@@ -129,7 +129,8 @@ const queryQboDocuments = async (
 const detectQboDuplicates = async (
   startDate?: string,
   endDate?: string,
-  inspectStripeId?: string
+  inspectStripeId?: string,
+  fetchLineDescriptions?: boolean
 ): Promise<{ groups: DuplicateGroup[]; checked: number; inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }> }> => {
   type DocWithNote = DuplicateRecord & { privateNote: string | null; lineDescription: string | null };
   const allDocs: DocWithNote[] = [];
@@ -165,9 +166,14 @@ const detectQboDuplicates = async (
 
   // Secondary fetch: for bank-deposit records with no PrivateNote Stripe IDs, fetch the
   // full individual record to read Line[].Description (QBO bulk SELECT never returns Line).
-  const depositsNeedingLineFetch = allDocs.filter(
-    (d) => d.entity === 'bank-deposit' && extractStripeIdsFromText(d.privateNote).length === 0
-  );
+  // Only enabled when fetchLineDescriptions=true (or inspectStripeId is set) to keep the
+  // normal bulk scan fast — this can make hundreds of individual API calls.
+  const depositsNeedingLineFetch =
+    fetchLineDescriptions || inspectStripeId
+      ? allDocs.filter(
+          (d) => d.entity === 'bank-deposit' && extractStripeIdsFromText(d.privateNote).length === 0
+        )
+      : [];
   if (depositsNeedingLineFetch.length > 0) {
     const idToIndex = new Map(allDocs.map((d, i) => [d.id, i]));
     for (const doc of depositsNeedingLineFetch) {
@@ -430,6 +436,7 @@ const stripeDuplicateCheck = async (
   const startDate = request.query.get('startDate') ?? undefined;
   const endDate = request.query.get('endDate') ?? undefined;
   const inspectStripeId = request.query.get('inspectStripeId') ?? undefined;
+  const fetchLineDescriptions = readBooleanQuery(request, 'fetchLineDescriptions', false);
 
   const includeQbo = system === 'qbo' || system === 'both';
   const includeSalesforce = system === 'salesforce' || system === 'both';
@@ -450,7 +457,7 @@ const stripeDuplicateCheck = async (
 
   try {
     if (includeQbo) {
-      const { groups, checked, inspectMatches } = await detectQboDuplicates(startDate, endDate, inspectStripeId);
+      const { groups, checked, inspectMatches } = await detectQboDuplicates(startDate, endDate, inspectStripeId, fetchLineDescriptions);
       let deleted = 0;
       let errors: string[] = [];
 

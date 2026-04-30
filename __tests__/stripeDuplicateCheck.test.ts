@@ -340,7 +340,7 @@ describe('stripeDuplicateCheck', () => {
         }]);
 
       const { context } = createContext();
-      const req = createRequest({ system: 'qbo' });
+      const req = createRequest({ system: 'qbo', fetchLineDescriptions: 'true' });
 
       const result = await handler(req, context);
       expect(result.status).toBe(200);
