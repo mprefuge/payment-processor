@@ -9,13 +9,21 @@ import {
 } from '../services/qboSvc';
 import { buildSalesforceConfig, SalesforceService } from '../services/salesforceService';
 
-type QuickBooksDocEntityType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
+type QuickBooksDocEntityType = 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer';
 
 const QBO_ENTITY_QUERY_MAP: Record<QuickBooksDocEntityType, string> = {
   'sales-receipt': 'SalesReceipt',
   'journal-entry': 'JournalEntry',
   'bank-deposit': 'Deposit',
+  'transfer': 'Transfer',
 };
+
+// Entity types that can be deleted via deleteQuickBooksDocument (must match QuickBooksDocType in qboSvc)
+const QBO_DELETABLE_ENTITY_TYPES = new Set<QuickBooksDocEntityType>([
+  'sales-receipt',
+  'journal-entry',
+  'bank-deposit',
+]);
 
 // DocNumber prefixes for documents whose suffix encodes a Stripe ID
 const STRIPE_ID_PREFIXES = new Set(['CHG', 'CHGJE', 'PO']);
@@ -72,6 +80,7 @@ type SystemResult = {
   deleted: number;
   errors: string[];
   inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }>;
+  debugLineFetch?: Array<{ id: string; lineDescription: string | null }>;
 };
 
 /**
@@ -131,7 +140,7 @@ const detectQboDuplicates = async (
   endDate?: string,
   inspectStripeId?: string,
   fetchLineDescriptions?: boolean
-): Promise<{ groups: DuplicateGroup[]; checked: number; inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }> }> => {
+): Promise<{ groups: DuplicateGroup[]; checked: number; inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }>; debugLineFetch?: Array<{ id: string; lineDescription: string | null }> }> => {
   type DocWithNote = DuplicateRecord & { privateNote: string | null; lineDescription: string | null };
   const allDocs: DocWithNote[] = [];
 
@@ -178,18 +187,27 @@ const detectQboDuplicates = async (
       (d) => d.entity === 'bank-deposit' && extractStripeIdsFromText(d.privateNote).length === 0
     );
     if (inspectStripeId) {
-      const anchorDates = new Set(
-        allDocs
-          .filter(
-            (d) =>
-              d.entity === 'bank-deposit' &&
-              ((d.privateNote ?? '').includes(inspectStripeId) ||
-                (d.docNumber ?? '').includes(inspectStripeId))
-          )
-          .map((d) => d.txnDate)
-          .filter(Boolean) as string[]
-      );
-      return anchorDates.size > 0 ? noPN.filter((d) => d.txnDate && anchorDates.has(d.txnDate)) : noPN;
+      const anchorDates = allDocs
+        .filter(
+          (d) =>
+            d.entity === 'bank-deposit' &&
+            ((d.privateNote ?? '').includes(inspectStripeId) ||
+              (d.docNumber ?? '').includes(inspectStripeId))
+        )
+        .map((d) => d.txnDate)
+        .filter(Boolean) as string[];
+      if (anchorDates.length > 0) {
+        // Bank-feed entries land on the settlement date (2–5 business days after payout initiation).
+        // Expand to a ±10-day window around each anchor date to cover typical settlement delays.
+        const anchorMs = anchorDates.map((d) => new Date(d).getTime()).filter(isFinite);
+        const WINDOW_MS = 10 * 24 * 60 * 60 * 1000;
+        return noPN.filter((d) => {
+          if (!d.txnDate) return false;
+          const t = new Date(d.txnDate).getTime();
+          return anchorMs.some((a) => Math.abs(t - a) <= WINDOW_MS);
+        });
+      }
+      return noPN;
     }
     if (fetchLineDescriptions) {
       return noPN.slice(-200); // cap at 200 most recent to prevent excessive API calls
@@ -215,7 +233,20 @@ const detectQboDuplicates = async (
     }
   }
 
+  const debugLineFetch: Array<{ id: string; lineDescription: string | null }> | undefined =
+    inspectStripeId
+      ? depositsNeedingLineFetch.map((d) => ({
+          id: d.id,
+          lineDescription: allDocs.find((a) => a.id === d.id)?.lineDescription ?? null,
+        }))
+      : undefined;
+
   // Group by {entity}:{stripeId}.
+  // Entity-key normalization: QBO bank-feed may book a payout as a Transfer instead of a
+  // Deposit (or alongside a Deposit). For grouping purposes we treat 'transfer' the same as
+  // 'bank-deposit' so both land in the same duplicate group under 'bank-deposit:{stripeId}'.
+  const entityKeyFor = (entity: string) => (entity === 'transfer' ? 'bank-deposit' : entity);
+
   // Primary source:  PrivateNote — extract full Stripe IDs via regex. This catches all
   //   DocNumber formats including the legacy 'payout_{id}' pattern because the memo
   //   always contains the untruncated Stripe ID.
@@ -230,20 +261,21 @@ const detectQboDuplicates = async (
   };
 
   for (const { privateNote, lineDescription, ...doc } of allDocs) {
+    const groupEntity = entityKeyFor(doc.entity);
     const noteIds = extractStripeIdsFromText(privateNote);
     if (noteIds.length > 0) {
       for (const stripeId of noteIds) {
-        addToGroup(`${doc.entity}:${stripeId}`, doc);
+        addToGroup(`${groupEntity}:${stripeId}`, doc);
       }
     } else if (extractStripeIdsFromText(lineDescription).length > 0) {
       for (const stripeId of extractStripeIdsFromText(lineDescription)) {
-        addToGroup(`${doc.entity}:${stripeId}`, doc);
+        addToGroup(`${groupEntity}:${stripeId}`, doc);
       }
     } else {
       // Fallback: use DocNumber prefix pattern
       const parts = parseDocNumberParts(doc.docNumber);
       if (parts) {
-        addToGroup(`${doc.entity}:${parts.prefix}:${parts.stripeKey}`, doc);
+        addToGroup(`${groupEntity}:${parts.prefix}:${parts.stripeKey}`, doc);
       }
     }
   }
@@ -273,7 +305,7 @@ const detectQboDuplicates = async (
         }))
     : undefined;
 
-  return { groups, checked: allDocs.length, ...(inspectMatches !== undefined && { inspectMatches }) };
+  return { groups, checked: allDocs.length, ...(inspectMatches !== undefined && { inspectMatches }), ...(debugLineFetch !== undefined && { debugLineFetch }) };
 };
 
 const deleteQboDuplicates = async (
@@ -291,9 +323,13 @@ const deleteQboDuplicates = async (
     });
 
     for (const doc of sorted.slice(1)) {
+      if (!QBO_DELETABLE_ENTITY_TYPES.has(doc.entity as QuickBooksDocEntityType)) {
+        errors.push(`Cannot auto-delete QBO ${doc.entity} ${doc.id}: entity type not supported for deletion`);
+        continue;
+      }
       try {
         const tagged: TaggedQuickBooksDocument = {
-          type: doc.entity as QuickBooksDocEntityType,
+          type: doc.entity as 'sales-receipt' | 'journal-entry' | 'bank-deposit',
           id: doc.id,
           syncToken: doc.syncToken,
           docNumber: doc.docNumber,
@@ -479,7 +515,7 @@ const stripeDuplicateCheck = async (
 
   try {
     if (includeQbo) {
-      const { groups, checked, inspectMatches } = await detectQboDuplicates(startDate, endDate, inspectStripeId, fetchLineDescriptions);
+      const { groups, checked, inspectMatches, debugLineFetch } = await detectQboDuplicates(startDate, endDate, inspectStripeId, fetchLineDescriptions);
       let deleted = 0;
       let errors: string[] = [];
 
@@ -489,7 +525,7 @@ const stripeDuplicateCheck = async (
         errors = result.errors;
       }
 
-      responseBody.qbo = { checked, duplicateGroups: groups, deleted, errors, ...(inspectMatches !== undefined && { inspectMatches }) };
+      responseBody.qbo = { checked, duplicateGroups: groups, deleted, errors, ...(inspectMatches !== undefined && { inspectMatches }), ...(debugLineFetch !== undefined && { debugLineFetch }) };
     }
 
     if (includeSalesforce) {

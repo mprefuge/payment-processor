@@ -318,10 +318,8 @@ describe('stripeDuplicateCheck', () => {
     });
 
     it('detects duplicate bank-deposits when payout ID is only in Line[].Description (bank-feed entry)', async () => {
-      // First call - bulk SELECT for SalesReceipt (page 1, no more)
-      // Second call - bulk SELECT for JournalEntry
-      // Third call - bulk SELECT for Deposit (page 1): two records, both have null PrivateNote
-      // Fourth/Fifth calls - individual SELECT * FROM Deposit WHERE Id = 'dX' for each
+      // Bulk SELECT order: SalesReceipt, JournalEntry, Deposit, Transfer
+      // Deposit has two records with null PrivateNote -> triggers secondary individual fetches
       mockQboQuery
         .mockResolvedValueOnce([]) // SalesReceipt page 1
         .mockResolvedValueOnce([]) // JournalEntry page 1
@@ -329,7 +327,8 @@ describe('stripeDuplicateCheck', () => {
           { Id: 'd10', SyncToken: '0', DocNumber: null, TxnDate: '2026-03-28', MetaData: { CreateTime: '2026-03-28T10:00:00Z' }, PrivateNote: null },
           { Id: 'd11', SyncToken: '0', DocNumber: null, TxnDate: '2026-03-28', MetaData: { CreateTime: '2026-03-28T11:00:00Z' }, PrivateNote: null },
         ])
-        // Individual full fetches for d10 and d11 (order matches depositsNeedingLineFetch)
+        .mockResolvedValueOnce([]) // Transfer page 1
+        // Individual full fetches for d10 and d11
         .mockResolvedValueOnce([{
           Id: 'd10', SyncToken: '0', PrivateNote: null,
           Line: [{ Description: 'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout' }],
@@ -349,6 +348,29 @@ describe('stripeDuplicateCheck', () => {
         'bank-deposit:po_1TRLq7BJf9YYVP9mB0NuhrM7'
       );
       expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
+    });
+
+    it('detects duplicate payout entries when second entry is a Transfer entity (bank-feed auto-categorized)', async () => {
+      mockQboQuery
+        .mockResolvedValueOnce([]) // SalesReceipt
+        .mockResolvedValueOnce([]) // JournalEntry
+        .mockResolvedValueOnce([   // Deposit - canonical payout entry
+          makeQboDoc('d1', '0', null, '2026-03-28', '2026-03-28T10:00:00Z', 'Stripe payout po_1TRLq7BJf9YYVP9mB0NuhrM7'),
+        ])
+        .mockResolvedValueOnce([   // Transfer - bank-feed auto-entry
+          { Id: 't1', SyncToken: '0', DocNumber: null, TxnDate: '2026-04-02', MetaData: { CreateTime: '2026-04-02T10:00:00Z' }, PrivateNote: 'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout' },
+        ]);
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      const group = result.jsonBody.qbo.duplicateGroups.find(
+        (g: any) => g.key === 'bank-deposit:po_1TRLq7BJf9YYVP9mB0NuhrM7'
+      );
+      expect(group).toBeDefined();
+      expect(group.records).toHaveLength(2);
     });
 
     it('ignores REF and DSP DocNumbers (no Stripe ID in suffix)', async () => {
