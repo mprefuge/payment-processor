@@ -339,12 +339,42 @@ const deleteQboDuplicates = async (
   let deleted = 0;
   const errors: string[] = [];
 
+  const ENTITY_DELETE_PRIORITY: Record<string, number> = {
+    'bank-deposit': 0,
+    'sales-receipt': 1,
+    'journal-entry': 2,
+    transfer: 99,
+  };
+
+  const toDateOnlyTimestamp = (value: string | null): number => {
+    if (!value) return Number.POSITIVE_INFINITY;
+    const t = new Date(`${value}T00:00:00Z`).getTime();
+    return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+  };
+
+  const toDateTimeTimestamp = (value: string | null): number => {
+    if (!value) return Number.POSITIVE_INFINITY;
+    const t = new Date(value).getTime();
+    return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+  };
+
   for (const group of groups) {
-    // Sort by createTime ascending — keep the oldest, delete the rest
+    // Keep the canonical record by entity priority first, then by business date (TxnDate).
+    // CreateTime is only a tiebreaker when TxnDate is missing/equal.
     const sorted = [...group.records].sort((a, b) => {
-      const ta = a.createTime ? new Date(a.createTime).getTime() : 0;
-      const tb = b.createTime ? new Date(b.createTime).getTime() : 0;
-      return ta - tb;
+      const pa = ENTITY_DELETE_PRIORITY[a.entity] ?? 50;
+      const pb = ENTITY_DELETE_PRIORITY[b.entity] ?? 50;
+      if (pa !== pb) return pa - pb;
+
+      const da = toDateOnlyTimestamp(a.txnDate);
+      const db = toDateOnlyTimestamp(b.txnDate);
+      if (da !== db) return da - db;
+
+      const ca = toDateTimeTimestamp(a.createTime);
+      const cb = toDateTimeTimestamp(b.createTime);
+      if (ca !== cb) return ca - cb;
+
+      return a.id.localeCompare(b.id);
     });
 
     for (const doc of sorted.slice(1)) {

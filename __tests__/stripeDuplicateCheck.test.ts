@@ -569,6 +569,50 @@ describe('stripeDuplicateCheck', () => {
       expect(result.jsonBody.qbo.errors).toHaveLength(1);
       expect(result.jsonBody.qbo.deleted).toBe(0);
     });
+
+    it('uses txnDate (not createTime) to choose which duplicate to keep', async () => {
+      mockQboQuery
+        .mockResolvedValueOnce(
+          makeQueryResponse('SalesReceipt', [
+            // Older createTime but newer txnDate
+            makeQboDoc(
+              '1',
+              '0',
+              'CHG-20240102-abc123',
+              '2024-01-02',
+              '2024-01-01T08:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            // Newer createTime but older txnDate
+            makeQboDoc(
+              '2',
+              '1',
+              'CHG-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T10:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('JournalEntry', []))
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []))
+        .mockResolvedValueOnce([]); // Transfer
+
+      mockDeleteQboDoc.mockResolvedValue(undefined);
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo', deleteDuplicates: 'true', dryRun: 'false' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(mockDeleteQboDoc).toHaveBeenCalledTimes(1);
+
+      const deletedIds = mockDeleteQboDoc.mock.calls.map((c: any[]) => c[0].id);
+      // Keep id=2 (older TxnDate), delete id=1 despite older createTime.
+      expect(deletedIds).toContain('1');
+      expect(deletedIds).not.toContain('2');
+      expect(result.jsonBody.qbo.deleted).toBe(1);
+    });
   });
 
   // ─── SALESFORCE DUPLICATE DETECTION ─────────────────────────────────────
