@@ -323,20 +323,53 @@ describe('stripeDuplicateCheck', () => {
       mockQboQuery
         .mockResolvedValueOnce([]) // SalesReceipt page 1
         .mockResolvedValueOnce([]) // JournalEntry page 1
-        .mockResolvedValueOnce([  // Deposit page 1
-          { Id: 'd10', SyncToken: '0', DocNumber: null, TxnDate: '2026-03-28', MetaData: { CreateTime: '2026-03-28T10:00:00Z' }, PrivateNote: null },
-          { Id: 'd11', SyncToken: '0', DocNumber: null, TxnDate: '2026-03-28', MetaData: { CreateTime: '2026-03-28T11:00:00Z' }, PrivateNote: null },
+        .mockResolvedValueOnce([
+          // Deposit page 1
+          {
+            Id: 'd10',
+            SyncToken: '0',
+            DocNumber: null,
+            TxnDate: '2026-03-28',
+            MetaData: { CreateTime: '2026-03-28T10:00:00Z' },
+            PrivateNote: null,
+          },
+          {
+            Id: 'd11',
+            SyncToken: '0',
+            DocNumber: null,
+            TxnDate: '2026-03-28',
+            MetaData: { CreateTime: '2026-03-28T11:00:00Z' },
+            PrivateNote: null,
+          },
         ])
         .mockResolvedValueOnce([]) // Transfer page 1
         // Individual full fetches for d10 and d11
-        .mockResolvedValueOnce([{
-          Id: 'd10', SyncToken: '0', PrivateNote: null,
-          Line: [{ Description: 'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout' }],
-        }])
-        .mockResolvedValueOnce([{
-          Id: 'd11', SyncToken: '0', PrivateNote: null,
-          Line: [{ Description: 'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout' }],
-        }]);
+        .mockResolvedValueOnce([
+          {
+            Id: 'd10',
+            SyncToken: '0',
+            PrivateNote: null,
+            Line: [
+              {
+                Description:
+                  'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout',
+              },
+            ],
+          },
+        ])
+        .mockResolvedValueOnce([
+          {
+            Id: 'd11',
+            SyncToken: '0',
+            PrivateNote: null,
+            Line: [
+              {
+                Description:
+                  'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout',
+              },
+            ],
+          },
+        ]);
 
       const { context } = createContext();
       const req = createRequest({ system: 'qbo', fetchLineDescriptions: 'true' });
@@ -354,11 +387,27 @@ describe('stripeDuplicateCheck', () => {
       mockQboQuery
         .mockResolvedValueOnce([]) // SalesReceipt
         .mockResolvedValueOnce([]) // JournalEntry
-        .mockResolvedValueOnce([   // Deposit - canonical payout entry
-          makeQboDoc('d1', '0', null, '2026-03-28', '2026-03-28T10:00:00Z', 'Stripe payout po_1TRLq7BJf9YYVP9mB0NuhrM7'),
+        .mockResolvedValueOnce([
+          // Deposit - canonical payout entry
+          makeQboDoc(
+            'd1',
+            '0',
+            null,
+            '2026-03-28',
+            '2026-03-28T10:00:00Z',
+            'Stripe payout po_1TRLq7BJf9YYVP9mB0NuhrM7'
+          ),
         ])
-        .mockResolvedValueOnce([   // Transfer - bank-feed auto-entry
-          { Id: 't1', SyncToken: '0', DocNumber: null, TxnDate: '2026-04-02', MetaData: { CreateTime: '2026-04-02T10:00:00Z' }, PrivateNote: 'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout' },
+        .mockResolvedValueOnce([
+          // Transfer - bank-feed auto-entry
+          {
+            Id: 't1',
+            SyncToken: '0',
+            DocNumber: null,
+            TxnDate: '2026-04-02',
+            MetaData: { CreateTime: '2026-04-02T10:00:00Z' },
+            PrivateNote: 'Stripe PayoutID: po_1TRLq7BJf9YYVP9mB0NuhrM7 Initiated automatic payout',
+          },
         ]);
 
       const { context } = createContext();

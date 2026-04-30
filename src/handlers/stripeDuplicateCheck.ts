@@ -15,7 +15,7 @@ const QBO_ENTITY_QUERY_MAP: Record<QuickBooksDocEntityType, string> = {
   'sales-receipt': 'SalesReceipt',
   'journal-entry': 'JournalEntry',
   'bank-deposit': 'Deposit',
-  'transfer': 'Transfer',
+  transfer: 'Transfer',
 };
 
 // Entity types that can be deleted via deleteQuickBooksDocument (must match QuickBooksDocType in qboSvc)
@@ -79,7 +79,13 @@ type SystemResult = {
   duplicateGroups: DuplicateGroup[];
   deleted: number;
   errors: string[];
-  inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }>;
+  inspectMatches?: Array<{
+    entity: string;
+    id: string;
+    docNumber: string | null;
+    privateNote: string | null;
+    lineDescription: string | null;
+  }>;
   debugLineFetch?: Array<{ id: string; lineDescription: string | null }>;
 };
 
@@ -140,8 +146,22 @@ const detectQboDuplicates = async (
   endDate?: string,
   inspectStripeId?: string,
   fetchLineDescriptions?: boolean
-): Promise<{ groups: DuplicateGroup[]; checked: number; inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }>; debugLineFetch?: Array<{ id: string; lineDescription: string | null }> }> => {
-  type DocWithNote = DuplicateRecord & { privateNote: string | null; lineDescription: string | null };
+): Promise<{
+  groups: DuplicateGroup[];
+  checked: number;
+  inspectMatches?: Array<{
+    entity: string;
+    id: string;
+    docNumber: string | null;
+    privateNote: string | null;
+    lineDescription: string | null;
+  }>;
+  debugLineFetch?: Array<{ id: string; lineDescription: string | null }>;
+}> => {
+  type DocWithNote = DuplicateRecord & {
+    privateNote: string | null;
+    lineDescription: string | null;
+  };
   const allDocs: DocWithNote[] = [];
 
   for (const entity of Object.keys(QBO_ENTITY_QUERY_MAP) as QuickBooksDocEntityType[]) {
@@ -305,7 +325,12 @@ const detectQboDuplicates = async (
         }))
     : undefined;
 
-  return { groups, checked: allDocs.length, ...(inspectMatches !== undefined && { inspectMatches }), ...(debugLineFetch !== undefined && { debugLineFetch }) };
+  return {
+    groups,
+    checked: allDocs.length,
+    ...(inspectMatches !== undefined && { inspectMatches }),
+    ...(debugLineFetch !== undefined && { debugLineFetch }),
+  };
 };
 
 const deleteQboDuplicates = async (
@@ -324,7 +349,9 @@ const deleteQboDuplicates = async (
 
     for (const doc of sorted.slice(1)) {
       if (!QBO_DELETABLE_ENTITY_TYPES.has(doc.entity as QuickBooksDocEntityType)) {
-        errors.push(`Cannot auto-delete QBO ${doc.entity} ${doc.id}: entity type not supported for deletion`);
+        errors.push(
+          `Cannot auto-delete QBO ${doc.entity} ${doc.id}: entity type not supported for deletion`
+        );
         continue;
       }
       try {
@@ -515,7 +542,12 @@ const stripeDuplicateCheck = async (
 
   try {
     if (includeQbo) {
-      const { groups, checked, inspectMatches, debugLineFetch } = await detectQboDuplicates(startDate, endDate, inspectStripeId, fetchLineDescriptions);
+      const { groups, checked, inspectMatches, debugLineFetch } = await detectQboDuplicates(
+        startDate,
+        endDate,
+        inspectStripeId,
+        fetchLineDescriptions
+      );
       let deleted = 0;
       let errors: string[] = [];
 
@@ -525,7 +557,14 @@ const stripeDuplicateCheck = async (
         errors = result.errors;
       }
 
-      responseBody.qbo = { checked, duplicateGroups: groups, deleted, errors, ...(inspectMatches !== undefined && { inspectMatches }), ...(debugLineFetch !== undefined && { debugLineFetch }) };
+      responseBody.qbo = {
+        checked,
+        duplicateGroups: groups,
+        deleted,
+        errors,
+        ...(inspectMatches !== undefined && { inspectMatches }),
+        ...(debugLineFetch !== undefined && { debugLineFetch }),
+      };
     }
 
     if (includeSalesforce) {
