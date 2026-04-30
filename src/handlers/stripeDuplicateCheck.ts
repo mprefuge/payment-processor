@@ -43,6 +43,7 @@ type QboDocumentRecord = {
     CreateTime?: string | null;
     LastUpdatedTime?: string | null;
   } | null;
+  Line?: Array<{ Description?: string | null }> | null;
 };
 
 type DuplicateRecord = {
@@ -70,6 +71,7 @@ type SystemResult = {
   duplicateGroups: DuplicateGroup[];
   deleted: number;
   errors: string[];
+  inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }>;
 };
 
 /**
@@ -126,9 +128,10 @@ const queryQboDocuments = async (
 
 const detectQboDuplicates = async (
   startDate?: string,
-  endDate?: string
-): Promise<{ groups: DuplicateGroup[]; checked: number }> => {
-  type DocWithNote = DuplicateRecord & { privateNote: string | null };
+  endDate?: string,
+  inspectStripeId?: string
+): Promise<{ groups: DuplicateGroup[]; checked: number; inspectMatches?: Array<{ entity: string; id: string; docNumber: string | null; privateNote: string | null; lineDescription: string | null }> }> => {
+  type DocWithNote = DuplicateRecord & { privateNote: string | null; lineDescription: string | null };
   const allDocs: DocWithNote[] = [];
 
   for (const entity of Object.keys(QBO_ENTITY_QUERY_MAP) as QuickBooksDocEntityType[]) {
@@ -155,7 +158,32 @@ const detectQboDuplicates = async (
         entity,
         createTime: record.MetaData?.CreateTime ?? null,
         privateNote: record.PrivateNote ?? null,
+        lineDescription: null,
       });
+    }
+  }
+
+  // Secondary fetch: for bank-deposit records with no PrivateNote Stripe IDs, fetch the
+  // full individual record to read Line[].Description (QBO bulk SELECT never returns Line).
+  const depositsNeedingLineFetch = allDocs.filter(
+    (d) => d.entity === 'bank-deposit' && extractStripeIdsFromText(d.privateNote).length === 0
+  );
+  if (depositsNeedingLineFetch.length > 0) {
+    const idToIndex = new Map(allDocs.map((d, i) => [d.id, i]));
+    for (const doc of depositsNeedingLineFetch) {
+      try {
+        const rows = await qboQuery<QboDocumentRecord[]>(
+          `SELECT * FROM Deposit WHERE Id = '${doc.id}'`
+        );
+        const full = Array.isArray(rows) ? rows[0] : null;
+        if (full?.Line && full.Line.length > 0) {
+          const lineText = full.Line.map((l) => l.Description ?? '').join(' ');
+          const idx = idToIndex.get(doc.id);
+          if (idx !== undefined) allDocs[idx].lineDescription = lineText;
+        }
+      } catch {
+        // Non-fatal: skip this record's Line data
+      }
     }
   }
 
@@ -173,10 +201,14 @@ const detectQboDuplicates = async (
     byKey.set(key, group);
   };
 
-  for (const { privateNote, ...doc } of allDocs) {
+  for (const { privateNote, lineDescription, ...doc } of allDocs) {
     const noteIds = extractStripeIdsFromText(privateNote);
     if (noteIds.length > 0) {
       for (const stripeId of noteIds) {
+        addToGroup(`${doc.entity}:${stripeId}`, doc);
+      }
+    } else if (extractStripeIdsFromText(lineDescription).length > 0) {
+      for (const stripeId of extractStripeIdsFromText(lineDescription)) {
         addToGroup(`${doc.entity}:${stripeId}`, doc);
       }
     } else {
@@ -195,7 +227,25 @@ const detectQboDuplicates = async (
     }
   }
 
-  return { groups, checked: allDocs.length };
+  // Optional: return all records whose PrivateNote or DocNumber mentions the target Stripe ID
+  const inspectMatches = inspectStripeId
+    ? allDocs
+        .filter(
+          ({ privateNote, docNumber, lineDescription }) =>
+            (privateNote ?? '').includes(inspectStripeId) ||
+            (docNumber ?? '').includes(inspectStripeId) ||
+            (lineDescription ?? '').includes(inspectStripeId)
+        )
+        .map(({ privateNote, lineDescription, ...rest }) => ({
+          entity: rest.entity,
+          id: rest.id,
+          docNumber: rest.docNumber,
+          privateNote,
+          lineDescription: lineDescription ?? null,
+        }))
+    : undefined;
+
+  return { groups, checked: allDocs.length, ...(inspectMatches !== undefined && { inspectMatches }) };
 };
 
 const deleteQboDuplicates = async (
@@ -379,6 +429,7 @@ const stripeDuplicateCheck = async (
   const dryRun = readBooleanQuery(request, 'dryRun', true);
   const startDate = request.query.get('startDate') ?? undefined;
   const endDate = request.query.get('endDate') ?? undefined;
+  const inspectStripeId = request.query.get('inspectStripeId') ?? undefined;
 
   const includeQbo = system === 'qbo' || system === 'both';
   const includeSalesforce = system === 'salesforce' || system === 'both';
@@ -399,7 +450,7 @@ const stripeDuplicateCheck = async (
 
   try {
     if (includeQbo) {
-      const { groups, checked } = await detectQboDuplicates(startDate, endDate);
+      const { groups, checked, inspectMatches } = await detectQboDuplicates(startDate, endDate, inspectStripeId);
       let deleted = 0;
       let errors: string[] = [];
 
@@ -409,7 +460,7 @@ const stripeDuplicateCheck = async (
         errors = result.errors;
       }
 
-      responseBody.qbo = { checked, duplicateGroups: groups, deleted, errors };
+      responseBody.qbo = { checked, duplicateGroups: groups, deleted, errors, ...(inspectMatches !== undefined && { inspectMatches }) };
     }
 
     if (includeSalesforce) {
