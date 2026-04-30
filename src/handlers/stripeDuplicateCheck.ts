@@ -166,14 +166,36 @@ const detectQboDuplicates = async (
 
   // Secondary fetch: for bank-deposit records with no PrivateNote Stripe IDs, fetch the
   // full individual record to read Line[].Description (QBO bulk SELECT never returns Line).
-  // Only enabled when fetchLineDescriptions=true (or inspectStripeId is set) to keep the
-  // normal bulk scan fast — this can make hundreds of individual API calls.
-  const depositsNeedingLineFetch =
-    fetchLineDescriptions || inspectStripeId
-      ? allDocs.filter(
-          (d) => d.entity === 'bank-deposit' && extractStripeIdsFromText(d.privateNote).length === 0
-        )
-      : [];
+  //
+  // Strategy to keep API call count manageable:
+  //   inspectStripeId mode — only fetch deposits sharing TxnDate with a deposit that already
+  //     has the target ID in PrivateNote/DocNumber. Bank-feed duplicates are always on the same
+  //     date as their canonical counterpart. Falls back to all no-PN deposits if no date anchor.
+  //   fetchLineDescriptions mode — fetch up to 200 most-recent no-PN deposits (bulk scan cap).
+  //   default — skip entirely (keeps normal scans fast).
+  const depositsNeedingLineFetch = (() => {
+    const noPN = allDocs.filter(
+      (d) => d.entity === 'bank-deposit' && extractStripeIdsFromText(d.privateNote).length === 0
+    );
+    if (inspectStripeId) {
+      const anchorDates = new Set(
+        allDocs
+          .filter(
+            (d) =>
+              d.entity === 'bank-deposit' &&
+              ((d.privateNote ?? '').includes(inspectStripeId) ||
+                (d.docNumber ?? '').includes(inspectStripeId))
+          )
+          .map((d) => d.txnDate)
+          .filter(Boolean) as string[]
+      );
+      return anchorDates.size > 0 ? noPN.filter((d) => d.txnDate && anchorDates.has(d.txnDate)) : noPN;
+    }
+    if (fetchLineDescriptions) {
+      return noPN.slice(-200); // cap at 200 most recent to prevent excessive API calls
+    }
+    return [];
+  })();
   if (depositsNeedingLineFetch.length > 0) {
     const idToIndex = new Map(allDocs.map((d, i) => [d.id, i]));
     for (const doc of depositsNeedingLineFetch) {
