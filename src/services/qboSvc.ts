@@ -1704,6 +1704,20 @@ const getSalesReceiptLineOverrides = (
   return overrides;
 };
 
+const getStripeLineDescription = (
+  stripeContext: StripeCustomerContext | null | undefined
+): string | null => {
+  if (!stripeContext) {
+    return null;
+  }
+
+  return (
+    toTrimmed(stripeContext.paymentIntent?.description) ??
+    toTrimmed(stripeContext.charge?.description) ??
+    null
+  );
+};
+
 const resolveRevenueItemReference = async (
   configuredValue: string,
   context: QuickBooksRequestContext
@@ -1866,14 +1880,18 @@ export const buildSalesReceipt = ({
     );
   }
 
+  const effectiveQty = resolvedLineQty ?? 1;
+  const effectiveUnitPrice =
+    resolvedLineRate ?? Number((mainAmount / effectiveQty).toFixed(2));
+
   lines.push({
     Amount: mainAmount,
     DetailType: 'SalesItemLineDetail',
     Description: lineDescription,
     SalesItemLineDetail: {
       ItemRef: createItemRef(itemReference),
-      ...(resolvedLineQty !== undefined ? { Qty: resolvedLineQty } : {}),
-      ...(resolvedLineRate !== undefined ? { UnitPrice: resolvedLineRate } : {}),
+      Qty: effectiveQty,
+      UnitPrice: effectiveUnitPrice,
       ...(resolvedServiceDate ? { ServiceDate: resolvedServiceDate } : {}),
       ...(classRef ? { ClassRef: classRef } : {}),
     },
@@ -1894,6 +1912,8 @@ export const buildSalesReceipt = ({
       Description: 'Processing Fee Coverage',
       SalesItemLineDetail: {
         ItemRef: createItemRef(itemReference),
+        Qty: 1,
+        UnitPrice: coverFeesAmount,
         ...(classRef ? { ClassRef: classRef } : {}),
       },
     });
@@ -1921,6 +1941,8 @@ export const buildSalesReceipt = ({
       Description: 'Stripe Processing Fee',
       SalesItemLineDetail: {
         ItemRef: createItemRef(itemReference),
+        Qty: 1,
+        UnitPrice: stripeFeeAmount,
         ...(classRef ? { ClassRef: classRef } : {}),
         ...(feeItemAccountRef ? { ItemAccountRef: feeItemAccountRef } : {}),
       },
@@ -3238,8 +3260,10 @@ const postChargeAsSalesReceipt = async (input: {
   });
 
   const category = getCheckoutCategory(stripe?.checkoutSession);
+  const stripeDescription = getStripeLineDescription(stripe);
   const description =
     lineOverrides.description ??
+    stripeDescription ??
     (category ? `${category} - ${transactionTypeName}` : transactionTypeName);
 
   const coverFeesInfo = getCoverFeesInfo(stripe as any);

@@ -357,6 +357,8 @@ describe('postChargeToQbo', () => {
 
       // Fee should be present as the second line on the sales receipt with the fees account referenced
       expect(salesReceiptBody.Line[1].Amount).toBe(-3.25);
+      expect(salesReceiptBody.Line[1].SalesItemLineDetail.Qty).toBe(1);
+      expect(salesReceiptBody.Line[1].SalesItemLineDetail.UnitPrice).toBe(-3.25);
       expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
         value: 'QBO_ACCOUNT_FEES',
         name: 'Stripe Fees',
@@ -371,6 +373,61 @@ describe('postChargeToQbo', () => {
     },
     { timeout: 20000 }
   );
+
+  it('uses payment intent description and fills qty/rate defaults when overrides are absent', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-pi-desc', DisplayName: 'Donor Example' } },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-pi-desc' } }
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 10_000,
+      fee: 320,
+      memo: 'Charge memo',
+      date: new Date('2026-05-01'),
+      stripe: {
+        charge: createStripeCharge({ description: 'Charge fallback description' }),
+        paymentIntent: {
+          id: 'pi_3TSDsyBJf9YYVP9m1rGbR4un',
+          description: 'PM Giv to Refuge Inter',
+        } as any,
+        customer: null,
+        checkoutSession: createCheckoutSession(),
+      },
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-pi-desc', type: 'sales-receipt' });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    expect(salesReceiptRequest).toBeDefined();
+
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody.Line[0].Description).toBe('PM Giv to Refuge Inter');
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail).toMatchObject({
+      Qty: 1,
+      UnitPrice: 100,
+    });
+    expect(salesReceiptBody.Line[1]).toMatchObject({
+      Amount: -3.2,
+      Description: 'Stripe Processing Fee',
+      SalesItemLineDetail: {
+        Qty: 1,
+        UnitPrice: -3.2,
+      },
+    });
+  });
 
   it('preserves the unique tail of long Stripe charge ids in sales receipt DocNumber', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
