@@ -1881,8 +1881,7 @@ export const buildSalesReceipt = ({
   }
 
   const effectiveQty = resolvedLineQty ?? 1;
-  const effectiveUnitPrice =
-    resolvedLineRate ?? Number((mainAmount / effectiveQty).toFixed(2));
+  const effectiveUnitPrice = resolvedLineRate ?? Number((mainAmount / effectiveQty).toFixed(2));
 
   lines.push({
     Amount: mainAmount,
