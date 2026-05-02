@@ -29,7 +29,9 @@ const testArtifactCleanup = loadHandler('./handlers/testArtifactCleanup');
 const stripeDuplicateCheck = loadHandler('./handlers/stripeDuplicateCheck');
 const donationFormBuilder = loadHandler('./handlers/donationFormBuilder');
 const donationFormConfigSave = loadHandler('./handlers/donationFormConfigSave');
+const donationFormConfigList = loadHandler('./handlers/donationFormConfigList');
 const donationFormConfigGet = loadHandler('./handlers/donationFormConfigGet');
+const donationFormConfigDelete = loadHandler('./handlers/donationFormConfigDelete');
 const donationFormEmbed = loadHandler('./handlers/donationFormEmbed');
 
 // configure the Azure Functions runtime and add OpenAPI/Swagger support
@@ -880,6 +882,27 @@ registerFunction('donationFormConfigSave', 'Save a donation form configuration',
   },
 });
 
+registerFunction('donationFormConfigList', 'List published donation form configurations', {
+  handler: donationFormConfigList,
+  description:
+    'Returns a list of existing donation form configurations so they can be selected and edited in the builder.',
+  tags: ['Builder'],
+  operationId: 'donationFormConfigList',
+  methods: ['GET'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/configs',
+  responses: {
+    200: {
+      description: 'Config list',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+        },
+      },
+    },
+  },
+});
+
 registerFunction('donationFormConfigGet', 'Fetch a published donation form configuration', {
   handler: donationFormConfigGet,
   description: 'Returns a previously published donation form configuration as JSON.',
@@ -891,6 +914,34 @@ registerFunction('donationFormConfigGet', 'Fetch a published donation form confi
   responses: {
     200: {
       description: 'Config JSON',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: 'Config not found',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+registerFunction('donationFormConfigDelete', 'Delete a published donation form configuration', {
+  handler: donationFormConfigDelete,
+  description: 'Deletes a previously published donation form configuration.',
+  tags: ['Builder'],
+  operationId: 'donationFormConfigDelete',
+  methods: ['DELETE'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/configs/{configId}',
+  responses: {
+    200: {
+      description: 'Config deleted',
       content: {
         'application/json': {
           schema: GenericSuccessResponseSchema,
@@ -1613,7 +1664,9 @@ export {
   stripeDuplicateCheck,
   donationFormBuilder,
   donationFormConfigSave,
+  donationFormConfigList,
   donationFormConfigGet,
+  donationFormConfigDelete,
   donationFormEmbed,
 };
 

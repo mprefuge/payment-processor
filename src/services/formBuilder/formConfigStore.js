@@ -203,12 +203,16 @@ class FormConfigStore {
   }
 
   async save(configInput) {
-    const id = randomUUID();
+    const input = configInput && typeof configInput === 'object' ? configInput : {};
+    const requestedId = typeof input.id === 'string' ? input.id.trim() : '';
+    const existing = requestedId ? await this.storage.get(requestedId) : null;
+    const id = existing && existing.id ? existing.id : randomUUID();
     const normalizedConfig = normalizeDonationFormConfig(configInput);
+    const now = new Date().toISOString();
     const record = {
       id,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: existing && existing.createdAt ? existing.createdAt : now,
+      updatedAt: now,
       config: normalizedConfig,
     };
 
@@ -223,6 +227,39 @@ class FormConfigStore {
 
     const record = await this.storage.get(id);
     return record ? clone(record) : null;
+  }
+
+  async list() {
+    const records = await this.storage.values();
+    const sorted = records
+      .filter((record) => record && record.id && record.config)
+      .sort((a, b) => {
+        const left = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const right = new Date(b.updatedAt || b.createdAt || 0).getTime();
+        return right - left;
+      });
+
+    return sorted.map((record) => ({
+      id: record.id,
+      name:
+        (record.config && record.config.name) ||
+        (record.config && record.config.branding && record.config.branding.title) ||
+        'Untitled form',
+      updatedAt: record.updatedAt || null,
+      createdAt: record.createdAt || null,
+      displayMode:
+        record.config && record.config.display && record.config.display.mode
+          ? record.config.display.mode
+          : 'embedded',
+    }));
+  }
+
+  async delete(id) {
+    if (!id) {
+      return false;
+    }
+
+    return this.storage.delete(id);
   }
 }
 

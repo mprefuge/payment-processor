@@ -13,6 +13,7 @@ module.exports = async function donationFormBuilder(request) {
   const baseUrl = getBaseUrl(request);
   const builderEndpoint = baseUrl + '/api/form-builder';
   const saveEndpoint = baseUrl + '/api/form-builder/configs';
+  const listEndpoint = baseUrl + '/api/form-builder/configs';
   const configBaseUrl = baseUrl + '/api/form-builder/configs';
 
   return {
@@ -24,6 +25,7 @@ module.exports = async function donationFormBuilder(request) {
     body: createBuilderPage({
       builderEndpoint,
       saveEndpoint,
+      listEndpoint,
       configBaseUrl,
     }),
   };

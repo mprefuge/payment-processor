@@ -1,7 +1,7 @@
 const { getDefaultDonationFormConfig } = require('./defaultDonationFormConfig');
 const { getDonationFormRuntimeSource } = require('./runtimeSource');
 
-function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
+function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, configBaseUrl }) {
   const defaultConfig = JSON.stringify(getDefaultDonationFormConfig());
   const runtimeSource = getDonationFormRuntimeSource();
 
@@ -164,6 +164,24 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
         <div class="builder-copy">Arrange the donor experience with drag-and-drop sections, tune the payment options, and publish a reusable configuration URL plus embed snippet.</div>
 
         <div class="builder-section">
+          <h2>Saved Forms</h2>
+          <div class="builder-grid builder-grid-2">
+            <div>
+              <label class="builder-label" for="builder-form-library">Select Existing Form</label>
+              <select class="builder-select" id="builder-form-library">
+                <option value="">Create new form</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:flex-end">
+              <button class="builder-btn builder-btn-secondary" style="width:100%" id="load-selected-form">Load Selected Form</button>
+            </div>
+          </div>
+          <div class="builder-actions" style="margin-top:12px">
+            <button class="builder-btn builder-btn-secondary" id="delete-selected-form">Delete Selected Form</button>
+          </div>
+        </div>
+
+        <div class="builder-section">
           <h2>Branding</h2>
           <div class="builder-grid">
             <div>
@@ -294,12 +312,16 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
     <script>
       (function () {
         var DEFAULT_CONFIG = ${defaultConfig};
+        var BUILDER_ENDPOINT = ${JSON.stringify(builderEndpoint)};
         var SAVE_ENDPOINT = ${JSON.stringify(saveEndpoint)};
+        var LIST_ENDPOINT = ${JSON.stringify(listEndpoint || saveEndpoint)};
         var CONFIG_BASE_URL = ${JSON.stringify(configBaseUrl)};
         var builderState = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
         var sectionList = document.getElementById('section-list');
         var previewRoot = document.getElementById('builder-preview-root');
         var publishResult = document.getElementById('publish-result');
+        var formLibrary = document.getElementById('builder-form-library');
+        var currentConfigId = null;
         var draggingSectionId = null;
 
         function clone(value) {
@@ -368,6 +390,71 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
           builderState.options.collectAddress = document.getElementById('toggle-address').checked;
           builderState.options.enableTribute = document.getElementById('toggle-tribute').checked;
           builderState.options.enableFeeCoverage = document.getElementById('toggle-fees').checked;
+        }
+
+        function formatFormLibraryOption(record) {
+          var name = record && record.name ? record.name : 'Untitled form';
+          var mode = record && record.displayMode ? record.displayMode : 'embedded';
+          var updated = record && record.updatedAt ? new Date(record.updatedAt).toLocaleString() : 'unknown date';
+          return name + ' (' + mode + ' • ' + updated + ')';
+        }
+
+        function refreshFormLibrary() {
+          return fetch(LIST_ENDPOINT)
+            .then(function (response) {
+              if (!response.ok) {
+                throw new Error('Unable to load saved forms.');
+              }
+              return response.json();
+            })
+            .then(function (payload) {
+              var records = payload && Array.isArray(payload.records) ? payload.records : [];
+              formLibrary.innerHTML = '<option value="">Create new form</option>';
+
+              records.forEach(function (record) {
+                var option = document.createElement('option');
+                option.value = record.id;
+                option.textContent = formatFormLibraryOption(record);
+                if (currentConfigId && currentConfigId === record.id) {
+                  option.selected = true;
+                }
+                formLibrary.appendChild(option);
+              });
+            })
+            .catch(function () {
+              formLibrary.innerHTML = '<option value="">Create new form</option>';
+            });
+        }
+
+        function resetToDefaultForm() {
+          currentConfigId = null;
+          builderState = clone(DEFAULT_CONFIG);
+          bindBranding();
+          renderSectionList();
+          renderPreview();
+          formLibrary.value = '';
+        }
+
+        function loadConfigById(configId) {
+          if (!configId) {
+            resetToDefaultForm();
+            return Promise.resolve();
+          }
+
+          return fetch(CONFIG_BASE_URL.replace(/\/$/, '') + '/' + encodeURIComponent(configId))
+            .then(function (response) {
+              if (!response.ok) {
+                throw new Error('Configuration not found.');
+              }
+              return response.json();
+            })
+            .then(function (payload) {
+              currentConfigId = configId;
+              builderState = payload.config || clone(DEFAULT_CONFIG);
+              bindBranding();
+              renderSectionList();
+              renderPreview();
+            });
         }
 
         function renderSectionList() {
@@ -458,22 +545,77 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
         });
 
         document.getElementById('reset-config').addEventListener('click', function () {
-          builderState = clone(DEFAULT_CONFIG);
-          bindBranding();
-          renderSectionList();
-          renderPreview();
+          resetToDefaultForm();
           publishResult.classList.remove('is-visible');
+          refreshFormLibrary();
+        });
+
+        document.getElementById('load-selected-form').addEventListener('click', function () {
+          var selectedId = formLibrary.value;
+          loadConfigById(selectedId)
+            .then(function () {
+              var url = new URL(CONFIG_BASE_URL, window.location.origin);
+              if (currentConfigId) {
+                url.searchParams.set('config', currentConfigId);
+              }
+              history.replaceState({}, '', url.toString());
+            })
+            .catch(function () {
+              publishResult.classList.add('is-visible');
+              document.getElementById('config-url').textContent = 'Unable to load selected form.';
+            });
+        });
+
+        document.getElementById('delete-selected-form').addEventListener('click', function () {
+          var selectedId = formLibrary.value || currentConfigId;
+          if (!selectedId) {
+            publishResult.classList.add('is-visible');
+            document.getElementById('config-url').textContent = 'Select a saved form before deleting.';
+            return;
+          }
+
+          if (!window.confirm('Delete this saved donation form? This cannot be undone.')) {
+            return;
+          }
+
+          fetch(CONFIG_BASE_URL.replace(/\/$/, '') + '/' + encodeURIComponent(selectedId), {
+            method: 'DELETE',
+          })
+            .then(function (response) {
+              if (!response.ok) {
+                throw new Error('Unable to delete selected form.');
+              }
+              return response.json();
+            })
+            .then(function () {
+              resetToDefaultForm();
+              publishResult.classList.remove('is-visible');
+              return refreshFormLibrary();
+            })
+            .then(function () {
+              var url = new URL(BUILDER_ENDPOINT, window.location.origin);
+              history.replaceState({}, '', url.toString());
+            })
+            .catch(function (error) {
+              publishResult.classList.add('is-visible');
+              document.getElementById('config-url').textContent = error && error.message ? error.message : 'Unable to delete selected form.';
+            });
         });
 
         document.getElementById('save-config').addEventListener('click', function () {
           applyInputs();
+          var payload = clone(builderState);
+          if (currentConfigId) {
+            payload.id = currentConfigId;
+          }
           fetch(SAVE_ENDPOINT, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(builderState),
+            body: JSON.stringify(payload),
           })
             .then(function (response) { return response.json(); })
             .then(function (result) {
+              currentConfigId = result.id || currentConfigId;
               publishResult.classList.add('is-visible');
               document.getElementById('config-url').textContent = result.configUrl;
               var snippets = result.embedSnippets || {};
@@ -484,6 +626,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
               var url = new URL(CONFIG_BASE_URL, window.location.origin);
               url.searchParams.set('config', result.id);
               history.replaceState({}, '', url.toString());
+              refreshFormLibrary();
             })
             .catch(function (error) {
               publishResult.classList.add('is-visible');
@@ -499,28 +642,18 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, configBaseUrl }) {
           if (!configId) {
             return Promise.resolve();
           }
-          return fetch(CONFIG_BASE_URL.replace(/\\\/$/, '') + '/' + encodeURIComponent(configId))
-            .then(function (response) {
-              if (!response.ok) {
-                throw new Error('Configuration not found.');
-              }
-              return response.json();
-            })
-            .then(function (payload) {
-              builderState = payload.config || clone(DEFAULT_CONFIG);
-              bindBranding();
-              renderSectionList();
-              renderPreview();
-            })
+          return loadConfigById(configId)
             .catch(function () {
-              builderState = clone(DEFAULT_CONFIG);
+              resetToDefaultForm();
             });
         }
 
         bindBranding();
         renderSectionList();
         renderPreview();
-        loadExistingConfig();
+        loadExistingConfig().then(function () {
+          refreshFormLibrary();
+        });
       })();
     </script>
   </body>

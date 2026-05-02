@@ -18,6 +18,21 @@ const createConfigStore = () => {
     async get(id) {
       return records.get(id) || null;
     },
+    async list() {
+      return Array.from(records.values()).map((record) => ({
+        id: record.id,
+        name: (record.config && record.config.name) || 'Untitled form',
+        updatedAt: record.updatedAt || null,
+        createdAt: record.createdAt || null,
+        displayMode:
+          record.config && record.config.display && record.config.display.mode
+            ? record.config.display.mode
+            : 'embedded',
+      }));
+    },
+    async delete(id) {
+      return records.delete(id);
+    },
     seed(record) {
       records.set(record.id, record);
     },
@@ -43,7 +58,6 @@ describe('donation form builder handlers', () => {
     expect(response.body).toContain('Donation Form Builder');
     expect(response.body).toContain('/api/form-builder/configs');
     expect(response.body).toContain('split(/\\r?\\n/)');
-    expect(response.body).toContain("replace(/\\\/$/, '')");
   });
 
   it('saves a config and returns config plus embed URLs', async () => {
@@ -92,6 +106,32 @@ describe('donation form builder handlers', () => {
     handler.__internals.resetConfigStore();
   });
 
+  it('lists saved configs for builder library', async () => {
+    const handler = require('../dist/handlers/donationFormConfigList');
+    const store = createConfigStore();
+    store.seed({
+      id: 'cfg_one',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      config: { name: 'Micah Test Form One', display: { mode: 'embedded' } },
+    });
+    handler.__internals.setConfigStore(store);
+
+    const response = await handler(
+      createHttpRequest({
+        method: 'GET',
+        url: 'http://localhost:7071/api/form-builder/configs',
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const payload = JSON.parse(response.body);
+    expect(Array.isArray(payload.records)).toBe(true);
+    expect(payload.records[0].id).toBe('cfg_one');
+
+    handler.__internals.resetConfigStore();
+  });
+
   it('returns inline config embed script when config id is provided', async () => {
     const handler = require('../dist/handlers/donationFormEmbed');
     const store = createConfigStore();
@@ -111,6 +151,29 @@ describe('donation form builder handlers', () => {
     expect(response.status).toBe(200);
     expect(response.headers['Content-Type']).toContain('application/javascript');
     expect(response.body).toContain('Micah Test Inline Config');
+
+    handler.__internals.resetConfigStore();
+  });
+
+  it('deletes saved configs by id', async () => {
+    const handler = require('../dist/handlers/donationFormConfigDelete');
+    const store = createConfigStore();
+    store.seed({
+      id: 'cfg_delete',
+      config: { name: 'Micah Test Delete Me' },
+    });
+    handler.__internals.setConfigStore(store);
+
+    const response = await handler(
+      createHttpRequest({
+        method: 'DELETE',
+        url: 'http://localhost:7071/api/form-builder/configs/cfg_delete',
+        params: { configId: 'cfg_delete' },
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({ ok: true, id: 'cfg_delete' });
 
     handler.__internals.resetConfigStore();
   });

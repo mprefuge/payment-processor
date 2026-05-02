@@ -15,6 +15,12 @@ const createMemoryStorage = () => {
       map.set(key, JSON.parse(JSON.stringify(value)));
       return value;
     },
+    async values() {
+      return Array.from(map.values()).map((value) => JSON.parse(JSON.stringify(value)));
+    },
+    async delete(key) {
+      return map.delete(key);
+    },
   };
 };
 
@@ -47,5 +53,35 @@ describe('formConfigStore', () => {
 
     const loaded = await store.get(saved.id);
     expect(loaded).toEqual(saved);
+  });
+
+  it('lists records and updates existing ids in place', async () => {
+    const store = new FormConfigStore({ storage: createMemoryStorage() });
+
+    const first = await store.save({ name: 'Micah Test Form One' });
+    const second = await store.save({ name: 'Micah Test Form Two' });
+
+    const listed = await store.list();
+    expect(listed.length).toBe(2);
+    expect(listed.some((record) => record.id === first.id)).toBe(true);
+    expect(listed.some((record) => record.id === second.id)).toBe(true);
+
+    const updated = await store.save({ id: first.id, name: 'Micah Test Form One Updated' });
+    expect(updated.id).toBe(first.id);
+    expect(updated.config.name).toBe('Micah Test Form One Updated');
+
+    const reloaded = await store.get(first.id);
+    expect(reloaded.config.name).toBe('Micah Test Form One Updated');
+  });
+
+  it('deletes saved records by id', async () => {
+    const store = new FormConfigStore({ storage: createMemoryStorage() });
+    const saved = await store.save({ name: 'Micah Test Delete Form' });
+
+    const deleted = await store.delete(saved.id);
+    expect(deleted).toBe(true);
+
+    const loaded = await store.get(saved.id);
+    expect(loaded).toBeNull();
   });
 });
