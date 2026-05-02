@@ -10,8 +10,6 @@ class FileKeyValueStore {
 
     this.filePath = filePath;
     this.logger = logger;
-    this.cache = null;
-    this.initialized = false;
     this.mutex = Promise.resolve();
   }
 
@@ -28,20 +26,8 @@ class FileKeyValueStore {
     return run;
   }
 
-  async _ensureInitialized() {
-    if (this.initialized) {
-      return;
-    }
-
-    await this._withLock(async () => {
-      if (this.initialized) {
-        return;
-      }
-
-      await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
-      this.cache = await this._readFile();
-      this.initialized = true;
-    });
+  async _ensureDirectory() {
+    await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
   }
 
   async _readFile() {
@@ -69,54 +55,64 @@ class FileKeyValueStore {
   }
 
   async get(key) {
-    await this._ensureInitialized();
-    const value = this.cache[key];
+    await this._ensureDirectory();
+    const cache = await this._readFile();
+    const value = cache[key];
     return value === undefined ? null : this._clone(value);
   }
 
   async has(key) {
-    await this._ensureInitialized();
-    return Object.prototype.hasOwnProperty.call(this.cache, key);
+    await this._ensureDirectory();
+    const cache = await this._readFile();
+    return Object.prototype.hasOwnProperty.call(cache, key);
   }
 
   async set(key, value) {
-    await this._ensureInitialized();
+    await this._ensureDirectory();
     const toStore = this._clone(value);
     await this._withLock(async () => {
-      this.cache[key] = toStore;
-      await this._writeFile(this.cache);
+      const cache = await this._readFile();
+      cache[key] = toStore;
+      await this._writeFile(cache);
     });
     return this._clone(toStore);
   }
 
   async delete(key) {
-    await this._ensureInitialized();
-    if (!Object.prototype.hasOwnProperty.call(this.cache, key)) {
-      return false;
-    }
+    await this._ensureDirectory();
+
+    let deleted = false;
 
     await this._withLock(async () => {
-      delete this.cache[key];
-      await this._writeFile(this.cache);
+      const cache = await this._readFile();
+      if (!Object.prototype.hasOwnProperty.call(cache, key)) {
+        return;
+      }
+
+      delete cache[key];
+      await this._writeFile(cache);
+      deleted = true;
     });
-    return true;
+
+    return deleted;
   }
 
   async values() {
-    await this._ensureInitialized();
-    return Object.values(this.cache).map((value) => this._clone(value));
+    await this._ensureDirectory();
+    const cache = await this._readFile();
+    return Object.values(cache).map((value) => this._clone(value));
   }
 
   async entries() {
-    await this._ensureInitialized();
-    return Object.entries(this.cache).map(([key, value]) => [key, this._clone(value)]);
+    await this._ensureDirectory();
+    const cache = await this._readFile();
+    return Object.entries(cache).map(([key, value]) => [key, this._clone(value)]);
   }
 
   async clear() {
-    await this._ensureInitialized();
+    await this._ensureDirectory();
     await this._withLock(async () => {
-      this.cache = {};
-      await this._writeFile(this.cache);
+      await this._writeFile({});
     });
   }
 }

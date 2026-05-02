@@ -2,9 +2,10 @@ const path = require('path');
 const FileKeyValueStore = require('./fileKeyValueStore');
 
 const storeCache = new Map();
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..', '..');
 
 function getBasePath(namespace = 'default') {
-  const root = process.env.PERSISTENT_STORAGE_BASE_PATH || path.join(process.cwd(), 'data');
+  const root = process.env.PERSISTENT_STORAGE_BASE_PATH || path.join(PROJECT_ROOT, 'data');
   return path.join(root, namespace);
 }
 

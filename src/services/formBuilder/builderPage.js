@@ -342,6 +342,16 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
             .filter(function (item) { return Number.isFinite(item) && item > 0; });
         }
 
+        function trimTrailingSlash(value) {
+          if (!value) {
+            return '';
+          }
+
+          return value.charAt(value.length - 1) === '/'
+            ? value.slice(0, -1)
+            : value;
+        }
+
         function bindBranding() {
           builderState.display = builderState.display || {};
           document.getElementById('builder-name').value = builderState.name || '';
@@ -441,7 +451,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
             return Promise.resolve();
           }
 
-          return fetch(CONFIG_BASE_URL.replace(/\/$/, '') + '/' + encodeURIComponent(configId))
+          return fetch(trimTrailingSlash(CONFIG_BASE_URL) + '/' + encodeURIComponent(configId))
             .then(function (response) {
               if (!response.ok) {
                 throw new Error('Configuration not found.');
@@ -578,7 +588,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
             return;
           }
 
-          fetch(CONFIG_BASE_URL.replace(/\/$/, '') + '/' + encodeURIComponent(selectedId), {
+          fetch(trimTrailingSlash(CONFIG_BASE_URL) + '/' + encodeURIComponent(selectedId), {
             method: 'DELETE',
           })
             .then(function (response) {
