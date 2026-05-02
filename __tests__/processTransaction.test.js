@@ -23,6 +23,11 @@ describe('processTransaction', () => {
     delete process.env.SF_CLIENT_SECRET;
     delete process.env.SF_LOGIN_URL;
     delete process.env.TEST_ARTIFACT_RUN_ID;
+    delete process.env.STRIPE_MODE;
+    delete process.env.STRIPE_LIVE_MODE_ENABLED;
+    delete process.env.STRIPE_LIVEMODE;
+    delete process.env.STRIPE_LIVE_SECRET_KEY;
+    delete process.env.STRIPE_TEST_SECRET_KEY;
   });
 
   it('returns checkout URL when valid request body is provided', async () => {
@@ -74,6 +79,98 @@ describe('processTransaction', () => {
 
     expect(stripeMock.customers.search).toHaveBeenCalled();
     expect(stripeMock.checkout.sessions.create).toHaveBeenCalled();
+  });
+
+  it('uses live Stripe key by default when category is not testing', async () => {
+    process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live_default';
+    process.env.STRIPE_TEST_SECRET_KEY = 'sk_test_default';
+    delete process.env.STRIPE_MODE;
+    delete process.env.STRIPE_LIVE_MODE_ENABLED;
+    delete process.env.STRIPE_LIVEMODE;
+
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_live' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_live',
+            url: 'https://stripe.test/session/live',
+            livemode: true,
+          }),
+        },
+      },
+    };
+
+    const factoryMock = vi.fn().mockReturnValue(stripeMock);
+    internals.setStripeClientFactory(factoryMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 5000,
+        frequency: 'onetime',
+        category: 'General',
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(context.res.status).toBe(200);
+    expect(factoryMock).toHaveBeenCalledWith('sk_live_default');
+  });
+
+  it('uses test Stripe key only when category is testing', async () => {
+    process.env.STRIPE_LIVE_SECRET_KEY = 'sk_live_default';
+    process.env.STRIPE_TEST_SECRET_KEY = 'sk_test_default';
+    delete process.env.STRIPE_MODE;
+    delete process.env.STRIPE_LIVE_MODE_ENABLED;
+    delete process.env.STRIPE_LIVEMODE;
+
+    const stripeMock = {
+      customers: {
+        search: vi.fn().mockResolvedValue({ data: [] }),
+        create: vi.fn().mockResolvedValue({ id: 'cus_test_mode' }),
+      },
+      checkout: {
+        sessions: {
+          create: vi.fn().mockResolvedValue({
+            id: 'cs_test_mode',
+            url: 'https://stripe.test/session/test',
+            livemode: false,
+          }),
+        },
+      },
+    };
+
+    const factoryMock = vi.fn().mockReturnValue(stripeMock);
+    internals.setStripeClientFactory(factoryMock);
+
+    const { context } = createContext();
+    const req = {
+      body: {
+        amount: 5000,
+        frequency: 'onetime',
+        category: 'testing',
+        customer: {
+          email: 'donor@example.com',
+          firstName: 'Donor',
+          lastName: 'Example',
+        },
+      },
+    };
+
+    await handler(context, req);
+
+    expect(context.res.status).toBe(200);
+    expect(factoryMock).toHaveBeenCalledWith('sk_test_default');
   });
 
   it('propagates a configured test artifact tag into Stripe customer and checkout metadata', async () => {

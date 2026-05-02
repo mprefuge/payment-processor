@@ -190,7 +190,10 @@ const readModeToggleFromRequest = (request) => {
   return null;
 };
 
-const getConfiguredMode = (requestOrContext, maybeContext) => {
+const isTestingCategory = (value) =>
+  typeof value === 'string' && value.trim().toLowerCase() === 'testing';
+
+const getConfiguredMode = (requestOrContext, maybeContext, requestData) => {
   const request = maybeContext ? requestOrContext : null;
   const context = maybeContext || requestOrContext;
 
@@ -217,7 +220,7 @@ const getConfiguredMode = (requestOrContext, maybeContext) => {
     return parseBooleanFlag(envFlag);
   }
 
-  return false;
+  return !isTestingCategory(requestData?.category);
 };
 
 const setStripeClientFactory = (factory) => {
@@ -981,8 +984,8 @@ module.exports = async function (request, context) {
       });
     }
 
-    const isLiveMode = getConfiguredMode(actualRequest, actualContext);
     const requestData = validation.value;
+    const isLiveMode = getConfiguredMode(actualRequest, actualContext, requestData);
     requestData.metadata = applyTestArtifactMetadata(requestData.metadata, {
       headers: actualRequest?.headers,
       isLiveMode,
