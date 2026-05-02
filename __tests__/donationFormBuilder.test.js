@@ -42,7 +42,7 @@ describe('donation form builder handlers', () => {
     expect(response.headers['Content-Type']).toContain('text/html');
     expect(response.body).toContain('Donation Form Builder');
     expect(response.body).toContain('/api/form-builder/configs');
-    expect(response.body).toContain("split(/\\r?\\n/)");
+    expect(response.body).toContain('split(/\\r?\\n/)');
     expect(response.body).toContain("replace(/\\\/$/, '')");
   });
 
@@ -64,7 +64,9 @@ describe('donation form builder handlers', () => {
     expect(response.jsonBody.configUrl).toBe(
       'http://localhost:7071/api/form-builder/configs/cfg_test_123'
     );
-    expect(response.jsonBody.embedScriptUrl).toContain('/api/form-builder/embed.js?config=cfg_test_123');
+    expect(response.jsonBody.embedScriptUrl).toContain(
+      '/api/form-builder/embed.js?config=cfg_test_123'
+    );
     expect(response.jsonBody.embedSnippet).toContain('data-donation-form');
 
     handler.__internals.resetConfigStore();

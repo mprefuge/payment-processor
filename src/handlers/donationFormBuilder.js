@@ -3,7 +3,8 @@ require('../preflight');
 const { createBuilderPage } = require('../services/formBuilder/builderPage');
 
 const getBaseUrl = (request) => {
-  const requestUrl = request && request.url ? request.url : 'http://localhost:7071/api/form-builder';
+  const requestUrl =
+    request && request.url ? request.url : 'http://localhost:7071/api/form-builder';
   const parsed = new URL(requestUrl);
   return parsed.origin;
 };

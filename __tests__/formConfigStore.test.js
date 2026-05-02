@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 
-const { FormConfigStore, normalizeDonationFormConfig } = require('../src/services/formBuilder/formConfigStore');
+const {
+  FormConfigStore,
+  normalizeDonationFormConfig,
+} = require('../src/services/formBuilder/formConfigStore');
 
 const createMemoryStorage = () => {
   const map = new Map();

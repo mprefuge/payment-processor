@@ -13,7 +13,8 @@ const resetConfigStore = () => {
 };
 
 const getBaseUrl = (request) => {
-  const requestUrl = request && request.url ? request.url : 'http://localhost:7071/api/form-builder/configs';
+  const requestUrl =
+    request && request.url ? request.url : 'http://localhost:7071/api/form-builder/configs';
   const parsed = new URL(requestUrl);
   return parsed.origin;
 };
@@ -24,9 +25,7 @@ module.exports = async function donationFormConfigSave(request) {
   const baseUrl = getBaseUrl(request);
   const configUrl = baseUrl + '/api/form-builder/configs/' + encodeURIComponent(record.id);
   const embedScriptUrl =
-    baseUrl +
-    '/api/form-builder/embed.js?config=' +
-    encodeURIComponent(record.id);
+    baseUrl + '/api/form-builder/embed.js?config=' + encodeURIComponent(record.id);
   const embeddedEmbedSnippet =
     '<div id="donation-form-embedded"></div>\n' +
     '<script src="' +
@@ -34,11 +33,7 @@ module.exports = async function donationFormConfigSave(request) {
     '"></' +
     'script>';
   const modalEmbedSnippet =
-    '<div data-donation-form></div>\n' +
-    '<script src="' +
-    embedScriptUrl +
-    '"></' +
-    'script>';
+    '<div data-donation-form></div>\n' + '<script src="' + embedScriptUrl + '"></' + 'script>';
   const selectedMode =
     record && record.config && record.config.display && record.config.display.mode === 'modal'
       ? 'modal'
