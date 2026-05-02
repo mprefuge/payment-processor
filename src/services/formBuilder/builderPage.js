@@ -554,7 +554,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
           var selectedId = formLibrary.value;
           loadConfigById(selectedId)
             .then(function () {
-              var url = new URL(CONFIG_BASE_URL, window.location.origin);
+              var url = new URL(BUILDER_ENDPOINT, window.location.origin);
               if (currentConfigId) {
                 url.searchParams.set('config', currentConfigId);
               }
@@ -623,7 +623,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
                 snippets.embedded || result.embeddedEmbedSnippet || result.embedSnippet || '';
               document.getElementById('embed-snippet-modal').textContent =
                 snippets.modal || result.modalEmbedSnippet || result.embedSnippet || '';
-              var url = new URL(CONFIG_BASE_URL, window.location.origin);
+              var url = new URL(BUILDER_ENDPOINT, window.location.origin);
               url.searchParams.set('config', result.id);
               history.replaceState({}, '', url.toString());
               refreshFormLibrary();
