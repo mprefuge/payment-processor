@@ -27,6 +27,10 @@ const salesforceRecordQboSync = loadHandler('./handlers/salesforceRecordQboSync'
 const qboReceiptsSync = loadHandler('./handlers/qboReceiptsSync');
 const testArtifactCleanup = loadHandler('./handlers/testArtifactCleanup');
 const stripeDuplicateCheck = loadHandler('./handlers/stripeDuplicateCheck');
+const donationFormBuilder = loadHandler('./handlers/donationFormBuilder');
+const donationFormConfigSave = loadHandler('./handlers/donationFormConfigSave');
+const donationFormConfigGet = loadHandler('./handlers/donationFormConfigGet');
+const donationFormEmbed = loadHandler('./handlers/donationFormEmbed');
 
 // configure the Azure Functions runtime and add OpenAPI/Swagger support
 app.setup({ enableHttpStream: true });
@@ -62,6 +66,7 @@ const openAPIConfig: OpenAPIObjectConfig = {
     { name: 'Stripe', description: 'Stripe webhook and helper functions' },
     { name: 'QBO', description: 'QuickBooks Online sync endpoints' },
     { name: 'Salesforce', description: 'Salesforce sync endpoints' },
+    { name: 'Builder', description: 'Donation form builder and embed endpoints' },
   ],
 };
 
@@ -833,6 +838,97 @@ registerFunction('healthCheck', 'Returns overall health and integration statuses
   },
 });
 
+registerFunction('donationFormBuilder', 'Render the drag-and-drop donation form builder UI', {
+  handler: donationFormBuilder,
+  description:
+    'Serves a self-contained WYSIWYG builder for composing a hosted donation form configuration and publishing an embed-ready config URL.',
+  tags: ['Builder'],
+  operationId: 'donationFormBuilder',
+  methods: ['GET'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder',
+  responses: {
+    200: {
+      description: 'Builder HTML page',
+      content: {
+        'text/html': {
+          schema: z.string(),
+        },
+      },
+    },
+  },
+});
+
+registerFunction('donationFormConfigSave', 'Save a donation form configuration', {
+  handler: donationFormConfigSave,
+  description:
+    'Persists a donation form configuration and returns the configuration URL plus a ready-to-paste embed snippet.',
+  tags: ['Builder'],
+  operationId: 'donationFormConfigSave',
+  methods: ['POST'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/configs',
+  responses: {
+    201: {
+      description: 'Config saved',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+registerFunction('donationFormConfigGet', 'Fetch a published donation form configuration', {
+  handler: donationFormConfigGet,
+  description: 'Returns a previously published donation form configuration as JSON.',
+  tags: ['Builder'],
+  operationId: 'donationFormConfigGet',
+  methods: ['GET'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/configs/{configId}',
+  responses: {
+    200: {
+      description: 'Config JSON',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: 'Config not found',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+registerFunction('donationFormEmbed', 'Return the embed runtime for a published donation form', {
+  handler: donationFormEmbed,
+  description:
+    'Returns a JavaScript embed that loads a published donation form configuration URL and renders the hosted Stripe checkout form.',
+  tags: ['Builder'],
+  operationId: 'donationFormEmbed',
+  methods: ['GET'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/embed.js',
+  responses: {
+    200: {
+      description: 'Embed JavaScript',
+      content: {
+        'application/javascript': {
+          schema: z.string(),
+        },
+      },
+    },
+  },
+});
+
 // transaction endpoint expects a request body matching transactionUpsertHttpBodySchema
 registerFunction('processTransaction', 'Process a payment transaction', {
   handler: processTransaction,
@@ -1515,6 +1611,10 @@ export {
   qboCustomersSync,
   salesforceRecordQboSync,
   stripeDuplicateCheck,
+  donationFormBuilder,
+  donationFormConfigSave,
+  donationFormConfigGet,
+  donationFormEmbed,
 };
 
 // expose the OpenAPI configuration/documents for testing or external use
