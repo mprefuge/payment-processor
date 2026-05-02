@@ -7,669 +7,940 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
 
   return `<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Donation Form Builder</title>
-    <style>
-      :root {
-        --builder-accent: #bd2135;
-        --builder-ink: #1d1d1f;
-        --builder-muted: #666;
-        --builder-bg: #f3efe8;
-        --builder-panel: #fff;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: Georgia, 'Times New Roman', serif;
-        color: var(--builder-ink);
-        background:
-          radial-gradient(circle at top left, rgba(189, 33, 53, 0.14), transparent 28%),
-          linear-gradient(180deg, #f7f1ea, #f3efe8 35%, #ece8e0 100%);
-      }
-      .builder-shell {
-        min-height: 100vh;
-        padding: 24px;
-        display: grid;
-        gap: 24px;
-        grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
-      }
-      .builder-panel,
-      .builder-preview {
-        background: rgba(255,255,255,0.92);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(0,0,0,0.08);
-        border-radius: 24px;
-        box-shadow: 0 24px 60px rgba(0,0,0,0.08);
-      }
-      .builder-panel { padding: 24px; overflow: auto; }
-      .builder-preview { padding: 20px; }
-      .builder-eyebrow {
-        text-transform: uppercase;
-        letter-spacing: .14em;
-        font-size: 12px;
-        color: var(--builder-accent);
-        font-weight: 700;
-      }
-      h1 { margin: 8px 0 10px; font-size: 36px; line-height: 1.05; }
-      .builder-copy { color: var(--builder-muted); font-size: 15px; max-width: 60ch; }
-      .builder-section { margin-top: 22px; }
-      .builder-section h2 {
-        margin: 0 0 12px;
-        font-size: 18px;
-      }
-      .builder-grid { display: grid; gap: 12px; }
-      .builder-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .builder-label {
-        display: block;
-        margin-bottom: 6px;
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: .06em;
-        font-weight: 700;
-        color: var(--builder-muted);
-      }
-      .builder-input,
-      .builder-textarea,
-      .builder-select {
-        width: 100%;
-        border-radius: 14px;
-        border: 1px solid rgba(0,0,0,.12);
-        background: #fff;
-        padding: 12px 14px;
-        font: inherit;
-      }
-      .builder-textarea { min-height: 90px; resize: vertical; }
-      .builder-toggle {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        padding: 12px 14px;
-        border-radius: 16px;
-        background: #fff;
-        border: 1px solid rgba(0,0,0,.08);
-      }
-      .builder-toggle input { width: 18px; height: 18px; }
-      .builder-list { display: grid; gap: 10px; }
-      .builder-item {
-        padding: 14px;
-        border-radius: 16px;
-        border: 1px solid rgba(0,0,0,.1);
-        background: linear-gradient(180deg, #fff, #faf7f4);
-        display: grid;
-        gap: 10px;
-        cursor: grab;
-      }
-      .builder-item.is-dragging { opacity: .45; }
-      .builder-item-top { display: flex; justify-content: space-between; gap: 12px; }
-      .builder-item-title { font-weight: 700; }
-      .builder-item-help { font-size: 13px; color: var(--builder-muted); }
-      .builder-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
-      .builder-btn {
-        border: 0;
-        border-radius: 999px;
-        padding: 12px 18px;
-        font: inherit;
-        font-weight: 700;
-        cursor: pointer;
-      }
-      .builder-btn-primary {
-        background: var(--builder-accent);
-        color: #fff;
-        box-shadow: 0 14px 32px rgba(189, 33, 53, 0.22);
-      }
-      .builder-btn-secondary {
-        background: #fff;
-        border: 1px solid rgba(0,0,0,.12);
-      }
-      .builder-result {
-        margin-top: 18px;
-        padding: 16px;
-        border-radius: 18px;
-        background: #fff8f6;
-        border: 1px solid rgba(189, 33, 53, .14);
-        display: none;
-      }
-      .builder-result.is-visible { display: block; }
-      .builder-code {
-        margin-top: 8px;
-        padding: 12px;
-        border-radius: 14px;
-        background: #241f20;
-        color: #f5f5f5;
-        font-family: Consolas, monospace;
-        font-size: 12px;
-        overflow: auto;
-        white-space: pre-wrap;
-      }
-      .builder-preview-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 16px;
-      }
-      .builder-preview-head small { color: var(--builder-muted); }
-      @media (max-width: 1080px) {
-        .builder-shell { grid-template-columns: 1fr; }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="builder-shell">
-      <aside class="builder-panel">
-        <div class="builder-eyebrow">No-Code Builder</div>
-        <h1>Donation Form Builder</h1>
-        <div class="builder-copy">Arrange the donor experience with drag-and-drop sections, tune the payment options, and publish a reusable configuration URL plus embed snippet.</div>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Donation Form Builder</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Manrope:wght@400;500;600;700;800&display=swap');
 
-        <div class="builder-section">
-          <h2>Saved Forms</h2>
-          <div class="builder-grid builder-grid-2">
-            <div>
-              <label class="builder-label" for="builder-form-library">Select Existing Form</label>
-              <select class="builder-select" id="builder-form-library">
-                <option value="">Create new form</option>
-              </select>
-            </div>
-            <div style="display:flex;align-items:flex-end">
-              <button class="builder-btn builder-btn-secondary" style="width:100%" id="load-selected-form">Load Selected Form</button>
-            </div>
-          </div>
-          <div class="builder-actions" style="margin-top:12px">
-            <button class="builder-btn builder-btn-secondary" id="delete-selected-form">Delete Selected Form</button>
-          </div>
-        </div>
+    :root {
+      --accent: #bd2135;
+      --accent-light: rgba(189,33,53,0.10);
+      --accent-ring: rgba(189,33,53,0.32);
+      --ink: #18161a;
+      --ink-2: #4a4650;
+      --ink-3: #8a8490;
+      --surface: #ffffff;
+      --surface-2: #f7f3ef;
+      --surface-3: #ede8e2;
+      --border: rgba(24,22,26,0.10);
+      --border-strong: rgba(24,22,26,0.18);
+      --shadow-sm: 0 2px 8px rgba(24,22,26,0.08);
+      --shadow-md: 0 8px 24px rgba(24,22,26,0.10);
+      --topbar-h: 54px;
+      --shelf-w: 260px;
+      --inspector-w: 320px;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+    }
 
-        <div class="builder-section">
-          <h2>Branding</h2>
-          <div class="builder-grid">
-            <div>
-              <label class="builder-label" for="builder-name">Form Name</label>
-              <input class="builder-input" id="builder-name" />
-            </div>
-            <div>
-              <label class="builder-label" for="builder-org-name">Organization Name</label>
-              <input class="builder-input" id="builder-org-name" />
-            </div>
-            <div>
-              <label class="builder-label" for="builder-title">Title</label>
-              <input class="builder-input" id="builder-title" />
-            </div>
-            <div>
-              <label class="builder-label" for="builder-submit-label">Submit Label</label>
-              <input class="builder-input" id="builder-submit-label" />
-            </div>
-            <div>
-              <label class="builder-label" for="builder-logo-url">Logo URL</label>
-              <input class="builder-input" id="builder-logo-url" />
-            </div>
-            <div>
-              <label class="builder-label" for="builder-accent-color">Accent Color</label>
-              <input class="builder-input" id="builder-accent-color" type="color" />
-            </div>
-            <div>
-              <label class="builder-label" for="builder-description">Description</label>
-              <textarea class="builder-textarea" id="builder-description"></textarea>
-            </div>
-          </div>
-        </div>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Manrope', 'Segoe UI', sans-serif; color: var(--ink); background: var(--surface-2); overflow: hidden; height: 100vh; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { border: 0; cursor: pointer; background: none; }
 
-        <div class="builder-section">
-          <h2>Presentation</h2>
-          <div class="builder-grid builder-grid-2">
-            <div>
-              <label class="builder-label" for="builder-display-mode">Form Display Mode</label>
-              <select class="builder-select" id="builder-display-mode">
-                <option value="embedded">Embedded Form</option>
-                <option value="modal">Modal Popup Form</option>
-              </select>
-            </div>
-            <div>
-              <label class="builder-label" for="builder-modal-trigger-label">Modal Trigger Label</label>
-              <input class="builder-input" id="builder-modal-trigger-label" placeholder="Open donation form" />
-            </div>
-          </div>
-        </div>
+    /* ── Top bar ─────────────────────────────────────── */
+    .vb-topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      height: var(--topbar-h);
+      background: rgba(255,255,255,0.96);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px; padding: 0 16px;
+    }
+    .vb-topbar-brand { font-family: 'Fraunces', Georgia, serif; font-size: 18px; font-weight: 600; white-space: nowrap; margin-right: 4px; }
+    .vb-topbar-brand span { color: var(--accent); }
+    .vb-topbar-sep { width: 1px; height: 24px; background: var(--border); }
+    .vb-topbar-form-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+    .vb-topbar-select { flex: 1; max-width: 280px; min-width: 120px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; font-weight: 500; background: var(--surface); outline: none; }
+    .vb-topbar-select:focus { border-color: var(--accent-ring); box-shadow: 0 0 0 3px var(--accent-light); }
+    .vb-topbar-actions { display: flex; gap: 6px; margin-left: auto; }
+    .vb-btn { border-radius: 8px; padding: 7px 14px; font-size: 13px; font-weight: 700; transition: all 0.14s ease; white-space: nowrap; }
+    .vb-btn:hover { transform: translateY(-1px); }
+    .vb-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+    .vb-btn-ghost { border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink-2); }
+    .vb-btn-ghost:hover { background: var(--surface-2); }
+    .vb-btn-primary { background: var(--accent); color: #fff; box-shadow: 0 4px 16px rgba(189,33,53,0.28); }
+    .vb-btn-primary:hover { background: #a51d2d; }
 
-        <div class="builder-section">
-          <h2>Payment Settings</h2>
-          <div class="builder-grid">
-            <div>
-              <label class="builder-label" for="builder-api-url">Transaction API URL</label>
-              <input class="builder-input" id="builder-api-url" />
-            </div>
-            <div class="builder-grid-2 builder-grid">
-              <div>
-                <label class="builder-label" for="builder-default-frequency">Default Frequency</label>
-                <select class="builder-select" id="builder-default-frequency">
-                  <option value="onetime">One-Time</option>
-                  <option value="month">Monthly</option>
-                  <option value="biweek">Bi-Weekly</option>
-                  <option value="week">Weekly</option>
-                  <option value="year">Yearly</option>
-                </select>
-              </div>
-              <div>
-                <label class="builder-label" for="builder-amounts">Preset Amounts</label>
-                <input class="builder-input" id="builder-amounts" placeholder="500,100,50,25,10" />
-              </div>
-            </div>
-            <div>
-              <label class="builder-label" for="builder-categories">Categories</label>
-              <textarea class="builder-textarea" id="builder-categories"></textarea>
-            </div>
-          </div>
-        </div>
+    /* ── Editor body ─────────────────────────────────── */
+    .vb-editor { display: flex; height: 100vh; padding-top: var(--topbar-h); }
 
-        <div class="builder-section">
-          <h2>Feature Toggles</h2>
-          <div class="builder-grid">
-            <label class="builder-toggle"><input type="checkbox" id="toggle-recurring" /> Allow recurring gifts</label>
-            <label class="builder-toggle"><input type="checkbox" id="toggle-organization" /> Allow organization giving</label>
-            <label class="builder-toggle"><input type="checkbox" id="toggle-address" /> Collect address</label>
-            <label class="builder-toggle"><input type="checkbox" id="toggle-tribute" /> Enable tribute gifts</label>
-            <label class="builder-toggle"><input type="checkbox" id="toggle-fees" /> Enable cover-fee option</label>
-          </div>
-        </div>
+    /* ── Left shelf ──────────────────────────────────── */
+    .vb-shelf { width: var(--shelf-w); flex-shrink: 0; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 
-        <div class="builder-section">
-          <h2>Section Layout</h2>
-          <div class="builder-copy">Drag cards to rearrange the form. Disable any section you do not want rendered.</div>
-          <div class="builder-list" id="section-list"></div>
-        </div>
+    .vb-shelf-pages { padding: 12px; border-bottom: 1px solid var(--border); }
+    .vb-shelf-pages-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .vb-shelf-pages-title { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3); }
+    .vb-shelf-add-page { font-size: 11px; font-weight: 700; color: var(--accent); padding: 3px 8px; border-radius: 6px; border: 1px solid var(--accent-ring); }
+    .vb-shelf-add-page:hover { background: var(--accent-light); }
 
-        <div class="builder-actions">
-          <button class="builder-btn builder-btn-primary" id="save-config">Publish Configuration</button>
-          <button class="builder-btn builder-btn-secondary" id="reset-config">Reset to Defaults</button>
-        </div>
+    .vb-page-chip { width: 100%; text-align: left; padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; background: none; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 2px; }
+    .vb-page-chip:hover { background: var(--surface-2); }
+    .vb-page-chip.is-selected { background: var(--accent-light); border-color: var(--accent-ring); color: var(--accent); }
+    .vb-page-chip.is-dragging { opacity: 0.4; }
+    .vb-page-chip-num { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-3); font-size: 10px; font-weight: 800; color: var(--ink-2); display: flex; align-items: center; justify-content: center; }
+    .vb-page-chip.is-selected .vb-page-chip-num { background: var(--accent); color: #fff; }
+    .vb-page-chip-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .vb-page-chip-count { font-size: 10px; color: var(--ink-3); flex-shrink: 0; }
 
-        <div class="builder-result" id="publish-result">
-          <div><strong>Config URL</strong></div>
-          <div id="config-url"></div>
-          <div style="margin-top:12px"><strong>Embedded Snippet</strong></div>
-          <div class="builder-code" id="embed-snippet-embedded"></div>
-          <div style="margin-top:12px"><strong>Modal Snippet</strong></div>
-          <div class="builder-code" id="embed-snippet-modal"></div>
-        </div>
-      </aside>
+    .vb-shelf-head { padding: 12px 12px 10px; border-bottom: 1px solid var(--border); }
+    .vb-shelf-head h2 { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3); margin-bottom: 8px; }
+    .vb-shelf-search { position: relative; }
+    .vb-shelf-search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--ink-3); pointer-events: none; font-size: 13px; }
+    .vb-shelf-search-input { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px 7px 30px; font-size: 13px; background: var(--surface-2); outline: none; }
+    .vb-shelf-search-input:focus { border-color: var(--accent-ring); background: var(--surface); }
 
-      <section class="builder-preview">
-        <div class="builder-preview-head">
-          <div>
-            <div class="builder-eyebrow">Live Preview</div>
-            <small>The preview uses the same runtime as the generated embed script.</small>
-          </div>
-          <a href="${builderEndpoint}" style="color:var(--builder-accent)">Reload builder</a>
-        </div>
-        <div id="builder-preview-root"></div>
-      </section>
+    .vb-shelf-body { flex: 1; overflow-y: auto; padding: 12px; }
+    .vb-shelf-section { margin-bottom: 14px; }
+    .vb-shelf-section-title { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3); margin-bottom: 8px; padding: 0 2px; }
+    .vb-shelf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .vb-shelf-block { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); cursor: grab; transition: all 0.12s ease; user-select: none; }
+    .vb-shelf-block:hover { border-color: var(--border-strong); background: var(--surface-2); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+    .vb-shelf-block:active { cursor: grabbing; }
+    .vb-shelf-block.is-disabled { opacity: 0.38; cursor: not-allowed; transform: none; box-shadow: none; }
+    .vb-shelf-block-icon { font-size: 20px; line-height: 1; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--surface-2); margin-bottom: 4px; }
+    .vb-shelf-block-name { font-size: 12px; font-weight: 700; }
+    .vb-shelf-block-desc { font-size: 11px; color: var(--ink-3); line-height: 1.3; }
+
+    /* ── Canvas ──────────────────────────────────────── */
+    .vb-canvas-area { flex: 1; min-width: 0; overflow-y: auto; padding: 24px; background: var(--surface-2); }
+    .vb-canvas-inner { max-width: 680px; margin: 0 auto; }
+
+    .vb-page-section { margin-bottom: 28px; }
+    .vb-page-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .vb-page-header-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.14em; color: var(--ink-3); white-space: nowrap; }
+    .vb-page-header-name { font-size: 14px; font-weight: 700; white-space: nowrap; }
+    .vb-page-header-line { flex: 1; height: 1px; background: var(--border); }
+    .vb-page-header-actions { display: flex; gap: 5px; }
+    .vb-page-header-btn { font-size: 11px; font-weight: 700; color: var(--ink-3); padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+    .vb-page-header-btn:hover { color: var(--ink); border-color: var(--border-strong); }
+    .vb-page-header-btn.danger:hover { color: var(--accent); border-color: var(--accent-ring); background: var(--accent-light); }
+
+    .vb-page-drop-area { border-radius: var(--radius-md); padding: 0; min-height: 56px; }
+    .vb-page-drop-area.is-empty { border: 2px dashed var(--border); display: flex; align-items: center; justify-content: center; min-height: 80px; border-radius: var(--radius-md); }
+    .vb-page-drop-area.drag-over { border-color: var(--accent-ring) !important; background: var(--accent-light) !important; }
+    .vb-page-empty-hint { font-size: 13px; color: var(--ink-3); padding: 16px; text-align: center; }
+
+    .vb-drop-zone { height: 6px; border-radius: 4px; margin: 3px 0; transition: all 0.14s ease; }
+    .vb-drop-zone.drag-over { height: 34px; margin: 3px 0; border-radius: 8px; background: var(--accent-light); border: 2px dashed var(--accent-ring); }
+    .vb-drop-zone.drag-over::after { content: 'Drop here'; display: flex; align-items: center; justify-content: center; height: 100%; font-size: 11px; font-weight: 700; color: var(--accent); }
+
+    .vb-add-page-btn { width: 100%; padding: 12px; border: 2px dashed var(--border); border-radius: var(--radius-md); background: none; color: var(--ink-3); font-size: 13px; font-weight: 600; transition: all 0.14s ease; margin-top: 4px; }
+    .vb-add-page-btn:hover { border-color: var(--accent-ring); color: var(--accent); background: var(--accent-light); }
+
+    /* ── Block card ──────────────────────────────────── */
+    .vb-block { position: relative; border-radius: var(--radius-md); background: var(--surface); border: 2px solid transparent; transition: border-color 0.12s, box-shadow 0.12s; }
+    .vb-block:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
+    .vb-block.is-selected { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-light); }
+    .vb-block.is-disabled { opacity: 0.5; }
+    .vb-block.is-dragging { opacity: 0.35; }
+
+    .vb-block-overlay { position: absolute; top: 8px; right: 8px; display: none; align-items: center; gap: 4px; z-index: 10; }
+    .vb-block:hover .vb-block-overlay, .vb-block.is-selected .vb-block-overlay { display: flex; }
+    .vb-block-drag-handle { cursor: grab; width: 28px; height: 28px; border-radius: 6px; background: rgba(255,255,255,0.94); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--ink-3); }
+    .vb-block-drag-handle:active { cursor: grabbing; }
+    .vb-block-ovr-btn { width: 28px; height: 28px; border-radius: 6px; background: rgba(255,255,255,0.94); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; transition: all 0.1s; }
+    .vb-block-ovr-btn:hover { background: #fff; border-color: var(--border-strong); }
+    .vb-block-ovr-btn.del:hover { background: #fef2f2; border-color: rgba(239,68,68,0.3); color: #dc2626; }
+
+    .vb-block-preview { padding: 18px 20px; }
+    .vb-block-type-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-3); margin-bottom: 10px; }
+
+    /* Block preview types */
+    .vbp-hero { text-align: center; padding: 16px 12px; }
+    .vbp-hero-logo { width: 52px; height: 52px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border); margin: 0 auto 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+    .vbp-hero-title { font-family: 'Fraunces', Georgia, serif; font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    .vbp-hero-desc { font-size: 13px; color: var(--ink-2); max-width: 38ch; margin: 0 auto; line-height: 1.6; }
+    .vbp-freq-tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+    .vbp-freq-tab { padding: 4px 11px; border-radius: 20px; font-size: 12px; font-weight: 700; border: 1px solid var(--border); color: var(--ink-2); }
+    .vbp-amounts { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
+    .vbp-amount-btn { padding: 6px 13px; border-radius: 8px; font-size: 13px; font-weight: 700; border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
+    .vbp-custom { display: flex; align-items: center; gap: 8px; }
+    .vbp-custom-sym { font-size: 14px; font-weight: 700; color: var(--ink-3); }
+    .vbp-fake-input { flex: 1; height: 36px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); }
+    .vbp-fields { display: grid; gap: 7px; }
+    .vbp-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .vbp-field { height: 36px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); display: flex; align-items: center; padding: 0 11px; font-size: 12px; color: var(--ink-3); }
+    .vbp-content-body { font-size: 14px; line-height: 1.65; color: var(--ink-2); border-left: 3px solid var(--accent-ring); padding-left: 12px; }
+    .vbp-toggle-row { display: flex; align-items: center; gap: 9px; height: 36px; border-radius: 8px; border: 1px solid var(--border); padding: 0 11px; background: var(--surface-2); }
+    .vbp-fake-cb { width: 15px; height: 15px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+    .vbp-toggle-lbl { font-size: 13px; color: var(--ink-2); }
+    .vbp-submit-wrap { text-align: center; padding: 10px 0; }
+    .vbp-total { font-size: 13px; color: var(--ink-3); margin-bottom: 10px; }
+    .vbp-total strong { font-size: 20px; color: var(--ink); font-family: 'Fraunces', Georgia, serif; }
+    .vbp-submit-btn { display: inline-block; padding: 12px 32px; border-radius: 999px; color: #fff; font-size: 14px; font-weight: 800; box-shadow: 0 8px 22px rgba(189,33,53,0.28); }
+
+    /* ── Inspector ───────────────────────────────────── */
+    .vb-inspector { width: var(--inspector-w); flex-shrink: 0; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: margin-right 0.22s ease; }
+    .vb-inspector.is-hidden { margin-right: calc(-1 * var(--inspector-w)); }
+    .vb-inspector-tabs { display: flex; border-bottom: 1px solid var(--border); }
+    .vb-inspector-tab { flex: 1; padding: 13px 6px; font-size: 12px; font-weight: 700; color: var(--ink-3); border-bottom: 2px solid transparent; transition: all 0.12s; }
+    .vb-inspector-tab:hover { color: var(--ink); }
+    .vb-inspector-tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+    .vb-inspector-body { flex: 1; overflow-y: auto; padding: 14px; }
+    .vb-tab-panel { display: none; }
+    .vb-tab-panel.is-active { display: block; }
+
+    .vb-field { display: grid; gap: 5px; margin-bottom: 11px; }
+    .vb-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-3); }
+    .vb-input, .vb-textarea, .vb-select { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--surface); outline: none; }
+    .vb-input:focus, .vb-textarea:focus, .vb-select:focus { border-color: var(--accent-ring); box-shadow: 0 0 0 3px var(--accent-light); }
+    .vb-textarea { min-height: 76px; resize: vertical; }
+    .vb-toggle-setting { display: flex; align-items: center; justify-content: space-between; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); margin-bottom: 7px; }
+    .vb-toggle-setting label { font-size: 13px; font-weight: 600; cursor: pointer; }
+    .vb-toggle-setting input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+    .vb-divider { height: 1px; background: var(--border); margin: 14px 0; }
+    .vb-section-head { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-3); margin-bottom: 9px; }
+    .vb-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .vb-color-row { display: flex; align-items: center; gap: 7px; }
+    .vb-color-row .vb-input { flex: 1; }
+    .vb-color-row input[type="color"] { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); padding: 2px; cursor: pointer; flex-shrink: 0; }
+    .vb-insp-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 14px; }
+    .vb-insp-action { padding: 7px; border-radius: 8px; font-size: 12px; font-weight: 700; border: 1px solid var(--border); background: var(--surface); color: var(--ink-2); transition: all 0.12s; }
+    .vb-insp-action:hover { border-color: var(--border-strong); background: var(--surface-2); }
+    .vb-insp-action.danger:hover { border-color: rgba(239,68,68,0.3); color: #dc2626; background: #fef2f2; }
+    .vb-insp-empty { padding: 24px 0; text-align: center; color: var(--ink-3); font-size: 13px; line-height: 1.6; }
+
+    .vb-preview-surface { background: var(--surface-2); border-radius: var(--radius-md); padding: 12px; margin-top: 4px; }
+    .vb-result { display: none; padding: 12px; border: 1px solid rgba(189,33,53,0.18); border-radius: var(--radius-md); background: #fff9f6; margin-top: 12px; }
+    .vb-result.is-visible { display: block; }
+    .vb-code { margin-top: 6px; padding: 9px; border-radius: 7px; background: #211d20; color: #f8f2ef; font-family: Consolas, monospace; font-size: 11px; white-space: pre-wrap; overflow: auto; max-height: 140px; }
+  </style>
+</head>
+<body>
+
+<header class="vb-topbar">
+  <div class="vb-topbar-brand">Form<span>Builder</span> <small style="font-family:Manrope,sans-serif;font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:0.04em;vertical-align:middle;">Visual Editor</small></div>
+  <div class="vb-topbar-sep"></div>
+  <div class="vb-topbar-form-row">
+    <select class="vb-topbar-select" id="vb-form-library"><option value="">New form&hellip;</option></select>
+    <button class="vb-btn vb-btn-ghost" id="vb-load-form">Load</button>
+    <button class="vb-btn vb-btn-ghost" id="vb-delete-form">Delete</button>
+  </div>
+  <div class="vb-topbar-actions">
+    <button class="vb-btn vb-btn-ghost" id="vb-reset">Reset</button>
+    <button class="vb-btn vb-btn-primary" id="vb-publish">Publish &rarr;</button>
+  </div>
+</header>
+
+<div class="vb-editor">
+  <aside class="vb-shelf">
+    <div class="vb-shelf-pages">
+      <div class="vb-shelf-pages-head">
+        <span class="vb-shelf-pages-title">Pages</span>
+        <button class="vb-shelf-add-page" id="vb-add-page">+ Add</button>
+      </div>
+      <div id="vb-page-nav"></div>
     </div>
+    <div class="vb-shelf-head">
+      <h2>Blocks</h2>
+      <div class="vb-shelf-search">
+        <span class="vb-shelf-search-icon">&#128269;</span>
+        <input class="vb-shelf-search-input" type="search" id="vb-search" placeholder="Search blocks&hellip;" />
+      </div>
+    </div>
+    <div class="vb-shelf-body" id="vb-shelf-body"></div>
+  </aside>
 
-    <script>
-      ${runtimeSource}
-    </script>
-    <script>
-      (function () {
-        var DEFAULT_CONFIG = ${defaultConfig};
-        var BUILDER_ENDPOINT = ${JSON.stringify(builderEndpoint)};
-        var SAVE_ENDPOINT = ${JSON.stringify(saveEndpoint)};
-        var LIST_ENDPOINT = ${JSON.stringify(listEndpoint || saveEndpoint)};
-        var CONFIG_BASE_URL = ${JSON.stringify(configBaseUrl)};
-        var builderState = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-        var sectionList = document.getElementById('section-list');
-        var previewRoot = document.getElementById('builder-preview-root');
-        var publishResult = document.getElementById('publish-result');
-        var formLibrary = document.getElementById('builder-form-library');
-        var currentConfigId = null;
-        var draggingSectionId = null;
+  <main class="vb-canvas-area">
+    <div class="vb-canvas-inner" id="vb-canvas"></div>
+  </main>
 
-        function clone(value) {
-          return value === undefined ? value : JSON.parse(JSON.stringify(value));
-        }
+  <aside class="vb-inspector is-hidden" id="vb-inspector">
+    <div class="vb-inspector-tabs">
+      <button class="vb-inspector-tab is-active" data-tab="block">Block</button>
+      <button class="vb-inspector-tab" data-tab="settings">Settings</button>
+      <button class="vb-inspector-tab" data-tab="preview">Preview</button>
+    </div>
+    <div class="vb-inspector-body">
+      <div class="vb-tab-panel is-active" id="vb-tab-block">
+        <div id="vb-block-insp"></div>
+      </div>
 
-        function readLines(value) {
-          return value
-            .split(/\\r?\\n/)
-            .map(function (item) { return item.trim(); })
-            .filter(Boolean);
-        }
+      <div class="vb-tab-panel" id="vb-tab-settings">
+        <div class="vb-section-head">Identity</div>
+        <div class="vb-field"><label class="vb-label">Form Name</label><input class="vb-input" id="gs-name" /></div>
+        <div class="vb-field"><label class="vb-label">Organization Name</label><input class="vb-input" id="gs-org-name" /></div>
+        <div class="vb-field"><label class="vb-label">Hero Title</label><input class="vb-input" id="gs-title" /></div>
+        <div class="vb-field"><label class="vb-label">Hero Description</label><textarea class="vb-textarea" id="gs-description"></textarea></div>
+        <div class="vb-grid-2">
+          <div class="vb-field"><label class="vb-label">Logo URL</label><input class="vb-input" id="gs-logo-url" /></div>
+          <div class="vb-field"><label class="vb-label">Accent Color</label>
+            <div class="vb-color-row"><input class="vb-input" id="gs-accent-text" placeholder="#bd2135" /><input type="color" id="gs-accent-color" /></div>
+          </div>
+        </div>
+        <div class="vb-divider"></div>
+        <div class="vb-section-head">Display</div>
+        <div class="vb-field"><label class="vb-label">Display Mode</label>
+          <select class="vb-select" id="gs-display-mode"><option value="embedded">Embedded</option><option value="modal">Modal Popup</option></select>
+        </div>
+        <div class="vb-field"><label class="vb-label">Modal Trigger Label</label><input class="vb-input" id="gs-modal-label" /></div>
+        <div class="vb-field"><label class="vb-label">Submit Button Label</label><input class="vb-input" id="gs-submit-label" /></div>
+        <div class="vb-divider"></div>
+        <div class="vb-section-head">Payment</div>
+        <div class="vb-field"><label class="vb-label">Transaction API URL</label><input class="vb-input" id="gs-api-url" /></div>
+        <div class="vb-grid-2">
+          <div class="vb-field"><label class="vb-label">Default Frequency</label>
+            <select class="vb-select" id="gs-frequency">
+              <option value="onetime">One-Time</option><option value="month">Monthly</option>
+              <option value="biweek">Bi-Weekly</option><option value="week">Weekly</option><option value="year">Yearly</option>
+            </select>
+          </div>
+          <div class="vb-field"><label class="vb-label">Preset Amounts</label><input class="vb-input" id="gs-amounts" placeholder="500,100,50,25" /></div>
+        </div>
+        <div class="vb-field"><label class="vb-label">Categories (one per line)</label><textarea class="vb-textarea" id="gs-categories"></textarea></div>
+        <div class="vb-divider"></div>
+        <div class="vb-section-head">Options</div>
+        <div class="vb-toggle-setting"><label for="gs-recurring">Allow recurring gifts</label><input type="checkbox" id="gs-recurring" /></div>
+        <div class="vb-toggle-setting"><label for="gs-org-giving">Organization giving</label><input type="checkbox" id="gs-org-giving" /></div>
+        <div class="vb-toggle-setting"><label for="gs-address">Collect address</label><input type="checkbox" id="gs-address" /></div>
+        <div class="vb-toggle-setting"><label for="gs-tribute">Tribute gifts</label><input type="checkbox" id="gs-tribute" /></div>
+        <div class="vb-toggle-setting"><label for="gs-fees">Cover-fee option</label><input type="checkbox" id="gs-fees" /></div>
+      </div>
 
-        function readAmounts(value) {
-          return value
-            .split(',')
-            .map(function (item) { return Number(item.trim()); })
-            .filter(function (item) { return Number.isFinite(item) && item > 0; });
-        }
+      <div class="vb-tab-panel" id="vb-tab-preview">
+        <div class="vb-preview-surface"><div id="vb-preview-root"></div></div>
+        <div class="vb-result" id="vb-result">
+          <strong style="font-size:12px">Config URL</strong>
+          <div id="vb-config-url" style="font-size:12px;margin:4px 0 10px;word-break:break-all"></div>
+          <strong style="font-size:12px">Embedded Snippet</strong>
+          <div class="vb-code" id="vb-snip-embedded"></div>
+          <strong style="font-size:12px;display:block;margin-top:10px">Modal Snippet</strong>
+          <div class="vb-code" id="vb-snip-modal"></div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
 
-        function trimTrailingSlash(value) {
-          if (!value) {
-            return '';
-          }
+<script>
+  ${runtimeSource}
+</script>
+<script>
+(function () {
+  var DEFAULT_CONFIG = ${defaultConfig};
+  var BUILDER_ENDPOINT = ${JSON.stringify(builderEndpoint)};
+  var SAVE_ENDPOINT    = ${JSON.stringify(saveEndpoint)};
+  var LIST_ENDPOINT    = ${JSON.stringify(listEndpoint || saveEndpoint)};
+  var CONFIG_BASE_URL  = ${JSON.stringify(configBaseUrl)};
 
-          return value.charAt(value.length - 1) === '/'
-            ? value.slice(0, -1)
-            : value;
-        }
+  var BLOCK_CATALOG = [
+    { category: 'Structure', blocks: [
+      { type: 'hero',    icon: '\\uD83C\\uDFDB', name: 'Hero',             desc: 'Logo, title & intro copy' },
+      { type: 'content', icon: '\\uD83D\\uDCDD', name: 'Text Block',       desc: 'Free-form narrative copy' },
+    ]},
+    { category: 'Donation', blocks: [
+      { type: 'amount',  icon: '\\uD83D\\uDCB0', name: 'Donation Details', desc: 'Amount, frequency & designation' },
+      { type: 'donor',   icon: '\\uD83D\\uDC64', name: 'Donor Info',       desc: 'Name, email & phone' },
+      { type: 'address', icon: '\\uD83D\\uDCCD', name: 'Address',          desc: 'Mailing address fields' },
+      { type: 'tribute', icon: '\\uD83D\\uDD4A',  name: 'Tribute',          desc: 'Honor or memory gift' },
+      { type: 'fees',    icon: '\\uD83E\\uDDFE', name: 'Processing Fees',  desc: 'Cover-fee & payment method' },
+      { type: 'submit',  icon: '\\u2705',        name: 'Submit',           desc: 'Review total & submit' },
+    ]}
+  ];
 
-        function bindBranding() {
-          builderState.display = builderState.display || {};
-          document.getElementById('builder-name').value = builderState.name || '';
-          document.getElementById('builder-org-name').value = builderState.branding.organizationName || '';
-          document.getElementById('builder-title').value = builderState.branding.title || '';
-          document.getElementById('builder-submit-label').value = builderState.branding.submitLabel || '';
-          document.getElementById('builder-logo-url').value = builderState.branding.logoUrl || '';
-          document.getElementById('builder-accent-color').value = builderState.branding.accentColor || '#bd2135';
-          document.getElementById('builder-description').value = builderState.branding.description || '';
-          document.getElementById('builder-display-mode').value = builderState.display.mode || 'embedded';
-          document.getElementById('builder-modal-trigger-label').value = builderState.display.modalTriggerLabel || 'Open donation form';
-          document.getElementById('builder-api-url').value = builderState.endpoints.processDonationApi || '';
-          document.getElementById('builder-default-frequency').value = builderState.payment.defaultFrequency || 'onetime';
-          document.getElementById('builder-amounts').value = (builderState.payment.amountPresets || []).join(',');
-          document.getElementById('builder-categories').value = (builderState.payment.categories || []).join('\\n');
-          document.getElementById('toggle-recurring').checked = Boolean(builderState.options.allowRecurring);
-          document.getElementById('toggle-organization').checked = Boolean(builderState.options.allowOrganizationGiving);
-          document.getElementById('toggle-address').checked = Boolean(builderState.options.collectAddress);
-          document.getElementById('toggle-tribute').checked = Boolean(builderState.options.enableTribute);
-          document.getElementById('toggle-fees').checked = Boolean(builderState.options.enableFeeCoverage);
-        }
+  /* ─── state ──────────────────────────────────────────── */
+  var S = {
+    bs: null,
+    configId: null,
+    selPageId: null,
+    selSectionId: null,
+    activeTab: 'block',
+    drag: null,          // { kind:'library'|'block'|'page', type, sectionId, pageId }
+    q: '',
+  };
 
-        function applyInputs() {
-          builderState.display = builderState.display || {};
-          builderState.name = document.getElementById('builder-name').value.trim() || DEFAULT_CONFIG.name;
-          builderState.branding.organizationName = document.getElementById('builder-org-name').value.trim() || DEFAULT_CONFIG.branding.organizationName;
-          builderState.branding.title = document.getElementById('builder-title').value.trim() || DEFAULT_CONFIG.branding.title;
-          builderState.branding.submitLabel = document.getElementById('builder-submit-label').value.trim() || DEFAULT_CONFIG.branding.submitLabel;
-          builderState.branding.logoUrl = document.getElementById('builder-logo-url').value.trim();
-          builderState.branding.accentColor = document.getElementById('builder-accent-color').value || DEFAULT_CONFIG.branding.accentColor;
-          builderState.branding.description = document.getElementById('builder-description').value.trim();
-          builderState.display.mode = document.getElementById('builder-display-mode').value || DEFAULT_CONFIG.display.mode;
-          builderState.display.modalTriggerLabel = document.getElementById('builder-modal-trigger-label').value.trim() || DEFAULT_CONFIG.display.modalTriggerLabel;
-          builderState.endpoints.processDonationApi = document.getElementById('builder-api-url').value.trim() || DEFAULT_CONFIG.endpoints.processDonationApi;
-          builderState.payment.defaultFrequency = document.getElementById('builder-default-frequency').value;
-          builderState.payment.amountPresets = readAmounts(document.getElementById('builder-amounts').value);
-          if (!builderState.payment.amountPresets.length) {
-            builderState.payment.amountPresets = clone(DEFAULT_CONFIG.payment.amountPresets);
-          }
-          builderState.payment.categories = readLines(document.getElementById('builder-categories').value);
-          if (!builderState.payment.categories.length) {
-            builderState.payment.categories = clone(DEFAULT_CONFIG.payment.categories);
-          }
-          builderState.options.allowRecurring = document.getElementById('toggle-recurring').checked;
-          builderState.options.allowOrganizationGiving = document.getElementById('toggle-organization').checked;
-          builderState.options.collectAddress = document.getElementById('toggle-address').checked;
-          builderState.options.enableTribute = document.getElementById('toggle-tribute').checked;
-          builderState.options.enableFeeCoverage = document.getElementById('toggle-fees').checked;
-        }
+  /* ─── DOM refs ───────────────────────────────────────── */
+  var elPageNav  = document.getElementById('vb-page-nav');
+  var elShelf    = document.getElementById('vb-shelf-body');
+  var elCanvas   = document.getElementById('vb-canvas');
+  var elInspector= document.getElementById('vb-inspector');
+  var elBlockInsp= document.getElementById('vb-block-insp');
+  var elPreview  = document.getElementById('vb-preview-root');
+  var elResult   = document.getElementById('vb-result');
+  var elLibrary  = document.getElementById('vb-form-library');
 
-        function formatFormLibraryOption(record) {
-          var name = record && record.name ? record.name : 'Untitled form';
-          var mode = record && record.displayMode ? record.displayMode : 'embedded';
-          var updated = record && record.updatedAt ? new Date(record.updatedAt).toLocaleString() : 'unknown date';
-          return name + ' (' + mode + ' • ' + updated + ')';
-        }
+  /* ─── helpers ────────────────────────────────────────── */
+  function clone(v) { return v === undefined ? v : JSON.parse(JSON.stringify(v)); }
+  function esc(v) { return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function readLines(v) { return String(v||'').split(/\\r?\\n/).map(function(s){return s.trim();}).filter(Boolean); }
+  function readAmounts(v) { return String(v||'').split(',').map(function(s){return Number(s.trim());}).filter(function(n){return Number.isFinite(n)&&n>0;}); }
+  function trimSlash(v) { return v && v.charAt(v.length-1)==='/' ? v.slice(0,-1) : (v||''); }
+  function createId(p) { return p+'_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7); }
+  function getSectionType(s) { return s&&(s.type||s.id)?String(s.type||s.id):'content'; }
+  function getSectionById(id) { return (S.bs.sections||[]).find(function(s){return s.id===id;})||null; }
+  function getPageById(id) { return (S.bs.pages||[]).find(function(p){return p.id===id;})||null; }
+  function getDefaultSectionByType(type) { return (DEFAULT_CONFIG.sections||[]).find(function(s){return(s.type||s.id)===type;})||null; }
+  function getBlockMeta(type) {
+    for (var ci=0;ci<BLOCK_CATALOG.length;ci++) {
+      var cat=BLOCK_CATALOG[ci];
+      for (var bi=0;bi<cat.blocks.length;bi++) { if(cat.blocks[bi].type===type) return cat.blocks[bi]; }
+    }
+    return {type:type,icon:'\\u25A1',name:type,desc:''};
+  }
 
-        function refreshFormLibrary() {
-          return fetch(LIST_ENDPOINT)
-            .then(function (response) {
-              if (!response.ok) {
-                throw new Error('Unable to load saved forms.');
-              }
-              return response.json();
-            })
-            .then(function (payload) {
-              var records = payload && Array.isArray(payload.records) ? payload.records : [];
-              formLibrary.innerHTML = '<option value="">Create new form</option>';
+  /* ─── normalizer ─────────────────────────────────────── */
+  function ensureEditorModel(rawConfig) {
+    var config = window.DonationFormRuntime.normalizeConfig(clone(rawConfig||DEFAULT_CONFIG));
+    var defSections = clone(DEFAULT_CONFIG.sections||[]);
+    var sections=[]; var seenIds={};
+    (Array.isArray(config.sections)&&config.sections.length?config.sections:defSections).forEach(function(section){
+      if(!section||typeof section!=='object') return;
+      var fb=getDefaultSectionByType(section.type||section.id);
+      var type=String(section.type||(fb?fb.type||fb.id:'content'));
+      var id=section.id||(type==='content'?createId('content'):type);
+      if(seenIds[id]) return;
+      sections.push({id:id,type:type,label:section.label||(fb?fb.label:'Text Block'),description:section.description||(fb?fb.description:'Supporting copy.'),enabled:section.enabled!==false,settings:type==='content'?{body:section.settings&&section.settings.body?String(section.settings.body):'Add supporting copy for this step.'}:undefined});
+      seenIds[id]=true;
+    });
+    defSections.forEach(function(s){if(!seenIds[s.id])sections.push(clone(s));});
+    config.sections=sections;
+    var validIds={}; sections.forEach(function(s){validIds[s.id]=true;});
+    var pages=(Array.isArray(config.pages)&&config.pages.length?config.pages:clone(DEFAULT_CONFIG.pages||[]))
+      .map(function(page,i){
+        var sids=Array.isArray(page.sectionIds)?page.sectionIds.filter(function(id,j,a){return validIds[id]&&a.indexOf(id)===j;}):[];
+        return {id:page.id||createId('page'),name:page.name||('Page '+(i+1)),description:page.description||'',sectionIds:sids};
+      })
+      .filter(function(page,i,a){return a.findIndex(function(p){return p.id===page.id;})===i;});
+    if(!pages.length) pages=[{id:createId('page'),name:'Page 1',description:'',sectionIds:[]}];
+    var assigned={};
+    pages.forEach(function(page){page.sectionIds=page.sectionIds.filter(function(id){if(assigned[id])return false;assigned[id]=true;return true;});});
+    sections.forEach(function(s){if(!assigned[s.id])pages[pages.length-1].sectionIds.push(s.id);});
+    config.pages=pages; return config;
+  }
 
-              records.forEach(function (record) {
-                var option = document.createElement('option');
-                option.value = record.id;
-                option.textContent = formatFormLibraryOption(record);
-                if (currentConfigId && currentConfigId === record.id) {
-                  option.selected = true;
-                }
-                formLibrary.appendChild(option);
-              });
-            })
-            .catch(function () {
-              formLibrary.innerHTML = '<option value="">Create new form</option>';
-            });
-        }
+  /* ─── mutations ──────────────────────────────────────── */
+  function selectPage(pageId) { S.selPageId=pageId; S.selSectionId=null; showInspector(); render(); switchTab('block'); }
+  function selectSection(pageId,sectionId) { S.selPageId=pageId; S.selSectionId=sectionId; showInspector(); render(); switchTab('block'); }
+  function showInspector() { elInspector.classList.remove('is-hidden'); }
 
-        function resetToDefaultForm() {
-          currentConfigId = null;
-          builderState = clone(DEFAULT_CONFIG);
-          bindBranding();
-          renderSectionList();
-          renderPreview();
-          formLibrary.value = '';
-        }
+  function addPage() {
+    var page={id:createId('page'),name:'New Page',description:'',sectionIds:[]};
+    S.bs.pages.push(page); S.selPageId=page.id; S.selSectionId=null; showInspector(); render();
+  }
 
-        function loadConfigById(configId) {
-          if (!configId) {
-            resetToDefaultForm();
-            return Promise.resolve();
-          }
+  function addSectionToPage(type,pageId,beforeSectionId) {
+    var targetPage=getPageById(pageId||S.selPageId)||S.bs.pages[0]; if(!targetPage) return;
+    var section;
+    if(type==='content'){
+      section={id:createId('content'),type:'content',label:'Text Block',description:'Supporting copy block.',enabled:true,settings:{body:'Add supporting copy for this step.'}};
+      S.bs.sections.push(section);
+    } else {
+      section=S.bs.sections.find(function(s){return getSectionType(s)===type;})||clone(getDefaultSectionByType(type));
+      if(!section) return;
+      if(!getSectionById(section.id)) S.bs.sections.push(section);
+    }
+    if(targetPage.sectionIds.indexOf(section.id)===-1){
+      var insertAt=beforeSectionId?targetPage.sectionIds.indexOf(beforeSectionId):-1;
+      if(insertAt<0) targetPage.sectionIds.push(section.id);
+      else targetPage.sectionIds.splice(insertAt,0,section.id);
+    }
+    S.selPageId=targetPage.id; S.selSectionId=section.id; showInspector(); render(); switchTab('block');
+  }
 
-          return fetch(trimTrailingSlash(CONFIG_BASE_URL) + '/' + encodeURIComponent(configId))
-            .then(function (response) {
-              if (!response.ok) {
-                throw new Error('Configuration not found.');
-              }
-              return response.json();
-            })
-            .then(function (payload) {
-              currentConfigId = configId;
-              builderState = payload.config || clone(DEFAULT_CONFIG);
-              bindBranding();
-              renderSectionList();
-              renderPreview();
-            });
-        }
+  function removeSection(sectionId,pageId) {
+    S.bs.pages.forEach(function(page){page.sectionIds=page.sectionIds.filter(function(id){return id!==sectionId;});});
+    var s=getSectionById(sectionId); if(s&&getSectionType(s)==='content') S.bs.sections=S.bs.sections.filter(function(x){return x.id!==sectionId;});
+    if(S.selSectionId===sectionId) S.selSectionId=null;
+    S.selPageId=pageId||S.selPageId; render();
+  }
 
-        function renderSectionList() {
-          sectionList.innerHTML = '';
-          builderState.sections.forEach(function (section) {
-            var item = document.createElement('div');
-            item.className = 'builder-item';
-            item.draggable = true;
-            item.dataset.sectionId = section.id;
-            item.innerHTML =
-              '<div class="builder-item-top">' +
-                '<div><div class="builder-item-title">' + section.label + '</div><div class="builder-item-help">' + section.description + '</div></div>' +
-                '<label class="builder-toggle" style="padding:8px 10px"><input type="checkbox" ' + (section.enabled ? 'checked' : '') + ' data-enable-toggle="' + section.id + '"> Enabled</label>' +
-              '</div>' +
-              '<div class="builder-grid builder-grid-2">' +
-                '<div><label class="builder-label">Heading</label><input class="builder-input" data-section-label="' + section.id + '" value="' + section.label.replace(/"/g, '&quot;') + '"></div>' +
-                '<div><label class="builder-label">Description</label><input class="builder-input" data-section-description="' + section.id + '" value="' + section.description.replace(/"/g, '&quot;') + '"></div>' +
-              '</div>';
+  function duplicateSection(sectionId,pageId) {
+    var src=getSectionById(sectionId); var page=getPageById(pageId);
+    if(!src||!page||getSectionType(src)!=='content') return;
+    var dup=clone(src); dup.id=createId('content'); dup.label=dup.label+' Copy';
+    S.bs.sections.push(dup); var idx=page.sectionIds.indexOf(sectionId); page.sectionIds.splice(idx+1,0,dup.id);
+    S.selSectionId=dup.id; render();
+  }
 
-            item.addEventListener('dragstart', function () {
-              draggingSectionId = section.id;
-              item.classList.add('is-dragging');
-            });
-            item.addEventListener('dragend', function () {
-              draggingSectionId = null;
-              item.classList.remove('is-dragging');
-            });
-            item.addEventListener('dragover', function (event) {
-              event.preventDefault();
-            });
-            item.addEventListener('drop', function (event) {
-              event.preventDefault();
-              if (!draggingSectionId || draggingSectionId === section.id) {
-                return;
-              }
-              var fromIndex = builderState.sections.findIndex(function (entry) { return entry.id === draggingSectionId; });
-              var toIndex = builderState.sections.findIndex(function (entry) { return entry.id === section.id; });
-              if (fromIndex < 0 || toIndex < 0) {
-                return;
-              }
-              var moved = builderState.sections.splice(fromIndex, 1)[0];
-              builderState.sections.splice(toIndex, 0, moved);
-              renderSectionList();
-              renderPreview();
-            });
+  function removePage(pageId) {
+    if(S.bs.pages.length<=1) return;
+    var idx=S.bs.pages.findIndex(function(p){return p.id===pageId;}); if(idx<0) return;
+    var removed=S.bs.pages.splice(idx,1)[0];
+    var dest=S.bs.pages[Math.max(0,idx-1)]||S.bs.pages[0];
+    if(dest&&removed.sectionIds.length) dest.sectionIds=dest.sectionIds.concat(removed.sectionIds.filter(function(id){return dest.sectionIds.indexOf(id)===-1;}));
+    S.selPageId=dest?dest.id:null; S.selSectionId=null; render();
+  }
 
-            sectionList.appendChild(item);
-          });
-        }
+  function moveSection(sectionId,fromPageId,toPageId,beforeSectionId) {
+    var fromPage=getPageById(fromPageId); var toPage=getPageById(toPageId); if(!fromPage||!toPage) return;
+    fromPage.sectionIds=fromPage.sectionIds.filter(function(id){return id!==sectionId;});
+    var insertAt=beforeSectionId?toPage.sectionIds.indexOf(beforeSectionId):-1;
+    if(insertAt<0) toPage.sectionIds.push(sectionId); else toPage.sectionIds.splice(insertAt,0,sectionId);
+    S.selPageId=toPage.id; S.selSectionId=sectionId; render();
+  }
 
-        function renderPreview() {
-          applyInputs();
-          previewRoot.innerHTML = '';
-          window.DonationFormRuntime.renderForm(previewRoot, builderState, { mode: 'preview' });
-        }
+  function movePage(draggedId,targetId) {
+    if(!draggedId||!targetId||draggedId===targetId) return;
+    var from=S.bs.pages.findIndex(function(p){return p.id===draggedId;});
+    var to=S.bs.pages.findIndex(function(p){return p.id===targetId;});
+    if(from<0||to<0) return;
+    var moved=S.bs.pages.splice(from,1)[0]; S.bs.pages.splice(to,0,moved); render();
+  }
 
-        sectionList.addEventListener('input', function (event) {
-          var toggleId = event.target.getAttribute('data-enable-toggle');
-          if (toggleId) {
-            var toggledSection = builderState.sections.find(function (section) { return section.id === toggleId; });
-            if (toggledSection) {
-              toggledSection.enabled = event.target.checked;
-            }
-          }
-          var labelId = event.target.getAttribute('data-section-label');
-          if (labelId) {
-            var labeledSection = builderState.sections.find(function (section) { return section.id === labelId; });
-            if (labeledSection) {
-              labeledSection.label = event.target.value;
-            }
-          }
-          var descriptionId = event.target.getAttribute('data-section-description');
-          if (descriptionId) {
-            var describedSection = builderState.sections.find(function (section) { return section.id === descriptionId; });
-            if (describedSection) {
-              describedSection.description = event.target.value;
-            }
-          }
-          renderPreview();
+  /* ─── block preview HTML ─────────────────────────────── */
+  function blockPreview(section,ac) {
+    var type=getSectionType(section);
+    ac=ac||'#bd2135';
+    if(type==='hero'){
+      var title=S.bs.branding&&S.bs.branding.title?S.bs.branding.title:'Support Our Mission';
+      var desc=S.bs.branding&&S.bs.branding.description?S.bs.branding.description.slice(0,100):'Your generosity makes a difference.';
+      return '<div class="vbp-hero"><div class="vbp-hero-logo">\\uD83C\\uDFDB</div><div class="vbp-hero-title">'+esc(title)+'</div><div class="vbp-hero-desc">'+esc(desc)+'</div></div>';
+    }
+    if(type==='amount'){
+      var amounts=S.bs.payment&&S.bs.payment.amountPresets?S.bs.payment.amountPresets:[500,100,50,25];
+      var btns=amounts.slice(0,4).map(function(a,i){return '<span class="vbp-amount-btn"'+(i===1?' style="background:'+ac+';color:#fff;border-color:transparent"':'')+'>$'+a+'</span>';}).join('');
+      return '<div><div class="vbp-freq-tabs"><span class="vbp-freq-tab" style="background:'+ac+';color:#fff;border-color:transparent">One-Time</span><span class="vbp-freq-tab">Monthly</span><span class="vbp-freq-tab">Bi-Weekly</span></div><div class="vbp-amounts">'+btns+'</div><div class="vbp-custom"><span class="vbp-custom-sym">$</span><div class="vbp-fake-input"></div></div></div>';
+    }
+    if(type==='donor') return '<div class="vbp-fields"><div class="vbp-field-row"><div class="vbp-field">First name</div><div class="vbp-field">Last name</div></div><div class="vbp-field">Email address</div><div class="vbp-field">Phone number</div></div>';
+    if(type==='address') return '<div class="vbp-fields"><div class="vbp-field">Street address</div><div class="vbp-field-row"><div class="vbp-field">City</div><div class="vbp-field">State / ZIP</div></div></div>';
+    if(type==='tribute') return '<div class="vbp-fields"><div class="vbp-toggle-row"><div class="vbp-fake-cb"></div><span class="vbp-toggle-lbl">This gift is in honor or memory of someone</span></div><div class="vbp-field" style="color:#ccc;margin-top:2px">Honoree name</div></div>';
+    if(type==='fees') return '<div class="vbp-fields"><div class="vbp-toggle-row"><div class="vbp-fake-cb" style="background:'+ac+';border-color:'+ac+'"></div><span class="vbp-toggle-lbl">I\\'ll cover the processing fee</span></div><div class="vbp-field-row" style="margin-top:4px"><div class="vbp-field">Card number</div><div class="vbp-field">MM / YY &middot; CVC</div></div></div>';
+    if(type==='submit'){
+      var lbl=S.bs.branding&&S.bs.branding.submitLabel?S.bs.branding.submitLabel:'Continue';
+      return '<div class="vbp-submit-wrap"><div class="vbp-total">Your gift <strong>$100</strong></div><div class="vbp-submit-btn" style="background:'+ac+'">'+esc(lbl)+'</div></div>';
+    }
+    if(type==='content'){
+      var body=section.settings&&section.settings.body?section.settings.body:'Add supporting copy for this step.';
+      return '<div class="vbp-content-body" style="border-left-color:'+ac+'">'+esc(body.slice(0,200))+'</div>';
+    }
+    return '<div style="color:var(--ink-3);font-size:13px">'+esc(type)+' block</div>';
+  }
+
+  /* ─── render: page nav ───────────────────────────────── */
+  function renderPageNav() {
+    var html='';
+    S.bs.pages.forEach(function(page,i){
+      html+='<div class="vb-page-chip'+(page.id===S.selPageId?' is-selected':'')+'" draggable="true" data-page-nav-id="'+esc(page.id)+'">'
+        +'<span class="vb-page-chip-num">'+(i+1)+'</span>'
+        +'<span class="vb-page-chip-name">'+esc(page.name)+'</span>'
+        +'<span class="vb-page-chip-count">'+page.sectionIds.length+'</span>'
+        +'</div>';
+    });
+    elPageNav.innerHTML=html;
+  }
+
+  /* ─── render: shelf ──────────────────────────────────── */
+  function renderShelf() {
+    var q=S.q.toLowerCase(); var html='';
+    BLOCK_CATALOG.forEach(function(cat){
+      var filtered=cat.blocks.filter(function(b){return !q||b.name.toLowerCase().indexOf(q)>=0||b.desc.toLowerCase().indexOf(q)>=0;});
+      if(!filtered.length) return;
+      html+='<div class="vb-shelf-section"><div class="vb-shelf-section-title">'+esc(cat.category)+'</div><div class="vb-shelf-grid">';
+      filtered.forEach(function(b){
+        var disabled=b.type!=='content'&&S.bs.pages.some(function(page){return page.sectionIds.some(function(sid){var s=getSectionById(sid);return s&&getSectionType(s)===b.type;});});
+        html+='<div class="vb-shelf-block'+(disabled?' is-disabled':'')+'" draggable="'+(disabled?'false':'true')+'" data-shelf-type="'+esc(b.type)+'" title="'+esc(b.name)+': '+esc(b.desc)+'">'
+          +'<div class="vb-shelf-block-icon">'+b.icon+'</div>'
+          +'<span class="vb-shelf-block-name">'+esc(b.name)+'</span>'
+          +'<span class="vb-shelf-block-desc">'+esc(b.desc)+'</span>'
+          +'</div>';
+      });
+      html+='</div></div>';
+    });
+    elShelf.innerHTML=html||'<div style="padding:10px 2px;font-size:13px;color:var(--ink-3)">No blocks match.</div>';
+  }
+
+  /* ─── render: canvas ─────────────────────────────────── */
+  function renderCanvas() {
+    var ac=(S.bs.branding&&S.bs.branding.accentColor)||'#bd2135';
+    var html='';
+    S.bs.pages.forEach(function(page,pi){
+      html+='<div class="vb-page-section" data-page-section="'+esc(page.id)+'">'
+        +'<div class="vb-page-header">'
+          +'<span class="vb-page-header-label">Page '+(pi+1)+'</span>'
+          +'<span class="vb-page-header-name">'+esc(page.name)+'</span>'
+          +'<div class="vb-page-header-line"></div>'
+          +'<div class="vb-page-header-actions">'
+            +'<button class="vb-page-header-btn" data-action="select-page" data-page-id="'+esc(page.id)+'">Edit</button>'
+            +(S.bs.pages.length>1?'<button class="vb-page-header-btn danger" data-action="remove-page" data-page-id="'+esc(page.id)+'">Remove</button>':'')
+          +'</div>'
+        +'</div>'
+        +'<div class="vb-page-drop-area'+(page.sectionIds.length===0?' is-empty':'')+'" data-page-drop="'+esc(page.id)+'">';
+
+      if(page.sectionIds.length===0){
+        html+='<div class="vb-page-empty-hint">Drag a block here from the left panel, or click a block to add it.</div>';
+      } else {
+        html+='<div class="vb-drop-zone" data-dz-before="'+esc(page.sectionIds[0])+'" data-dz-page="'+esc(page.id)+'"></div>';
+        page.sectionIds.forEach(function(sid,si){
+          var s=getSectionById(sid); if(!s) return;
+          var m=getBlockMeta(getSectionType(s));
+          html+='<div class="vb-block'+(S.selSectionId===s.id?' is-selected':'')+(s.enabled===false?' is-disabled':'')+(S.drag&&S.drag.kind==='block'&&S.drag.sectionId===s.id?' is-dragging':'')+'" draggable="true" data-block-id="'+esc(s.id)+'" data-block-page="'+esc(page.id)+'">'
+            +'<div class="vb-block-overlay">'
+              +'<div class="vb-block-drag-handle" title="Drag to reorder">&#8942; &#8942;</div>'
+              +'<button class="vb-block-ovr-btn" data-action="select-section" data-section-id="'+esc(s.id)+'" data-page-id="'+esc(page.id)+'" title="Edit settings">&#9998;</button>'
+              +(getSectionType(s)==='content'?'<button class="vb-block-ovr-btn" data-action="duplicate-section" data-section-id="'+esc(s.id)+'" data-page-id="'+esc(page.id)+'" title="Duplicate">&#10697;</button>':'')
+              +'<button class="vb-block-ovr-btn del" data-action="remove-section" data-section-id="'+esc(s.id)+'" data-page-id="'+esc(page.id)+'" title="Remove">&times;</button>'
+            +'</div>'
+            +'<div class="vb-block-preview">'
+              +'<div class="vb-block-type-badge">'+m.icon+' '+esc(m.name)+(s.enabled===false?' &middot; Hidden':'')+'</div>'
+              +blockPreview(s,ac)
+            +'</div>'
+            +'</div>';
+          var nextId=page.sectionIds[si+1];
+          html+='<div class="vb-drop-zone"'+(nextId?' data-dz-before="'+esc(nextId)+'"':' data-dz-after="last"')+' data-dz-page="'+esc(page.id)+'"></div>';
         });
+      }
 
-        document.querySelectorAll('.builder-input, .builder-textarea, .builder-select').forEach(function (element) {
-          element.addEventListener('input', renderPreview);
-          element.addEventListener('change', renderPreview);
+      html+='</div></div>'; // drop-area + page-section
+    });
+
+    html+='<button class="vb-add-page-btn" id="vb-add-page-canvas">+ Add a new page</button>';
+    elCanvas.innerHTML=html;
+    var addBtn=document.getElementById('vb-add-page-canvas');
+    if(addBtn) addBtn.addEventListener('click',addPage);
+  }
+
+  /* ─── render: block inspector ────────────────────────── */
+  function renderBlockInsp() {
+    var sel=S.selSectionId?getSectionById(S.selSectionId):null;
+    var page=getPageById(S.selPageId)||S.bs.pages[0];
+    if(sel){
+      var type=getSectionType(sel); var m=getBlockMeta(type);
+      elBlockInsp.innerHTML=
+        '<div style="display:flex;align-items:center;gap:9px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)">'
+          +'<div style="font-size:26px;line-height:1">'+m.icon+'</div>'
+          +'<div><div style="font-size:14px;font-weight:700">'+esc(m.name)+'</div><div style="font-size:12px;color:var(--ink-3)">'+esc(m.desc)+'</div></div>'
+        +'</div>'
+        +'<div class="vb-field"><label class="vb-label">Label</label><input class="vb-input" id="insp-label" value="'+esc(sel.label||'')+'"></div>'
+        +'<div class="vb-field"><label class="vb-label">Description</label><textarea class="vb-textarea" id="insp-desc">'+esc(sel.description||'')+'</textarea></div>'
+        +(type==='content'
+          ?'<div class="vb-field"><label class="vb-label">Text Content</label><textarea class="vb-textarea" style="min-height:110px" id="insp-body">'+esc(sel.settings&&sel.settings.body?sel.settings.body:'')+'</textarea></div>'
+          :'')
+        +'<div class="vb-toggle-setting"><label for="insp-visible">Visible</label><input type="checkbox" id="insp-visible"'+(sel.enabled!==false?' checked':'')+'></div>'
+        +'<div class="vb-insp-actions">'
+          +'<button class="vb-insp-action danger" data-insp-action="remove-section">Remove</button>'
+          +(type==='content'?'<button class="vb-insp-action" data-insp-action="duplicate-section">Duplicate</button>':'<span></span>')
+        +'</div>';
+      return;
+    }
+    if(page){
+      elBlockInsp.innerHTML=
+        '<div style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)">'
+          +'<div style="font-size:14px;font-weight:700">Page Settings</div>'
+          +'<div style="font-size:12px;color:var(--ink-3)">Step '+(S.bs.pages.indexOf(page)+1)+' of '+S.bs.pages.length+'</div>'
+        +'</div>'
+        +'<div class="vb-field"><label class="vb-label">Page Name</label><input class="vb-input" id="insp-page-name" value="'+esc(page.name||'')+'"></div>'
+        +'<div class="vb-field"><label class="vb-label">Page Description</label><textarea class="vb-textarea" id="insp-page-desc">'+esc(page.description||'')+'</textarea></div>'
+        +'<div class="vb-insp-actions"><button class="vb-insp-action danger" data-insp-action="remove-page"'+(S.bs.pages.length<=1?' disabled':'')+'> Remove Page</button></div>';
+      return;
+    }
+    elBlockInsp.innerHTML='<div class="vb-insp-empty">Click a block to edit it, or click a page&rsquo;s Edit button.</div>';
+  }
+
+  /* ─── render: preview ────────────────────────────────── */
+  function renderPreview() { applySettings(); elPreview.innerHTML=''; window.DonationFormRuntime.renderForm(elPreview,S.bs,{mode:'preview'}); }
+
+  /* ─── settings sync ──────────────────────────────────── */
+  function syncSettings() {
+    var bs=S.bs; bs.display=bs.display||{}; bs.endpoints=bs.endpoints||{}; bs.options=bs.options||{}; bs.payment=bs.payment||{}; bs.branding=bs.branding||{};
+    document.getElementById('gs-name').value       =bs.name||'';
+    document.getElementById('gs-org-name').value   =bs.branding.organizationName||'';
+    document.getElementById('gs-title').value      =bs.branding.title||'';
+    document.getElementById('gs-submit-label').value=bs.branding.submitLabel||'';
+    document.getElementById('gs-logo-url').value   =bs.branding.logoUrl||'';
+    var c=bs.branding.accentColor||'#bd2135';
+    document.getElementById('gs-accent-color').value=c;
+    document.getElementById('gs-accent-text').value =c;
+    document.getElementById('gs-description').value=bs.branding.description||'';
+    document.getElementById('gs-display-mode').value=bs.display.mode||'embedded';
+    document.getElementById('gs-modal-label').value=bs.display.modalTriggerLabel||'Open donation form';
+    document.getElementById('gs-api-url').value    =bs.endpoints.processDonationApi||'';
+    document.getElementById('gs-frequency').value  =bs.payment.defaultFrequency||'onetime';
+    document.getElementById('gs-amounts').value    =(bs.payment.amountPresets||[]).join(',');
+    document.getElementById('gs-categories').value =(bs.payment.categories||[]).join('\\n');
+    document.getElementById('gs-recurring').checked =Boolean(bs.options.allowRecurring);
+    document.getElementById('gs-org-giving').checked=Boolean(bs.options.allowOrganizationGiving);
+    document.getElementById('gs-address').checked  =Boolean(bs.options.collectAddress);
+    document.getElementById('gs-tribute').checked  =Boolean(bs.options.enableTribute);
+    document.getElementById('gs-fees').checked     =Boolean(bs.options.enableFeeCoverage);
+  }
+
+  function applySettings() {
+    var bs=S.bs; bs.display=bs.display||{}; bs.endpoints=bs.endpoints||{}; bs.options=bs.options||{}; bs.payment=bs.payment||{}; bs.branding=bs.branding||{};
+    bs.name=document.getElementById('gs-name').value.trim()||DEFAULT_CONFIG.name;
+    bs.branding.organizationName=document.getElementById('gs-org-name').value.trim()||DEFAULT_CONFIG.branding.organizationName;
+    bs.branding.title=document.getElementById('gs-title').value.trim()||DEFAULT_CONFIG.branding.title;
+    bs.branding.submitLabel=document.getElementById('gs-submit-label').value.trim()||DEFAULT_CONFIG.branding.submitLabel;
+    bs.branding.logoUrl=document.getElementById('gs-logo-url').value.trim();
+    bs.branding.accentColor=document.getElementById('gs-accent-color').value||DEFAULT_CONFIG.branding.accentColor;
+    bs.branding.description=document.getElementById('gs-description').value.trim();
+    bs.display.mode=document.getElementById('gs-display-mode').value||DEFAULT_CONFIG.display.mode;
+    bs.display.modalTriggerLabel=document.getElementById('gs-modal-label').value.trim()||DEFAULT_CONFIG.display.modalTriggerLabel;
+    bs.endpoints.processDonationApi=document.getElementById('gs-api-url').value.trim()||DEFAULT_CONFIG.endpoints.processDonationApi;
+    bs.payment.defaultFrequency=document.getElementById('gs-frequency').value||DEFAULT_CONFIG.payment.defaultFrequency;
+    bs.payment.amountPresets=readAmounts(document.getElementById('gs-amounts').value);
+    if(!bs.payment.amountPresets.length) bs.payment.amountPresets=clone(DEFAULT_CONFIG.payment.amountPresets);
+    bs.payment.categories=readLines(document.getElementById('gs-categories').value);
+    if(!bs.payment.categories.length) bs.payment.categories=clone(DEFAULT_CONFIG.payment.categories);
+    bs.options.allowRecurring=document.getElementById('gs-recurring').checked;
+    bs.options.allowOrganizationGiving=document.getElementById('gs-org-giving').checked;
+    bs.options.collectAddress=document.getElementById('gs-address').checked;
+    bs.options.enableTribute=document.getElementById('gs-tribute').checked;
+    bs.options.enableFeeCoverage=document.getElementById('gs-fees').checked;
+  }
+
+  /* ─── tab switch ─────────────────────────────────────── */
+  function switchTab(tab) {
+    S.activeTab=tab;
+    document.querySelectorAll('.vb-inspector-tab').forEach(function(el){ el.classList.toggle('is-active',el.getAttribute('data-tab')===tab); });
+    document.querySelectorAll('.vb-tab-panel').forEach(function(el){ el.classList.toggle('is-active',el.id==='vb-tab-'+tab); });
+    if(tab==='preview') renderPreview();
+  }
+
+  /* ─── main render ────────────────────────────────────── */
+  function render() {
+    if(!getPageById(S.selPageId)&&S.bs.pages[0]) S.selPageId=S.bs.pages[0].id;
+    renderPageNav(); renderShelf(); renderCanvas(); renderBlockInsp();
+  }
+
+  /* ─── reset / load ───────────────────────────────────── */
+  function resetToDefault() {
+    S.configId=null; S.bs=ensureEditorModel(DEFAULT_CONFIG);
+    S.selPageId=S.bs.pages[0]?S.bs.pages[0].id:null; S.selSectionId=null;
+    syncSettings(); render(); elLibrary.value=''; elResult.classList.remove('is-visible');
+  }
+
+  function loadConfigById(configId) {
+    if(!configId){resetToDefault();return Promise.resolve();}
+    return fetch(trimSlash(CONFIG_BASE_URL)+'/'+encodeURIComponent(configId))
+      .then(function(r){if(!r.ok)throw new Error('Not found');return r.json();})
+      .then(function(payload){
+        S.configId=configId; S.bs=ensureEditorModel(payload&&payload.config?payload.config:DEFAULT_CONFIG);
+        S.selPageId=S.bs.pages[0]?S.bs.pages[0].id:null; S.selSectionId=null; syncSettings(); render();
+      });
+  }
+
+  function refreshLibrary() {
+    return fetch(LIST_ENDPOINT).then(function(r){return r.ok?r.json():{records:[]};})
+      .then(function(p){
+        var recs=p&&Array.isArray(p.records)?p.records:[];
+        elLibrary.innerHTML='<option value="">New form\\u2026</option>';
+        recs.forEach(function(rec){
+          var opt=document.createElement('option'); opt.value=rec.id;
+          opt.textContent=(rec.name||'Untitled')+' ('+(rec.displayMode||'embedded')+' \\u2022 '+(rec.updatedAt?new Date(rec.updatedAt).toLocaleDateString():'?')+')';
+          if(S.configId&&S.configId===rec.id) opt.selected=true;
+          elLibrary.appendChild(opt);
         });
-        document.querySelectorAll('input[type="checkbox"]').forEach(function (element) {
-          element.addEventListener('change', renderPreview);
-        });
+      }).catch(function(){elLibrary.innerHTML='<option value="">New form\\u2026</option>';});
+  }
 
-        document.getElementById('reset-config').addEventListener('click', function () {
-          resetToDefaultForm();
-          publishResult.classList.remove('is-visible');
-          refreshFormLibrary();
-        });
+  /* ══ DRAG & DROP ════════════════════════════════════════ */
 
-        document.getElementById('load-selected-form').addEventListener('click', function () {
-          var selectedId = formLibrary.value;
-          loadConfigById(selectedId)
-            .then(function () {
-              var url = new URL(BUILDER_ENDPOINT, window.location.origin);
-              if (currentConfigId) {
-                url.searchParams.set('config', currentConfigId);
-              }
-              history.replaceState({}, '', url.toString());
-            })
-            .catch(function () {
-              publishResult.classList.add('is-visible');
-              document.getElementById('config-url').textContent = 'Unable to load selected form.';
-            });
-        });
+  /* Shelf → canvas */
+  elShelf.addEventListener('dragstart',function(e){
+    var el=e.target.closest('[data-shelf-type]');
+    if(!el||el.classList.contains('is-disabled')){e.preventDefault();return;}
+    S.drag={kind:'library',type:el.getAttribute('data-shelf-type')};
+    if(e.dataTransfer){e.dataTransfer.effectAllowed='copy';e.dataTransfer.setData('text/plain',el.getAttribute('data-shelf-type'));}
+  });
+  elShelf.addEventListener('dragend',function(){S.drag=null;clearDZ();});
 
-        document.getElementById('delete-selected-form').addEventListener('click', function () {
-          var selectedId = formLibrary.value || currentConfigId;
-          if (!selectedId) {
-            publishResult.classList.add('is-visible');
-            document.getElementById('config-url').textContent = 'Select a saved form before deleting.';
-            return;
-          }
+  /* Block reorder */
+  elCanvas.addEventListener('dragstart',function(e){
+    var el=e.target.closest('[data-block-id]');
+    if(!el)return;
+    S.drag={kind:'block',sectionId:el.getAttribute('data-block-id'),pageId:el.getAttribute('data-block-page')};
+    el.classList.add('is-dragging');
+    if(e.dataTransfer)e.dataTransfer.effectAllowed='move';
+  });
+  elCanvas.addEventListener('dragend',function(e){
+    var el=e.target.closest('[data-block-id]');
+    if(el)el.classList.remove('is-dragging');
+    S.drag=null;clearDZ();
+  });
 
-          if (!window.confirm('Delete this saved donation form? This cannot be undone.')) {
-            return;
-          }
+  /* Page chip reorder */
+  elPageNav.addEventListener('dragstart',function(e){
+    var el=e.target.closest('[data-page-nav-id]');
+    if(!el)return;
+    S.drag={kind:'page',pageId:el.getAttribute('data-page-nav-id')};
+    el.classList.add('is-dragging');
+    if(e.dataTransfer)e.dataTransfer.effectAllowed='move';
+  });
+  elPageNav.addEventListener('dragend',function(e){
+    var el=e.target.closest('[data-page-nav-id]');
+    if(el)el.classList.remove('is-dragging');
+    S.drag=null;
+  });
+  elPageNav.addEventListener('dragover',function(e){if(S.drag&&S.drag.kind==='page')e.preventDefault();});
+  elPageNav.addEventListener('drop',function(e){
+    var el=e.target.closest('[data-page-nav-id]');
+    if(!el||!S.drag||S.drag.kind!=='page')return;
+    e.preventDefault();movePage(S.drag.pageId,el.getAttribute('data-page-nav-id'));S.drag=null;
+  });
 
-          fetch(trimTrailingSlash(CONFIG_BASE_URL) + '/' + encodeURIComponent(selectedId), {
-            method: 'DELETE',
-          })
-            .then(function (response) {
-              if (!response.ok) {
-                throw new Error('Unable to delete selected form.');
-              }
-              return response.json();
-            })
-            .then(function () {
-              resetToDefaultForm();
-              publishResult.classList.remove('is-visible');
-              return refreshFormLibrary();
-            })
-            .then(function () {
-              var url = new URL(BUILDER_ENDPOINT, window.location.origin);
-              history.replaceState({}, '', url.toString());
-            })
-            .catch(function (error) {
-              publishResult.classList.add('is-visible');
-              document.getElementById('config-url').textContent = error && error.message ? error.message : 'Unable to delete selected form.';
-            });
-        });
+  /* Universal dragover / drop on canvas */
+  document.addEventListener('dragover',function(e){
+    if(!S.drag||S.drag.kind==='page')return;
+    var dz=e.target.closest('.vb-drop-zone');
+    var pa=e.target.closest('[data-page-drop]');
+    if(dz){e.preventDefault();clearDZ();dz.classList.add('drag-over');}
+    else if(pa){e.preventDefault();clearDZ();pa.classList.add('drag-over');}
+  });
 
-        document.getElementById('save-config').addEventListener('click', function () {
-          applyInputs();
-          var payload = clone(builderState);
-          if (currentConfigId) {
-            payload.id = currentConfigId;
-          }
-          fetch(SAVE_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          })
-            .then(function (response) { return response.json(); })
-            .then(function (result) {
-              currentConfigId = result.id || currentConfigId;
-              publishResult.classList.add('is-visible');
-              document.getElementById('config-url').textContent = result.configUrl;
-              var snippets = result.embedSnippets || {};
-              document.getElementById('embed-snippet-embedded').textContent =
-                snippets.embedded || result.embeddedEmbedSnippet || result.embedSnippet || '';
-              document.getElementById('embed-snippet-modal').textContent =
-                snippets.modal || result.modalEmbedSnippet || result.embedSnippet || '';
-              var url = new URL(BUILDER_ENDPOINT, window.location.origin);
-              url.searchParams.set('config', result.id);
-              history.replaceState({}, '', url.toString());
-              refreshFormLibrary();
-            })
-            .catch(function (error) {
-              publishResult.classList.add('is-visible');
-              document.getElementById('config-url').textContent = error && error.message ? error.message : 'Unable to publish configuration.';
-              document.getElementById('embed-snippet-embedded').textContent = '';
-              document.getElementById('embed-snippet-modal').textContent = '';
-            });
-        });
+  document.addEventListener('dragleave',function(e){
+    var dz=e.target.closest('.vb-drop-zone');
+    if(dz&&!dz.contains(e.relatedTarget))dz.classList.remove('drag-over');
+    var pa=e.target.closest('[data-page-drop]');
+    if(pa&&!pa.contains(e.relatedTarget))pa.classList.remove('drag-over');
+  });
 
-        function loadExistingConfig() {
-          var params = new URLSearchParams(window.location.search);
-          var configId = params.get('config');
-          if (!configId) {
-            return Promise.resolve();
-          }
-          return loadConfigById(configId)
-            .catch(function () {
-              resetToDefaultForm();
-            });
-        }
+  document.addEventListener('drop',function(e){
+    if(!S.drag||S.drag.kind==='page')return;
+    var dz=e.target.closest('.vb-drop-zone');
+    var pa=e.target.closest('[data-page-drop]');
+    if(!dz&&!pa)return;
+    e.preventDefault();clearDZ();
+    var toPageId=dz?dz.getAttribute('data-dz-page'):pa.getAttribute('data-page-drop');
+    var beforeId=dz?(dz.getAttribute('data-dz-before')||null):null;
+    if(S.drag.kind==='library'){
+      addSectionToPage(S.drag.type,toPageId,beforeId);
+    } else if(S.drag.kind==='block'){
+      if(S.drag.sectionId!==beforeId) moveSection(S.drag.sectionId,S.drag.pageId,toPageId,beforeId);
+    }
+    S.drag=null;
+  });
 
-        bindBranding();
-        renderSectionList();
-        renderPreview();
-        loadExistingConfig().then(function () {
-          refreshFormLibrary();
-        });
-      })();
-    </script>
-  </body>
+  function clearDZ(){
+    document.querySelectorAll('.drag-over').forEach(function(el){el.classList.remove('drag-over');});
+  }
+
+  /* ══ CLICK EVENTS ════════════════════════════════════════ */
+
+  elPageNav.addEventListener('click',function(e){
+    var el=e.target.closest('[data-page-nav-id]');
+    if(el){selectPage(el.getAttribute('data-page-nav-id'));}
+  });
+
+  elCanvas.addEventListener('click',function(e){
+    var btn=e.target.closest('[data-action]');
+    if(btn){
+      var a=btn.getAttribute('data-action');
+      var sid=btn.getAttribute('data-section-id'); var pid=btn.getAttribute('data-page-id');
+      if(a==='remove-section')removeSection(sid,pid);
+      else if(a==='duplicate-section')duplicateSection(sid,pid);
+      else if(a==='select-section'){selectSection(pid,sid);}
+      else if(a==='select-page'){selectPage(pid);}
+      else if(a==='remove-page')removePage(pid);
+      return;
+    }
+    var block=e.target.closest('[data-block-id]');
+    if(block&&!e.target.closest('.vb-block-overlay')){
+      selectSection(block.getAttribute('data-block-page'),block.getAttribute('data-block-id'));
+    }
+  });
+
+  /* Shelf click = add to selected page */
+  elShelf.addEventListener('click',function(e){
+    var el=e.target.closest('[data-shelf-type]');
+    if(el&&!el.classList.contains('is-disabled')) addSectionToPage(el.getAttribute('data-shelf-type'),S.selPageId,null);
+  });
+
+  /* Inspector tabs */
+  document.querySelectorAll('.vb-inspector-tab').forEach(function(tab){
+    tab.addEventListener('click',function(){switchTab(tab.getAttribute('data-tab'));});
+  });
+
+  /* Block inspector inputs */
+  elBlockInsp.addEventListener('input',function(e){
+    var sel=S.selSectionId?getSectionById(S.selSectionId):null;
+    var page=getPageById(S.selPageId);
+    if(e.target.id==='insp-label'&&sel)sel.label=e.target.value;
+    else if(e.target.id==='insp-desc'&&sel)sel.description=e.target.value;
+    else if(e.target.id==='insp-body'&&sel){sel.settings=sel.settings||{};sel.settings.body=e.target.value;}
+    else if(e.target.id==='insp-page-name'&&page)page.name=e.target.value;
+    else if(e.target.id==='insp-page-desc'&&page)page.description=e.target.value;
+    renderPageNav(); renderCanvas();
+  });
+
+  elBlockInsp.addEventListener('change',function(e){
+    var sel=S.selSectionId?getSectionById(S.selSectionId):null;
+    if(e.target.id==='insp-visible'&&sel){sel.enabled=e.target.checked;renderCanvas();}
+  });
+
+  elBlockInsp.addEventListener('click',function(e){
+    var btn=e.target.closest('[data-insp-action]');
+    if(!btn)return;
+    var a=btn.getAttribute('data-insp-action');
+    if(a==='remove-section'&&S.selSectionId)removeSection(S.selSectionId,S.selPageId);
+    else if(a==='duplicate-section'&&S.selSectionId)duplicateSection(S.selSectionId,S.selPageId);
+    else if(a==='remove-page'&&S.selPageId)removePage(S.selPageId);
+  });
+
+  /* Settings tab live update */
+  document.getElementById('vb-tab-settings').addEventListener('input',function(e){
+    if(e.target.id==='gs-accent-color')document.getElementById('gs-accent-text').value=e.target.value;
+    if(e.target.id==='gs-accent-text'){var c=e.target.value;if(/^#[0-9a-f]{6}$/i.test(c))document.getElementById('gs-accent-color').value=c;}
+  });
+  document.getElementById('vb-tab-settings').addEventListener('change',function(){renderCanvas();});
+
+  /* Add page */
+  document.getElementById('vb-add-page').addEventListener('click',function(){addPage();});
+
+  /* Search */
+  document.getElementById('vb-search').addEventListener('input',function(){S.q=this.value.trim();renderShelf();});
+
+  /* Top bar */
+  document.getElementById('vb-reset').addEventListener('click',resetToDefault);
+
+  document.getElementById('vb-load-form').addEventListener('click',function(){
+    loadConfigById(elLibrary.value)
+      .then(function(){
+        var url=new URL(BUILDER_ENDPOINT,window.location.origin);
+        if(S.configId)url.searchParams.set('config',S.configId);
+        history.replaceState({},'',url.toString());
+      })
+      .catch(function(err){
+        showInspector();switchTab('preview');elResult.classList.add('is-visible');
+        document.getElementById('vb-config-url').textContent=err&&err.message?err.message:'Unable to load form.';
+      });
+  });
+
+  document.getElementById('vb-delete-form').addEventListener('click',function(){
+    var id=elLibrary.value||S.configId;
+    if(!id){alert('Select a saved form first.');return;}
+    if(!window.confirm('Delete this form? This cannot be undone.'))return;
+    fetch(trimSlash(CONFIG_BASE_URL)+'/'+encodeURIComponent(id),{method:'DELETE'})
+      .then(function(r){if(!r.ok)throw new Error('Delete failed');return r.json();})
+      .then(function(){resetToDefault();return refreshLibrary();})
+      .then(function(){history.replaceState({},'',new URL(BUILDER_ENDPOINT,window.location.origin).toString());})
+      .catch(function(err){alert(err&&err.message?err.message:'Unable to delete.');});
+  });
+
+  document.getElementById('vb-publish').addEventListener('click',function(){
+    applySettings();
+    var payload=clone(S.bs); if(S.configId)payload.id=S.configId;
+    fetch(SAVE_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+      .then(function(r){return r.json();})
+      .then(function(result){
+        S.configId=result.id||S.configId;
+        showInspector();switchTab('preview');elResult.classList.add('is-visible');
+        document.getElementById('vb-config-url').textContent=result.configUrl||'';
+        document.getElementById('vb-snip-embedded').textContent=(result.embedSnippets&&result.embedSnippets.embedded)||result.embeddedEmbedSnippet||result.embedSnippet||'';
+        document.getElementById('vb-snip-modal').textContent=(result.embedSnippets&&result.embedSnippets.modal)||result.modalEmbedSnippet||result.embedSnippet||'';
+        var url=new URL(BUILDER_ENDPOINT,window.location.origin);url.searchParams.set('config',result.id);
+        history.replaceState({},'',url.toString());return refreshLibrary();
+      })
+      .catch(function(err){
+        showInspector();switchTab('preview');elResult.classList.add('is-visible');
+        document.getElementById('vb-config-url').textContent=err&&err.message?err.message:'Publish failed.';
+      });
+  });
+
+  /* ── Boot ────────────────────────────────────────────── */
+  S.bs=ensureEditorModel(DEFAULT_CONFIG);
+  S.selPageId=S.bs.pages[0]?S.bs.pages[0].id:null;
+  syncSettings(); render();
+
+  var initId=new URLSearchParams(window.location.search).get('config');
+  if(initId) loadConfigById(initId).catch(resetToDefault);
+  refreshLibrary();
+})();
+</script>
+</body>
 </html>`;
 }
 
-module.exports = {
-  createBuilderPage,
-};
+module.exports = { createBuilderPage };

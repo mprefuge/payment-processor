@@ -50,45 +50,72 @@ function getDefaultDonationFormConfig() {
     sections: [
       {
         id: 'hero',
+        type: 'hero',
         label: 'Hero',
         description: 'Logo, title, and description.',
         enabled: true,
       },
       {
         id: 'amount',
+        type: 'amount',
         label: 'Donation Details',
         description: 'Amount, frequency, and category selection.',
         enabled: true,
       },
       {
         id: 'donor',
+        type: 'donor',
         label: 'Donor Information',
         description: 'Name, email, and phone collection.',
         enabled: true,
       },
       {
         id: 'address',
+        type: 'address',
         label: 'Address',
         description: 'Mailing address fields.',
         enabled: true,
       },
       {
         id: 'tribute',
+        type: 'tribute',
         label: 'Tribute',
         description: 'Honor or memory gift details.',
         enabled: true,
       },
       {
         id: 'fees',
+        type: 'fees',
         label: 'Processing Fees',
         description: 'Cover-fee checkbox and payment method selector.',
         enabled: true,
       },
       {
         id: 'submit',
+        type: 'submit',
         label: 'Submit',
         description: 'Summary, disclaimer, and call to action.',
         enabled: true,
+      },
+    ],
+    pages: [
+      {
+        id: 'page_donation',
+        name: 'Donation',
+        description: 'Choose an amount and gift designation.',
+        sectionIds: ['hero', 'amount'],
+      },
+      {
+        id: 'page_donor',
+        name: 'Donor Details',
+        description: 'Collect donor identity and optional dedication details.',
+        sectionIds: ['donor', 'address', 'tribute'],
+      },
+      {
+        id: 'page_review',
+        name: 'Review & Submit',
+        description: 'Confirm totals and continue to Stripe Checkout.',
+        sectionIds: ['fees', 'submit'],
       },
     ],
   };

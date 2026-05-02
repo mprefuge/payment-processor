@@ -66,9 +66,64 @@ function normalizeAmountPresets(value, fallback) {
   return normalized.length ? normalized : clone(fallback);
 }
 
+function normalizeSectionType(value, fallback) {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === 'hero' ||
+    normalized === 'amount' ||
+    normalized === 'donor' ||
+    normalized === 'address' ||
+    normalized === 'tribute' ||
+    normalized === 'fees' ||
+    normalized === 'submit' ||
+    normalized === 'content'
+  ) {
+    return normalized;
+  }
+
+  return fallback;
+}
+
+function normalizeSectionSettings(value, type) {
+  if (type !== 'content') {
+    return undefined;
+  }
+
+  return {
+    body: normalizeString(value && value.body, 'Add supporting copy for this step.'),
+  };
+}
+
+function normalizeSectionIdList(value, validSectionIds) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized = [];
+  value.forEach((item) => {
+    if (typeof item !== 'string') {
+      return;
+    }
+
+    const trimmed = item.trim();
+    if (!trimmed || !validSectionIds.has(trimmed) || normalized.includes(trimmed)) {
+      return;
+    }
+
+    normalized.push(trimmed);
+  });
+
+  return normalized;
+}
+
 function normalizeSections(value, fallback) {
   const fallbackById = new Map(fallback.map((section) => [section.id, clone(section)]));
   const normalized = [];
+  const seenIds = new Set();
 
   if (Array.isArray(value)) {
     value.forEach((item) => {
@@ -76,24 +131,118 @@ function normalizeSections(value, fallback) {
         return;
       }
 
-      const fallbackSection = fallbackById.get(item.id);
-      if (!fallbackSection) {
+      const rawId = typeof item.id === 'string' ? item.id.trim() : '';
+      const fallbackSection = rawId ? fallbackById.get(rawId) : null;
+      const fallbackType = fallbackSection ? fallbackSection.type || fallbackSection.id : 'content';
+      const type = normalizeSectionType(item.type, fallbackType);
+      if (!fallbackSection && type !== 'content') {
+        return;
+      }
+
+      const id = rawId || (type === 'content' ? randomUUID() : type);
+      if (!id || seenIds.has(id)) {
         return;
       }
 
       normalized.push({
-        ...fallbackSection,
-        label: normalizeString(item.label, fallbackSection.label),
-        description: normalizeString(item.description, fallbackSection.description),
-        enabled: normalizeBoolean(item.enabled, fallbackSection.enabled),
+        ...(fallbackSection || {}),
+        id,
+        type,
+        label: normalizeString(
+          item.label,
+          fallbackSection ? fallbackSection.label : 'Content Block'
+        ),
+        description: normalizeString(
+          item.description,
+          fallbackSection ? fallbackSection.description : 'Supporting copy block.'
+        ),
+        enabled: normalizeBoolean(item.enabled, fallbackSection ? fallbackSection.enabled : true),
+        settings: normalizeSectionSettings(item.settings, type),
       });
-      fallbackById.delete(item.id);
+      seenIds.add(id);
+      if (fallbackSection) {
+        fallbackById.delete(id);
+      }
     });
   }
 
   fallbackById.forEach((section) => {
-    normalized.push(section);
+    if (!seenIds.has(section.id)) {
+      normalized.push(section);
+    }
   });
+
+  return normalized;
+}
+
+function normalizePages(value, fallback, sections) {
+  const validSectionIds = new Set(sections.map((section) => section.id));
+  const normalized = [];
+  const seenPageIds = new Set();
+
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      if (!item || typeof item !== 'object') {
+        return;
+      }
+
+      const requestedId = typeof item.id === 'string' ? item.id.trim() : '';
+      const id = requestedId || 'page_' + String(index + 1);
+      if (seenPageIds.has(id)) {
+        return;
+      }
+
+      normalized.push({
+        id,
+        name: normalizeString(item.name, 'Page ' + String(index + 1)),
+        description: normalizeString(item.description, ''),
+        sectionIds: normalizeSectionIdList(item.sectionIds, validSectionIds),
+      });
+      seenPageIds.add(id);
+    });
+  }
+
+  if (!normalized.length) {
+    fallback.forEach((page) => {
+      normalized.push({
+        id: page.id,
+        name: page.name,
+        description: page.description,
+        sectionIds: normalizeSectionIdList(page.sectionIds, validSectionIds),
+      });
+    });
+  }
+
+  if (!normalized.length) {
+    normalized.push({
+      id: 'page_1',
+      name: 'Page 1',
+      description: '',
+      sectionIds: [],
+    });
+  }
+
+  const assignedIds = new Set();
+  normalized.forEach((page) => {
+    page.sectionIds = page.sectionIds.filter((sectionId) => {
+      if (assignedIds.has(sectionId)) {
+        return false;
+      }
+
+      assignedIds.add(sectionId);
+      return true;
+    });
+  });
+
+  const unassignedIds = sections
+    .map((section) => section.id)
+    .filter((sectionId) => !assignedIds.has(sectionId));
+
+  if (unassignedIds.length) {
+    normalized[normalized.length - 1].sectionIds = normalized[normalized.length - 1].sectionIds.concat(
+      unassignedIds
+    );
+  }
 
   return normalized;
 }
@@ -101,6 +250,7 @@ function normalizeSections(value, fallback) {
 function normalizeDonationFormConfig(input = {}) {
   const defaults = getDefaultDonationFormConfig();
   const config = input && typeof input === 'object' ? input : {};
+  const normalizedSections = normalizeSections(config.sections, defaults.sections);
 
   return {
     version: 1,
@@ -187,7 +337,8 @@ function normalizeDonationFormConfig(input = {}) {
         defaults.payment.categories
       ),
     },
-    sections: normalizeSections(config.sections, defaults.sections),
+    sections: normalizedSections,
+    pages: normalizePages(config.pages, defaults.pages || [], normalizedSections),
   };
 }
 

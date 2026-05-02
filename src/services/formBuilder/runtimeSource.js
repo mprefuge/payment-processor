@@ -177,6 +177,7 @@ function getDonationFormRuntimeSource() {
     config.options = config.options || {};
     config.payment = config.payment || {};
     config.sections = ensureArray(config.sections, []);
+    config.pages = ensureArray(config.pages, []);
     config.stripe = config.stripe || {};
 
     config.branding.organizationName = config.branding.organizationName || 'Organization';
@@ -201,16 +202,135 @@ function getDonationFormRuntimeSource() {
     config.options.collectAddress = config.options.collectAddress !== false;
     config.options.enableTribute = config.options.enableTribute !== false;
     config.options.enableFeeCoverage = config.options.enableFeeCoverage !== false;
+    config.pages = ensurePages(config);
 
     return config;
   }
 
-  function sectionEnabled(config, id) {
-    var section = config.sections.find(function (entry) {
+  function getSection(config, id) {
+    return config.sections.find(function (entry) {
       return entry && entry.id === id;
-    });
+    }) || null;
+  }
+
+  function getSectionType(section) {
+    return section && (section.type || section.id) ? String(section.type || section.id).toLowerCase() : '';
+  }
+
+  function sectionEnabled(config, idOrSection) {
+    var section = typeof idOrSection === 'string' ? getSection(config, idOrSection) : idOrSection;
 
     return !section || section.enabled !== false;
+  }
+
+  function sectionVisible(config, section) {
+    if (!sectionEnabled(config, section)) {
+      return false;
+    }
+
+    var type = getSectionType(section);
+    if (type === 'address') {
+      return config.options.collectAddress;
+    }
+    if (type === 'tribute') {
+      return config.options.enableTribute;
+    }
+    if (type === 'fees') {
+      return config.options.enableFeeCoverage;
+    }
+
+    return true;
+  }
+
+  function deriveDefaultPages(config) {
+    var pages = [
+      { id: 'page_donation', name: 'Donation', description: 'Choose an amount and designation.', sectionIds: [] },
+      { id: 'page_donor', name: 'Donor Details', description: 'Collect donor details and address.', sectionIds: [] },
+      { id: 'page_review', name: 'Review & Submit', description: 'Confirm and continue to Stripe Checkout.', sectionIds: [] }
+    ];
+
+    config.sections.forEach(function (section) {
+      var type = getSectionType(section);
+      if (type === 'hero' || type === 'amount') {
+        pages[0].sectionIds.push(section.id);
+      } else if (type === 'donor' || type === 'address' || type === 'tribute' || type === 'content') {
+        pages[1].sectionIds.push(section.id);
+      } else {
+        pages[2].sectionIds.push(section.id);
+      }
+    });
+
+    return pages.filter(function (page) {
+      return page.sectionIds.length;
+    });
+  }
+
+  function ensurePages(config) {
+    var validSectionIds = {};
+    config.sections.forEach(function (section) {
+      validSectionIds[section.id] = true;
+    });
+
+    var pages = ensureArray(config.pages, []).map(function (page, index) {
+      var sectionIds = ensureArray(page && page.sectionIds, []).filter(function (sectionId, sectionIndex, arr) {
+        return validSectionIds[sectionId] && arr.indexOf(sectionId) === sectionIndex;
+      });
+
+      return {
+        id: page && page.id ? String(page.id) : 'page_' + String(index + 1),
+        name: page && page.name ? String(page.name) : 'Page ' + String(index + 1),
+        description: page && page.description ? String(page.description) : '',
+        sectionIds: sectionIds,
+      };
+    }).filter(function (page, index, arr) {
+      return page.sectionIds.length && arr.findIndex(function (entry) { return entry.id === page.id; }) === index;
+    });
+
+    if (!pages.length) {
+      pages = deriveDefaultPages(config);
+    }
+
+    if (!pages.length) {
+      pages = [{ id: 'page_1', name: 'Page 1', description: '', sectionIds: [] }];
+    }
+
+    var assigned = {};
+    pages.forEach(function (page) {
+      page.sectionIds = page.sectionIds.filter(function (sectionId) {
+        if (assigned[sectionId]) {
+          return false;
+        }
+        assigned[sectionId] = true;
+        return true;
+      });
+    });
+
+    config.sections.forEach(function (section) {
+      if (!assigned[section.id]) {
+        pages[pages.length - 1].sectionIds.push(section.id);
+      }
+    });
+
+    return pages;
+  }
+
+  function getRenderablePages(config) {
+    return config.pages
+      .map(function (page) {
+        var sections = page.sectionIds
+          .map(function (sectionId) { return getSection(config, sectionId); })
+          .filter(function (section) { return section && sectionVisible(config, section); });
+
+        return {
+          id: page.id,
+          name: page.name,
+          description: page.description,
+          sections: sections,
+        };
+      })
+      .filter(function (page) {
+        return page.sections.length;
+      });
   }
 
   function feeFor(amount, paymentMethod, cardType) {
@@ -288,8 +408,18 @@ function getDonationFormRuntimeSource() {
     };
   }
 
-  function validateStep(config, state, step) {
-    if (step === 1) {
+  function validatePage(config, state, pageNumber) {
+    var pages = getRenderablePages(config);
+    var page = pages[pageNumber - 1];
+    if (!page) {
+      return { ok: true, message: '' };
+    }
+
+    var pageTypes = page.sections.map(function (section) {
+      return getSectionType(section);
+    });
+
+    if (pageTypes.indexOf('amount') >= 0) {
       var amount = currentAmount(state);
       if (!(amount > 0)) {
         return { ok: false, message: 'Please choose or enter an amount.' };
@@ -303,7 +433,11 @@ function getDonationFormRuntimeSource() {
       return { ok: true, message: '' };
     }
 
-    if (step === 2) {
+    if (
+      pageTypes.indexOf('donor') >= 0 ||
+      pageTypes.indexOf('address') >= 0 ||
+      pageTypes.indexOf('tribute') >= 0
+    ) {
       if (state.donationType === 'individual') {
         if (!state.fields.firstName.trim() || !state.fields.lastName.trim()) {
           return { ok: false, message: 'Please enter first and last name.' };
@@ -319,7 +453,7 @@ function getDonationFormRuntimeSource() {
         return { ok: false, message: 'Please enter a phone number.' };
       }
 
-      if (sectionEnabled(config, 'address') && config.options.collectAddress) {
+      if (pageTypes.indexOf('address') >= 0 && sectionEnabled(config, 'address') && config.options.collectAddress) {
         var usingLookup = state.addressMode === 'lookup';
         if (usingLookup) {
           if (!state.fields.addressLookup || state.fields.addressLookup.trim().length < 5) {
@@ -338,7 +472,7 @@ function getDonationFormRuntimeSource() {
         }
       }
 
-      if (sectionEnabled(config, 'tribute') && config.options.enableTribute && state.tributeEnabled) {
+      if (pageTypes.indexOf('tribute') >= 0 && sectionEnabled(config, 'tribute') && config.options.enableTribute && state.tributeEnabled) {
         if (!state.fields.tributeFirstName.trim() || !state.fields.tributeLastName.trim()) {
           return { ok: false, message: 'Please complete tribute name fields.' };
         }
@@ -460,72 +594,127 @@ function getDonationFormRuntimeSource() {
       return '<option value="' + escapeHtml(countryValue) + '">' + escapeHtml(countryValue) + '</option>';
     }).join('');
 
+    function renderSection(section) {
+      var type = getSectionType(section);
+      var heading = section.label ? escapeHtml(section.label) : '';
+      var description = section.description ? '<p class="df-section-copy">' + escapeHtml(section.description) + '</p>' : '';
+
+      if (type === 'hero') {
+        return '';
+      }
+
+      if (type === 'content') {
+        var body = section.settings && section.settings.body
+          ? '<div class="df-content-body">' + escapeHtml(section.settings.body).replace(/\n/g, '<br>') + '</div>'
+          : '';
+        return '<div class="df-card df-card-content"><h3>' + heading + '</h3>' + description + body + '</div>';
+      }
+
+      if (type === 'amount') {
+        return '' +
+          '<div class="df-card"><h3>' + (heading || 'Donation Details') + '</h3>' + description +
+            frequencyButtons +
+            '<div class="df-row df-amount-row" style="margin-top:10px" data-amount-row>' +
+              amountButtons +
+              '<button type="button" class="df-chip df-amount df-amount-chip is-amount" data-amount="custom">Other</button>' +
+            '</div>' +
+            '<div class="df-grid" data-custom-wrap style="display:none;margin-top:10px"><div><label class="df-label">Custom amount</label><input type="number" min="1" step="0.01" class="df-input" data-field="customAmount"></div></div>' +
+            '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Category</label><select class="df-select" data-field="category">' + categoryOptions + '</select></div></div>' +
+            '<div class="df-grid" data-other-wrap style="display:none;margin-top:10px"><div><label class="df-label">Other category</label><input class="df-input" data-field="categoryOther"></div></div>' +
+          '</div>';
+      }
+
+      if (type === 'donor') {
+        return '' +
+          '<div class="df-card"><h3>' + (heading || 'Your Information') + '</h3>' + description +
+            (config.options.allowOrganizationGiving
+              ? '<div class="df-row" data-donor-row><button type="button" class="df-chip df-donor df-donation-type-chip" data-donation-type="individual">Individual</button><button type="button" class="df-chip df-donor df-donation-type-chip" data-donation-type="organization">Organization</button></div>'
+              : '') +
+            '<div class="df-grid df-grid-2" style="margin-top:10px" data-individual-fields><div><label class="df-label">First name</label><input class="df-input" data-field="firstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="lastName"></div></div>' +
+            '<div class="df-grid" style="margin-top:10px;display:none" data-organization-fields><div><label class="df-label">Organization</label><input class="df-input" data-field="organization"></div></div>' +
+            '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">Email</label><input class="df-input" type="email" data-field="email"></div><div><label class="df-label">Phone</label><input class="df-input" data-field="phone"></div></div>' +
+          '</div>';
+      }
+
+      if (type === 'address') {
+        return '' +
+          '<div class="df-card"><h3>' + (heading || 'Address') + '</h3>' + description +
+            '<div data-address-lookup-row style="margin-top:10px"><div class="df-address-lookup-wrap"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px"><label class="df-label" style="margin:0">Address</label><span class="df-address-manual-link" data-enter-manual>Enter manually</span></div><input class="df-input" data-field="addressLookup" autocomplete="off" placeholder="Start typing your address"><div class="df-address-suggestions" data-address-suggestions></div></div></div>' +
+            '<div data-manual-address style="display:none;margin-top:10px"><div class="df-grid df-grid-2"><div><label class="df-label">Address line 1</label><input class="df-input" data-field="address1"></div><div><label class="df-label">Address line 2</label><input class="df-input" data-field="address2"></div></div>' +
+            '<div class="df-grid df-grid-4" style="margin-top:10px"><div><label class="df-label">City</label><input class="df-input" data-field="city"></div><div><label class="df-label">State</label><select class="df-select" data-field="state">' + stateOptions + '</select></div><div><label class="df-label">Postal code</label><input class="df-input" data-field="postalCode"></div><div><label class="df-label">Country</label><select class="df-select" data-field="country">' + countryOptions + '</select></div></div></div>' +
+          '</div>';
+      }
+
+      if (type === 'tribute') {
+        return '' +
+          '<div class="df-card"><h3>' + (heading || 'Tribute') + '</h3>' + description +
+            '<label class="df-inline"><input type="checkbox" data-field="tributeEnabled"> Tribute gift</label>' +
+            '<div data-tribute-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="honor">In Honor</button><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="memory">In Memory</button></div>' +
+            '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">First name</label><input class="df-input" data-field="tributeFirstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="tributeLastName"></div></div>' +
+            '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Message</label><textarea class="df-textarea" data-field="tributeMessage"></textarea></div></div></div>' +
+          '</div>';
+      }
+
+      if (type === 'fees') {
+        return '' +
+          '<div class="df-card"><h3>' + (heading || 'Processing Fees') + '</h3>' + description +
+            '<label class="df-inline"><input type="checkbox" data-field="coverFee"> Cover processing fee</label>' +
+            '<div data-payment-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-payment" data-payment-method="card">Card</button><button type="button" class="df-chip df-payment" data-payment-method="ach">Bank</button><button type="button" class="df-chip df-payment" data-payment-method="wallet">Wallet</button></div>' +
+            '<div data-card-wrap style="margin-top:8px"><div class="df-row"><button type="button" class="df-chip df-card" data-card-type="visa">Visa</button><button type="button" class="df-chip df-card" data-card-type="mastercard">Mastercard</button><button type="button" class="df-chip df-card" data-card-type="amex">AmEx</button><button type="button" class="df-chip df-card" data-card-type="other">Other</button></div></div></div>' +
+          '</div>';
+      }
+
+      if (type === 'submit') {
+        return '' +
+          '<div class="df-card"><h3>' + (heading || 'Review & Submit') + '</h3>' + description +
+            '<div class="df-total"><div><div class="df-label" style="margin:0 0 2px;text-transform:none;letter-spacing:0;font-size:13px">Total</div><div class="df-total-money" data-total-display>$0.00</div></div><div class="df-label" data-frequency-display style="margin:0;text-transform:none;letter-spacing:0"></div></div>' +
+            '<div class="df-error" data-error></div>' +
+            '<button type="button" class="df-submit" data-submit style="margin-top:10px"></button>' +
+            '<div class="df-meta">After clicking donate, the donor will be redirected to Stripe Checkout.</div>' +
+            (options.mode === 'preview' ? '<pre class="df-preview-result" data-preview-result></pre>' : '') +
+          '</div>';
+      }
+
+      return '';
+    }
+
+    var pages = getRenderablePages(config);
+    var showHeader = pages.some(function (page) {
+      return page.sections.some(function (section) {
+        return getSectionType(section) === 'hero';
+      });
+    });
+
     return '' +
       '<div class="df-panel" style="--df-accent:' + escapeHtml(config.branding.accentColor) + '">' +
-        '<div class="df-header">' +
-          (config.branding.logoUrl ? '<img class="df-logo" src="' + escapeHtml(config.branding.logoUrl) + '" alt="logo">' : '') +
-          '<div><h2 class="df-title">' + escapeHtml(config.branding.title) + '</h2><p class="df-description">' + escapeHtml(config.branding.description) + '</p></div>' +
-        '</div>' +
+        (showHeader
+          ? '<div class="df-header">' +
+              (config.branding.logoUrl ? '<img class="df-logo" src="' + escapeHtml(config.branding.logoUrl) + '" alt="logo">' : '') +
+              '<div><h2 class="df-title">' + escapeHtml(config.branding.title) + '</h2><p class="df-description">' + escapeHtml(config.branding.description) + '</p></div>' +
+            '</div>'
+          : '') +
         '<div class="df-body">' +
           '<div class="df-step-indicators">' +
-            '<span class="df-dot" data-dot="1"></span><span class="df-dot" data-dot="2"></span><span class="df-dot" data-dot="3"></span>' +
+            pages.map(function (_page, index) {
+              return '<span class="df-dot" data-dot="' + String(index + 1) + '"></span>';
+            }).join('') +
           '</div>' +
+          pages.map(function (page, index) {
+            var isFirst = index === 0;
+            var isLast = index === pages.length - 1;
+            var nav = '<div class="df-nav">' +
+              (isFirst ? '<span></span>' : '<button type="button" class="df-btn ghost" data-prev>Previous</button>') +
+              (isLast ? '<span></span>' : '<button type="button" class="df-btn primary" data-next>Next</button>') +
+            '</div>';
 
-          '<div class="df-step" data-step="1">' +
-            '<div class="df-card"><h3>Donation Details</h3>' +
-              frequencyButtons +
-              '<div class="df-row df-amount-row" style="margin-top:10px" data-amount-row>' +
-                amountButtons +
-                '<button type="button" class="df-chip df-amount df-amount-chip is-amount" data-amount="custom">Other</button>' +
+            return '<div class="df-step" data-step="' + String(index + 1) + '" style="display:' + (isFirst ? '' : 'none') + '">' +
+              '<div class="df-step-meta"><div class="df-step-title">' + escapeHtml(page.name || ('Page ' + String(index + 1))) + '</div>' +
+              (page.description ? '<div class="df-step-description">' + escapeHtml(page.description) + '</div>' : '') +
               '</div>' +
-              '<div class="df-grid" data-custom-wrap style="display:none;margin-top:10px"><div><label class="df-label">Custom amount</label><input type="number" min="1" step="0.01" class="df-input" data-field="customAmount"></div></div>' +
-              '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Category</label><select class="df-select" data-field="category">' + categoryOptions + '</select></div></div>' +
-              '<div class="df-grid" data-other-wrap style="display:none;margin-top:10px"><div><label class="df-label">Other category</label><input class="df-input" data-field="categoryOther"></div></div>' +
-            '</div>' +
-            '<div class="df-nav"><span></span><button type="button" class="df-btn primary" data-next>Next</button></div>' +
-          '</div>' +
-
-          '<div class="df-step" data-step="2" style="display:none">' +
-            '<div class="df-card"><h3>Your Information</h3>' +
-              (config.options.allowOrganizationGiving
-                ? '<div class="df-row" data-donor-row><button type="button" class="df-chip df-donor df-donation-type-chip" data-donation-type="individual">Individual</button><button type="button" class="df-chip df-donor df-donation-type-chip" data-donation-type="organization">Organization</button></div>'
-                : '') +
-              '<div class="df-grid df-grid-2" style="margin-top:10px" data-individual-fields><div><label class="df-label">First name</label><input class="df-input" data-field="firstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="lastName"></div></div>' +
-              '<div class="df-grid" style="margin-top:10px;display:none" data-organization-fields><div><label class="df-label">Organization</label><input class="df-input" data-field="organization"></div></div>' +
-              '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">Email</label><input class="df-input" type="email" data-field="email"></div><div><label class="df-label">Phone</label><input class="df-input" data-field="phone"></div></div>' +
-
-              (sectionEnabled(config, 'address') && config.options.collectAddress
-                ? '<div data-address-lookup-row style="margin-top:10px"><div class="df-address-lookup-wrap"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px"><label class="df-label" style="margin:0">Address</label><span class="df-address-manual-link" data-enter-manual>Enter manually</span></div><input class="df-input" data-field="addressLookup" autocomplete="off" placeholder="Start typing your address"><div class="df-address-suggestions" data-address-suggestions></div></div></div>' +
-                  '<div data-manual-address style="display:none;margin-top:10px"><div class="df-grid df-grid-2"><div><label class="df-label">Address line 1</label><input class="df-input" data-field="address1"></div><div><label class="df-label">Address line 2</label><input class="df-input" data-field="address2"></div></div>' +
-                  '<div class="df-grid df-grid-4" style="margin-top:10px"><div><label class="df-label">City</label><input class="df-input" data-field="city"></div><div><label class="df-label">State</label><select class="df-select" data-field="state">' + stateOptions + '</select></div><div><label class="df-label">Postal code</label><input class="df-input" data-field="postalCode"></div><div><label class="df-label">Country</label><select class="df-select" data-field="country">' + countryOptions + '</select></div></div></div>'
-                : '') +
-
-              (sectionEnabled(config, 'tribute') && config.options.enableTribute
-                ? '<div class="df-card" style="margin-top:12px"><label class="df-inline"><input type="checkbox" data-field="tributeEnabled"> Tribute gift</label>' +
-                    '<div data-tribute-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="honor">In Honor</button><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="memory">In Memory</button></div>' +
-                    '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">First name</label><input class="df-input" data-field="tributeFirstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="tributeLastName"></div></div>' +
-                    '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Message</label><textarea class="df-textarea" data-field="tributeMessage"></textarea></div></div></div></div>'
-                : '') +
-            '</div>' +
-            '<div class="df-nav"><button type="button" class="df-btn ghost" data-prev>Previous</button><button type="button" class="df-btn primary" data-next>Next</button></div>' +
-          '</div>' +
-
-          '<div class="df-step" data-step="3" style="display:none">' +
-            '<div class="df-card"><h3>Review & Submit</h3>' +
-              '<div class="df-total"><div><div class="df-label" style="margin:0 0 2px;text-transform:none;letter-spacing:0;font-size:13px">Total</div><div class="df-total-money" data-total-display>$0.00</div></div><div class="df-label" data-frequency-display style="margin:0;text-transform:none;letter-spacing:0"></div></div>' +
-              (sectionEnabled(config, 'fees') && config.options.enableFeeCoverage
-                ? '<div style="margin-top:10px"><label class="df-inline"><input type="checkbox" data-field="coverFee"> Cover processing fee</label>' +
-                  '<div data-payment-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-payment" data-payment-method="card">Card</button><button type="button" class="df-chip df-payment" data-payment-method="ach">Bank</button><button type="button" class="df-chip df-payment" data-payment-method="wallet">Wallet</button></div>' +
-                  '<div data-card-wrap style="margin-top:8px"><div class="df-row"><button type="button" class="df-chip df-card" data-card-type="visa">Visa</button><button type="button" class="df-chip df-card" data-card-type="mastercard">Mastercard</button><button type="button" class="df-chip df-card" data-card-type="amex">AmEx</button><button type="button" class="df-chip df-card" data-card-type="other">Other</button></div></div></div></div>'
-                : '') +
-
-              '<div class="df-error" data-error></div>' +
-              '<button type="button" class="df-submit" data-submit style="margin-top:10px"></button>' +
-              '<div class="df-meta">After clicking donate, the donor will be redirected to Stripe Checkout.</div>' +
-              (options.mode === 'preview' ? '<pre class="df-preview-result" data-preview-result></pre>' : '') +
-            '</div>' +
-            '<div class="df-nav"><button type="button" class="df-btn ghost" data-prev>Previous</button><span></span></div>' +
-          '</div>' +
+              page.sections.map(function (section) { return renderSection(section); }).join('') +
+              nav +
+            '</div>';
+          }).join('') +
         '</div>' +
       '</div>';
   }
@@ -842,12 +1031,12 @@ function getDonationFormRuntimeSource() {
       }
 
       if (event.target.matches('[data-next]')) {
-        var validation = validateStep(config, state, state.step);
+        var validation = validatePage(config, state, state.step);
         if (!validation.ok) {
           showError(validation.message);
           return;
         }
-        state.step = Math.min(3, state.step + 1);
+        state.step = Math.min(steps.length, state.step + 1);
         syncStep();
         syncTotals();
         return;
@@ -868,20 +1057,15 @@ function getDonationFormRuntimeSource() {
       }
 
       if (event.target.matches('[data-submit]')) {
-        var valid = validateStep(config, state, 1);
-        if (!valid.ok) {
-          showError(valid.message);
-          state.step = 1;
-          syncStep();
-          return;
-        }
-
-        valid = validateStep(config, state, 2);
-        if (!valid.ok) {
-          showError(valid.message);
-          state.step = 2;
-          syncStep();
-          return;
+        var valid = { ok: true, message: '' };
+        for (var pageIndex = 1; pageIndex <= steps.length; pageIndex += 1) {
+          valid = validatePage(config, state, pageIndex);
+          if (!valid.ok) {
+            showError(valid.message);
+            state.step = pageIndex;
+            syncStep();
+            return;
+          }
         }
 
         var payload = buildPayload(config, state);

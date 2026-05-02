@@ -56,8 +56,9 @@ describe('donation form builder handlers', () => {
     expect(response.status).toBe(200);
     expect(response.headers['Content-Type']).toContain('text/html');
     expect(response.body).toContain('Donation Form Builder');
+    expect(response.body).toContain('Visual Editor');
     expect(response.body).toContain('/api/form-builder/configs');
-    expect(response.body).toContain('split(/\\r?\\n/)');
+    expect(response.body).toContain('vb-page-nav');
   });
 
   it('saves a config and returns config plus embed URLs', async () => {

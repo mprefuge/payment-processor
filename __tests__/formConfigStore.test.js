@@ -84,4 +84,35 @@ describe('formConfigStore', () => {
     const loaded = await store.get(saved.id);
     expect(loaded).toBeNull();
   });
+
+  it('normalizes page structures and custom content sections', async () => {
+    const store = new FormConfigStore({ storage: createMemoryStorage() });
+
+    const saved = await store.save({
+      name: 'Micah Test Multi Page Form',
+      sections: [
+        { id: 'hero', label: 'Custom Hero' },
+        {
+          type: 'content',
+          label: 'Why This Matters',
+          description: 'Campaign context',
+          settings: { body: 'Line one\nLine two' },
+        },
+      ],
+      pages: [
+        {
+          id: 'page_intro',
+          name: 'Intro',
+          description: 'Opening page',
+          sectionIds: ['hero'],
+        },
+      ],
+    });
+
+    expect(saved.config.pages.length).toBeGreaterThan(0);
+    expect(saved.config.pages[0].name).toBe('Intro');
+    expect(saved.config.sections.some((section) => section.id === 'hero')).toBe(true);
+    expect(saved.config.sections.some((section) => section.type === 'content')).toBe(true);
+    expect(saved.config.pages.some((page) => page.sectionIds.includes('hero'))).toBe(true);
+  });
 });
