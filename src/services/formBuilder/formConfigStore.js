@@ -239,9 +239,8 @@ function normalizePages(value, fallback, sections) {
     .filter((sectionId) => !assignedIds.has(sectionId));
 
   if (unassignedIds.length) {
-    normalized[normalized.length - 1].sectionIds = normalized[normalized.length - 1].sectionIds.concat(
-      unassignedIds
-    );
+    normalized[normalized.length - 1].sectionIds =
+      normalized[normalized.length - 1].sectionIds.concat(unassignedIds);
   }
 
   return normalized;
