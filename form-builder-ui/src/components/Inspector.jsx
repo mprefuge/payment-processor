@@ -610,7 +610,11 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
         {previewMode === 'embedded' ? (
           <div className="insp-runtime-panel">
             <div className="insp-runtime-header">
-              {logoUrl ? <img src={logoUrl} alt="logo" /> : <div className="insp-runtime-logo-fallback" />}
+              {logoUrl ? (
+                <img src={logoUrl} alt="logo" />
+              ) : (
+                <div className="insp-runtime-logo-fallback" />
+              )}
               <div>
                 <div className="insp-runtime-title">{title}</div>
                 <div className="insp-runtime-subtitle">{subtitle}</div>
@@ -623,10 +627,16 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
                     {(row.columns || []).map((col) => {
                       const span = typeof col.width === 'number' && col.width > 0 ? col.width : 12;
                       return (
-                        <div key={col.id} className="insp-runtime-col" style={{ gridColumn: `span ${span}` }}>
+                        <div
+                          key={col.id}
+                          className="insp-runtime-col"
+                          style={{ gridColumn: `span ${span}` }}
+                        >
                           {col.field ? (
                             <>
-                              <div className="insp-runtime-field-label">{col.field.label || col.field.type}</div>
+                              <div className="insp-runtime-field-label">
+                                {col.field.label || col.field.type}
+                              </div>
                               <FieldPreview field={col.field} accent={accent} />
                             </>
                           ) : (
@@ -665,7 +675,8 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
                     page.rows.map((row) => (
                       <div key={row.id} className="insp-runtime-row">
                         {(row.columns || []).map((col) => {
-                          const span = typeof col.width === 'number' && col.width > 0 ? col.width : 12;
+                          const span =
+                            typeof col.width === 'number' && col.width > 0 ? col.width : 12;
                           return (
                             <div
                               key={col.id}
@@ -674,7 +685,9 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
                             >
                               {col.field ? (
                                 <>
-                                  <div className="insp-runtime-field-label">{col.field.label || col.field.type}</div>
+                                  <div className="insp-runtime-field-label">
+                                    {col.field.label || col.field.type}
+                                  </div>
                                   <FieldPreview field={col.field} accent={accent} />
                                 </>
                               ) : (
