@@ -114,6 +114,9 @@ function getDonationFormRuntimeSource() {
       '.df-body{padding:16px;max-width:700px;margin:0 auto;position:relative;overflow:visible}' +
       '.df-card{background:#fff;border-radius:18px;box-shadow:0 6px 24px rgba(189,33,53,.10),0 1px 6px rgba(0,0,0,.08);padding:24px;margin-bottom:16px;max-width:700px;margin-left:auto;margin-right:auto;overflow:visible}' +
       '.df-card h3{margin:0 0 16px;font-size:18px;font-weight:700;text-align:center}' +
+      '.df-card-field{padding:16px;max-width:none;margin:0}' +
+      '.df-card-field h3{font-size:14px;font-weight:700;text-align:left;margin:0 0 8px}' +
+      '.df-card-field .df-section-copy{font-size:12px;margin:0 0 6px;color:#777}' +
       '.df-step-indicators{display:flex;justify-content:center;margin-bottom:20px}' +
       '.df-dot{display:flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:50%;background:#ccc;position:relative;margin:0 8px}' +
       '.df-dot.is-active{background:var(--df-accent)}' +
@@ -125,6 +128,9 @@ function getDonationFormRuntimeSource() {
       '.df-grid{display:grid;gap:10px}' +
       '.df-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}' +
       '.df-grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}' +
+      '.df-step{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px}' +
+      '.df-step-slot{grid-column:span var(--df-span,12);min-width:0}' +
+      '.df-step-meta,.df-nav{grid-column:1 / -1}' +
       '.df-label{display:block;font-size:14px;font-weight:600;color:#222;margin-bottom:6px}' +
       '.df-input,.df-select,.df-textarea{width:100%;padding:12px;border:1.5px solid #e0e0e0;border-radius:10px;background:#fafbfc;font-size:16px;outline:none;transition:.2s border-color,.2s box-shadow,.2s background;font:inherit}' +
       '.df-textarea{min-height:86px;resize:vertical}' +
@@ -165,7 +171,7 @@ function getDonationFormRuntimeSource() {
       '.df-modal-wrap{width:min(760px,100%);max-height:92vh;overflow:auto}' +
       '.df-close{position:absolute;top:10px;right:10px;background:#fff;border:0;width:34px;height:34px;border-radius:50%;font-size:20px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.2)}' +
       '.df-embedded .df-panel{border-radius:20px}.df-embedded .df-header{border-radius:20px 20px 0 0}' +
-      '@media (max-width: 760px){.df-grid-2,.df-grid-4{grid-template-columns:1fr}.df-title{font-size:21px}.df-total-money{font-size:21px}.df-panel{border-radius:12px}.df-header{border-radius:12px 12px 0 0}.df-card{padding:18px}.df-amount-row{flex-wrap:wrap;justify-content:center}}';
+      '@media (max-width: 760px){.df-grid-2,.df-grid-4{grid-template-columns:1fr}.df-title{font-size:21px}.df-total-money{font-size:21px}.df-panel{border-radius:12px}.df-header{border-radius:12px 12px 0 0}.df-card{padding:18px}.df-card-field{padding:14px}.df-step{grid-template-columns:1fr}.df-step-slot{grid-column:1 / -1}.df-amount-row{flex-wrap:wrap;justify-content:center}}';
     document.head.appendChild(style);
   }
 
@@ -217,6 +223,62 @@ function getDonationFormRuntimeSource() {
     return section && (section.type || section.id) ? String(section.type || section.id).toLowerCase() : '';
   }
 
+  function isCustomFieldType(type) {
+    return String(type || '').indexOf('field_') === 0;
+  }
+
+  function getCustomFieldSettings(section) {
+    var type = getSectionType(section);
+    var settings = (section && section.settings && typeof section.settings === 'object') ? section.settings : {};
+    var fallbackKey = type === 'field_firstname'
+      ? 'firstName'
+      : type === 'field_lastname'
+        ? 'lastName'
+        : type === 'field_email'
+          ? 'email'
+          : type === 'field_phone'
+            ? 'phone'
+            : String(section && section.id ? section.id : 'customField');
+    var fieldKey = String(settings.fieldKey || fallbackKey)
+      .trim()
+      .replace(/[^a-zA-Z0-9_]/g, '_');
+    if (!fieldKey) {
+      fieldKey = String(section && section.id ? section.id : 'customField').replace(/[^a-zA-Z0-9_]/g, '_');
+    }
+    var inputType = String(settings.inputType || 'text').toLowerCase();
+    var options = Array.isArray(settings.options)
+      ? settings.options.map(function (option) { return String(option).trim(); }).filter(Boolean)
+      : [];
+    return {
+      fieldKey: fieldKey,
+      inputType: inputType,
+      required: settings.required === true,
+      placeholder: settings.placeholder ? String(settings.placeholder) : '',
+      options: options,
+    };
+  }
+
+  function getCustomFieldSections(config) {
+    return (config.sections || []).filter(function (section) {
+      return sectionVisible(config, section) && isCustomFieldType(getSectionType(section));
+    });
+  }
+
+  function getCustomFieldKeys(config) {
+    var seen = {};
+    return getCustomFieldSections(config)
+      .map(function (section) {
+        return getCustomFieldSettings(section).fieldKey;
+      })
+      .filter(function (key) {
+        if (!key || seen[key]) {
+          return false;
+        }
+        seen[key] = true;
+        return true;
+      });
+  }
+
   function sectionEnabled(config, idOrSection) {
     var section = typeof idOrSection === 'string' ? getSection(config, idOrSection) : idOrSection;
 
@@ -253,7 +315,7 @@ function getDonationFormRuntimeSource() {
       var type = getSectionType(section);
       if (type === 'hero' || type === 'amount') {
         pages[0].sectionIds.push(section.id);
-      } else if (type === 'donor' || type === 'address' || type === 'tribute' || type === 'content') {
+      } else if (type === 'donor' || type === 'address' || type === 'tribute' || type === 'content' || isCustomFieldType(type)) {
         pages[1].sectionIds.push(section.id);
       } else {
         pages[2].sectionIds.push(section.id);
@@ -348,6 +410,32 @@ function getDonationFormRuntimeSource() {
   }
 
   function createState(config) {
+    var dynamicFields = {};
+    getCustomFieldKeys(config).forEach(function (key) {
+      dynamicFields[key] = '';
+    });
+
+    var fields = {
+      firstName: '',
+      lastName: '',
+      organization: '',
+      email: '',
+      phone: '',
+      addressLookup: '',
+      address1: '',
+      address2: '',
+      city: '',
+      state: '',
+      postalCode: '',
+      country: 'United States',
+      tributeFirstName: '',
+      tributeLastName: '',
+      tributeMessage: '',
+    };
+    Object.keys(dynamicFields).forEach(function (key) {
+      fields[key] = dynamicFields[key];
+    });
+
     return {
       step: 1,
       amount: Number(config.payment.amountPresets[0] || 0),
@@ -363,23 +451,7 @@ function getDonationFormRuntimeSource() {
       cardType: 'visa',
       tributeEnabled: false,
       tributeType: 'honor',
-      fields: {
-        firstName: '',
-        lastName: '',
-        organization: '',
-        email: '',
-        phone: '',
-        addressLookup: '',
-        address1: '',
-        address2: '',
-        city: '',
-        state: '',
-        postalCode: '',
-        country: 'United States',
-        tributeFirstName: '',
-        tributeLastName: '',
-        tributeMessage: '',
-      },
+      fields: fields,
     };
   }
 
@@ -481,6 +553,31 @@ function getDonationFormRuntimeSource() {
       return { ok: true, message: '' };
     }
 
+    var requiredCustom = page.sections
+      .filter(function (section) {
+        return isCustomFieldType(getSectionType(section));
+      })
+      .map(function (section) {
+        return {
+          section: section,
+          settings: getCustomFieldSettings(section),
+        };
+      })
+      .filter(function (entry) {
+        return entry.settings.required;
+      });
+
+    for (var i = 0; i < requiredCustom.length; i += 1) {
+      var requiredField = requiredCustom[i];
+      var fieldValue = state.fields[requiredField.settings.fieldKey];
+      if (!String(fieldValue || '').trim()) {
+        return {
+          ok: false,
+          message: 'Please complete ' + String(requiredField.section.label || 'required fields').toLowerCase() + '.',
+        };
+      }
+    }
+
     return { ok: true, message: '' };
   }
 
@@ -525,6 +622,35 @@ function getDonationFormRuntimeSource() {
       };
     }
 
+    var reserved = {
+      firstName: true,
+      lastName: true,
+      organization: true,
+      email: true,
+      phone: true,
+      addressLookup: true,
+      address1: true,
+      address2: true,
+      city: true,
+      state: true,
+      postalCode: true,
+      country: true,
+      tributeFirstName: true,
+      tributeLastName: true,
+      tributeMessage: true,
+    };
+    var customFields = {};
+    getCustomFieldSections(config).forEach(function (section) {
+      var settings = getCustomFieldSettings(section);
+      if (reserved[settings.fieldKey]) {
+        return;
+      }
+      customFields[settings.fieldKey] = String(state.fields[settings.fieldKey] || '').trim();
+    });
+    if (Object.keys(customFields).length) {
+      payload.customFields = customFields;
+    }
+
     return payload;
   }
 
@@ -565,6 +691,14 @@ function getDonationFormRuntimeSource() {
   }
 
   function createWizardMarkup(config, state, options) {
+    function asSlot(html, span) {
+      var safeSpan = Number(span || 12);
+      if ([12, 6, 4].indexOf(safeSpan) < 0) {
+        safeSpan = 12;
+      }
+      return '<div class="df-step-slot" style="--df-span:' + String(safeSpan) + '">' + html + '</div>';
+    }
+
     var amountButtons = config.payment.amountPresets
       .map(function (amount) {
         return '<button type="button" class="df-chip df-amount df-amount-chip is-amount" data-amount="' + escapeHtml(amount) + '">' + formatMoney(amount) + '</button>';
@@ -607,11 +741,40 @@ function getDonationFormRuntimeSource() {
         var body = section.settings && section.settings.body
           ? '<div class="df-content-body">' + escapeHtml(section.settings.body).replace(/\n/g, '<br>') + '</div>'
           : '';
-        return '<div class="df-card df-card-content"><h3>' + heading + '</h3>' + description + body + '</div>';
+        return asSlot('<div class="df-card df-card-content"><h3>' + heading + '</h3>' + description + body + '</div>', 12);
+      }
+
+      if (isCustomFieldType(type)) {
+        var fieldSettings = getCustomFieldSettings(section);
+        var fieldLabel = heading || 'Field';
+        var requiredMark = fieldSettings.required ? ' *' : '';
+        var placeholderAttr = fieldSettings.placeholder ? ' placeholder="' + escapeHtml(fieldSettings.placeholder) + '"' : '';
+        var inputMarkup = '';
+
+        if (fieldSettings.inputType === 'textarea') {
+          inputMarkup = '<textarea class="df-textarea" data-field="' + escapeHtml(fieldSettings.fieldKey) + '"' + placeholderAttr + '></textarea>';
+        } else if (fieldSettings.inputType === 'select') {
+          var selectOptions = (fieldSettings.options.length ? fieldSettings.options : ['Option 1', 'Option 2'])
+            .map(function (option) {
+              return '<option value="' + escapeHtml(option) + '">' + escapeHtml(option) + '</option>';
+            })
+            .join('');
+          inputMarkup = '<select class="df-select" data-field="' + escapeHtml(fieldSettings.fieldKey) + '">' + selectOptions + '</select>';
+        } else {
+          var htmlInputType = fieldSettings.inputType === 'email' || fieldSettings.inputType === 'tel' || fieldSettings.inputType === 'number'
+            ? fieldSettings.inputType
+            : 'text';
+          inputMarkup = '<input class="df-input" type="' + htmlInputType + '" data-field="' + escapeHtml(fieldSettings.fieldKey) + '"' + placeholderAttr + '>';
+        }
+
+        return '' +
+          '<div class="df-card df-card-field"><h3>' + fieldLabel + requiredMark + '</h3>' + description +
+            '<div class="df-grid"><div>' + inputMarkup + '</div></div>' +
+          '</div>';
       }
 
       if (type === 'amount') {
-        return '' +
+        return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Donation Details') + '</h3>' + description +
             frequencyButtons +
             '<div class="df-row df-amount-row" style="margin-top:10px" data-amount-row>' +
@@ -621,11 +784,11 @@ function getDonationFormRuntimeSource() {
             '<div class="df-grid" data-custom-wrap style="display:none;margin-top:10px"><div><label class="df-label">Custom amount</label><input type="number" min="1" step="0.01" class="df-input" data-field="customAmount"></div></div>' +
             '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Category</label><select class="df-select" data-field="category">' + categoryOptions + '</select></div></div>' +
             '<div class="df-grid" data-other-wrap style="display:none;margin-top:10px"><div><label class="df-label">Other category</label><input class="df-input" data-field="categoryOther"></div></div>' +
-          '</div>';
+          '</div>', 12);
       }
 
       if (type === 'donor') {
-        return '' +
+        return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Your Information') + '</h3>' + description +
             (config.options.allowOrganizationGiving
               ? '<div class="df-row" data-donor-row><button type="button" class="df-chip df-donor df-donation-type-chip" data-donation-type="individual">Individual</button><button type="button" class="df-chip df-donor df-donation-type-chip" data-donation-type="organization">Organization</button></div>'
@@ -633,46 +796,46 @@ function getDonationFormRuntimeSource() {
             '<div class="df-grid df-grid-2" style="margin-top:10px" data-individual-fields><div><label class="df-label">First name</label><input class="df-input" data-field="firstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="lastName"></div></div>' +
             '<div class="df-grid" style="margin-top:10px;display:none" data-organization-fields><div><label class="df-label">Organization</label><input class="df-input" data-field="organization"></div></div>' +
             '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">Email</label><input class="df-input" type="email" data-field="email"></div><div><label class="df-label">Phone</label><input class="df-input" data-field="phone"></div></div>' +
-          '</div>';
+          '</div>', 12);
       }
 
       if (type === 'address') {
-        return '' +
+        return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Address') + '</h3>' + description +
             '<div data-address-lookup-row style="margin-top:10px"><div class="df-address-lookup-wrap"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px"><label class="df-label" style="margin:0">Address</label><span class="df-address-manual-link" data-enter-manual>Enter manually</span></div><input class="df-input" data-field="addressLookup" autocomplete="off" placeholder="Start typing your address"><div class="df-address-suggestions" data-address-suggestions></div></div></div>' +
             '<div data-manual-address style="display:none;margin-top:10px"><div class="df-grid df-grid-2"><div><label class="df-label">Address line 1</label><input class="df-input" data-field="address1"></div><div><label class="df-label">Address line 2</label><input class="df-input" data-field="address2"></div></div>' +
             '<div class="df-grid df-grid-4" style="margin-top:10px"><div><label class="df-label">City</label><input class="df-input" data-field="city"></div><div><label class="df-label">State</label><select class="df-select" data-field="state">' + stateOptions + '</select></div><div><label class="df-label">Postal code</label><input class="df-input" data-field="postalCode"></div><div><label class="df-label">Country</label><select class="df-select" data-field="country">' + countryOptions + '</select></div></div></div>' +
-          '</div>';
+          '</div>', 12);
       }
 
       if (type === 'tribute') {
-        return '' +
+        return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Tribute') + '</h3>' + description +
             '<label class="df-inline"><input type="checkbox" data-field="tributeEnabled"> Tribute gift</label>' +
             '<div data-tribute-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="honor">In Honor</button><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="memory">In Memory</button></div>' +
             '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">First name</label><input class="df-input" data-field="tributeFirstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="tributeLastName"></div></div>' +
             '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Message</label><textarea class="df-textarea" data-field="tributeMessage"></textarea></div></div></div>' +
-          '</div>';
+          '</div>', 12);
       }
 
       if (type === 'fees') {
-        return '' +
+        return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Processing Fees') + '</h3>' + description +
             '<label class="df-inline"><input type="checkbox" data-field="coverFee"> Cover processing fee</label>' +
             '<div data-payment-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-payment" data-payment-method="card">Card</button><button type="button" class="df-chip df-payment" data-payment-method="ach">Bank</button><button type="button" class="df-chip df-payment" data-payment-method="wallet">Wallet</button></div>' +
             '<div data-card-wrap style="margin-top:8px"><div class="df-row"><button type="button" class="df-chip df-card" data-card-type="visa">Visa</button><button type="button" class="df-chip df-card" data-card-type="mastercard">Mastercard</button><button type="button" class="df-chip df-card" data-card-type="amex">AmEx</button><button type="button" class="df-chip df-card" data-card-type="other">Other</button></div></div></div>' +
-          '</div>';
+          '</div>', 12);
       }
 
       if (type === 'submit') {
-        return '' +
+        return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Review & Submit') + '</h3>' + description +
             '<div class="df-total"><div><div class="df-label" style="margin:0 0 2px;text-transform:none;letter-spacing:0;font-size:13px">Total</div><div class="df-total-money" data-total-display>$0.00</div></div><div class="df-label" data-frequency-display style="margin:0;text-transform:none;letter-spacing:0"></div></div>' +
             '<div class="df-error" data-error></div>' +
             '<button type="button" class="df-submit" data-submit style="margin-top:10px"></button>' +
             '<div class="df-meta">After clicking donate, the donor will be redirected to Stripe Checkout.</div>' +
             (options.mode === 'preview' ? '<pre class="df-preview-result" data-preview-result></pre>' : '') +
-          '</div>';
+          '</div>', 12);
       }
 
       return '';
@@ -707,11 +870,56 @@ function getDonationFormRuntimeSource() {
               (isLast ? '<span></span>' : '<button type="button" class="df-btn primary" data-next>Next</button>') +
             '</div>';
 
+            var stepSections = [];
+            var pendingCustom = [];
+
+            function flushCustom() {
+              if (!pendingCustom.length) {
+                return;
+              }
+
+              var rows = [];
+              var row = [];
+              pendingCustom.forEach(function (entry) {
+                row.push(entry);
+                if (row.length >= 3) {
+                  rows.push(row);
+                  row = [];
+                }
+              });
+              if (row.length) {
+                rows.push(row);
+              }
+
+              rows.forEach(function (group) {
+                var span = group.length === 1 ? 12 : (group.length === 2 ? 6 : 4);
+                group.forEach(function (entry) {
+                  stepSections.push(asSlot(entry.html, span));
+                });
+              });
+
+              pendingCustom = [];
+            }
+
+            page.sections.forEach(function (section) {
+              var sectionType = getSectionType(section);
+              if (isCustomFieldType(sectionType)) {
+                pendingCustom.push({
+                  html: renderSection(section),
+                  settings: getCustomFieldSettings(section),
+                });
+              } else {
+                flushCustom();
+                stepSections.push(renderSection(section));
+              }
+            });
+            flushCustom();
+
             return '<div class="df-step" data-step="' + String(index + 1) + '" style="display:' + (isFirst ? '' : 'none') + '">' +
               '<div class="df-step-meta"><div class="df-step-title">' + escapeHtml(page.name || ('Page ' + String(index + 1))) + '</div>' +
               (page.description ? '<div class="df-step-description">' + escapeHtml(page.description) + '</div>' : '') +
               '</div>' +
-              page.sections.map(function (section) { return renderSection(section); }).join('') +
+              stepSections.join('') +
               nav +
             '</div>';
           }).join('') +

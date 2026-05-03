@@ -1,7 +1,18 @@
 const { getDefaultDonationFormConfig } = require('./defaultDonationFormConfig');
 const { getDonationFormRuntimeSource } = require('./runtimeSource');
+const path = require('path');
+const fs = require('fs');
 
+// If the React builder has been compiled, serve it instead of the legacy inline builder.
 function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, configBaseUrl }) {
+  const reactDistIndex = path.join(__dirname, 'builder-dist', 'index.html');
+  if (fs.existsSync(reactDistIndex)) {
+    return fs.readFileSync(reactDistIndex, 'utf-8');
+  }
+  return _legacyBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, configBaseUrl });
+}
+
+function _legacyBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, configBaseUrl }) {
   const defaultConfig = JSON.stringify(getDefaultDonationFormConfig());
   const runtimeSource = getDonationFormRuntimeSource();
 
@@ -36,7 +47,6 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Manrope', 'Segoe UI', sans-serif; color: var(--ink); background: var(--surface-2); overflow: hidden; height: 100vh; }
     button, input, select, textarea { font: inherit; color: inherit; }
     button { border: 0; cursor: pointer; background: none; }
 
@@ -118,12 +128,12 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
     .vb-page-header-btn:hover { color: var(--ink); border-color: var(--border-strong); }
     .vb-page-header-btn.danger:hover { color: var(--accent); border-color: var(--accent-ring); background: var(--accent-light); }
 
-    .vb-page-drop-area { border-radius: var(--radius-md); padding: 0; min-height: 56px; }
+    .vb-page-drop-area { border-radius: var(--radius-md); padding: 0; min-height: 56px; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 6px; align-items: start; }
     .vb-page-drop-area.is-empty { border: 2px dashed var(--border); display: flex; align-items: center; justify-content: center; min-height: 80px; border-radius: var(--radius-md); }
     .vb-page-drop-area.drag-over { border-color: var(--accent-ring) !important; background: var(--accent-light) !important; }
     .vb-page-empty-hint { font-size: 13px; color: var(--ink-3); padding: 16px; text-align: center; }
 
-    .vb-drop-zone { height: 6px; border-radius: 4px; margin: 3px 0; transition: all 0.14s ease; }
+    .vb-drop-zone { grid-column: 1 / -1; height: 6px; border-radius: 4px; margin: 3px 0; transition: all 0.14s ease; }
     .vb-drop-zone.drag-over { height: 34px; margin: 3px 0; border-radius: 8px; background: var(--accent-light); border: 2px dashed var(--accent-ring); }
     .vb-drop-zone.drag-over::after { content: 'Drop here'; display: flex; align-items: center; justify-content: center; height: 100%; font-size: 11px; font-weight: 700; color: var(--accent); }
 
@@ -131,11 +141,13 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
     .vb-add-page-btn:hover { border-color: var(--accent-ring); color: var(--accent); background: var(--accent-light); }
 
     /* ── Block card ──────────────────────────────────── */
-    .vb-block { position: relative; border-radius: var(--radius-md); background: var(--surface); border: 2px solid transparent; transition: border-color 0.12s, box-shadow 0.12s; }
+    .vb-block { grid-column: 1 / -1; position: relative; border-radius: var(--radius-md); background: var(--surface); border: 2px solid transparent; transition: border-color 0.12s, box-shadow 0.12s; }
+    .vb-block.vb-block-field { grid-column: span var(--vb-field-span, 12); min-width: 0; }
     .vb-block:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
     .vb-block.is-selected { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-light); }
     .vb-block.is-disabled { opacity: 0.5; }
     .vb-block.is-dragging { opacity: 0.35; }
+    .vb-block.drag-over { outline: 2px dashed var(--accent); outline-offset: 2px; background: var(--accent-light); }
 
     .vb-block-overlay { position: absolute; top: 8px; right: 8px; display: none; align-items: center; gap: 4px; z-index: 10; }
     .vb-block:hover .vb-block-overlay, .vb-block.is-selected .vb-block-overlay { display: flex; }
@@ -329,15 +341,23 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   var BLOCK_CATALOG = [
     { category: 'Structure', blocks: [
       { type: 'hero',    icon: '\\uD83C\\uDFDB', name: 'Hero',             desc: 'Logo, title & intro copy' },
-      { type: 'content', icon: '\\uD83D\\uDCDD', name: 'Text Block',       desc: 'Free-form narrative copy' },
+      { type: 'content', icon: '\\uD83D\\uDCDD', name: 'Text Block',       desc: 'Free-form narrative copy', allowMultiple: true },
     ]},
     { category: 'Donation', blocks: [
       { type: 'amount',  icon: '\\uD83D\\uDCB0', name: 'Donation Details', desc: 'Amount, frequency & designation' },
-      { type: 'donor',   icon: '\\uD83D\\uDC64', name: 'Donor Info',       desc: 'Name, email & phone' },
       { type: 'address', icon: '\\uD83D\\uDCCD', name: 'Address',          desc: 'Mailing address fields' },
       { type: 'tribute', icon: '\\uD83D\\uDD4A',  name: 'Tribute',          desc: 'Honor or memory gift' },
       { type: 'fees',    icon: '\\uD83E\\uDDFE', name: 'Processing Fees',  desc: 'Cover-fee & payment method' },
       { type: 'submit',  icon: '\\u2705',        name: 'Submit',           desc: 'Review total & submit' },
+    ]},
+    { category: 'Fields', blocks: [
+      { type: 'field_firstName', icon: '\\uD83D\\uDC64', name: 'First Name', desc: 'Single-line input', allowMultiple: true },
+      { type: 'field_lastName',  icon: '\\uD83D\\uDC64', name: 'Last Name',  desc: 'Single-line input', allowMultiple: true },
+      { type: 'field_email',     icon: '\\u2709\\uFE0F', name: 'Email',      desc: 'Email input', allowMultiple: true },
+      { type: 'field_phone',     icon: '\\u260E\\uFE0F', name: 'Phone',      desc: 'Phone input', allowMultiple: true },
+      { type: 'field_text',      icon: '\\uD83D\\uDDE8', name: 'Text Field', desc: 'Custom single-line input', allowMultiple: true },
+      { type: 'field_textarea',  icon: '\\uD83D\\uDCDD', name: 'Text Area',  desc: 'Multi-line text input', allowMultiple: true },
+      { type: 'field_dropdown',  icon: '\\u25BE',          name: 'Dropdown',   desc: 'Select from options', allowMultiple: true },
     ]}
   ];
 
@@ -349,6 +369,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
     selSectionId: null,
     activeTab: 'block',
     drag: null,          // { kind:'library'|'block'|'page', type, sectionId, pageId }
+    suppressClickUntil: 0,
     q: '',
   };
 
@@ -372,6 +393,17 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   function getSectionType(s) { return s&&(s.type||s.id)?String(s.type||s.id):'content'; }
   function getSectionById(id) { return (S.bs.sections||[]).find(function(s){return s.id===id;})||null; }
   function getPageById(id) { return (S.bs.pages||[]).find(function(p){return p.id===id;})||null; }
+  function getPageContainingSection(sectionId) {
+    return (S.bs.pages||[]).find(function(page){ return Array.isArray(page.sectionIds) && page.sectionIds.indexOf(sectionId)!==-1; })||null;
+  }
+  function suppressClickFor(ms) {
+    var windowMs = Number(ms);
+    if(!Number.isFinite(windowMs) || windowMs<0) windowMs = 250;
+    S.suppressClickUntil = Math.max(S.suppressClickUntil||0, Date.now() + windowMs);
+  }
+  function clickSuppressed() {
+    return Date.now() < (S.suppressClickUntil||0);
+  }
   function getDefaultSectionByType(type) { return (DEFAULT_CONFIG.sections||[]).find(function(s){return(s.type||s.id)===type;})||null; }
   function getBlockMeta(type) {
     for (var ci=0;ci<BLOCK_CATALOG.length;ci++) {
@@ -380,27 +412,155 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
     }
     return {type:type,icon:'\\u25A1',name:type,desc:''};
   }
+  function isFieldType(type) { return String(type||'').indexOf('field_')===0; }
+  function fieldSupportsTypeSelection(type) { return String(type||'')==='field_text'; }
+  function defaultFieldSettingsForType(type) {
+    if(type==='field_firstName') return { fieldKey:'firstName', inputType:'text', placeholder:'', required:true };
+    if(type==='field_lastName') return { fieldKey:'lastName', inputType:'text', placeholder:'', required:true };
+    if(type==='field_email') return { fieldKey:'email', inputType:'email', placeholder:'', required:true };
+    if(type==='field_phone') return { fieldKey:'phone', inputType:'tel', placeholder:'', required:true };
+    if(type==='field_dropdown') return { fieldKey:createId('field'), inputType:'select', placeholder:'', required:false, options:['Option 1','Option 2'] };
+    if(type==='field_textarea') return { fieldKey:createId('field'), inputType:'textarea', placeholder:'', required:false };
+    return { fieldKey:createId('field'), inputType:'text', placeholder:'', required:false };
+  }
+  function normalizeFieldSettings(type, settings) {
+    var base=defaultFieldSettingsForType(type);
+    var src=settings&&typeof settings==='object'?settings:{};
+    var key=String(src.fieldKey||base.fieldKey||'').trim().replace(/[^a-zA-Z0-9_]/g,'_');
+    if(!key) key=createId('field');
+    var inputType=String(src.inputType||base.inputType||'text');
+    var normalized={
+      fieldKey:key,
+      inputType:inputType,
+      placeholder:src.placeholder?String(src.placeholder):'',
+      required:src.required===true,
+    };
+    if(inputType==='select'){
+      var opts=Array.isArray(src.options)?src.options.map(function(v){return String(v).trim();}).filter(Boolean):[];
+      if(!opts.length&&Array.isArray(base.options)) opts=base.options.slice();
+      normalized.options=opts;
+    }
+    return normalized;
+  }
+  function createNamedFieldSection(type, label, description) {
+    var meta=getBlockMeta(type);
+    return {
+      id:createId('field'),
+      type:type,
+      label:label||meta.name||'Field',
+      description:description||meta.desc||'',
+      enabled:true,
+      settings:normalizeFieldSettings(type,{}),
+    };
+  }
+  function placeholderContentFieldType(section) {
+    if(!section||String(section.type||'')!=='content') return '';
+    var normalizedLabel=String(section.label||'').trim().toLowerCase();
+    var normalizedDesc=String(section.description||'').trim().toLowerCase();
+    var bodyText=section.settings&&section.settings.body?String(section.settings.body):'';
+    var looksLikePlaceholder=/add\\s+supporting\\s+copy\\s+for\\s+this\\s+step\\.?/i.test(bodyText);
+    if(!looksLikePlaceholder) return '';
+    if(normalizedLabel==='first name') return 'field_firstName';
+    if(normalizedLabel==='last name') return 'field_lastName';
+    if(normalizedLabel==='email') return 'field_email';
+    if(normalizedLabel==='phone') return 'field_phone';
+    if(normalizedLabel==='dropdown') return 'field_dropdown';
+    if(normalizedLabel==='text field') return 'field_text';
+    if(normalizedLabel==='text area'||normalizedLabel==='textarea') return 'field_textarea';
+    if(normalizedDesc==='single-line input') return 'field_text';
+    if(normalizedDesc==='multi-line text input') return 'field_textarea';
+    if(normalizedDesc==='select from options') return 'field_dropdown';
+    return '';
+  }
+  function expandLegacySection(section, type) {
+    if(type==='donor'){
+      var explicitTypes=arguments[2]||{};
+      var donorFields=[
+        { type:'field_firstName', label:'First Name' },
+        { type:'field_lastName', label:'Last Name' },
+        { type:'field_email', label:'Email' },
+        { type:'field_phone', label:'Phone' },
+      ].filter(function(entry){ return !explicitTypes[entry.type]; })
+        .map(function(entry){ return createNamedFieldSection(entry.type,entry.label,''); });
+      return donorFields;
+    }
+    return null;
+  }
+  function createSectionFromType(type) {
+    if(type==='content'){
+      return {id:createId('content'),type:'content',label:'Text Block',description:'Supporting copy block.',enabled:true,settings:{body:'Add supporting copy for this step.'}};
+    }
+    if(isFieldType(type)){
+      var m=getBlockMeta(type);
+      return {
+        id:createId('field'),
+        type:type,
+        label:m.name||'Field',
+        description:m.desc||'',
+        enabled:true,
+        settings:normalizeFieldSettings(type,{}),
+      };
+    }
+    return clone(getDefaultSectionByType(type));
+  }
 
   /* ─── normalizer ─────────────────────────────────────── */
   function ensureEditorModel(rawConfig) {
     var config = window.DonationFormRuntime.normalizeConfig(clone(rawConfig||DEFAULT_CONFIG));
     var defSections = clone(DEFAULT_CONFIG.sections||[]);
     var sections=[]; var seenIds={};
+    var sourceToNewSectionIds={};
+    var explicitFieldTypes={};
+    (Array.isArray(config.sections)&&config.sections.length?config.sections:defSections).forEach(function(section){
+      var inferredType=placeholderContentFieldType(section);
+      if(inferredType) explicitFieldTypes[inferredType]=true;
+      if(section&&isFieldType(section.type)) explicitFieldTypes[String(section.type)]=true;
+    });
     (Array.isArray(config.sections)&&config.sections.length?config.sections:defSections).forEach(function(section){
       if(!section||typeof section!=='object') return;
       var fb=getDefaultSectionByType(section.type||section.id);
       var type=String(section.type||(fb?fb.type||fb.id:'content'));
+      var inferredFieldType=placeholderContentFieldType(section);
+      if(inferredFieldType) type=inferredFieldType;
       var id=section.id||(type==='content'?createId('content'):type);
+      var expanded=expandLegacySection(section,type,explicitFieldTypes);
+      if(expanded){
+        sourceToNewSectionIds[id]=expanded.map(function(s){return s.id;});
+        if(!expanded.length) return;
+        expanded.forEach(function(s){
+          if(seenIds[s.id]) return;
+          sections.push(s);
+          seenIds[s.id]=true;
+        });
+        return;
+      }
       if(seenIds[id]) return;
-      sections.push({id:id,type:type,label:section.label||(fb?fb.label:'Text Block'),description:section.description||(fb?fb.description:'Supporting copy.'),enabled:section.enabled!==false,settings:type==='content'?{body:section.settings&&section.settings.body?String(section.settings.body):'Add supporting copy for this step.'}:undefined});
+      var normalizedSettings=section.settings&&typeof section.settings==='object'?clone(section.settings):undefined;
+      var normalizedDescription=section.description||(fb?fb.description:'Supporting copy.');
+      if(type==='content'){
+        normalizedSettings={body:section.settings&&section.settings.body?String(section.settings.body):'Add supporting copy for this step.'};
+      } else if(isFieldType(type)){
+        normalizedSettings=normalizeFieldSettings(type,normalizedSettings);
+        if(/name,\\s*email,\\s*and\\s*phone\\s*collection\\.?/i.test(String(normalizedDescription||''))){
+          normalizedDescription='';
+        }
+      }
+      sections.push({id:id,type:type,label:section.label||(fb?fb.label:'Text Block'),description:normalizedDescription,enabled:section.enabled!==false,settings:normalizedSettings});
       seenIds[id]=true;
+      sourceToNewSectionIds[id]=[id];
     });
-    defSections.forEach(function(s){if(!seenIds[s.id])sections.push(clone(s));});
     config.sections=sections;
     var validIds={}; sections.forEach(function(s){validIds[s.id]=true;});
     var pages=(Array.isArray(config.pages)&&config.pages.length?config.pages:clone(DEFAULT_CONFIG.pages||[]))
       .map(function(page,i){
-        var sids=Array.isArray(page.sectionIds)?page.sectionIds.filter(function(id,j,a){return validIds[id]&&a.indexOf(id)===j;}):[];
+        var expandedIds=[];
+        if(Array.isArray(page.sectionIds)){
+          page.sectionIds.forEach(function(rawId){
+            var mapped=sourceToNewSectionIds[rawId]||[rawId];
+            mapped.forEach(function(mid){expandedIds.push(mid);});
+          });
+        }
+        var sids=expandedIds.filter(function(id,j,a){return validIds[id]&&a.indexOf(id)===j;});
         return {id:page.id||createId('page'),name:page.name||('Page '+(i+1)),description:page.description||'',sectionIds:sids};
       })
       .filter(function(page,i,a){return a.findIndex(function(p){return p.id===page.id;})===i;});
@@ -424,11 +584,12 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   function addSectionToPage(type,pageId,beforeSectionId) {
     var targetPage=getPageById(pageId||S.selPageId)||S.bs.pages[0]; if(!targetPage) return;
     var section;
-    if(type==='content'){
-      section={id:createId('content'),type:'content',label:'Text Block',description:'Supporting copy block.',enabled:true,settings:{body:'Add supporting copy for this step.'}};
+    if(type==='content'||isFieldType(type)){
+      section=createSectionFromType(type);
+      if(!section) return;
       S.bs.sections.push(section);
     } else {
-      section=S.bs.sections.find(function(s){return getSectionType(s)===type;})||clone(getDefaultSectionByType(type));
+      section=S.bs.sections.find(function(s){return getSectionType(s)===type;})||createSectionFromType(type);
       if(!section) return;
       if(!getSectionById(section.id)) S.bs.sections.push(section);
     }
@@ -442,7 +603,8 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
 
   function removeSection(sectionId,pageId) {
     S.bs.pages.forEach(function(page){page.sectionIds=page.sectionIds.filter(function(id){return id!==sectionId;});});
-    var s=getSectionById(sectionId); if(s&&getSectionType(s)==='content') S.bs.sections=S.bs.sections.filter(function(x){return x.id!==sectionId;});
+    var s=getSectionById(sectionId);
+    if(s&&(getSectionType(s)==='content'||isFieldType(getSectionType(s)))) S.bs.sections=S.bs.sections.filter(function(x){return x.id!==sectionId;});
     if(S.selSectionId===sectionId) S.selSectionId=null;
     S.selPageId=pageId||S.selPageId; render();
   }
@@ -465,10 +627,23 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   }
 
   function moveSection(sectionId,fromPageId,toPageId,beforeSectionId) {
-    var fromPage=getPageById(fromPageId); var toPage=getPageById(toPageId); if(!fromPage||!toPage) return;
-    fromPage.sectionIds=fromPage.sectionIds.filter(function(id){return id!==sectionId;});
+    if(!sectionId) return;
+    var fromPage=getPageById(fromPageId)||getPageContainingSection(sectionId);
+    var toPage=getPageById(toPageId)||fromPage;
+    if(!fromPage||!toPage) return;
+
+    var removed=false;
+    (S.bs.pages||[]).forEach(function(page){
+      var beforeCount=Array.isArray(page.sectionIds)?page.sectionIds.length:0;
+      page.sectionIds=(page.sectionIds||[]).filter(function(id){return id!==sectionId;});
+      if(page.sectionIds.length!==beforeCount) removed=true;
+    });
+    if(!removed) return;
+
     var insertAt=beforeSectionId?toPage.sectionIds.indexOf(beforeSectionId):-1;
-    if(insertAt<0) toPage.sectionIds.push(sectionId); else toPage.sectionIds.splice(insertAt,0,sectionId);
+    if(insertAt<0) toPage.sectionIds.push(sectionId);
+    else toPage.sectionIds.splice(insertAt,0,sectionId);
+
     S.selPageId=toPage.id; S.selSectionId=sectionId; render();
   }
 
@@ -506,6 +681,18 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
       var body=section.settings&&section.settings.body?section.settings.body:'Add supporting copy for this step.';
       return '<div class="vbp-content-body" style="border-left-color:'+ac+'">'+esc(body.slice(0,200))+'</div>';
     }
+    if(isFieldType(type)){
+      var fs=normalizeFieldSettings(type,section.settings||{});
+      var label=section.label||'Field';
+      if(fs.inputType==='select'){
+        var opts=(Array.isArray(fs.options)?fs.options:['Option 1','Option 2']).slice(0,2).map(function(opt){return '<span class="vbp-freq-tab">'+esc(opt)+'</span>';}).join('');
+        return '<div class="vbp-fields"><div class="vbp-field" style="background:#fff;color:#6a6470">'+esc(label)+'</div><div class="vbp-freq-tabs" style="margin-top:6px">'+opts+'</div></div>';
+      }
+      if(fs.inputType==='textarea'){
+        return '<div class="vbp-fields"><div class="vbp-field" style="background:#fff;color:#6a6470">'+esc(label)+'</div><div class="vbp-field" style="height:52px;margin-top:6px;background:#fff"></div></div>';
+      }
+      return '<div class="vbp-fields"><div class="vbp-field" style="background:#fff;color:#6a6470">'+esc(label)+(fs.required?' *':'')+'</div></div>';
+    }
     return '<div style="color:var(--ink-3);font-size:13px">'+esc(type)+' block</div>';
   }
 
@@ -530,7 +717,8 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
       if(!filtered.length) return;
       html+='<div class="vb-shelf-section"><div class="vb-shelf-section-title">'+esc(cat.category)+'</div><div class="vb-shelf-grid">';
       filtered.forEach(function(b){
-        var disabled=b.type!=='content'&&S.bs.pages.some(function(page){return page.sectionIds.some(function(sid){var s=getSectionById(sid);return s&&getSectionType(s)===b.type;});});
+        var exists=S.bs.pages.some(function(page){return page.sectionIds.some(function(sid){var s=getSectionById(sid);return s&&getSectionType(s)===b.type;});});
+        var disabled=!b.allowMultiple&&b.type!=='content'&&exists;
         html+='<div class="vb-shelf-block'+(disabled?' is-disabled':'')+'" draggable="'+(disabled?'false':'true')+'" data-shelf-type="'+esc(b.type)+'" title="'+esc(b.name)+': '+esc(b.desc)+'">'
           +'<div class="vb-shelf-block-icon">'+b.icon+'</div>'
           +'<span class="vb-shelf-block-name">'+esc(b.name)+'</span>'
@@ -562,11 +750,33 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
       if(page.sectionIds.length===0){
         html+='<div class="vb-page-empty-hint">Drag a block here from the left panel, or click a block to add it.</div>';
       } else {
+        var autoSpanById={};
+        var fieldRun=[];
+        function flushFieldRun(){
+          if(!fieldRun.length) return;
+          var span=fieldRun.length===1?12:(fieldRun.length===2?6:4);
+          fieldRun.forEach(function(fid){ autoSpanById[fid]=span; });
+          fieldRun=[];
+        }
+        page.sectionIds.forEach(function(rsid){
+          var rs=getSectionById(rsid); if(!rs) return;
+          if(isFieldType(getSectionType(rs))){
+            fieldRun.push(rsid);
+            if(fieldRun.length>=3) flushFieldRun();
+          } else {
+            flushFieldRun();
+          }
+        });
+        flushFieldRun();
+
         html+='<div class="vb-drop-zone" data-dz-before="'+esc(page.sectionIds[0])+'" data-dz-page="'+esc(page.id)+'"></div>';
         page.sectionIds.forEach(function(sid,si){
           var s=getSectionById(sid); if(!s) return;
-          var m=getBlockMeta(getSectionType(s));
-          html+='<div class="vb-block'+(S.selSectionId===s.id?' is-selected':'')+(s.enabled===false?' is-disabled':'')+(S.drag&&S.drag.kind==='block'&&S.drag.sectionId===s.id?' is-dragging':'')+'" draggable="true" data-block-id="'+esc(s.id)+'" data-block-page="'+esc(page.id)+'">'
+          var type=getSectionType(s);
+          var m=getBlockMeta(type);
+          var isField=isFieldType(type);
+          var span=isField?(autoSpanById[s.id]||12):12;
+          html+='<div class="vb-block'+(isField?' vb-block-field':'')+(S.selSectionId===s.id?' is-selected':'')+(s.enabled===false?' is-disabled':'')+(S.drag&&S.drag.kind==='block'&&S.drag.sectionId===s.id?' is-dragging':'')+'" style="'+(isField?'--vb-field-span:'+span+';':'')+'" draggable="true" data-block-id="'+esc(s.id)+'" data-block-page="'+esc(page.id)+'">'
             +'<div class="vb-block-overlay">'
               +'<div class="vb-block-drag-handle" title="Drag to reorder">&#8942; &#8942;</div>'
               +'<button class="vb-block-ovr-btn" data-action="select-section" data-section-id="'+esc(s.id)+'" data-page-id="'+esc(page.id)+'" title="Edit settings">&#9998;</button>'
@@ -607,6 +817,22 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
         +'<div class="vb-field"><label class="vb-label">Description</label><textarea class="vb-textarea" id="insp-desc">'+esc(sel.description||'')+'</textarea></div>'
         +(type==='content'
           ?'<div class="vb-field"><label class="vb-label">Text Content</label><textarea class="vb-textarea" style="min-height:110px" id="insp-body">'+esc(sel.settings&&sel.settings.body?sel.settings.body:'')+'</textarea></div>'
+          :'')
+        +(isFieldType(type)
+          ?(function(){
+            var fs=normalizeFieldSettings(type,sel.settings||{});
+            return ''
+              +'<div class="vb-field"><label class="vb-label">Field Key</label><input class="vb-input" id="insp-field-key" value="'+esc(fs.fieldKey||'')+'"></div>'
+              +(fieldSupportsTypeSelection(type)
+                ?'<div class="vb-field"><label class="vb-label">Field Type</label><select class="vb-select" id="insp-input-type"><option value="text"'+(fs.inputType==='text'?' selected':'')+'>Text</option><option value="number"'+(fs.inputType==='number'?' selected':'')+'>Number</option><option value="email"'+(fs.inputType==='email'?' selected':'')+'>Email</option><option value="tel"'+(fs.inputType==='tel'?' selected':'')+'>Phone</option></select></div>'
+                :'')
+              +'<div style="font-size:12px;color:var(--ink-3);margin:-2px 0 8px">Adaptive layout: drag fields to reorder. Rows auto-snap to 1 (100%), 2 (50/50), or 3 (33/33/33).</div>'
+              +'<div class="vb-field"><label class="vb-label">Placeholder</label><input class="vb-input" id="insp-placeholder" value="'+esc(fs.placeholder||'')+'"></div>'
+              +(fs.inputType==='select'
+                ?'<div class="vb-field"><label class="vb-label">Dropdown Options (one per line)</label><textarea class="vb-textarea" id="insp-options">'+esc((fs.options||[]).join('\\n'))+'</textarea></div>'
+                :'')
+              +'<div class="vb-toggle-setting"><label for="insp-required">Required</label><input type="checkbox" id="insp-required"'+(fs.required?' checked':'')+'></div>';
+          })()
           :'')
         +'<div class="vb-toggle-setting"><label for="insp-visible">Visible</label><input type="checkbox" id="insp-visible"'+(sel.enabled!==false?' checked':'')+'></div>'
         +'<div class="vb-insp-actions">'
@@ -742,12 +968,14 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
     var el=e.target.closest('[data-block-id]');
     if(!el)return;
     S.drag={kind:'block',sectionId:el.getAttribute('data-block-id'),pageId:el.getAttribute('data-block-page')};
+    suppressClickFor(300);
     el.classList.add('is-dragging');
     if(e.dataTransfer)e.dataTransfer.effectAllowed='move';
   });
   elCanvas.addEventListener('dragend',function(e){
     var el=e.target.closest('[data-block-id]');
     if(el)el.classList.remove('is-dragging');
+    suppressClickFor(250);
     S.drag=null;clearDZ();
   });
 
@@ -775,14 +1003,18 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   document.addEventListener('dragover',function(e){
     if(!S.drag||S.drag.kind==='page')return;
     var dz=e.target.closest('.vb-drop-zone');
+    var blk=e.target.closest('[data-block-id]');
     var pa=e.target.closest('[data-page-drop]');
     if(dz){e.preventDefault();clearDZ();dz.classList.add('drag-over');}
+    else if(blk&&blk.getAttribute('data-block-id')!==S.drag.sectionId){e.preventDefault();clearDZ();blk.classList.add('drag-over');}
     else if(pa){e.preventDefault();clearDZ();pa.classList.add('drag-over');}
   });
 
   document.addEventListener('dragleave',function(e){
     var dz=e.target.closest('.vb-drop-zone');
     if(dz&&!dz.contains(e.relatedTarget))dz.classList.remove('drag-over');
+    var blk=e.target.closest('[data-block-id]');
+    if(blk&&!blk.contains(e.relatedTarget))blk.classList.remove('drag-over');
     var pa=e.target.closest('[data-page-drop]');
     if(pa&&!pa.contains(e.relatedTarget))pa.classList.remove('drag-over');
   });
@@ -790,11 +1022,24 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   document.addEventListener('drop',function(e){
     if(!S.drag||S.drag.kind==='page')return;
     var dz=e.target.closest('.vb-drop-zone');
+    var blk=e.target.closest('[data-block-id]');
     var pa=e.target.closest('[data-page-drop]');
-    if(!dz&&!pa)return;
+    if(!dz&&!blk&&!pa)return;
     e.preventDefault();clearDZ();
-    var toPageId=dz?dz.getAttribute('data-dz-page'):pa.getAttribute('data-page-drop');
-    var beforeId=dz?(dz.getAttribute('data-dz-before')||null):null;
+    suppressClickFor(250);
+    var toPageId, beforeId;
+    if(dz){
+      toPageId=dz.getAttribute('data-dz-page');
+      beforeId=dz.getAttribute('data-dz-before')||null;
+    } else if(blk&&blk.getAttribute('data-block-id')!==S.drag.sectionId){
+      toPageId=blk.getAttribute('data-block-page');
+      beforeId=blk.getAttribute('data-block-id');
+    } else if(pa){
+      toPageId=pa.getAttribute('data-page-drop');
+      beforeId=null;
+    } else {
+      S.drag=null; return;
+    }
     if(S.drag.kind==='library'){
       addSectionToPage(S.drag.type,toPageId,beforeId);
     } else if(S.drag.kind==='block'){
@@ -815,6 +1060,7 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   });
 
   elCanvas.addEventListener('click',function(e){
+    if(clickSuppressed()) return;
     var btn=e.target.closest('[data-action]');
     if(btn){
       var a=btn.getAttribute('data-action');
@@ -846,10 +1092,14 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
   /* Block inspector inputs */
   elBlockInsp.addEventListener('input',function(e){
     var sel=S.selSectionId?getSectionById(S.selSectionId):null;
+    var type=sel?getSectionType(sel):'';
     var page=getPageById(S.selPageId);
     if(e.target.id==='insp-label'&&sel)sel.label=e.target.value;
     else if(e.target.id==='insp-desc'&&sel)sel.description=e.target.value;
     else if(e.target.id==='insp-body'&&sel){sel.settings=sel.settings||{};sel.settings.body=e.target.value;}
+    else if(e.target.id==='insp-field-key'&&sel&&isFieldType(type)){sel.settings=normalizeFieldSettings(type,sel.settings||{});sel.settings.fieldKey=e.target.value.trim().replace(/[^a-zA-Z0-9_]/g,'_');}
+    else if(e.target.id==='insp-placeholder'&&sel&&isFieldType(type)){sel.settings=normalizeFieldSettings(type,sel.settings||{});sel.settings.placeholder=e.target.value;}
+    else if(e.target.id==='insp-options'&&sel&&isFieldType(type)){sel.settings=normalizeFieldSettings(type,sel.settings||{});sel.settings.options=readLines(e.target.value);}
     else if(e.target.id==='insp-page-name'&&page)page.name=e.target.value;
     else if(e.target.id==='insp-page-desc'&&page)page.description=e.target.value;
     renderPageNav(); renderCanvas();
@@ -857,7 +1107,16 @@ function createBuilderPage({ builderEndpoint, saveEndpoint, listEndpoint, config
 
   elBlockInsp.addEventListener('change',function(e){
     var sel=S.selSectionId?getSectionById(S.selSectionId):null;
+    var type=sel?getSectionType(sel):'';
     if(e.target.id==='insp-visible'&&sel){sel.enabled=e.target.checked;renderCanvas();}
+    else if(e.target.id==='insp-required'&&sel&&isFieldType(type)){sel.settings=normalizeFieldSettings(type,sel.settings||{});sel.settings.required=e.target.checked;renderCanvas();}
+    else if(e.target.id==='insp-input-type'&&sel&&isFieldType(type)){
+      sel.settings=normalizeFieldSettings(type,sel.settings||{});
+      sel.settings.inputType=e.target.value||'text';
+      if(sel.settings.inputType==='select'&&(!Array.isArray(sel.settings.options)||!sel.settings.options.length)) sel.settings.options=['Option 1','Option 2'];
+      renderBlockInsp();
+      renderCanvas();
+    }
   });
 
   elBlockInsp.addEventListener('click',function(e){
