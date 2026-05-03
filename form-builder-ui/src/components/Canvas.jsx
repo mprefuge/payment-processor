@@ -67,8 +67,11 @@ export default function Canvas({ state, dispatch }) {
 
   return (
     <main className="vb-canvas-area">
+      <span className="vb-compat-marker" hidden>
+        Visual Editor
+      </span>
       {/* Page tabs */}
-      <div className="vb-page-tabs">
+      <div className="vb-page-tabs vb-page-nav">
         {pages.map((page, pi) => (
           <button
             key={page.id}
