@@ -11,6 +11,7 @@ export default function FieldBlock({ col, row, pageIdx, isSelected, dispatch, ac
     useSortable({
       id: col.id,
       data: {
+        type: 'field',
         source: 'field',
         fieldId: field?.id,
         colId: col.id,

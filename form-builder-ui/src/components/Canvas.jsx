@@ -1,6 +1,11 @@
 import React from 'react';
 import { useDroppable } from '@dnd-kit/core';
-import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import Row from './Row';
 
@@ -58,6 +63,34 @@ function SortableRow({ row, page, pageIdx, selectedFieldId, dispatch, accent }) 
   );
 }
 
+function SortablePageTab({ page, pageIdx, currentPageIdx, accent, dispatch }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: page.id,
+    data: { type: 'page-tab', pageIdx, pageId: page.id },
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.55 : 1,
+    ...(pageIdx === currentPageIdx ? { '--accent': accent } : {}),
+  };
+
+  return (
+    <button
+      ref={setNodeRef}
+      className={`vb-page-tab${pageIdx === currentPageIdx ? ' is-active' : ''}`}
+      style={style}
+      onClick={() => dispatch({ type: 'SELECT_PAGE', payload: pageIdx })}
+      {...attributes}
+      {...listeners}
+    >
+      <span className="vb-page-tab-num">{pageIdx + 1}</span>
+      {page.name || `Page ${pageIdx + 1}`}
+    </button>
+  );
+}
+
 export default function Canvas({ state, dispatch }) {
   const { pages, selectedPageIdx, selectedFieldId, branding } = state;
   const accent = branding?.accentColor || '#bd2135';
@@ -72,17 +105,18 @@ export default function Canvas({ state, dispatch }) {
       </span>
       {/* Page tabs */}
       <div className="vb-page-tabs vb-page-nav">
-        {pages.map((page, pi) => (
-          <button
-            key={page.id}
-            className={`vb-page-tab${pi === currentPageIdx ? ' is-active' : ''}`}
-            style={pi === currentPageIdx ? { '--accent': accent } : {}}
-            onClick={() => dispatch({ type: 'SELECT_PAGE', payload: pi })}
-          >
-            <span className="vb-page-tab-num">{pi + 1}</span>
-            {page.name || `Page ${pi + 1}`}
-          </button>
-        ))}
+        <SortableContext items={pages.map((p) => p.id)} strategy={horizontalListSortingStrategy}>
+          {pages.map((page, pi) => (
+            <SortablePageTab
+              key={page.id}
+              page={page}
+              pageIdx={pi}
+              currentPageIdx={currentPageIdx}
+              accent={accent}
+              dispatch={dispatch}
+            />
+          ))}
+        </SortableContext>
         <button
           className="vb-page-tab vb-page-tab-add"
           onClick={() => dispatch({ type: 'ADD_PAGE' })}

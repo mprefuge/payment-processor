@@ -480,12 +480,21 @@ textarea {
 
 .vb-row-handle {
   position: absolute;
-  left: -26px;
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0;
-  font-size: 16px;
+  left: 8px;
+  top: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #faf7f4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.45;
+  font-size: 13px;
   color: var(--ink-soft);
+  cursor: grab;
+  z-index: 3;
 }
 
 .vb-row:hover .vb-row-handle {

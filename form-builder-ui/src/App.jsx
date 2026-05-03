@@ -122,23 +122,25 @@ export default function App() {
               afterRowId: oData.afterRowId,
             },
           });
-        } else if (oData.type === 'row-handle') {
-          // Reorder rows via drag handle
-          const toRowId = oData.rowId;
-          const toPageIdx = oData.pageIdx;
-          if (toPageIdx === fromPageIdx && toRowId !== fromRowId) {
-            const page = state.pages[fromPageIdx];
-            if (page) {
-              const fromIdx = page.rows.findIndex((r) => r.id === fromRowId);
-              const toIdx = page.rows.findIndex((r) => r.id === toRowId);
-              if (fromIdx >= 0 && toIdx >= 0) {
-                dispatch({
-                  type: 'REORDER_ROWS',
-                  payload: { pageIdx: fromPageIdx, fromIdx, toIdx },
-                });
-              }
-            }
-          }
+        }
+      } else if (aData.type === 'row-handle') {
+        const { pageIdx } = aData;
+        const page = state.pages[pageIdx];
+        if (!page) return;
+        const activeRowId = aData.rowId || active.id;
+        const overRowId =
+          oData?.rowId ||
+          (typeof over.id === 'string' && over.id.startsWith('row_') ? over.id.slice(4) : over.id);
+        const fromIdx = page.rows.findIndex((r) => r.id === activeRowId);
+        const toIdx = page.rows.findIndex((r) => r.id === overRowId);
+        if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+          dispatch({ type: 'REORDER_ROWS', payload: { pageIdx, fromIdx, toIdx } });
+        }
+      } else if (aData.type === 'page-tab') {
+        const fromIdx = state.pages.findIndex((p) => p.id === active.id);
+        const toIdx = state.pages.findIndex((p) => p.id === over.id);
+        if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+          dispatch({ type: 'REORDER_PAGES', payload: { from: fromIdx, to: toIdx } });
         }
       }
     },

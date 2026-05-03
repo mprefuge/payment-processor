@@ -172,6 +172,74 @@ function mapPages(pages, pageIdx, rowId, mapColumns) {
   });
 }
 
+function normalizeLoadedConfig(cfg) {
+  const config = cfg && typeof cfg === 'object' ? cfg : {};
+
+  const normalizeField = (field) => {
+    if (!field || typeof field !== 'object') return null;
+    const type = typeof field.type === 'string' && field.type ? field.type : 'text';
+    const defaults = createDefaultField(type);
+    return {
+      ...defaults,
+      ...field,
+      id: field.id || createId('field'),
+      type,
+      settings: {
+        ...(defaults.settings || {}),
+        ...((field && field.settings) || {}),
+      },
+    };
+  };
+
+  const normalizeRows = (rowsInput) => {
+    if (!Array.isArray(rowsInput)) return [];
+    return rowsInput
+      .map((row) => {
+        const columnsInput = Array.isArray(row?.columns) ? row.columns : [];
+        const normalizedCols = columnsInput
+          .map((col) => {
+            const field = normalizeField(col?.field);
+            if (!field) return null;
+            return {
+              ...col,
+              id: col?.id || createId('col'),
+              field,
+            };
+          })
+          .filter(Boolean);
+
+        if (!normalizedCols.length) return null;
+
+        const hasValidWidths = normalizedCols.every(
+          (col) => typeof col.width === 'number' && Number.isFinite(col.width) && col.width > 0
+        );
+
+        return {
+          ...row,
+          id: row?.id || createId('row'),
+          columns: hasValidWidths ? normalizedCols : recalculateColumnWidths(normalizedCols),
+        };
+      })
+      .filter(Boolean);
+  };
+
+  const pagesInput = Array.isArray(config.pages) ? config.pages : [];
+  const pages = pagesInput
+    .map((page, idx) => ({
+      ...page,
+      id: page?.id || createId('page'),
+      name: page?.name || `Page ${idx + 1}`,
+      description: typeof page?.description === 'string' ? page.description : '',
+      rows: normalizeRows(page?.rows),
+    }))
+    .filter(Boolean);
+
+  return {
+    ...config,
+    pages: pages.length ? pages : createInitialState().pages,
+  };
+}
+
 // ─── Reducer ─────────────────────────────────────────────────────────────────
 
 function reducer(state, action) {
@@ -212,8 +280,8 @@ function reducer(state, action) {
       const pages = state.pages.map((page, pi) => {
         if (pi !== pageIdx) return page;
         const rows = [...page.rows];
-        const afterIdx = afterRowId ? rows.findIndex((r) => r.id === afterRowId) : -1;
-        rows.splice(afterIdx >= 0 ? afterIdx + 1 : rows.length, 0, newRow);
+        const afterIdx = afterRowId ? rows.findIndex((r) => r.id === afterRowId) : null;
+        rows.splice(afterIdx == null ? 0 : afterIdx >= 0 ? afterIdx + 1 : rows.length, 0, newRow);
         return { ...page, rows };
       });
       return { ...state, pages, selectedFieldId: newField.id, dirty: true };
@@ -327,8 +395,8 @@ function reducer(state, action) {
       pages = pages.map((page, pi) => {
         if (pi !== toPageIdx) return page;
         const rows = [...page.rows];
-        const afterIdx = afterRowId ? rows.findIndex((r) => r.id === afterRowId) : -1;
-        rows.splice(afterIdx >= 0 ? afterIdx + 1 : rows.length, 0, newRow);
+        const afterIdx = afterRowId ? rows.findIndex((r) => r.id === afterRowId) : null;
+        rows.splice(afterIdx == null ? 0 : afterIdx >= 0 ? afterIdx + 1 : rows.length, 0, newRow);
         return { ...page, rows };
       });
 
@@ -447,7 +515,7 @@ function reducer(state, action) {
     // ── Persistence ────────────────────────────────────────────────────────
 
     case 'LOAD_CONFIG': {
-      const cfg = action.payload;
+      const cfg = normalizeLoadedConfig(action.payload);
       return {
         ...createInitialState(),
         ...cfg,
@@ -501,3 +569,8 @@ export function useEditorState() {
 
   return { state, dispatch, selectedField, selectedPageIdx };
 }
+
+export const __internals = {
+  reducer,
+  createInitialState,
+};
