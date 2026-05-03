@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { getFieldMeta } from '../fieldTypes';
+import FieldPreview from './FieldPreview';
 
 // ─── Generic form helpers ─────────────────────────────────────────────────────
 
@@ -567,10 +568,141 @@ function FormSettings({ state, dispatch }) {
   );
 }
 
+function SitePreview({ state, page, previewMode, setPreviewMode }) {
+  const accent = state.branding?.accentColor || '#bd2135';
+  const title = state.branding?.title || 'Support Our Mission';
+  const subtitle = state.branding?.subtitle || 'Your gift makes a difference.';
+  const logoUrl = state.branding?.logoUrl || '';
+
+  return (
+    <div className="insp-section">
+      <div className="insp-section-title">Site Preview</div>
+      <div className="insp-preview-toolbar">
+        <button
+          className={`insp-preview-mode${previewMode === 'embedded' ? ' is-active' : ''}`}
+          onClick={() => setPreviewMode('embedded')}
+          type="button"
+        >
+          Embedded
+        </button>
+        <button
+          className={`insp-preview-mode${previewMode === 'modal' ? ' is-active' : ''}`}
+          onClick={() => setPreviewMode('modal')}
+          type="button"
+        >
+          Modal
+        </button>
+      </div>
+
+      <div className="insp-site-preview">
+        <div className="insp-site-chrome">
+          <div className="insp-site-brand">Sample Site</div>
+          <button className="insp-site-donate" type="button" style={{ background: accent }}>
+            Donate
+          </button>
+        </div>
+
+        <div className="insp-site-content">
+          <h4 style={{ color: accent }}>Support Refuge&apos;s ministry</h4>
+          <p>Preview your live donation experience in-context before publishing.</p>
+        </div>
+
+        {previewMode === 'embedded' ? (
+          <div className="insp-runtime-panel">
+            <div className="insp-runtime-header">
+              {logoUrl ? <img src={logoUrl} alt="logo" /> : <div className="insp-runtime-logo-fallback" />}
+              <div>
+                <div className="insp-runtime-title">{title}</div>
+                <div className="insp-runtime-subtitle">{subtitle}</div>
+              </div>
+            </div>
+            <div className="insp-runtime-body">
+              {page?.rows?.length ? (
+                page.rows.map((row) => (
+                  <div key={row.id} className="insp-runtime-row">
+                    {(row.columns || []).map((col) => {
+                      const span = typeof col.width === 'number' && col.width > 0 ? col.width : 12;
+                      return (
+                        <div key={col.id} className="insp-runtime-col" style={{ gridColumn: `span ${span}` }}>
+                          {col.field ? (
+                            <>
+                              <div className="insp-runtime-field-label">{col.field.label || col.field.type}</div>
+                              <FieldPreview field={col.field} accent={accent} />
+                            </>
+                          ) : (
+                            <div className="insp-runtime-empty">Empty field</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))
+              ) : (
+                <div className="insp-runtime-empty">No fields on this page yet.</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="insp-modal-preview-shell">
+            <button className="insp-modal-launch" type="button" style={{ background: accent }}>
+              Open Donation Form
+            </button>
+            <div className="insp-modal-overlay">
+              <div className="insp-modal-card">
+                <div className="insp-runtime-header">
+                  {logoUrl ? (
+                    <img src={logoUrl} alt="logo" />
+                  ) : (
+                    <div className="insp-runtime-logo-fallback" />
+                  )}
+                  <div>
+                    <div className="insp-runtime-title">{title}</div>
+                    <div className="insp-runtime-subtitle">{subtitle}</div>
+                  </div>
+                </div>
+                <div className="insp-runtime-body">
+                  {page?.rows?.length ? (
+                    page.rows.map((row) => (
+                      <div key={row.id} className="insp-runtime-row">
+                        {(row.columns || []).map((col) => {
+                          const span = typeof col.width === 'number' && col.width > 0 ? col.width : 12;
+                          return (
+                            <div
+                              key={col.id}
+                              className="insp-runtime-col"
+                              style={{ gridColumn: `span ${span}` }}
+                            >
+                              {col.field ? (
+                                <>
+                                  <div className="insp-runtime-field-label">{col.field.label || col.field.type}</div>
+                                  <FieldPreview field={col.field} accent={accent} />
+                                </>
+                              ) : (
+                                <div className="insp-runtime-empty">Empty field</div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="insp-runtime-empty">No fields on this page yet.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Inspector root ───────────────────────────────────────────────────────────
 
 export default function Inspector({ state, dispatch }) {
   const [tab, setTab] = useState('field');
+  const [previewMode, setPreviewMode] = useState(state.display?.mode || 'embedded');
 
   const selectedField = (() => {
     if (!state.selectedFieldId) return null;
@@ -600,6 +732,15 @@ export default function Inspector({ state, dispatch }) {
         >
           ⚙ Settings
         </button>
+        <button
+          className={`insp-tab${tab === 'preview' ? ' is-active' : ''}`}
+          onClick={() => {
+            setPreviewMode(state.display?.mode || 'embedded');
+            setTab('preview');
+          }}
+        >
+          Preview
+        </button>
       </div>
 
       <div className="insp-body">
@@ -616,8 +757,15 @@ export default function Inspector({ state, dispatch }) {
               <p>Click a field on the canvas to edit its settings.</p>
             </div>
           )
-        ) : (
+        ) : tab === 'settings' ? (
           <FormSettings state={state} dispatch={dispatch} />
+        ) : (
+          <SitePreview
+            state={state}
+            page={state.pages[state.selectedPageIdx] || state.pages[0]}
+            previewMode={previewMode}
+            setPreviewMode={setPreviewMode}
+          />
         )}
       </div>
     </aside>

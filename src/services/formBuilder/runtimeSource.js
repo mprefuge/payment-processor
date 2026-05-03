@@ -131,6 +131,7 @@ function getDonationFormRuntimeSource() {
       '.df-step{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px}' +
       '.df-step-slot{grid-column:span var(--df-span,12);min-width:0}' +
       '.df-step-meta,.df-nav{grid-column:1 / -1}' +
+      '.df-step-meta{display:none}' +
       '.df-label{display:block;font-size:14px;font-weight:600;color:#222;margin-bottom:6px}' +
       '.df-input,.df-select,.df-textarea{width:100%;padding:12px;border:1.5px solid #e0e0e0;border-radius:10px;background:#fafbfc;font-size:16px;outline:none;transition:.2s border-color,.2s box-shadow,.2s background;font:inherit}' +
       '.df-textarea{min-height:86px;resize:vertical}' +
@@ -141,8 +142,7 @@ function getDonationFormRuntimeSource() {
       '.df-address-item:hover{background:#f7f7f7}' +
       '.df-input:focus,.df-select:focus,.df-textarea:focus{border-color:var(--df-accent);box-shadow:0 0 0 2px rgba(189,33,53,.2);background:#fff}' +
       '.df-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}' +
-      '.df-amount-row{flex-wrap:nowrap;margin-bottom:8px}' +
-      '.df-amount-row:last-child{margin-bottom:0}' +
+      '.df-amount-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:0}' +
       '.df-chip{padding:12px 18px;border-radius:999px;border:1.5px solid #d4d4d4;background:#fff;font-weight:700;cursor:pointer;transition:.2s;font-size:16px}' +
       '.df-chip:hover{border-color:var(--df-accent);color:var(--df-accent)}' +
       '.df-chip.is-selected{background:var(--df-accent);border-color:var(--df-accent);color:#fff;box-shadow:0 2px 10px rgba(189,33,53,.25)}' +
@@ -159,6 +159,11 @@ function getDonationFormRuntimeSource() {
       '.df-btn[disabled]{opacity:.55;cursor:not-allowed}' +
       '.df-total{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;background:#f8f9fa;border:2px solid transparent;border-radius:12px;padding:16px}' +
       '.df-total-money{font-size:24px;font-weight:700;color:var(--df-accent)}' +
+      '.df-review{margin-top:10px;border:1px solid #ececec;border-radius:12px;padding:10px 12px;background:#fff}' +
+      '.df-review-row{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-top:4px}' +
+      '.df-review-row:first-child{margin-top:0}' +
+      '.df-review-key{color:#555}' +
+      '.df-review-value{font-weight:600;text-align:right}' +
       '.df-submit{width:100%;padding:16px;border-radius:12px;border:0;background:var(--df-accent);color:#fff;font-size:20px;font-weight:800;cursor:pointer;box-shadow:0 6px 20px rgba(189,33,53,.18);transition:.2s}' +
       '.df-submit:hover{background:#a81c2d}' +
       '.df-submit[disabled]{opacity:.6;cursor:not-allowed;box-shadow:none}' +
@@ -438,7 +443,7 @@ function getDonationFormRuntimeSource() {
 
     return {
       step: 1,
-      amount: Number(config.payment.amountPresets[0] || 0),
+      amount: 0,
       customAmount: '',
       useCustomAmount: false,
       addressMode: 'lookup',
@@ -468,6 +473,31 @@ function getDonationFormRuntimeSource() {
       year: ' every year',
     };
     return map[value] || '';
+  }
+
+  function frequencyReadableLabel(value) {
+    var map = {
+      onetime: 'One-Time',
+      week: 'Weekly',
+      biweek: 'Bi-Weekly',
+      month: 'Monthly',
+      year: 'Yearly',
+    };
+    return map[value] || 'One-Time';
+  }
+
+  function normalizeStateForPayload(value) {
+    var raw = String(value || '').trim();
+    if (!raw || raw.toLowerCase() === 'outside us') {
+      return '';
+    }
+
+    var splitIndex = raw.indexOf(' - ');
+    if (splitIndex > 0) {
+      return raw.slice(0, splitIndex).trim().toUpperCase();
+    }
+
+    return raw.length === 2 ? raw.toUpperCase() : raw;
   }
 
   function totals(state) {
@@ -584,17 +614,18 @@ function getDonationFormRuntimeSource() {
   function buildPayload(config, state) {
     var computedTotals = totals(state);
     var category = state.category.indexOf('Other') === 0 ? state.categoryOther.trim() : state.category;
+    var categoryLower = String(category || '').toLowerCase();
 
     var payload = {
       donationType: state.donationType,
-      livemode: category.toLowerCase() === 'test' ? false : true,
+      livemode: !(categoryLower === 'test' || categoryLower === 'testing'),
       email: state.fields.email.trim(),
       phone: state.fields.phone.trim(),
       address: {
         line1: state.fields.address1.trim(),
         line2: state.fields.address2.trim(),
         city: state.fields.city.trim(),
-        state: state.fields.state.trim(),
+        state: normalizeStateForPayload(state.fields.state),
         postal_code: state.fields.postalCode.trim(),
         country: state.fields.country.trim(),
       },
@@ -701,16 +732,22 @@ function getDonationFormRuntimeSource() {
 
     var amountButtons = config.payment.amountPresets
       .map(function (amount) {
-        return '<button type="button" class="df-chip df-amount df-amount-chip is-amount" data-amount="' + escapeHtml(amount) + '">' + formatMoney(amount) + '</button>';
+        var numeric = Number(amount || 0);
+        var label = Number.isInteger(numeric) ? '$' + String(numeric) : formatMoney(numeric);
+        return '<button type="button" class="df-chip df-amount df-amount-chip is-amount" data-amount="' + escapeHtml(amount) + '">' + label + '</button>';
       })
       .join('');
 
     var frequencyButtons = config.options.allowRecurring
-      ? '<div class="df-row" data-frequency-row>' +
-          '<button type="button" class="df-chip df-frequency df-frequency-chip" data-frequency="onetime">One-Time</button>' +
-          '<button type="button" class="df-chip df-frequency df-frequency-chip" data-frequency="month">Monthly</button>' +
-          '<button type="button" class="df-chip df-frequency df-frequency-chip" data-frequency="biweek">Bi-Weekly</button>' +
-          '<button type="button" class="df-chip df-frequency df-frequency-chip" data-frequency="year">Yearly</button>' +
+      ? '<label class="df-label" style="display:block;margin-bottom:6px">Frequency</label>' +
+        '<div class="df-row" data-frequency-row>' +
+          '<button type="button" class="df-chip df-frequency df-frequency-chip" data-frequency-mode="onetime">One-Time</button>' +
+          '<button type="button" class="df-chip df-frequency df-frequency-chip" data-frequency-mode="recurring">Recurring</button>' +
+        '</div>' +
+        '<div class="df-row" data-recurring-stepper style="display:none;margin-top:10px">' +
+          '<button type="button" class="df-chip" data-freq-minus aria-label="Previous interval">−</button>' +
+          '<span class="df-chip" data-frequency-display-inline style="pointer-events:none;min-width:140px;text-align:center">Monthly</span>' +
+          '<button type="button" class="df-chip" data-freq-plus aria-label="Next interval">+</button>' +
         '</div>'
       : '';
 
@@ -732,6 +769,10 @@ function getDonationFormRuntimeSource() {
       var type = getSectionType(section);
       var heading = section.label ? escapeHtml(section.label) : '';
       var description = section.description ? '<p class="df-section-copy">' + escapeHtml(section.description) + '</p>' : '';
+      var showDescription = type === 'content' || isCustomFieldType(type);
+      if (!showDescription) {
+        description = '';
+      }
 
       if (type === 'hero') {
         return '';
@@ -777,13 +818,15 @@ function getDonationFormRuntimeSource() {
         return asSlot('' +
           '<div class="df-card"><h3>' + (heading || 'Donation Details') + '</h3>' + description +
             frequencyButtons +
-            '<div class="df-row df-amount-row" style="margin-top:10px" data-amount-row>' +
+            '<label class="df-label" style="display:block;margin-top:12px;margin-bottom:6px">Amount</label>' +
+            '<div class="df-amount-row" data-amount-row>' +
               amountButtons +
               '<button type="button" class="df-chip df-amount df-amount-chip is-amount" data-amount="custom">Other</button>' +
             '</div>' +
             '<div class="df-grid" data-custom-wrap style="display:none;margin-top:10px"><div><label class="df-label">Custom amount</label><input type="number" min="1" step="0.01" class="df-input" data-field="customAmount"></div></div>' +
             '<div class="df-grid" style="margin-top:10px"><div><label class="df-label">Category</label><select class="df-select" data-field="category">' + categoryOptions + '</select></div></div>' +
             '<div class="df-grid" data-other-wrap style="display:none;margin-top:10px"><div><label class="df-label">Other category</label><input class="df-input" data-field="categoryOther"></div></div>' +
+            '<div class="df-total" style="margin-top:12px"><div class="df-total-money" data-total-inline>$0.00</div><button type="button" class="df-btn primary" data-next-inline>Next</button></div>' +
           '</div>', 12);
       }
 
@@ -810,7 +853,7 @@ function getDonationFormRuntimeSource() {
 
       if (type === 'tribute') {
         return asSlot('' +
-          '<div class="df-card"><h3>' + (heading || 'Tribute') + '</h3>' + description +
+          '<div class="df-card" data-tribute-section style="display:none"><h3>' + (heading || 'Tribute') + '</h3>' + description +
             '<label class="df-inline"><input type="checkbox" data-field="tributeEnabled"> Tribute gift</label>' +
             '<div data-tribute-wrap style="display:none;margin-top:10px"><div class="df-row"><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="honor">In Honor</button><button type="button" class="df-chip df-tribute df-tribute-chip" data-tribute-type="memory">In Memory</button></div>' +
             '<div class="df-grid df-grid-2" style="margin-top:10px"><div><label class="df-label">First name</label><input class="df-input" data-field="tributeFirstName"></div><div><label class="df-label">Last name</label><input class="df-input" data-field="tributeLastName"></div></div>' +
@@ -853,7 +896,6 @@ function getDonationFormRuntimeSource() {
         (showHeader
           ? '<div class="df-header">' +
               (config.branding.logoUrl ? '<img class="df-logo" src="' + escapeHtml(config.branding.logoUrl) + '" alt="logo">' : '') +
-              '<div><h2 class="df-title">' + escapeHtml(config.branding.title) + '</h2><p class="df-description">' + escapeHtml(config.branding.description) + '</p></div>' +
             '</div>'
           : '') +
         '<div class="df-body">' +
@@ -865,10 +907,13 @@ function getDonationFormRuntimeSource() {
           pages.map(function (page, index) {
             var isFirst = index === 0;
             var isLast = index === pages.length - 1;
-            var nav = '<div class="df-nav">' +
-              (isFirst ? '<span></span>' : '<button type="button" class="df-btn ghost" data-prev>Previous</button>') +
-              (isLast ? '<span></span>' : '<button type="button" class="df-btn primary" data-next>Next</button>') +
-            '</div>';
+            var nav = '';
+            if (!isFirst) {
+              nav = '<div class="df-nav">' +
+                '<button type="button" class="df-btn ghost" data-prev>Previous</button>' +
+                (isLast ? '<span></span>' : '<button type="button" class="df-btn primary" data-next>Next</button>') +
+              '</div>';
+            }
 
             var stepSections = [];
             var pendingCustom = [];
@@ -916,9 +961,7 @@ function getDonationFormRuntimeSource() {
             flushCustom();
 
             return '<div class="df-step" data-step="' + String(index + 1) + '" style="display:' + (isFirst ? '' : 'none') + '">' +
-              '<div class="df-step-meta"><div class="df-step-title">' + escapeHtml(page.name || ('Page ' + String(index + 1))) + '</div>' +
-              (page.description ? '<div class="df-step-description">' + escapeHtml(page.description) + '</div>' : '') +
-              '</div>' +
+              '<div class="df-step-meta"></div>' +
               stepSections.join('') +
               nav +
             '</div>';
@@ -934,6 +977,17 @@ function getDonationFormRuntimeSource() {
     var dots = host.querySelectorAll('[data-dot]');
     var steps = host.querySelectorAll('[data-step]');
     var lookupTimer = null;
+    var recurringFrequencies = ['year', 'month', 'biweek', 'week'];
+
+    function recurringLabel(value) {
+      var map = {
+        year: 'Yearly',
+        month: 'Monthly',
+        biweek: 'Bi-Weekly',
+        week: 'Weekly',
+      };
+      return map[value] || 'Monthly';
+    }
 
     function selectButtons(selector, value, attr) {
       host.querySelectorAll(selector).forEach(function (button) {
@@ -953,9 +1007,24 @@ function getDonationFormRuntimeSource() {
     }
 
     function syncTribute() {
+      var tributeSection = host.querySelector('[data-tribute-section]');
       var tributeWrap = host.querySelector('[data-tribute-wrap]');
+      var tributeCheckbox = host.querySelector('[data-field="tributeEnabled"]');
+      var tributeAvailable = state.category === 'Tribute';
+
+      if (tributeSection) {
+        tributeSection.style.display = tributeAvailable ? '' : 'none';
+      }
+
+      if (!tributeAvailable) {
+        state.tributeEnabled = false;
+        if (tributeCheckbox) {
+          tributeCheckbox.checked = false;
+        }
+      }
+
       if (tributeWrap) {
-        tributeWrap.style.display = state.tributeEnabled ? '' : 'none';
+        tributeWrap.style.display = tributeAvailable && state.tributeEnabled ? '' : 'none';
       }
     }
 
@@ -990,6 +1059,59 @@ function getDonationFormRuntimeSource() {
       if (cardWrap) {
         cardWrap.style.display = state.coverFee && state.paymentMethod === 'card' ? '' : 'none';
       }
+    }
+
+    function updateCategoryOptionsByFrequency() {
+      var categorySelect = host.querySelector('[data-field="category"]');
+      if (!categorySelect) {
+        return;
+      }
+
+      var oneTimeCategories = ensureArray(config.payment.categories, []);
+      var recurringCategories = ['General Giving', 'Corporate Sponsor', 'testing', 'Other (specify)'];
+      var options = state.frequency === 'onetime' ? oneTimeCategories : recurringCategories;
+      var unique = Array.from(new Set(options.filter(Boolean)));
+
+      categorySelect.innerHTML = unique
+        .map(function (category) {
+          return '<option value="' + escapeHtml(category) + '">' + escapeHtml(category) + '</option>';
+        })
+        .join('');
+
+      if (unique.indexOf(state.category) < 0) {
+        state.category = unique[0] || '';
+      }
+      categorySelect.value = state.category;
+      syncCategoryOther();
+      syncTribute();
+    }
+
+    function syncFrequencyControls() {
+      var recurringStepper = host.querySelector('[data-recurring-stepper]');
+      var displayInline = host.querySelector('[data-frequency-display-inline]');
+      var minus = host.querySelector('[data-freq-minus]');
+      var plus = host.querySelector('[data-freq-plus]');
+
+      if (!recurringStepper || !displayInline || !minus || !plus) {
+        return;
+      }
+
+      var recurring = state.frequency !== 'onetime';
+      recurringStepper.style.display = recurring ? '' : 'none';
+
+      if (!recurring) {
+        return;
+      }
+
+      var idx = recurringFrequencies.indexOf(state.frequency);
+      if (idx < 0) {
+        idx = recurringFrequencies.indexOf('month');
+        state.frequency = 'month';
+      }
+
+      displayInline.textContent = recurringLabel(state.frequency);
+      minus.disabled = idx === 0;
+      plus.disabled = idx === recurringFrequencies.length - 1;
     }
 
     function syncAddressMode() {
@@ -1118,11 +1240,15 @@ function getDonationFormRuntimeSource() {
     function syncTotals() {
       var computed = totals(state);
       var totalDisplay = host.querySelector('[data-total-display]');
+      var totalInline = host.querySelector('[data-total-inline]');
       var frequencyDisplay = host.querySelector('[data-frequency-display]');
       var submit = host.querySelector('[data-submit]');
 
       if (totalDisplay) {
         totalDisplay.textContent = formatMoney(computed.total);
+      }
+      if (totalInline) {
+        totalInline.textContent = 'Total: ' + formatMoney(computed.total) + frequencyLabel(state.frequency);
       }
       if (frequencyDisplay) {
         frequencyDisplay.textContent = frequencyLabel(state.frequency);
@@ -1200,8 +1326,31 @@ function getDonationFormRuntimeSource() {
 
       var freqBtn = event.target.closest('.df-frequency');
       if (freqBtn) {
-        state.frequency = freqBtn.getAttribute('data-frequency') || 'onetime';
-        selectButtons('.df-frequency', state.frequency, 'data-frequency');
+        var mode = freqBtn.getAttribute('data-frequency-mode') || 'onetime';
+        if (mode === 'onetime') {
+          state.frequency = 'onetime';
+        } else {
+          state.frequency = state.frequency === 'onetime' ? 'month' : state.frequency;
+        }
+        selectButtons('.df-frequency', mode, 'data-frequency-mode');
+        syncFrequencyControls();
+        updateCategoryOptionsByFrequency();
+        syncTotals();
+        return;
+      }
+
+      if (event.target.matches('[data-freq-minus], [data-freq-plus]')) {
+        var currentIdx = recurringFrequencies.indexOf(state.frequency);
+        if (currentIdx < 0) {
+          currentIdx = recurringFrequencies.indexOf('month');
+        }
+        if (event.target.matches('[data-freq-minus]')) {
+          currentIdx = Math.max(0, currentIdx - 1);
+        } else {
+          currentIdx = Math.min(recurringFrequencies.length - 1, currentIdx + 1);
+        }
+        state.frequency = recurringFrequencies[currentIdx];
+        syncFrequencyControls();
         syncTotals();
         return;
       }
@@ -1230,7 +1379,7 @@ function getDonationFormRuntimeSource() {
         return;
       }
 
-      var cardBtn = event.target.closest('.df-card');
+      var cardBtn = event.target.closest('[data-card-type]');
       if (cardBtn) {
         state.cardType = cardBtn.getAttribute('data-card-type') || 'visa';
         selectButtons('.df-card', state.cardType, 'data-card-type');
@@ -1250,7 +1399,20 @@ function getDonationFormRuntimeSource() {
         return;
       }
 
-      if (event.target.matches('[data-enter-manual]')) {
+      if (event.target.matches('[data-next-inline]')) {
+        var inlineValidation = validatePage(config, state, state.step);
+        if (!inlineValidation.ok) {
+          showError(inlineValidation.message);
+          return;
+        }
+        state.step = Math.min(steps.length, state.step + 1);
+        syncStep();
+        syncTotals();
+        return;
+      }
+
+      var enterManual = event.target.closest('[data-enter-manual]');
+      if (enterManual) {
         state.addressMode = 'manual';
         hideAddressSuggestions();
         syncAddressMode();
@@ -1336,6 +1498,15 @@ function getDonationFormRuntimeSource() {
       });
     });
 
+    host.querySelectorAll('[data-enter-manual]').forEach(function (manualLink) {
+      manualLink.addEventListener('click', function (event) {
+        event.preventDefault();
+        state.addressMode = 'manual';
+        hideAddressSuggestions();
+        syncAddressMode();
+      });
+    });
+
     host.addEventListener('click', function (event) {
       if (!event.target.closest('[data-address-lookup-row]')) {
         hideAddressSuggestions();
@@ -1343,7 +1514,7 @@ function getDonationFormRuntimeSource() {
     });
 
     selectButtons('.df-amount', String(state.amount), 'data-amount');
-    selectButtons('.df-frequency', state.frequency, 'data-frequency');
+    selectButtons('.df-frequency', state.frequency === 'onetime' ? 'onetime' : 'recurring', 'data-frequency-mode');
     selectButtons('.df-donor', state.donationType, 'data-donation-type');
     selectButtons('.df-payment', state.paymentMethod, 'data-payment-method');
     selectButtons('.df-card', state.cardType, 'data-card-type');
@@ -1352,6 +1523,8 @@ function getDonationFormRuntimeSource() {
     syncDonorFields();
     syncTribute();
     syncCategoryOther();
+    updateCategoryOptionsByFrequency();
+    syncFrequencyControls();
     syncCustomAmount();
     syncPayment();
     syncAddressMode();

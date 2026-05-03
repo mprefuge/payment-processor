@@ -44,6 +44,7 @@ function getDefaultDonationFormConfig() {
         'TNND Camp Payment',
         'Cooking and Culture Payment',
         'Volunteer Application Payment',
+        'testing',
         'Other (specify)',
       ],
     },
