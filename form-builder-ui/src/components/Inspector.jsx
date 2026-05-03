@@ -66,7 +66,11 @@ function AmountPillsSettings({ settings, onSettingChange }) {
   return (
     <>
       <Field label="Currency">
-        <select className="insp-input" value={settings.currency || 'USD'} onChange={(e) => onSettingChange({ currency: e.target.value })}>
+        <select
+          className="insp-input"
+          value={settings.currency || 'USD'}
+          onChange={(e) => onSettingChange({ currency: e.target.value })}
+        >
           <option value="USD">USD ($)</option>
           <option value="CAD">CAD (C$)</option>
           <option value="EUR">EUR (€)</option>
@@ -91,10 +95,16 @@ function AmountPillsSettings({ settings, onSettingChange }) {
             onChange={(e) => setNewPreset(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && addPreset()}
           />
-          <button className="insp-btn-sm" onClick={addPreset}>Add</button>
+          <button className="insp-btn-sm" onClick={addPreset}>
+            Add
+          </button>
         </div>
       </Field>
-      <Toggle label="Allow custom amount" checked={settings.allowCustom} onChange={(v) => onSettingChange({ allowCustom: v })} />
+      <Toggle
+        label="Allow custom amount"
+        checked={settings.allowCustom}
+        onChange={(v) => onSettingChange({ allowCustom: v })}
+      />
     </>
   );
 }
@@ -108,7 +118,9 @@ function CategorySettings({ settings, onSettingChange }) {
   }
 
   function addOption() {
-    onSettingChange({ options: [...opts, { label: 'New Option', value: `opt_${opts.length + 1}` }] });
+    onSettingChange({
+      options: [...opts, { label: 'New Option', value: `opt_${opts.length + 1}` }],
+    });
   }
 
   function removeOption(idx) {
@@ -118,7 +130,11 @@ function CategorySettings({ settings, onSettingChange }) {
   return (
     <>
       <Field label="Input Style">
-        <select className="insp-input" value={settings.inputMode || 'dropdown'} onChange={(e) => onSettingChange({ inputMode: e.target.value })}>
+        <select
+          className="insp-input"
+          value={settings.inputMode || 'dropdown'}
+          onChange={(e) => onSettingChange({ inputMode: e.target.value })}
+        >
           <option value="dropdown">Dropdown</option>
           <option value="pills">Pills</option>
         </select>
@@ -126,12 +142,26 @@ function CategorySettings({ settings, onSettingChange }) {
       <Field label="Options">
         {opts.map((opt, idx) => (
           <div key={idx} className="insp-row insp-option-row">
-            <input className="insp-input" value={opt.label} onChange={(e) => updateOption(idx, 'label', e.target.value)} placeholder="Label" />
-            <input className="insp-input" value={opt.value} onChange={(e) => updateOption(idx, 'value', e.target.value)} placeholder="Value" />
-            <button className="insp-btn-danger-sm" onClick={() => removeOption(idx)}>✕</button>
+            <input
+              className="insp-input"
+              value={opt.label}
+              onChange={(e) => updateOption(idx, 'label', e.target.value)}
+              placeholder="Label"
+            />
+            <input
+              className="insp-input"
+              value={opt.value}
+              onChange={(e) => updateOption(idx, 'value', e.target.value)}
+              placeholder="Value"
+            />
+            <button className="insp-btn-danger-sm" onClick={() => removeOption(idx)}>
+              ✕
+            </button>
           </div>
         ))}
-        <button className="insp-btn-sm" onClick={addOption}>+ Add Option</button>
+        <button className="insp-btn-sm" onClick={addOption}>
+          + Add Option
+        </button>
       </Field>
     </>
   );
@@ -156,19 +186,41 @@ function FrequencySettings({ settings, onSettingChange }) {
   return (
     <>
       <Field label="Default">
-        <select className="insp-input" value={settings.defaultValue || ''} onChange={(e) => onSettingChange({ defaultValue: e.target.value })}>
-          {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        <select
+          className="insp-input"
+          value={settings.defaultValue || ''}
+          onChange={(e) => onSettingChange({ defaultValue: e.target.value })}
+        >
+          {opts.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
         </select>
       </Field>
       <Field label="Options">
         {opts.map((opt, idx) => (
           <div key={idx} className="insp-row insp-option-row">
-            <input className="insp-input" value={opt.label} onChange={(e) => updateOption(idx, 'label', e.target.value)} placeholder="Label" />
-            <input className="insp-input" value={opt.value} onChange={(e) => updateOption(idx, 'value', e.target.value)} placeholder="Value" />
-            <button className="insp-btn-danger-sm" onClick={() => removeOption(idx)}>✕</button>
+            <input
+              className="insp-input"
+              value={opt.label}
+              onChange={(e) => updateOption(idx, 'label', e.target.value)}
+              placeholder="Label"
+            />
+            <input
+              className="insp-input"
+              value={opt.value}
+              onChange={(e) => updateOption(idx, 'value', e.target.value)}
+              placeholder="Value"
+            />
+            <button className="insp-btn-danger-sm" onClick={() => removeOption(idx)}>
+              ✕
+            </button>
           </div>
         ))}
-        <button className="insp-btn-sm" onClick={addOption}>+ Add Option</button>
+        <button className="insp-btn-sm" onClick={addOption}>
+          + Add Option
+        </button>
       </Field>
     </>
   );
@@ -178,12 +230,27 @@ function CoverFeeSettings({ settings, onSettingChange }) {
   return (
     <>
       <Field label="Fee Percentage (%)">
-        <NumberInput value={settings.feePercent} onChange={(v) => onSettingChange({ feePercent: v })} min={0} max={100} step={0.1} />
+        <NumberInput
+          value={settings.feePercent}
+          onChange={(v) => onSettingChange({ feePercent: v })}
+          min={0}
+          max={100}
+          step={0.1}
+        />
       </Field>
       <Field label="Fixed Fee ($)">
-        <NumberInput value={settings.feeFixed} onChange={(v) => onSettingChange({ feeFixed: v })} min={0} step={0.01} />
+        <NumberInput
+          value={settings.feeFixed}
+          onChange={(v) => onSettingChange({ feeFixed: v })}
+          min={0}
+          step={0.01}
+        />
       </Field>
-      <Toggle label="Checked by default" checked={settings.defaultChecked} onChange={(v) => onSettingChange({ defaultChecked: v })} />
+      <Toggle
+        label="Checked by default"
+        checked={settings.defaultChecked}
+        onChange={(v) => onSettingChange({ defaultChecked: v })}
+      />
     </>
   );
 }
@@ -223,7 +290,11 @@ function AmountSettings({ settings, onSettingChange }) {
   return (
     <>
       <Field label="Currency">
-        <select className="insp-input" value={settings.currency || 'USD'} onChange={(e) => onSettingChange({ currency: e.target.value })}>
+        <select
+          className="insp-input"
+          value={settings.currency || 'USD'}
+          onChange={(e) => onSettingChange({ currency: e.target.value })}
+        >
           <option value="USD">USD</option>
           <option value="CAD">CAD</option>
           <option value="EUR">EUR</option>
@@ -231,13 +302,28 @@ function AmountSettings({ settings, onSettingChange }) {
         </select>
       </Field>
       <Field label="Fixed Amount (leave blank for user input)">
-        <NumberInput value={settings.fixedAmount} onChange={(v) => onSettingChange({ fixedAmount: v })} min={0} step={0.01} />
+        <NumberInput
+          value={settings.fixedAmount}
+          onChange={(v) => onSettingChange({ fixedAmount: v })}
+          min={0}
+          step={0.01}
+        />
       </Field>
       <Field label="Minimum ($)">
-        <NumberInput value={settings.min} onChange={(v) => onSettingChange({ min: v })} min={0} step={1} />
+        <NumberInput
+          value={settings.min}
+          onChange={(v) => onSettingChange({ min: v })}
+          min={0}
+          step={1}
+        />
       </Field>
       <Field label="Maximum ($)">
-        <NumberInput value={settings.max} onChange={(v) => onSettingChange({ max: v })} min={0} step={1} />
+        <NumberInput
+          value={settings.max}
+          onChange={(v) => onSettingChange({ max: v })}
+          min={0}
+          step={1}
+        />
       </Field>
     </>
   );
@@ -256,8 +342,18 @@ function FieldInspector({ field, pageIdx, dispatch }) {
     update({ settings });
   }
 
-  const hasPlaceholder = ['text', 'email', 'phone', 'textarea', 'number', 'zip_code', 'amount'].includes(field.type);
-  const hasRequired = !['cover_fee', 'card_input', 'ach_input', 'billing_address'].includes(field.type);
+  const hasPlaceholder = [
+    'text',
+    'email',
+    'phone',
+    'textarea',
+    'number',
+    'zip_code',
+    'amount',
+  ].includes(field.type);
+  const hasRequired = !['cover_fee', 'card_input', 'ach_input', 'billing_address'].includes(
+    field.type
+  );
 
   return (
     <div className="insp-section">
@@ -267,20 +363,36 @@ function FieldInspector({ field, pageIdx, dispatch }) {
       </div>
 
       <Field label="Label">
-        <TextInput value={field.label} onChange={(v) => update({ label: v })} placeholder="Field label" />
+        <TextInput
+          value={field.label}
+          onChange={(v) => update({ label: v })}
+          placeholder="Field label"
+        />
       </Field>
 
       {hasPlaceholder && (
         <Field label="Placeholder">
-          <TextInput value={field.placeholder} onChange={(v) => update({ placeholder: v })} placeholder="Placeholder text…" />
+          <TextInput
+            value={field.placeholder}
+            onChange={(v) => update({ placeholder: v })}
+            placeholder="Placeholder text…"
+          />
         </Field>
       )}
 
       {hasRequired && (
-        <Toggle label="Required" checked={field.required} onChange={(v) => update({ required: v })} />
+        <Toggle
+          label="Required"
+          checked={field.required}
+          onChange={(v) => update({ required: v })}
+        />
       )}
 
-      <Toggle label="Visible" checked={field.enabled !== false} onChange={(v) => update({ enabled: v })} />
+      <Toggle
+        label="Visible"
+        checked={field.enabled !== false}
+        onChange={(v) => update({ enabled: v })}
+      />
 
       {/* Type-specific settings */}
       {field.type === 'amount_pills' && (
@@ -302,20 +414,40 @@ function FieldInspector({ field, pageIdx, dispatch }) {
         <PaymentMethodSettings settings={field.settings} onSettingChange={onSettingChange} />
       )}
       {field.type === 'checkout' && (
-        <Toggle label="Show middle name" checked={field.settings?.showMiddle} onChange={(v) => onSettingChange({ showMiddle: v })} />
+        <Toggle
+          label="Show middle name"
+          checked={field.settings?.showMiddle}
+          onChange={(v) => onSettingChange({ showMiddle: v })}
+        />
       )}
       {field.type === 'full_name' && (
-        <Toggle label="Show middle name" checked={field.settings?.showMiddle} onChange={(v) => onSettingChange({ showMiddle: v })} />
+        <Toggle
+          label="Show middle name"
+          checked={field.settings?.showMiddle}
+          onChange={(v) => onSettingChange({ showMiddle: v })}
+        />
       )}
       {field.type === 'billing_address' && (
         <>
-          <Toggle label="Show address line 2" checked={field.settings?.showAddress2} onChange={(v) => onSettingChange({ showAddress2: v })} />
-          <Toggle label="Show country" checked={field.settings?.showCountry} onChange={(v) => onSettingChange({ showCountry: v })} />
+          <Toggle
+            label="Show address line 2"
+            checked={field.settings?.showAddress2}
+            onChange={(v) => onSettingChange({ showAddress2: v })}
+          />
+          <Toggle
+            label="Show country"
+            checked={field.settings?.showCountry}
+            onChange={(v) => onSettingChange({ showCountry: v })}
+          />
         </>
       )}
       {field.type === 'checkbox' && (
         <Field label="Checkbox label">
-          <TextInput value={field.settings?.checkboxLabel} onChange={(v) => onSettingChange({ checkboxLabel: v })} placeholder="I agree to…" />
+          <TextInput
+            value={field.settings?.checkboxLabel}
+            onChange={(v) => onSettingChange({ checkboxLabel: v })}
+            placeholder="I agree to…"
+          />
         </Field>
       )}
 
@@ -350,24 +482,52 @@ function FormSettings({ state, dispatch }) {
       <div className="insp-section-title">Branding</div>
       <Field label="Accent Color">
         <div className="insp-color-row">
-          <input type="color" className="insp-color" value={branding.accentColor || '#bd2135'} onChange={(e) => updateBranding({ accentColor: e.target.value })} />
-          <input className="insp-input" value={branding.accentColor || '#bd2135'} onChange={(e) => /^#[0-9a-fA-F]{0,6}$/.test(e.target.value) && updateBranding({ accentColor: e.target.value })} />
+          <input
+            type="color"
+            className="insp-color"
+            value={branding.accentColor || '#bd2135'}
+            onChange={(e) => updateBranding({ accentColor: e.target.value })}
+          />
+          <input
+            className="insp-input"
+            value={branding.accentColor || '#bd2135'}
+            onChange={(e) =>
+              /^#[0-9a-fA-F]{0,6}$/.test(e.target.value) &&
+              updateBranding({ accentColor: e.target.value })
+            }
+          />
         </div>
       </Field>
       <Field label="Form Title">
-        <TextInput value={branding.title} onChange={(v) => updateBranding({ title: v })} placeholder="Support Our Mission" />
+        <TextInput
+          value={branding.title}
+          onChange={(v) => updateBranding({ title: v })}
+          placeholder="Support Our Mission"
+        />
       </Field>
       <Field label="Subtitle">
-        <TextInput value={branding.subtitle} onChange={(v) => updateBranding({ subtitle: v })} placeholder="Your gift makes a difference." />
+        <TextInput
+          value={branding.subtitle}
+          onChange={(v) => updateBranding({ subtitle: v })}
+          placeholder="Your gift makes a difference."
+        />
       </Field>
       <Field label="Logo URL">
-        <TextInput value={branding.logoUrl} onChange={(v) => updateBranding({ logoUrl: v })} placeholder="https://…" />
+        <TextInput
+          value={branding.logoUrl}
+          onChange={(v) => updateBranding({ logoUrl: v })}
+          placeholder="https://…"
+        />
       </Field>
 
       <div className="insp-separator" />
       <div className="insp-section-title">Display</div>
       <Field label="Form Mode">
-        <select className="insp-input" value={display.mode || 'embedded'} onChange={(e) => updateDisplay({ mode: e.target.value })}>
+        <select
+          className="insp-input"
+          value={display.mode || 'embedded'}
+          onChange={(e) => updateDisplay({ mode: e.target.value })}
+        >
           <option value="embedded">Embedded (inline)</option>
           <option value="modal">Modal popup</option>
         </select>
@@ -376,7 +536,11 @@ function FormSettings({ state, dispatch }) {
       <div className="insp-separator" />
       <div className="insp-section-title">Payment</div>
       <Field label="Currency">
-        <select className="insp-input" value={payment.currency || 'USD'} onChange={(e) => updatePayment({ currency: e.target.value })}>
+        <select
+          className="insp-input"
+          value={payment.currency || 'USD'}
+          onChange={(e) => updatePayment({ currency: e.target.value })}
+        >
           <option value="USD">USD</option>
           <option value="CAD">CAD</option>
           <option value="EUR">EUR</option>
@@ -384,10 +548,20 @@ function FormSettings({ state, dispatch }) {
         </select>
       </Field>
       <Field label="Processing Fee %">
-        <NumberInput value={payment.processingFeePercent} onChange={(v) => updatePayment({ processingFeePercent: v })} min={0} step={0.1} />
+        <NumberInput
+          value={payment.processingFeePercent}
+          onChange={(v) => updatePayment({ processingFeePercent: v })}
+          min={0}
+          step={0.1}
+        />
       </Field>
       <Field label="Processing Fee Fixed ($)">
-        <NumberInput value={payment.processingFeeFixed} onChange={(v) => updatePayment({ processingFeeFixed: v })} min={0} step={0.01} />
+        <NumberInput
+          value={payment.processingFeeFixed}
+          onChange={(v) => updatePayment({ processingFeeFixed: v })}
+          min={0}
+          step={0.01}
+        />
       </Field>
     </div>
   );
@@ -414,10 +588,16 @@ export default function Inspector({ state, dispatch }) {
   return (
     <aside className="vb-inspector">
       <div className="insp-tabs">
-        <button className={`insp-tab${tab === 'field' ? ' is-active' : ''}`} onClick={() => setTab('field')}>
+        <button
+          className={`insp-tab${tab === 'field' ? ' is-active' : ''}`}
+          onClick={() => setTab('field')}
+        >
           {selectedField ? '✏ Field' : 'Field'}
         </button>
-        <button className={`insp-tab${tab === 'settings' ? ' is-active' : ''}`} onClick={() => setTab('settings')}>
+        <button
+          className={`insp-tab${tab === 'settings' ? ' is-active' : ''}`}
+          onClick={() => setTab('settings')}
+        >
           ⚙ Settings
         </button>
       </div>

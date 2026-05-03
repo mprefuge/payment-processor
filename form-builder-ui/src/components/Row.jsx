@@ -57,7 +57,15 @@ function RowDropZone({ rowId, pageIdx }) {
   return <div ref={setNodeRef} className={`vb-row-drop-bg${isOver ? ' drag-over' : ''}`} />;
 }
 
-export default function Row({ row, page, pageIdx, selectedFieldId, dispatch, accent, dragHandleProps }) {
+export default function Row({
+  row,
+  page,
+  pageIdx,
+  selectedFieldId,
+  dispatch,
+  accent,
+  dragHandleProps,
+}) {
   const rowRef = useRef(null);
   const totalWidth = row.columns.reduce((s, c) => s + (c.width || 0), 0);
 
@@ -69,7 +77,10 @@ export default function Row({ row, page, pageIdx, selectedFieldId, dispatch, acc
         ⠿
       </div>
 
-      <SortableContext items={row.columns.map((c) => c.id)} strategy={horizontalListSortingStrategy}>
+      <SortableContext
+        items={row.columns.map((c) => c.id)}
+        strategy={horizontalListSortingStrategy}
+      >
         <div
           className="vb-row-columns"
           style={{
@@ -109,7 +120,8 @@ export default function Row({ row, page, pageIdx, selectedFieldId, dispatch, acc
           title="Delete row"
           onClick={() => {
             for (const col of row.columns) {
-              if (col.field) dispatch({ type: 'REMOVE_FIELD', payload: { pageIdx, fieldId: col.field.id } });
+              if (col.field)
+                dispatch({ type: 'REMOVE_FIELD', payload: { pageIdx, fieldId: col.field.id } });
             }
           }}
         >

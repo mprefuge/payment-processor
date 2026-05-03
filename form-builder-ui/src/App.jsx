@@ -21,9 +21,7 @@ export default function App() {
   const { state, dispatch } = useEditorState();
   const [activeDrag, setActiveDrag] = useState(null);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
-  );
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const handleDragStart = useCallback(({ active }) => {
     setActiveDrag(active.data.current);
@@ -46,7 +44,12 @@ export default function App() {
           // Drop onto an existing field → insert before it in its row
           dispatch({
             type: 'ADD_FIELD_BEFORE',
-            payload: { pageIdx: oData.pageIdx, rowId: oData.rowId, beforeFieldId: oData.fieldId, field },
+            payload: {
+              pageIdx: oData.pageIdx,
+              rowId: oData.rowId,
+              beforeFieldId: oData.fieldId,
+              field,
+            },
           });
         } else if (oData.type === 'row') {
           // Drop onto row background → append to that row
@@ -70,7 +73,12 @@ export default function App() {
             // Same row reorder
             dispatch({
               type: 'REORDER_FIELDS_IN_ROW',
-              payload: { pageIdx: fromPageIdx, rowId: fromRowId, fromFieldId: fieldId, toFieldId: oData.fieldId },
+              payload: {
+                pageIdx: fromPageIdx,
+                rowId: fromRowId,
+                fromFieldId: fieldId,
+                toFieldId: oData.fieldId,
+              },
             });
           } else {
             // Cross-row move, insert before target field
@@ -86,7 +94,10 @@ export default function App() {
               },
             });
           }
-        } else if (oData.type === 'row' && (oData.rowId !== fromRowId || oData.pageIdx !== fromPageIdx)) {
+        } else if (
+          oData.type === 'row' &&
+          (oData.rowId !== fromRowId || oData.pageIdx !== fromPageIdx)
+        ) {
           // Move to different row (append to end)
           dispatch({
             type: 'MOVE_FIELD_TO_ROW',
@@ -103,7 +114,13 @@ export default function App() {
           // Move field to a new standalone row
           dispatch({
             type: 'MOVE_FIELD_TO_NEW_ROW',
-            payload: { fromPageIdx, fromRowId, fieldId, toPageIdx: oData.pageIdx, afterRowId: oData.afterRowId },
+            payload: {
+              fromPageIdx,
+              fromRowId,
+              fieldId,
+              toPageIdx: oData.pageIdx,
+              afterRowId: oData.afterRowId,
+            },
           });
         } else if (oData.type === 'row-handle') {
           // Reorder rows via drag handle
@@ -115,7 +132,10 @@ export default function App() {
               const fromIdx = page.rows.findIndex((r) => r.id === fromRowId);
               const toIdx = page.rows.findIndex((r) => r.id === toRowId);
               if (fromIdx >= 0 && toIdx >= 0) {
-                dispatch({ type: 'REORDER_ROWS', payload: { pageIdx: fromPageIdx, fromIdx, toIdx } });
+                dispatch({
+                  type: 'REORDER_ROWS',
+                  payload: { pageIdx: fromPageIdx, fromIdx, toIdx },
+                });
               }
             }
           }

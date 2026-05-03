@@ -134,7 +134,10 @@ textarea {
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
-  transition: transform 0.14s ease, background 0.18s ease, border-color 0.18s ease;
+  transition:
+    transform 0.14s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
 }
 
 .vb-btn:hover {

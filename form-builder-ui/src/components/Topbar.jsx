@@ -80,7 +80,12 @@ export default function Topbar({ state, dispatch }) {
         ref={nameRef}
         className="vb-topbar-name"
         value={state.name}
-        onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', payload: { key: 'root', updates: { name: e.target.value } } })}
+        onChange={(e) =>
+          dispatch({
+            type: 'UPDATE_SETTINGS',
+            payload: { key: 'root', updates: { name: e.target.value } },
+          })
+        }
         placeholder="Form name…"
       />
 
@@ -107,7 +112,12 @@ export default function Topbar({ state, dispatch }) {
       <button className="vb-btn vb-btn-ghost" onClick={() => dispatch({ type: 'RESET' })}>
         Reset
       </button>
-      <button className="vb-btn vb-btn-primary" style={{ '--accent': accent }} onClick={save} disabled={saving}>
+      <button
+        className="vb-btn vb-btn-primary"
+        style={{ '--accent': accent }}
+        onClick={save}
+        disabled={saving}
+      >
         {saving ? 'Saving…' : 'Publish →'}
       </button>
     </header>

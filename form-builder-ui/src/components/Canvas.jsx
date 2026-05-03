@@ -96,7 +96,10 @@ export default function Canvas({ state, dispatch }) {
             className="vb-page-name-input"
             value={currentPage?.name || ''}
             onChange={(e) =>
-              dispatch({ type: 'UPDATE_PAGE', payload: { pageIdx: currentPageIdx, updates: { name: e.target.value } } })
+              dispatch({
+                type: 'UPDATE_PAGE',
+                payload: { pageIdx: currentPageIdx, updates: { name: e.target.value } },
+              })
             }
             placeholder="Page name…"
           />
@@ -104,7 +107,10 @@ export default function Canvas({ state, dispatch }) {
             className="vb-page-desc-input"
             value={currentPage?.description || ''}
             onChange={(e) =>
-              dispatch({ type: 'UPDATE_PAGE', payload: { pageIdx: currentPageIdx, updates: { description: e.target.value } } })
+              dispatch({
+                type: 'UPDATE_PAGE',
+                payload: { pageIdx: currentPageIdx, updates: { description: e.target.value } },
+              })
             }
             placeholder="Page description (optional)…"
           />
@@ -124,10 +130,16 @@ export default function Canvas({ state, dispatch }) {
         {!currentPage || currentPage.rows.length === 0 ? (
           <EmptyPageDrop pageIdx={currentPageIdx} />
         ) : (
-          <SortableContext items={currentPage.rows.map((r) => r.id)} strategy={verticalListSortingStrategy}>
+          <SortableContext
+            items={currentPage.rows.map((r) => r.id)}
+            strategy={verticalListSortingStrategy}
+          >
             {currentPage.rows.map((row, ri) => (
               <React.Fragment key={row.id}>
-                <RowGap pageIdx={currentPageIdx} afterRowId={ri === 0 ? null : currentPage.rows[ri - 1]?.id} />
+                <RowGap
+                  pageIdx={currentPageIdx}
+                  afterRowId={ri === 0 ? null : currentPage.rows[ri - 1]?.id}
+                />
                 <SortableRow
                   row={row}
                   page={currentPage}

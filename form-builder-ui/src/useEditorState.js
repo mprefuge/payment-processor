@@ -85,8 +85,14 @@ function makeDefaultConfig() {
           {
             id: createId('row'),
             columns: recalculateColumnWidths([
-              { id: createId('col'), field: { ...createDefaultField('email'), id: createId('field') } },
-              { id: createId('col'), field: { ...createDefaultField('phone'), id: createId('field') } },
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('email'), id: createId('field') },
+              },
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('phone'), id: createId('field') },
+              },
             ]),
           },
         ],
@@ -99,19 +105,28 @@ function makeDefaultConfig() {
           {
             id: createId('row'),
             columns: recalculateColumnWidths([
-              { id: createId('col'), field: { ...createDefaultField('cover_fee'), id: createId('field') } },
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('cover_fee'), id: createId('field') },
+              },
             ]),
           },
           {
             id: createId('row'),
             columns: recalculateColumnWidths([
-              { id: createId('col'), field: { ...createDefaultField('payment_method'), id: createId('field') } },
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('payment_method'), id: createId('field') },
+              },
             ]),
           },
           {
             id: createId('row'),
             columns: recalculateColumnWidths([
-              { id: createId('col'), field: { ...createDefaultField('card_input'), id: createId('field') } },
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('card_input'), id: createId('field') },
+              },
             ]),
           },
         ],
@@ -357,7 +372,8 @@ function reducer(state, action) {
             columns: row.columns.map((col) => {
               if (col.field?.id !== fieldId) return col;
               const newField = { ...col.field, ...updates };
-              if (updates.settings) newField.settings = { ...col.field.settings, ...updates.settings };
+              if (updates.settings)
+                newField.settings = { ...col.field.settings, ...updates.settings };
               return { ...col, field: newField };
             }),
           })),

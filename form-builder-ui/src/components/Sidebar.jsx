@@ -56,10 +56,7 @@ export default function Sidebar() {
       <div className="vb-sidebar-body">
         {filteredCats.map((cat) => (
           <div key={cat.id} className="vb-palette-category">
-            <button
-              className="vb-palette-cat-header"
-              onClick={() => toggle(cat.id)}
-            >
+            <button className="vb-palette-cat-header" onClick={() => toggle(cat.id)}>
               <span>{cat.label}</span>
               <span className="vb-palette-cat-arrow">{collapsed[cat.id] ? '▸' : '▾'}</span>
             </button>
@@ -72,9 +69,7 @@ export default function Sidebar() {
             )}
           </div>
         ))}
-        {filteredCats.length === 0 && (
-          <p className="vb-sidebar-empty">No fields match "{query}"</p>
-        )}
+        {filteredCats.length === 0 && <p className="vb-sidebar-empty">No fields match "{query}"</p>}
       </div>
       <div className="vb-sidebar-hint">
         Drag a field onto the canvas, or click a field card to edit its settings.

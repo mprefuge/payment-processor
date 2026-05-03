@@ -7,17 +7,18 @@ import { getFieldMeta } from '../fieldTypes';
 export default function FieldBlock({ col, row, pageIdx, isSelected, dispatch, accent }) {
   const field = col.field;
 
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging, isOver } = useSortable({
-    id: col.id,
-    data: {
-      source: 'field',
-      fieldId: field?.id,
-      colId: col.id,
-      rowId: row.id,
-      pageIdx,
-      label: field?.label,
-    },
-  });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging, isOver } =
+    useSortable({
+      id: col.id,
+      data: {
+        source: 'field',
+        fieldId: field?.id,
+        colId: col.id,
+        rowId: row.id,
+        pageIdx,
+        label: field?.label,
+      },
+    });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -55,10 +56,19 @@ export default function FieldBlock({ col, row, pageIdx, isSelected, dispatch, ac
     >
       {/* Overlay controls */}
       <div className="vb-field-overlay">
-        <div className="vb-field-drag-handle" {...listeners} {...attributes} title="Drag to reorder">
+        <div
+          className="vb-field-drag-handle"
+          {...listeners}
+          {...attributes}
+          title="Drag to reorder"
+        >
           ⋮⋮
         </div>
-        <button className="vb-field-ovr-btn vb-field-delete" onClick={handleDelete} title="Remove field">
+        <button
+          className="vb-field-ovr-btn vb-field-delete"
+          onClick={handleDelete}
+          title="Remove field"
+        >
           ✕
         </button>
       </div>
