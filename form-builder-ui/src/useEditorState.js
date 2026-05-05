@@ -1,15 +1,11 @@
-import { useReducer, useCallback } from 'react';
+﻿import { useReducer, useCallback } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 import { createId, recalculateColumnWidths, deepClone } from './utils';
 import { createDefaultField } from './fieldTypes';
 
-// ─── Default config ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Default config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function makeDefaultConfig() {
-  const aId = createId('field');
-  const fId = createId('field');
-  const cId = createId('field');
-  const dId = createId('field');
   return {
     name: 'Untitled Form',
     display: { mode: 'embedded' },
@@ -18,6 +14,8 @@ function makeDefaultConfig() {
       logoUrl: '',
       title: 'Support Our Mission',
       subtitle: 'Your gift makes a difference.',
+      headerBg: '#ffffff',
+      fontFamily: 'inherit',
     },
     payment: {
       currency: 'USD',
@@ -25,22 +23,38 @@ function makeDefaultConfig() {
       allowCustomAmount: true,
       processingFeePercent: 2.9,
       processingFeeFixed: 0.3,
+      stripePublishableKey: '',
+      enabledMethods: ['card', 'ach'],
+      allowRecurring: true,
+    },
+    salesforce: {
+      primaryObject: 'Contact',
+      donationObject: 'Transaction__c',
+      defaultCampaignId: '',
+      recordType: '',
+      createAccount: false,
+    },
+    confirmationPage: {
+      type: 'message', // message | redirect
+      message: 'Thank you for your generous gift! You will receive a confirmation email shortly.',
+      redirectUrl: '',
+      emailNotification: true,
     },
     pages: [
       {
         id: 'page_1',
         name: 'Donation',
         description: '',
+        nextLabel: 'Continue',
+        prevLabel: 'Back',
+        showProgress: true,
         rows: [
           {
             id: createId('row'),
             columns: recalculateColumnWidths([
               {
                 id: createId('col'),
-                field: {
-                  ...createDefaultField('amount_pills'),
-                  id: aId,
-                },
+                field: { ...createDefaultField('amount_pills'), id: createId('field') },
               },
             ]),
           },
@@ -49,17 +63,11 @@ function makeDefaultConfig() {
             columns: recalculateColumnWidths([
               {
                 id: createId('col'),
-                field: {
-                  ...createDefaultField('donation_frequency'),
-                  id: fId,
-                },
+                field: { ...createDefaultField('donation_frequency'), id: createId('field') },
               },
               {
                 id: createId('col'),
-                field: {
-                  ...createDefaultField('category'),
-                  id: cId,
-                },
+                field: { ...createDefaultField('category'), id: createId('field') },
               },
             ]),
           },
@@ -69,16 +77,16 @@ function makeDefaultConfig() {
         id: 'page_2',
         name: 'Donor Info',
         description: '',
+        nextLabel: 'Continue',
+        prevLabel: 'Back',
+        showProgress: true,
         rows: [
           {
             id: createId('row'),
             columns: recalculateColumnWidths([
               {
                 id: createId('col'),
-                field: {
-                  ...createDefaultField('full_name'),
-                  id: dId,
-                },
+                field: { ...createDefaultField('full_name'), id: createId('field') },
               },
             ]),
           },
@@ -95,12 +103,33 @@ function makeDefaultConfig() {
               },
             ]),
           },
+          {
+            id: createId('row'),
+            columns: recalculateColumnWidths([
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('billing_address'), id: createId('field') },
+              },
+            ]),
+          },
+          {
+            id: createId('row'),
+            columns: recalculateColumnWidths([
+              {
+                id: createId('col'),
+                field: { ...createDefaultField('organization'), id: createId('field') },
+              },
+            ]),
+          },
         ],
       },
       {
         id: 'page_3',
         name: 'Payment',
         description: '',
+        nextLabel: 'Complete Donation',
+        prevLabel: 'Back',
+        showProgress: true,
         rows: [
           {
             id: createId('row'),
@@ -116,7 +145,7 @@ function makeDefaultConfig() {
             columns: recalculateColumnWidths([
               {
                 id: createId('col'),
-                field: { ...createDefaultField('payment_method'), id: createId('field') },
+                field: { ...createDefaultField('stripe_payment_element'), id: createId('field') },
               },
             ]),
           },
@@ -125,7 +154,7 @@ function makeDefaultConfig() {
             columns: recalculateColumnWidths([
               {
                 id: createId('col'),
-                field: { ...createDefaultField('card_input'), id: createId('field') },
+                field: { ...createDefaultField('order_summary'), id: createId('field') },
               },
             ]),
           },
@@ -142,10 +171,12 @@ function createInitialState() {
     selectedPageIdx: 0,
     selectedFieldId: null,
     dirty: false,
+    history: [],
+    historyIndex: -1,
   };
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function findField(state, fieldId) {
   for (let pi = 0; pi < state.pages.length; pi++) {
@@ -188,6 +219,13 @@ function normalizeLoadedConfig(cfg) {
         ...(defaults.settings || {}),
         ...((field && field.settings) || {}),
       },
+      salesforce: {
+        object: '',
+        field: '',
+        transform: '',
+        ...((field && field.salesforce) || {}),
+      },
+      conditions: Array.isArray(field.conditions) ? field.conditions : [],
     };
   };
 
@@ -200,20 +238,13 @@ function normalizeLoadedConfig(cfg) {
           .map((col) => {
             const field = normalizeField(col?.field);
             if (!field) return null;
-            return {
-              ...col,
-              id: col?.id || createId('col'),
-              field,
-            };
+            return { ...col, id: col?.id || createId('col'), field };
           })
           .filter(Boolean);
-
         if (!normalizedCols.length) return null;
-
         const hasValidWidths = normalizedCols.every(
           (col) => typeof col.width === 'number' && Number.isFinite(col.width) && col.width > 0
         );
-
         return {
           ...row,
           id: row?.id || createId('row'),
@@ -226,6 +257,9 @@ function normalizeLoadedConfig(cfg) {
   const pagesInput = Array.isArray(config.pages) ? config.pages : [];
   const pages = pagesInput
     .map((page, idx) => ({
+      nextLabel: 'Continue',
+      prevLabel: 'Back',
+      showProgress: true,
       ...page,
       id: page?.id || createId('page'),
       name: page?.name || `Page ${idx + 1}`,
@@ -240,11 +274,25 @@ function normalizeLoadedConfig(cfg) {
   };
 }
 
-// ─── Reducer ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ History helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const MAX_HISTORY = 50;
+
+function pushHistory(state, snapshot) {
+  const history = state.history.slice(0, state.historyIndex + 1);
+  const newHistory = [...history, snapshot].slice(-MAX_HISTORY);
+  return { history: newHistory, historyIndex: newHistory.length - 1 };
+}
+
+function snapshotPages(state) {
+  return deepClone(state.pages);
+}
+
+// â”€â”€â”€ Reducer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function reducer(state, action) {
   switch (action.type) {
-    // ── Field additions ────────────────────────────────────────────────────
+    // â”€â”€ Field additions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'ADD_FIELD_TO_ROW': {
       const { pageIdx, rowId, field } = action.payload;
@@ -254,7 +302,13 @@ function reducer(state, action) {
         ...row,
         columns: recalculateColumnWidths([...row.columns, newCol]),
       }));
-      return { ...state, pages, selectedFieldId: newField.id, dirty: true };
+      return {
+        ...state,
+        pages,
+        selectedFieldId: newField.id,
+        dirty: true,
+        ...pushHistory(state, snapshotPages(state)),
+      };
     }
 
     case 'ADD_FIELD_BEFORE': {
@@ -267,7 +321,13 @@ function reducer(state, action) {
         cols.splice(idx >= 0 ? idx : cols.length, 0, newCol);
         return { ...row, columns: recalculateColumnWidths(cols) };
       });
-      return { ...state, pages, selectedFieldId: newField.id, dirty: true };
+      return {
+        ...state,
+        pages,
+        selectedFieldId: newField.id,
+        dirty: true,
+        ...pushHistory(state, snapshotPages(state)),
+      };
     }
 
     case 'ADD_FIELD_IN_NEW_ROW': {
@@ -284,10 +344,16 @@ function reducer(state, action) {
         rows.splice(afterIdx == null ? 0 : afterIdx >= 0 ? afterIdx + 1 : rows.length, 0, newRow);
         return { ...page, rows };
       });
-      return { ...state, pages, selectedFieldId: newField.id, dirty: true };
+      return {
+        ...state,
+        pages,
+        selectedFieldId: newField.id,
+        dirty: true,
+        ...pushHistory(state, snapshotPages(state)),
+      };
     }
 
-    // ── Field removal ──────────────────────────────────────────────────────
+    // â”€â”€ Field removal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'REMOVE_FIELD': {
       const { pageIdx, fieldId } = action.payload;
@@ -307,10 +373,11 @@ function reducer(state, action) {
         pages,
         selectedFieldId: state.selectedFieldId === fieldId ? null : state.selectedFieldId,
         dirty: true,
+        ...pushHistory(state, snapshotPages(state)),
       };
     }
 
-    // ── Field reorder / move ───────────────────────────────────────────────
+    // â”€â”€ Field reorder / move â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'REORDER_FIELDS_IN_ROW': {
       const { pageIdx, rowId, fromFieldId, toFieldId } = action.payload;
@@ -327,7 +394,6 @@ function reducer(state, action) {
       const { fromPageIdx, fromRowId, fieldId, toPageIdx, toRowId, beforeFieldId } = action.payload;
       let movedCol = null;
 
-      // Remove from source
       let pages = state.pages.map((page, pi) => {
         if (pi !== fromPageIdx) return page;
         const rows = page.rows
@@ -346,7 +412,6 @@ function reducer(state, action) {
 
       if (!movedCol) return state;
 
-      // Insert into target
       pages = pages.map((page, pi) => {
         if (pi !== toPageIdx) return page;
         const rows = page.rows.map((row) => {
@@ -403,7 +468,7 @@ function reducer(state, action) {
       return { ...state, pages, dirty: true };
     }
 
-    // ── Column resize ──────────────────────────────────────────────────────
+    // â”€â”€ Column resize â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'RESIZE_COLUMNS': {
       const { pageIdx, rowId, colAId, colBId, deltaUnits } = action.payload;
@@ -425,7 +490,7 @@ function reducer(state, action) {
       return { ...state, pages, dirty: true };
     }
 
-    // ── Field settings ─────────────────────────────────────────────────────
+    // â”€â”€ Field settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'UPDATE_FIELD': {
       const { fieldId, updates } = action.payload;
@@ -442,6 +507,8 @@ function reducer(state, action) {
               const newField = { ...col.field, ...updates };
               if (updates.settings)
                 newField.settings = { ...col.field.settings, ...updates.settings };
+              if (updates.salesforce)
+                newField.salesforce = { ...col.field.salesforce, ...updates.salesforce };
               return { ...col, field: newField };
             }),
           })),
@@ -450,7 +517,7 @@ function reducer(state, action) {
       return { ...state, pages, dirty: true };
     }
 
-    // ── UI selection ───────────────────────────────────────────────────────
+    // â”€â”€ UI selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'SELECT_FIELD':
       return { ...state, selectedFieldId: action.payload };
@@ -458,13 +525,16 @@ function reducer(state, action) {
     case 'SELECT_PAGE':
       return { ...state, selectedPageIdx: action.payload, selectedFieldId: null };
 
-    // ── Pages ──────────────────────────────────────────────────────────────
+    // â”€â”€ Pages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'ADD_PAGE': {
       const newPage = {
         id: createId('page'),
         name: `Page ${state.pages.length + 1}`,
         description: '',
+        nextLabel: 'Continue',
+        prevLabel: 'Back',
+        showProgress: true,
         rows: [],
       };
       return {
@@ -504,7 +574,7 @@ function reducer(state, action) {
       return { ...state, pages, dirty: true };
     }
 
-    // ── Global settings ────────────────────────────────────────────────────
+    // â”€â”€ Global settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'UPDATE_SETTINGS': {
       const { key, updates } = action.payload;
@@ -512,7 +582,35 @@ function reducer(state, action) {
       return { ...state, [key]: { ...state[key], ...updates }, dirty: true };
     }
 
-    // ── Persistence ────────────────────────────────────────────────────────
+    // â”€â”€ Undo / Redo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    case 'UNDO': {
+      if (state.historyIndex < 0) return state;
+      const newIndex = state.historyIndex - 1;
+      const pages = newIndex >= 0 ? deepClone(state.history[newIndex]) : makeDefaultConfig().pages;
+      return {
+        ...state,
+        pages,
+        selectedFieldId: null,
+        dirty: true,
+        historyIndex: newIndex,
+      };
+    }
+
+    case 'REDO': {
+      if (state.historyIndex >= state.history.length - 1) return state;
+      const newIndex = state.historyIndex + 1;
+      const pages = deepClone(state.history[newIndex]);
+      return {
+        ...state,
+        pages,
+        selectedFieldId: null,
+        dirty: true,
+        historyIndex: newIndex,
+      };
+    }
+
+    // â”€â”€ Persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     case 'LOAD_CONFIG': {
       const cfg = normalizeLoadedConfig(action.payload);
@@ -524,6 +622,8 @@ function reducer(state, action) {
         selectedPageIdx: 0,
         selectedFieldId: null,
         dirty: false,
+        history: [],
+        historyIndex: -1,
       };
     }
 
@@ -538,7 +638,7 @@ function reducer(state, action) {
   }
 }
 
-// ─── Hook ─────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function useEditorState() {
   const [state, dispatch] = useReducer(reducer, null, createInitialState);
@@ -567,7 +667,10 @@ export function useEditorState() {
     return state.selectedPageIdx;
   }, [state.selectedFieldId, state.pages, state.selectedPageIdx]);
 
-  return { state, dispatch, selectedField, selectedPageIdx };
+  const canUndo = state.historyIndex >= 0;
+  const canRedo = state.historyIndex < state.history.length - 1;
+
+  return { state, dispatch, selectedField, selectedPageIdx, canUndo, canRedo };
 }
 
 export const __internals = {

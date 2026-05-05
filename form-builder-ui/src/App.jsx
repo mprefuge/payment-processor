@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+﻿import React, { useState, useCallback, useEffect } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -7,7 +7,7 @@ import {
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
-import { SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable';
+import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 
 import { useEditorState } from './useEditorState';
 import { createDefaultField, getFieldMeta } from './fieldTypes';
@@ -18,10 +18,27 @@ import Inspector from './components/Inspector';
 import './main.css';
 
 export default function App() {
-  const { state, dispatch } = useEditorState();
+  const { state, dispatch, canUndo, canRedo } = useEditorState();
   const [activeDrag, setActiveDrag] = useState(null);
+  const [devicePreview, setDevicePreview] = useState('desktop'); // desktop | tablet | mobile
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  // Keyboard shortcuts: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
+  useEffect(() => {
+    function onKey(e) {
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (ctrl && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        dispatch({ type: 'UNDO' });
+      } else if (ctrl && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        dispatch({ type: 'REDO' });
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dispatch]);
 
   const handleDragStart = useCallback(({ active }) => {
     setActiveDrag(active.data.current);
@@ -37,11 +54,9 @@ export default function App() {
       if (!aData || !oData) return;
 
       if (aData.source === 'palette') {
-        // ── Dropped from the sidebar palette ───────────────────────────────────
         const field = createDefaultField(aData.fieldType);
 
         if (oData.type === 'field') {
-          // Drop onto an existing field → insert before it in its row
           dispatch({
             type: 'ADD_FIELD_BEFORE',
             payload: {
@@ -52,25 +67,21 @@ export default function App() {
             },
           });
         } else if (oData.type === 'row') {
-          // Drop onto row background → append to that row
           dispatch({
             type: 'ADD_FIELD_TO_ROW',
             payload: { pageIdx: oData.pageIdx, rowId: oData.rowId, field },
           });
         } else if (oData.type === 'row-gap') {
-          // Drop between rows or on empty page → new row
           dispatch({
             type: 'ADD_FIELD_IN_NEW_ROW',
             payload: { pageIdx: oData.pageIdx, afterRowId: oData.afterRowId, field },
           });
         }
       } else if (aData.source === 'field') {
-        // ── Moving an existing canvas field ────────────────────────────────────
         const { fieldId, rowId: fromRowId, pageIdx: fromPageIdx } = aData;
 
         if (oData.type === 'field' && oData.fieldId !== fieldId) {
           if (oData.rowId === fromRowId && oData.pageIdx === fromPageIdx) {
-            // Same row reorder
             dispatch({
               type: 'REORDER_FIELDS_IN_ROW',
               payload: {
@@ -81,7 +92,6 @@ export default function App() {
               },
             });
           } else {
-            // Cross-row move, insert before target field
             dispatch({
               type: 'MOVE_FIELD_TO_ROW',
               payload: {
@@ -98,7 +108,6 @@ export default function App() {
           oData.type === 'row' &&
           (oData.rowId !== fromRowId || oData.pageIdx !== fromPageIdx)
         ) {
-          // Move to different row (append to end)
           dispatch({
             type: 'MOVE_FIELD_TO_ROW',
             payload: {
@@ -111,7 +120,6 @@ export default function App() {
             },
           });
         } else if (oData.type === 'row-gap') {
-          // Move field to a new standalone row
           dispatch({
             type: 'MOVE_FIELD_TO_NEW_ROW',
             payload: {
@@ -158,7 +166,14 @@ export default function App() {
       onDragEnd={handleDragEnd}
     >
       <div className="vb-app">
-        <Topbar state={state} dispatch={dispatch} />
+        <Topbar
+          state={state}
+          dispatch={dispatch}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          devicePreview={devicePreview}
+          setDevicePreview={setDevicePreview}
+        />
         <div className="vb-body">
           <Sidebar isDragging={!!activeDrag} />
           <Canvas
@@ -167,6 +182,7 @@ export default function App() {
             page={selectedPage}
             pageIdx={state.selectedPageIdx}
             accent={accent}
+            devicePreview={devicePreview}
           />
           <Inspector state={state} dispatch={dispatch} />
         </div>
@@ -181,7 +197,7 @@ export default function App() {
         )}
         {activeDrag?.source === 'field' && (
           <div className="vb-drag-overlay field">
-            <span>{getFieldMeta(activeDrag.fieldType)?.icon || '▦'}</span>
+            <span>{getFieldMeta(activeDrag.fieldType)?.icon || 'â–¦'}</span>
             <span>{activeDrag.label}</span>
           </div>
         )}
