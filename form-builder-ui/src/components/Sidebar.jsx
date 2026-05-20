@@ -102,7 +102,7 @@ export default function Sidebar() {
       </div>
 
       <div className="vb-sidebar-hint">
-        Drag blocks onto the canvas or click to select a field.
+        Drag any block from the palette above onto the canvas to add it to your form.
       </div>
     </aside>
   );

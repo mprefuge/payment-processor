@@ -10,7 +10,7 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
 
   const fakeSelect = (opts, ph) => (
     <select className="fp-input" readOnly tabIndex={-1} defaultValue="">
-      <option value="" disabled>{ph || label || 'Selectâ€¦'}</option>
+      <option value="" disabled>{ph || label || 'Select…'}</option>
       {(opts || []).map((o) => (
         <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>
       ))}
@@ -41,7 +41,7 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
     case 'paragraph':
       return (
         <p className="fp-paragraph" style={{ textAlign: settings.align || 'left' }}>
-          {settings.text || 'Paragraph textâ€¦'}
+          {settings.text || 'Paragraph text…'}
         </p>
       );
 
@@ -50,7 +50,7 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
         <img src={settings.src} alt={settings.alt || ''} className="fp-image" style={{ width: settings.width || '100%' }} />
       ) : (
         <div className="fp-image-placeholder">
-          <span>ðŸ–¼</span>
+          <span>🖼</span>
           <span>Image</span>
         </div>
       );
@@ -106,8 +106,8 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
     case 'hidden':
       return (
         <div className="fp-hidden-badge">
-          <span>â—Œ</span>
-          <span>Hidden field: {settings.value || 'â€¦'}</span>
+          <span>◌</span>
+          <span>Hidden field: {settings.value || '…'}</span>
         </div>
       );
 
@@ -151,7 +151,7 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
     }
 
     case 'dropdown':
-      return fakeSelect(settings.options || [], settings.placeholder || 'Chooseâ€¦');
+      return fakeSelect(settings.options || [], settings.placeholder || 'Choose…');
 
     case 'toggle':
       return (
@@ -215,7 +215,7 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
       return (
         <div className="fp-stack">
           <input className="fp-input" placeholder="Street address" readOnly tabIndex={-1} />
-          {settings.showAddress2 && <input className="fp-input" placeholder="Apt, suite, unitâ€¦" readOnly tabIndex={-1} />}
+          {settings.showAddress2 && <input className="fp-input" placeholder="Apt, suite, unit…" readOnly tabIndex={-1} />}
           <div className="fp-row">
             <input className="fp-input" placeholder="City" readOnly tabIndex={-1} />
             {settings.showState !== false && <input className="fp-input fp-input-sm" placeholder="State" readOnly tabIndex={-1} />}
@@ -235,9 +235,9 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
     case 'file_upload':
       return (
         <div className="fp-file-upload">
-          <span className="fp-file-icon">ðŸ“Ž</span>
+          <span className="fp-file-icon">📎</span>
           <span>Click to upload or drag &amp; drop</span>
-          <span className="fp-file-hint">{settings.accept || 'Any file'} â€” max {settings.maxSizeMb || 10} MB</span>
+          <span className="fp-file-hint">{settings.accept || 'Any file'} – max {settings.maxSizeMb || 10} MB</span>
         </div>
       );
 
@@ -318,7 +318,7 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
 
     case 'payment_method': {
       const opts = settings.options || ['card', 'ach'];
-      const labels = { card: 'ðŸ’³ Card', ach: 'ðŸ¦ ACH', apple_pay: ' Apple Pay', google_pay: 'â¬› Google Pay' };
+      const labels = { card: '💳 Card', ach: '🏦 ACH', apple_pay: ' Apple Pay', google_pay: '⬛ Google Pay' };
       return <div className="fp-pills">{opts.map((o, i) => pill(labels[o] || o, i === 0))}</div>;
     }
 

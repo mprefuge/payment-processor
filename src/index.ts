@@ -33,6 +33,8 @@ const donationFormConfigList = loadHandler('./handlers/donationFormConfigList');
 const donationFormConfigGet = loadHandler('./handlers/donationFormConfigGet');
 const donationFormConfigDelete = loadHandler('./handlers/donationFormConfigDelete');
 const donationFormEmbed = loadHandler('./handlers/donationFormEmbed');
+const donationFormSfObjects = loadHandler('./handlers/donationFormSfObjects');
+const donationFormSfFields = loadHandler('./handlers/donationFormSfFields');
 
 // configure the Azure Functions runtime and add OpenAPI/Swagger support
 app.setup({ enableHttpStream: true });
@@ -976,6 +978,52 @@ registerFunction('donationFormEmbed', 'Return the embed runtime for a published 
           schema: z.string(),
         },
       },
+    },
+  },
+});
+
+registerFunction('donationFormSfObjects', 'List available Salesforce objects for field mapping', {
+  handler: donationFormSfObjects,
+  description:
+    'Returns the list of Salesforce objects available for form field mapping in the donation form builder.',
+  tags: ['Builder'],
+  operationId: 'donationFormSfObjects',
+  methods: ['GET'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/sf/objects',
+  responses: {
+    200: {
+      description: 'Object list',
+      content: { 'application/json': { schema: GenericSuccessResponseSchema } },
+    },
+    503: {
+      description: 'Salesforce not configured',
+      content: { 'application/json': { schema: GenericErrorResponseSchema } },
+    },
+  },
+});
+
+registerFunction('donationFormSfFields', 'List Salesforce fields for a given object', {
+  handler: donationFormSfFields,
+  description:
+    'Describes the writable fields of a Salesforce object, filtered for use in the form-builder field-mapping panel.',
+  tags: ['Builder'],
+  operationId: 'donationFormSfFields',
+  methods: ['GET'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/sf/fields/{objectName}',
+  responses: {
+    200: {
+      description: 'Field list',
+      content: { 'application/json': { schema: GenericSuccessResponseSchema } },
+    },
+    404: {
+      description: 'Object not found',
+      content: { 'application/json': { schema: GenericErrorResponseSchema } },
+    },
+    503: {
+      description: 'Salesforce not configured',
+      content: { 'application/json': { schema: GenericErrorResponseSchema } },
     },
   },
 });

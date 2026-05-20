@@ -379,6 +379,36 @@ function reducer(state, action) {
 
     // â”€â”€ Field reorder / move â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    case 'DUPLICATE_FIELD': {
+      const { pageIdx, rowId, colId } = action.payload;
+      let dupFieldId = null;
+      const pages = state.pages.map((page, pi) => {
+        if (pi !== pageIdx) return page;
+        const srcRowIdx = page.rows.findIndex((r) => r.id === rowId);
+        if (srcRowIdx < 0) return page;
+        const srcRow = page.rows[srcRowIdx];
+        const srcCol = srcRow.columns.find((c) => c.id === colId);
+        if (!srcCol?.field) return page;
+        dupFieldId = createId('field');
+        const dupField = { ...deepClone(srcCol.field), id: dupFieldId };
+        const newRow = {
+          id: createId('row'),
+          columns: [{ id: createId('col'), width: 12, field: dupField }],
+        };
+        const rows = [...page.rows];
+        rows.splice(srcRowIdx + 1, 0, newRow);
+        return { ...page, rows };
+      });
+      if (!dupFieldId) return state;
+      return {
+        ...state,
+        pages,
+        selectedFieldId: dupFieldId,
+        dirty: true,
+        ...pushHistory(state, snapshotPages(state)),
+      };
+    }
+
     case 'REORDER_FIELDS_IN_ROW': {
       const { pageIdx, rowId, fromFieldId, toFieldId } = action.payload;
       const pages = mapPages(state.pages, pageIdx, rowId, (row) => {

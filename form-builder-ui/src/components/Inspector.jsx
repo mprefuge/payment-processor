@@ -1,5 +1,6 @@
-﻿import React, { useState } from 'react';
-import { getFieldMeta, SF_SUGGESTIONS } from '../fieldTypes';
+﻿import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { getFieldMeta, SF_SUGGESTIONS, getSfCompatibleTypes } from '../fieldTypes';
 import FieldPreview from './FieldPreview';
 
 // ─── Generic form helpers ─────────────────────────────────────────────────────
@@ -585,51 +586,331 @@ function LogicInspector({ field, state, dispatch }) {
 
 // ─── Salesforce Tab ───────────────────────────────────────────────────────────
 
+const SF_OBJECTS_ENDPOINT = '/api/form-builder/sf/objects';
+const SF_FIELDS_ENDPOINT = '/api/form-builder/sf/fields';
+
+// State machine statuses used in SalesforceInspector
+const SF_STATUS = { IDLE: 'idle', LOADING: 'loading', READY: 'ready', ERROR: 'error' };
+
+// Human-readable labels for Salesforce field types
+const SF_TYPE_LABELS = {
+  string: 'Text', textarea: 'Long Text', email: 'Email', phone: 'Phone',
+  url: 'URL', picklist: 'Picklist', multipicklist: 'Multi-Picklist', combobox: 'Combobox',
+  boolean: 'Checkbox', double: 'Number', integer: 'Integer', long: 'Long Integer',
+  currency: 'Currency', percent: 'Percent', date: 'Date', datetime: 'Date/Time',
+  time: 'Time', id: 'ID', reference: 'Lookup', base64: 'File',
+};
+
 function SalesforceInspector({ field, state, dispatch }) {
   const sf = field.salesforce || {};
+  const compatibleTypes = getSfCompatibleTypes(field.type);
   const suggestions = SF_SUGGESTIONS[field.type] || [];
+  const isMappable = compatibleTypes !== null;
+
+  // Objects list
+  const [objStatus, setObjStatus] = useState(SF_STATUS.IDLE);
+  const [objects, setObjects] = useState([]);
+  const [objError, setObjError] = useState('');
+  const [objSearch, setObjSearch] = useState('');
+
+  // Fields list for selected object
+  const [fldStatus, setFldStatus] = useState(SF_STATUS.IDLE);
+  const [fields, setFields] = useState([]);
+  const [fldError, setFldError] = useState('');
+  const [fldSearch, setFldSearch] = useState('');
+
+  // Whether Salesforce is configured (null=unknown, true/false once fetched)
+  const [sfConfigured, setSfConfigured] = useState(null);
+
+  // Track which object we've fetched fields for (so we refetch on object change)
+  const [loadedFieldsFor, setLoadedFieldsFor] = useState('');
+
   function updateSf(updates) {
     dispatch({ type: 'UPDATE_FIELD', payload: { fieldId: field.id, updates: { salesforce: { ...sf, ...updates } } } });
   }
+
+  function clearMapping() {
+    updateSf({ object: '', field: '' });
+    setFields([]);
+    setFldStatus(SF_STATUS.IDLE);
+    setLoadedFieldsFor('');
+    setFldSearch('');
+  }
+
+  // Fetch Salesforce objects
+  async function fetchObjects() {
+    setObjStatus(SF_STATUS.LOADING);
+    setObjError('');
+    try {
+      const r = await fetch(SF_OBJECTS_ENDPOINT);
+      const data = await r.json();
+      if (!r.ok) {
+        if (r.status === 503) {
+          setSfConfigured(false);
+          setObjStatus(SF_STATUS.ERROR);
+          setObjError(data.error || 'Salesforce not configured.');
+          return;
+        }
+        throw new Error(data.error || `HTTP ${r.status}`);
+      }
+      setSfConfigured(true);
+      setObjects(data.objects || []);
+      setObjStatus(SF_STATUS.READY);
+    } catch (err) {
+      setObjStatus(SF_STATUS.ERROR);
+      setObjError(err.message || 'Failed to load objects.');
+    }
+  }
+
+  // Fetch fields for the selected Salesforce object
+  async function fetchFields(objectName) {
+    if (!objectName) return;
+    setFldStatus(SF_STATUS.LOADING);
+    setFldError('');
+    setFields([]);
+    setFldSearch('');
+    try {
+      const r = await fetch(`${SF_FIELDS_ENDPOINT}/${encodeURIComponent(objectName)}`);
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      setFields(data.fields || []);
+      setLoadedFieldsFor(objectName);
+      setFldStatus(SF_STATUS.READY);
+    } catch (err) {
+      setFldStatus(SF_STATUS.ERROR);
+      setFldError(err.message || 'Failed to load fields.');
+    }
+  }
+
+  // When the user picks an object from the dropdown, fetch its fields
+  function handleObjectChange(objName) {
+    updateSf({ object: objName, field: '' });
+    setFldSearch('');
+    if (objName && objName !== loadedFieldsFor) {
+      fetchFields(objName);
+    } else if (!objName) {
+      setFields([]);
+      setFldStatus(SF_STATUS.IDLE);
+      setLoadedFieldsFor('');
+    }
+  }
+
+  // If the field already has a saved object set and fields haven't been loaded yet, auto-load
+  useEffect(() => {
+    if (sf.object && sf.object !== loadedFieldsFor && fldStatus === SF_STATUS.IDLE) {
+      fetchFields(sf.object);
+    }
+  }, [sf.object]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Filtered views
+  const filteredObjects = objSearch
+    ? objects.filter((o) => o.label.toLowerCase().includes(objSearch.toLowerCase()) || o.name.toLowerCase().includes(objSearch.toLowerCase()))
+    : objects;
+
+  const filteredFields = (() => {
+    let list = fields;
+    if (compatibleTypes) list = list.filter((f) => compatibleTypes.includes(f.type));
+    if (fldSearch) {
+      const q = fldSearch.toLowerCase();
+      list = list.filter((f) => f.label.toLowerCase().includes(q) || f.name.toLowerCase().includes(q));
+    }
+    return list;
+  })();
+
+  const selectedObjectLabel = objects.find((o) => o.name === sf.object)?.label || sf.object || '';
+  const selectedFieldLabel = fields.find((f) => f.name === sf.field)?.label || sf.field || '';
+
+  if (!isMappable) {
+    return (
+      <div className="insp-section">
+        <SectionTitle>Salesforce Mapping</SectionTitle>
+        <div className="insp-sf-not-mappable">
+          <span className="insp-sf-nm-icon">☁</span>
+          <p>Content-only fields (headings, dividers, etc.) don't collect data and can't be mapped to Salesforce.</p>
+        </div>
+        <Separator />
+        <SfFormLevelConfig state={state} dispatch={dispatch} />
+      </div>
+    );
+  }
+
   return (
     <div className="insp-section">
-      <SectionTitle>Field Mapping</SectionTitle>
-      <p className="insp-hint-text">Map this field to a Salesforce object and field API name.</p>
-      <Field label="Object">
-        <Select value={sf.object || ''} onChange={(v) => updateSf({ object: v })}>
-          <option value="">— none —</option>
-          <option value="Contact">Contact</option>
-          <option value="Lead">Lead</option>
-          <option value="Account">Account</option>
-          <option value="Opportunity">Opportunity</option>
-          <option value="Transaction__c">Transaction__c</option>
-          <option value="Campaign">Campaign</option>
-        </Select>
-      </Field>
-      <Field label="Field API Name">
-        <input className="insp-input" value={sf.field || ''} onChange={(e) => updateSf({ field: e.target.value })} placeholder="e.g. FirstName, Amount__c" list={`sf-sugg-${field.id}`} />
-        {suggestions.length > 0 && (
-          <datalist id={`sf-sugg-${field.id}`}>
-            {suggestions.map((s) => <option key={s.field} value={s.field} label={s.label} />)}
-          </datalist>
+      <SectionTitle>Salesforce Mapping</SectionTitle>
+
+      {/* Current mapping summary (if set) */}
+      {sf.object && sf.field ? (
+        <div className="insp-sf-mapping-badge">
+          <div className="insp-sf-badge-inner">
+            <span className="insp-sf-badge-obj">{selectedObjectLabel || sf.object}</span>
+            <span className="insp-sf-badge-arrow">→</span>
+            <span className="insp-sf-badge-fld">{selectedFieldLabel || sf.field}</span>
+          </div>
+          <button className="insp-sf-clear-btn" onClick={clearMapping} title="Remove mapping">✕</button>
+        </div>
+      ) : (
+        <p className="insp-hint-text">Connect to Salesforce and pick the object + field this input maps to.</p>
+      )}
+
+      {/* Step 1: Pick Object */}
+      <div className="insp-sf-step">
+        <div className="insp-sf-step-header">
+          <span className="insp-sf-step-num">1</span>
+          <span className="insp-sf-step-label">Salesforce Object</span>
+          {objStatus === SF_STATUS.IDLE && (
+            <button className="insp-sf-connect-btn" onClick={fetchObjects}>Connect ↗</button>
+          )}
+          {objStatus === SF_STATUS.LOADING && <span className="insp-sf-spinner" />}
+          {objStatus === SF_STATUS.ERROR && (
+            <button className="insp-sf-retry-btn" onClick={fetchObjects}>Retry</button>
+          )}
+        </div>
+
+        {objStatus === SF_STATUS.ERROR && (
+          <div className="insp-sf-error-msg">
+            {sfConfigured === false
+              ? <>SF credentials not configured on this server. Set <code>SF_CLIENT_ID</code> / <code>SF_CLIENT_SECRET</code> in environment settings.</>
+              : objError}
+          </div>
         )}
-      </Field>
-      {suggestions.length > 0 && (
-        <div className="insp-sf-suggestions">
-          <div className="insp-sf-sugg-label">Suggested:</div>
-          {suggestions.map((s) => (
-            <button key={s.field} className="insp-sf-sugg-btn" onClick={() => updateSf({ object: s.object, field: s.field })}>
-              <span className="insp-sf-obj">{s.object}</span>
-              <span className="insp-sf-field">{s.field}</span>
-              <span className="insp-sf-label">{s.label}</span>
-            </button>
-          ))}
+
+        {objStatus === SF_STATUS.READY && (
+          <>
+            <input
+              className="insp-input insp-sf-search"
+              placeholder="Search objects…"
+              value={objSearch}
+              onChange={(e) => setObjSearch(e.target.value)}
+            />
+            <select
+              className="insp-input insp-sf-select"
+              value={sf.object || ''}
+              size={Math.min(filteredObjects.length + 1, 7)}
+              onChange={(e) => handleObjectChange(e.target.value)}
+            >
+              <option value="">— none —</option>
+              {filteredObjects.map((o) => (
+                <option key={o.name} value={o.name}>{o.label} ({o.name})</option>
+              ))}
+            </select>
+          </>
+        )}
+
+        {/* Static fallback when SF not connected */}
+        {objStatus === SF_STATUS.IDLE && (
+          <select
+            className="insp-input"
+            value={sf.object || ''}
+            onChange={(e) => handleObjectChange(e.target.value)}
+          >
+            <option value="">— connect to browse, or type below —</option>
+            <option value="Contact">Contact</option>
+            <option value="Lead">Lead</option>
+            <option value="Account">Account</option>
+            <option value="Opportunity">Opportunity</option>
+            <option value="Transaction__c">Transaction__c</option>
+            <option value="Campaign">Campaign</option>
+          </select>
+        )}
+      </div>
+
+      {/* Step 2: Pick Field */}
+      {sf.object && (
+        <div className="insp-sf-step">
+          <div className="insp-sf-step-header">
+            <span className="insp-sf-step-num">2</span>
+            <span className="insp-sf-step-label">Field on <strong>{selectedObjectLabel || sf.object}</strong></span>
+            {fldStatus === SF_STATUS.LOADING && <span className="insp-sf-spinner" />}
+            {fldStatus === SF_STATUS.ERROR && (
+              <button className="insp-sf-retry-btn" onClick={() => fetchFields(sf.object)}>Retry</button>
+            )}
+          </div>
+
+          {fldStatus === SF_STATUS.ERROR && (
+            <div className="insp-sf-error-msg">{fldError}</div>
+          )}
+
+          {fldStatus === SF_STATUS.READY && (
+            <>
+              <input
+                className="insp-input insp-sf-search"
+                placeholder="Search fields…"
+                value={fldSearch}
+                onChange={(e) => setFldSearch(e.target.value)}
+              />
+              {filteredFields.length === 0 ? (
+                <div className="insp-sf-empty">
+                  {fldSearch
+                    ? 'No matching fields.'
+                    : `No compatible fields found on ${sf.object} for this input type.`}
+                </div>
+              ) : (
+                <div className="insp-sf-field-list">
+                  {filteredFields.map((f) => (
+                    <button
+                      key={f.name}
+                      className={`insp-sf-field-row${sf.field === f.name ? ' is-selected' : ''}${f.required ? ' is-required' : ''}`}
+                      onClick={() => updateSf({ field: f.name })}
+                      title={`${f.label} (${f.name}) — ${SF_TYPE_LABELS[f.type] || f.type}${f.required ? ' · required' : ''}`}
+                    >
+                      <span className="insp-sf-fl-label">{f.label}</span>
+                      <span className="insp-sf-fl-name">{f.name}</span>
+                      <span className="insp-sf-fl-type">{SF_TYPE_LABELS[f.type] || f.type}</span>
+                      {f.required && <span className="insp-sf-fl-req">*</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <p className="insp-sf-compat-note">
+                Showing fields compatible with <em>{field.type}</em> input type.{' '}
+                {fields.length !== filteredFields.length && `(${fields.length - filteredFields.length} hidden by type filter)`}
+              </p>
+            </>
+          )}
+
+          {(fldStatus === SF_STATUS.IDLE || fldStatus === SF_STATUS.LOADING) && fldStatus !== SF_STATUS.LOADING && (
+            <input
+              className="insp-input"
+              value={sf.field || ''}
+              onChange={(e) => updateSf({ field: e.target.value })}
+              placeholder="e.g. FirstName, Amount__c"
+            />
+          )}
+
+          {/* Suggestions when no SF connection */}
+          {fldStatus === SF_STATUS.IDLE && suggestions.filter((s) => s.object === sf.object).length > 0 && (
+            <div className="insp-sf-suggestions">
+              <div className="insp-sf-sugg-label">Suggestions:</div>
+              {suggestions
+                .filter((s) => s.object === sf.object)
+                .map((s) => (
+                  <button key={s.field} className="insp-sf-sugg-btn" onClick={() => updateSf({ field: s.field })}>
+                    <span className="insp-sf-field">{s.field}</span>
+                    <span className="insp-sf-label">{s.label}</span>
+                  </button>
+                ))}
+            </div>
+          )}
         </div>
       )}
-      <Field label="Transform" hint="Optional value override or formula">
-        <TextInput value={sf.transform} onChange={(v) => updateSf({ transform: v })} placeholder="e.g. fixed:Donation" />
-      </Field>
+
+      {/* Transform (advanced) */}
+      <details className="insp-sf-advanced">
+        <summary>Advanced</summary>
+        <Field label="Value Transform" hint='Optional: "fixed:value" to hardcode, or leave blank to pass through'>
+          <TextInput value={sf.transform} onChange={(v) => updateSf({ transform: v })} placeholder="e.g. fixed:Donation" />
+        </Field>
+      </details>
+
       <Separator />
+      <SfFormLevelConfig state={state} dispatch={dispatch} />
+    </div>
+  );
+}
+
+function SfFormLevelConfig({ state, dispatch }) {
+  return (
+    <>
       <SectionTitle>Form-Level Salesforce Config</SectionTitle>
       {[
         { key: 'primaryObject', label: 'Primary Object', placeholder: 'Contact' },
@@ -638,7 +919,11 @@ function SalesforceInspector({ field, state, dispatch }) {
         { key: 'recordType', label: 'Record Type', placeholder: 'Individual' },
       ].map(({ key, label, placeholder }) => (
         <Field key={key} label={label}>
-          <TextInput value={state.salesforce?.[key]} onChange={(v) => dispatch({ type: 'UPDATE_SETTINGS', payload: { key: 'salesforce', updates: { [key]: v } } })} placeholder={placeholder} />
+          <TextInput
+            value={state.salesforce?.[key]}
+            onChange={(v) => dispatch({ type: 'UPDATE_SETTINGS', payload: { key: 'salesforce', updates: { [key]: v } } })}
+            placeholder={placeholder}
+          />
         </Field>
       ))}
       <Toggle
@@ -646,7 +931,7 @@ function SalesforceInspector({ field, state, dispatch }) {
         checked={state.salesforce?.createAccount}
         onChange={(v) => dispatch({ type: 'UPDATE_SETTINGS', payload: { key: 'salesforce', updates: { createAccount: v } } })}
       />
-    </div>
+    </>
   );
 }
 
@@ -729,23 +1014,8 @@ function FormSettings({ state, dispatch }) {
 
 // ─── Site Preview tab ────────────────────────────────────────────────────────
 
-function SitePreview({ state, page, previewMode, setPreviewMode }) {
-  const accent = state.branding?.accentColor || '#bd2135';
-  const title = state.branding?.title || 'Support Our Mission';
-  const subtitle = state.branding?.subtitle || 'Your gift makes a difference.';
-  const logoUrl = state.branding?.logoUrl || '';
-
-  const runtimeHeader = (
-    <div className="insp-runtime-header">
-      {logoUrl ? <img src={logoUrl} alt="logo" /> : <div className="insp-runtime-logo-fallback" />}
-      <div>
-        <div className="insp-runtime-title">{title}</div>
-        <div className="insp-runtime-subtitle">{subtitle}</div>
-      </div>
-    </div>
-  );
-
-  const renderPage = (
+function FormContent({ page, accent }) {
+  return (
     <div className="insp-runtime-body">
       {page?.rows?.length ? (
         page.rows.map((row) => (
@@ -762,7 +1032,7 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
                       <FieldPreview field={col.field} accent={accent} />
                     </>
                   ) : (
-                    <div className="insp-runtime-empty">Empty</div>
+                    <div className="insp-runtime-empty">Empty slot</div>
                   )}
                 </div>
               );
@@ -774,34 +1044,121 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
       )}
     </div>
   );
+}
+
+function FormCard({ title, subtitle, logoUrl, accent, page, onClose }) {
+  return (
+    <div className="insp-modal-card">
+      {onClose && (
+        <button className="insp-modal-close" type="button" onClick={onClose} title="Close">✕</button>
+      )}
+      <div className="insp-runtime-header">
+        {logoUrl ? <img src={logoUrl} alt="logo" /> : <div className="insp-runtime-logo-fallback" />}
+        <div>
+          <div className="insp-runtime-title">{title}</div>
+          <div className="insp-runtime-subtitle">{subtitle}</div>
+        </div>
+      </div>
+      <FormContent page={page} accent={accent} />
+    </div>
+  );
+}
+
+function SitePreview({ state, page, previewMode, setPreviewMode }) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const accent = state.branding?.accentColor || '#bd2135';
+  const title = state.branding?.title || 'Support Our Mission';
+  const subtitle = state.branding?.subtitle || 'Your gift makes a difference.';
+  const logoUrl = state.branding?.logoUrl || '';
+
+  // Close modal when switching modes or when component unmounts
+  useEffect(() => { setModalOpen(false); }, [previewMode]);
+  useEffect(() => () => setModalOpen(false), []);
+
+  // Lock body scroll when modal portal is open
+  useEffect(() => {
+    if (modalOpen) document.body.style.overflow = 'hidden';
+    else document.body.style.overflow = '';
+    return () => { document.body.style.overflow = ''; };
+  }, [modalOpen]);
+
+  const modalPortal = modalOpen && createPortal(
+    <div
+      className="insp-portal-overlay"
+      onClick={(e) => { if (e.target === e.currentTarget) setModalOpen(false); }}
+    >
+      <div className="insp-portal-modal">
+        <FormCard
+          title={title}
+          subtitle={subtitle}
+          logoUrl={logoUrl}
+          accent={accent}
+          page={page}
+          onClose={() => setModalOpen(false)}
+        />
+      </div>
+    </div>,
+    document.body
+  );
 
   return (
     <div className="insp-section">
       <SectionTitle>Site Preview</SectionTitle>
+
+      {/* Mode toggle */}
       <div className="insp-preview-toolbar">
-        <button className={`insp-preview-mode${previewMode === 'embedded' ? ' is-active' : ''}`} onClick={() => setPreviewMode('embedded')}>Embedded</button>
-        <button className={`insp-preview-mode${previewMode === 'modal' ? ' is-active' : ''}`} onClick={() => setPreviewMode('modal')}>Modal</button>
+        <button
+          className={`insp-preview-mode${previewMode === 'embedded' ? ' is-active' : ''}`}
+          onClick={() => setPreviewMode('embedded')}
+        >Embedded</button>
+        <button
+          className={`insp-preview-mode${previewMode === 'modal' ? ' is-active' : ''}`}
+          onClick={() => setPreviewMode('modal')}
+        >Modal Pop-up</button>
       </div>
+
+      {/* Same fake-site chrome for both modes */}
       <div className="insp-site-preview">
         <div className="insp-site-chrome">
           <div className="insp-site-brand">Sample Site</div>
-          <button className="insp-site-donate" type="button" style={{ background: accent }}>Donate</button>
+          <button
+            className="insp-site-donate"
+            type="button"
+            style={{ background: accent }}
+            onClick={() => previewMode === 'modal' && setModalOpen(true)}
+            title={previewMode === 'modal' ? 'Click to open modal preview' : undefined}
+          >Donate</button>
         </div>
         <div className="insp-site-content">
           <h4 style={{ color: accent }}>Support our mission</h4>
           <p>Preview your form in context before publishing.</p>
         </div>
-        {previewMode === 'embedded' ? (
-          <div className="insp-runtime-panel">{runtimeHeader}{renderPage}</div>
-        ) : (
-          <div className="insp-modal-preview-shell">
-            <button className="insp-modal-launch" type="button" style={{ background: accent }}>Open Donation Form</button>
-            <div className="insp-modal-overlay">
-              <div className="insp-modal-card">{runtimeHeader}{renderPage}</div>
-            </div>
+
+        {/* Embedded: form card appears inline below the page content */}
+        {previewMode === 'embedded' && (
+          <div className="insp-embedded-panel">
+            <FormCard
+              title={title}
+              subtitle={subtitle}
+              logoUrl={logoUrl}
+              accent={accent}
+              page={page}
+            />
+          </div>
+        )}
+
+        {/* Modal: hint shown until Donate is clicked */}
+        {previewMode === 'modal' && (
+          <div className="insp-modal-cta">
+            <p className="insp-modal-cta-text">
+              Click <strong>Donate</strong> above to open the modal preview at full size.
+            </p>
           </div>
         )}
       </div>
+
+      {/* Full-viewport modal rendered via portal */}
+      {modalPortal}
     </div>
   );
 }

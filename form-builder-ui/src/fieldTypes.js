@@ -142,6 +142,63 @@ export const SF_SUGGESTIONS = {
   ],
 };
 
+/**
+ * Returns which Salesforce field types are compatible with a given form field type.
+ * Used to filter the field list when the user picks a Salesforce object.
+ */
+export function getSfCompatibleTypes(fieldType) {
+  switch (fieldType) {
+    case 'text':
+    case 'hidden':
+    case 'section_header':
+      return ['string', 'textarea', 'url', 'id', 'reference', 'picklist', 'combobox'];
+    case 'textarea':
+      return ['string', 'textarea'];
+    case 'email':
+      return ['email', 'string'];
+    case 'phone':
+      return ['phone', 'string'];
+    case 'url':
+      return ['url', 'string'];
+    case 'number':
+    case 'amount':
+    case 'amount_pills':
+    case 'range_slider':
+      return ['double', 'integer', 'long', 'currency', 'percent'];
+    case 'date':
+    case 'date_of_birth':
+      return ['date', 'datetime'];
+    case 'time':
+      return ['time', 'datetime', 'string'];
+    case 'checkbox':
+    case 'toggle':
+    case 'terms_acceptance':
+      return ['boolean'];
+    case 'dropdown':
+    case 'radio':
+    case 'donation_frequency':
+      return ['picklist', 'string', 'combobox'];
+    case 'checkbox_group':
+    case 'likert':
+      return ['multipicklist', 'string'];
+    case 'full_name':
+    case 'organization':
+      return ['string', 'textarea'];
+    case 'billing_address':
+      return ['string', 'textarea'];
+    case 'country':
+    case 'zip_code':
+      return ['string', 'picklist', 'combobox'];
+    case 'category':
+      return ['picklist', 'string', 'id', 'reference'];
+    case 'file_upload':
+      return ['base64', 'string'];
+    default:
+      // Content-only fields (heading, paragraph, divider, spacer, html_embed, image)
+      return null; // null = not mappable
+  }
+}
+
 export function createDefaultField(type) {
   const meta = getFieldMeta(type);
   const base = {

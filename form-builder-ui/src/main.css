@@ -980,6 +980,7 @@ textarea {
   border-radius: 12px;
   background: #f5f2ef;
   overflow: hidden;
+  position: relative;
 }
 
 .insp-site-chrome {
@@ -1000,8 +1001,7 @@ textarea {
   font-weight: 800;
 }
 
-.insp-site-donate,
-.insp-modal-launch {
+.insp-site-donate {
   border: 0;
   color: #fff;
   border-radius: 8px;
@@ -1011,6 +1011,10 @@ textarea {
   text-transform: uppercase;
   padding: 8px 10px;
   cursor: pointer;
+  transition: opacity 0.15s;
+}
+.insp-site-donate:hover {
+  opacity: 0.85;
 }
 
 .insp-site-content {
@@ -1111,23 +1115,93 @@ textarea {
   background: #faf8f5;
 }
 
-.insp-modal-preview-shell {
-  padding: 12px;
+/* Modal CTA hint (shown in panel before Donate is clicked) */
+.insp-modal-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 12px;
+  border-top: 1px solid #eee;
+}
+.insp-modal-cta-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #7b6f6f;
+  text-align: center;
 }
 
-.insp-modal-overlay {
-  margin-top: 8px;
-  border-radius: 10px;
-  background: rgba(31, 26, 26, 0.45);
-  padding: 10px;
+/* Embedded form panel inside panel */
+.insp-embedded-panel {
+  border-top: 1px solid #e8e2dc;
+}
+
+/* Full-viewport portal overlay — rendered on document.body via createPortal */
+.insp-portal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 10, 10, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 100000;
+  animation: insp-overlay-fade-in 0.15s ease;
+}
+
+@keyframes insp-overlay-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.insp-portal-modal {
+  width: 100%;
+  max-width: 540px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  animation: insp-modal-slide-in 0.15s ease;
+}
+
+@keyframes insp-modal-slide-in {
+  from { transform: translateY(-16px); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
 }
 
 .insp-modal-card {
+  position: relative;
   border: 1px solid #dfd6cd;
-  border-radius: 12px;
+  border-radius: 16px;
   background: #fff;
-  box-shadow: 0 10px 24px rgba(17, 12, 12, 0.2);
-  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(17, 12, 12, 0.35);
+  width: 100%;
+  overflow-y: auto;
+  max-height: 90vh;
+}
+
+.insp-modal-close {
+  position: sticky;
+  top: 8px;
+  float: right;
+  clear: right;
+  margin: 8px 8px 0 0;
+  border: 1px solid #ddd;
+  background: #fff;
+  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  cursor: pointer;
+  color: #555;
+  z-index: 2;
+  flex-shrink: 0;
+}
+.insp-modal-close:hover {
+  background: #f5f0eb;
+  border-color: #c0b5b5;
 }
 
 .vb-drag-overlay {
@@ -1783,14 +1857,303 @@ textarea {
   color: var(--ink-soft);
 }
 
-/* Salesforce suggestions */
+/* ─── Salesforce mapping panel ──────────────────────────────────────────────── */
+
+/* Non-mappable notice */
+.insp-sf-not-mappable {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: #f4f0ec;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.insp-sf-nm-icon {
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+.insp-sf-not-mappable p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+/* Mapping badge (when a mapping is saved) */
+.insp-sf-mapping-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #edf7ff;
+  border: 1px solid #bde4ff;
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.insp-sf-badge-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.insp-sf-badge-obj {
+  font-size: 11px;
+  font-weight: 700;
+  color: #0284c7;
+  background: #e0f2fe;
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.insp-sf-badge-arrow {
+  font-size: 12px;
+  color: #0284c7;
+  flex-shrink: 0;
+}
+.insp-sf-badge-fld {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: monospace;
+  color: #0c4a6e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-sf-clear-btn {
+  flex-shrink: 0;
+  border: 1px solid #bde4ff;
+  background: transparent;
+  color: #0284c7;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.insp-sf-clear-btn:hover { background: #bde4ff; }
+
+/* Steps */
+.insp-sf-step {
+  margin-bottom: 16px;
+}
+.insp-sf-step-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.insp-sf-step-num {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  background: var(--accent, #bd2135);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.insp-sf-step-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink);
+  flex: 1;
+}
+.insp-sf-connect-btn {
+  flex-shrink: 0;
+  background: var(--accent, #bd2135);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: opacity 0.1s;
+}
+.insp-sf-connect-btn:hover { opacity: 0.85; }
+
+.insp-sf-retry-btn {
+  flex-shrink: 0;
+  background: transparent;
+  color: #dc3545;
+  border: 1px solid #dc3545;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.insp-sf-retry-btn:hover { background: #fff1f2; }
+
+/* Spinner */
+.insp-sf-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #e0dbd5;
+  border-top-color: var(--accent, #bd2135);
+  border-radius: 50%;
+  animation: sf-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes sf-spin { to { transform: rotate(360deg); } }
+
+/* Error message */
+.insp-sf-error-msg {
+  font-size: 11px;
+  color: #dc3545;
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+.insp-sf-error-msg code {
+  font-family: monospace;
+  font-size: 10px;
+  background: #ffe4e6;
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* Search boxes */
+.insp-sf-search {
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+/* Object/field select (multi-row listbox) */
+.insp-sf-select {
+  padding: 2px 4px;
+  font-size: 12px;
+  overflow-y: auto;
+}
+.insp-sf-select option { padding: 4px 6px; }
+
+/* Field list */
+.insp-sf-field-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  background: #faf8f5;
+}
+.insp-sf-field-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.08s, border-color 0.08s;
+  font-size: 12px;
+}
+.insp-sf-field-row:hover {
+  background: #f0f7ff;
+  border-color: #bde4ff;
+}
+.insp-sf-field-row.is-selected {
+  background: #e0f2fe;
+  border-color: #7dd3fc;
+}
+.insp-sf-fl-label {
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-sf-fl-name {
+  font-family: monospace;
+  font-size: 10px;
+  color: #555;
+  white-space: nowrap;
+}
+.insp-sf-fl-type {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #0284c7;
+  background: #e0f2fe;
+  border-radius: 3px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+.insp-sf-field-row.is-required .insp-sf-fl-label::after {
+  content: '';
+}
+.insp-sf-fl-req {
+  color: #dc3545;
+  font-weight: 800;
+  font-size: 13px;
+}
+
+/* Empty / compat note */
+.insp-sf-empty {
+  font-size: 11px;
+  color: var(--ink-soft);
+  padding: 10px;
+  text-align: center;
+}
+.insp-sf-compat-note {
+  font-size: 10px;
+  color: #9a8e8e;
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+.insp-sf-compat-note em { font-style: normal; font-weight: 700; }
+
+/* Advanced accordion */
+.insp-sf-advanced {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.insp-sf-advanced summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+.insp-sf-advanced summary::-webkit-details-marker { display: none; }
+.insp-sf-advanced summary::before {
+  content: '▸ ';
+  font-size: 9px;
+}
+.insp-sf-advanced[open] summary::before { content: '▾ '; }
+
+/* Suggestions (static fallback) */
 .insp-sf-suggestions {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
+  gap: 3px;
+  margin-top: 6px;
 }
-
 .insp-sf-sugg-label {
   font-size: 10px;
   text-transform: uppercase;
@@ -1798,7 +2161,6 @@ textarea {
   color: #9a8f8f;
   font-weight: 800;
 }
-
 .insp-sf-sugg-btn {
   display: flex;
   align-items: center;
@@ -1806,37 +2168,26 @@ textarea {
   border: 1px solid var(--border);
   background: #fff;
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   text-align: left;
   cursor: pointer;
   transition: background 0.1s;
   width: 100%;
+  font-size: 11px;
 }
-
 .insp-sf-sugg-btn:hover {
   background: #f4f0ec;
   border-color: #c9bfb6;
 }
-
-.insp-sf-obj {
-  font-size: 10px;
-  font-weight: 800;
-  color: #0ea5e9;
-  background: #e8f6ff;
-  border-radius: 4px;
-  padding: 1px 5px;
-}
-
 .insp-sf-field {
-  font-size: 11px;
   font-weight: 700;
   color: var(--ink);
   font-family: monospace;
 }
-
 .insp-sf-label {
   font-size: 10px;
   color: var(--ink-soft);
   margin-left: auto;
 }
+
 
