@@ -91,7 +91,11 @@ module.exports = async function donationFormSfFields(request) {
       body: JSON.stringify({ objectName, fields }),
     };
   } catch (err) {
-    if (err.message && err.message.includes('NOT_FOUND')) {
+    const isNotFound =
+      err.errorCode === 'NOT_FOUND' ||
+      err.statusCode === 404 ||
+      (err.message && (err.message.includes('NOT_FOUND') || err.message.includes('does not exist')));
+    if (isNotFound) {
       return {
         status: 404,
         headers: { 'Content-Type': 'application/json' },

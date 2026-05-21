@@ -49,6 +49,7 @@ export const FIELD_CATEGORIES = [
     label: 'Personal Info',
     icon: '👤',
     fields: [
+      { type: 'donor_type', label: 'Donor Type', icon: '⊙', desc: 'Individual / Organization toggle' },
       { type: 'full_name', label: 'Full Name', icon: '👤', desc: 'First + Last name' },
       { type: 'billing_address', label: 'Address', icon: '🏠', desc: 'Full address block' },
       { type: 'country', label: 'Country', icon: '🌍', desc: 'Country dropdown' },

@@ -192,12 +192,18 @@ function normalizePages(value, fallback, sections) {
         return;
       }
 
-      normalized.push({
+      const pageEntry = {
         id,
         name: normalizeString(item.name, 'Page ' + String(index + 1)),
         description: normalizeString(item.description, ''),
         sectionIds: normalizeSectionIdList(item.sectionIds, validSectionIds),
-      });
+      };
+      // Preserve new form-builder fields if present
+      if (Array.isArray(item.rows)) pageEntry.rows = item.rows;
+      if (typeof item.nextLabel === 'string') pageEntry.nextLabel = item.nextLabel;
+      if (typeof item.prevLabel === 'string') pageEntry.prevLabel = item.prevLabel;
+      if (typeof item.showProgress === 'boolean') pageEntry.showProgress = item.showProgress;
+      normalized.push(pageEntry);
       seenPageIds.add(id);
     });
   }
@@ -276,6 +282,10 @@ function normalizeDonationFormConfig(input = {}) {
         config.branding && config.branding.submitLabel,
         defaults.branding.submitLabel
       ),
+      // New form-builder field
+      ...(config.branding && config.branding.subtitle != null
+        ? { subtitle: String(config.branding.subtitle) }
+        : {}),
     },
     display: {
       mode: normalizeMode(config.display && config.display.mode, defaults.display.mode),
@@ -338,6 +348,9 @@ function normalizeDonationFormConfig(input = {}) {
     },
     sections: normalizedSections,
     pages: normalizePages(config.pages, defaults.pages || [], normalizedSections),
+    // Pass through new form-builder top-level keys when present
+    ...(config.salesforce != null ? { salesforce: config.salesforce } : {}),
+    ...(config.confirmationPage != null ? { confirmationPage: config.confirmationPage } : {}),
   };
 }
 

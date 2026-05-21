@@ -2,6 +2,7 @@
 import { createPortal } from 'react-dom';
 import { getFieldMeta, SF_SUGGESTIONS, getSfCompatibleTypes } from '../fieldTypes';
 import FieldPreview from './FieldPreview';
+import InteractivePreview from './InteractivePreview';
 
 // ─── Generic form helpers ─────────────────────────────────────────────────────
 
@@ -419,18 +420,23 @@ function StripeElementSettings({ settings, onChange }) {
     { value: 'us_bank_account', label: 'ACH / Bank' },
     { value: 'link', label: 'Link (saved cards)' },
   ];
-  const enabled = settings.methods || ['card'];
+  const enabled = settings.paymentMethods || ['card'];
   return (
-    <Field label="Payment methods">
-      {methodOptions.map((m) => (
-        <Toggle key={m.value} label={m.label} checked={enabled.includes(m.value)}
-          onChange={(v) => {
-            const next = v ? [...enabled, m.value] : enabled.filter((x) => x !== m.value);
-            onChange({ methods: next.length ? next : ['card'] });
-          }}
-        />
-      ))}
-    </Field>
+    <>
+      <div className="insp-info-note">
+        Stripe's Payment Element loads a secure, hosted iframe — card details are entered directly with Stripe and never touch your server. This field requires a valid Stripe Publishable Key in Form settings.
+      </div>
+      <Field label="Payment methods">
+        {methodOptions.map((m) => (
+          <Toggle key={m.value} label={m.label} checked={enabled.includes(m.value)}
+            onChange={(v) => {
+              const next = v ? [...enabled, m.value] : enabled.filter((x) => x !== m.value);
+              onChange({ paymentMethods: next.length ? next : ['card'] });
+            }}
+          />
+        ))}
+      </Field>
+    </>
   );
 }
 
@@ -1167,7 +1173,6 @@ function SitePreview({ state, page, previewMode, setPreviewMode }) {
 
 export default function Inspector({ state, dispatch }) {
   const [tab, setTab] = useState('field');
-  const [previewMode, setPreviewMode] = useState(state.display?.mode || 'embedded');
 
   const selectedField = (() => {
     if (!state.selectedFieldId) return null;
@@ -1199,7 +1204,6 @@ export default function Inspector({ state, dispatch }) {
             className={`insp-tab${tab === t.id ? ' is-active' : ''}${t.disabled ? ' is-disabled' : ''}`}
             onClick={() => {
               if (t.disabled) return;
-              if (t.id === 'preview') setPreviewMode(state.display?.mode || 'embedded');
               setTab(t.id);
             }}
           >
@@ -1225,12 +1229,7 @@ export default function Inspector({ state, dispatch }) {
         ) : tab === 'settings' ? (
           <FormSettings state={state} dispatch={dispatch} />
         ) : tab === 'preview' ? (
-          <SitePreview
-            state={state}
-            page={state.pages[state.selectedPageIdx] || state.pages[0]}
-            previewMode={previewMode}
-            setPreviewMode={setPreviewMode}
-          />
+          <InteractivePreview state={state} />
         ) : (
           <div className="insp-empty">
             <span className="insp-empty-icon">☝</span>

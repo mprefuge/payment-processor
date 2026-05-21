@@ -331,19 +331,10 @@ export default function FieldPreview({ field, accent = '#bd2135' }) {
               return <span key={m} className={`fp-stripe-tab${i === 0 ? ' is-active' : ''}`} style={i === 0 ? { borderBottomColor: accent, color: accent } : {}}>{n}</span>;
             })}
           </div>
-          <div className="fp-stack" style={{ marginTop: 8 }}>
-            <input className="fp-input" placeholder="Card number" readOnly tabIndex={-1} />
-            <div className="fp-row">
-              <input className="fp-input" placeholder="MM / YY" readOnly tabIndex={-1} />
-              <input className="fp-input fp-input-sm" placeholder="CVC" readOnly tabIndex={-1} />
-            </div>
+          <div className="fp-stripe-secure-notice">
+            <span className="fp-stripe-secure-icon">🔒</span>
+            <span>Payment details are collected securely by Stripe — card data never touches your server.</span>
           </div>
-          {settings.showSaveCard && (
-            <label className="fp-checkbox-row" style={{ marginTop: 8 }}>
-              <input type="checkbox" readOnly tabIndex={-1} />
-              <span>Save this card for future gifts</span>
-            </label>
-          )}
         </div>
       );
 

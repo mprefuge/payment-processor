@@ -29,6 +29,7 @@ const testArtifactCleanup = loadHandler('./handlers/testArtifactCleanup');
 const stripeDuplicateCheck = loadHandler('./handlers/stripeDuplicateCheck');
 const donationFormBuilder = loadHandler('./handlers/donationFormBuilder');
 const donationFormConfigSave = loadHandler('./handlers/donationFormConfigSave');
+const donationFormConfigUpdate = loadHandler('./handlers/donationFormConfigUpdate');
 const donationFormConfigList = loadHandler('./handlers/donationFormConfigList');
 const donationFormConfigGet = loadHandler('./handlers/donationFormConfigGet');
 const donationFormConfigDelete = loadHandler('./handlers/donationFormConfigDelete');
@@ -961,6 +962,42 @@ registerFunction('donationFormConfigDelete', 'Delete a published donation form c
   },
 });
 
+registerFunction('donationFormConfigUpdate', 'Update an existing donation form configuration', {
+  handler: donationFormConfigUpdate,
+  description: 'Updates a previously saved donation form configuration by ID.',
+  tags: ['Builder'],
+  operationId: 'donationFormConfigUpdate',
+  methods: ['PUT'],
+  ...withAnonymousAuth({}),
+  route: 'form-builder/configs/{configId}',
+  responses: {
+    200: {
+      description: 'Config updated',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: 'Bad request',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: 'Config not found',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
 registerFunction('donationFormEmbed', 'Return the embed runtime for a published donation form', {
   handler: donationFormEmbed,
   description:
@@ -1712,6 +1749,7 @@ export {
   stripeDuplicateCheck,
   donationFormBuilder,
   donationFormConfigSave,
+  donationFormConfigUpdate,
   donationFormConfigList,
   donationFormConfigGet,
   donationFormConfigDelete,

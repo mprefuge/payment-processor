@@ -22,9 +22,15 @@ export function clamp(v, min, max) {
 
 export function formatMoney(amount, currency = 'USD') {
   try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(amount);
   } catch {
-    return `$${Number(amount).toFixed(2)}`;
+    const n = Number(amount);
+    return `$${Number.isInteger(n) ? n : n.toFixed(2)}`;
   }
 }
 
