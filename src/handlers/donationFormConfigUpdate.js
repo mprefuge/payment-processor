@@ -65,6 +65,15 @@ module.exports = async function donationFormConfigUpdate(request) {
   const embedSnippet =
     '<div data-donation-form></div>\n<script src="' + embedScriptUrl + '"></script>';
 
+  const embeddedEmbedSnippet =
+    '<div id="donation-form-embedded"></div>\n' +
+    '<script src="' +
+    embedScriptUrl +
+    '"></' +
+    'script>';
+  const modalEmbedSnippet =
+    '<div data-donation-form></div>\n' + '<script src="' + embedScriptUrl + '"></' + 'script>';
+
   return {
     status: 200,
     jsonBody: {
@@ -72,6 +81,13 @@ module.exports = async function donationFormConfigUpdate(request) {
       configUrl,
       embedScriptUrl,
       embedSnippet,
+      embeddedEmbedSnippet,
+      modalEmbedSnippet,
+      embedSnippets: {
+        embedded: embeddedEmbedSnippet,
+        modal: modalEmbedSnippet,
+      },
+      config: record.config,
     },
   };
 };

@@ -285,8 +285,10 @@ const resolveRequestDependencies = (deps, modeToggle) => {
   };
 };
 
-const buildSummary = (lookbackDays, payouts, processed, skipped, errors) => ({
+const buildSummary = (lookbackDays, requestedLookbackDays, payouts, processed, skipped, errors) => ({
   lookbackDays,
+  requestedLookbackDays,
+  lookbackDaysClamped: requestedLookbackDays !== lookbackDays,
   total: payouts.length,
   processed: processed.length,
   skipped: skipped.length,
@@ -496,11 +498,10 @@ const handler = async (request, context) => {
     }
 
     const lookbackFromRequest = Number(url.searchParams.get('lookbackDays'));
-    const lookbackDays = clampLookbackDays(
-      Number.isFinite(lookbackFromRequest)
-        ? lookbackFromRequest
-        : (deps.lookbackDays ?? DEFAULT_LOOKBACK_DAYS)
-    );
+    const requestedLookbackDays = Number.isFinite(lookbackFromRequest)
+      ? lookbackFromRequest
+      : (deps.lookbackDays ?? DEFAULT_LOOKBACK_DAYS);
+    const lookbackDays = clampLookbackDays(requestedLookbackDays);
     const nowMillis = typeof deps.now === 'function' ? deps.now() : Date.now();
 
     const payouts = await fetchRecentPayouts(deps.stripe, lookbackDays, nowMillis);
@@ -529,7 +530,7 @@ const handler = async (request, context) => {
     const skipped = outcomes.filter((entry) => entry.status === 'skipped');
 
     return buildHandlerResponse(errors.length > 0 ? 207 : 200, {
-      summary: buildSummary(lookbackDays, payouts, processed, skipped, errors),
+      summary: buildSummary(lookbackDays, requestedLookbackDays, payouts, processed, skipped, errors),
       processed,
       skipped,
       errors,

@@ -1,0 +1,1063 @@
+{
+  "info": {
+    "name": "Payment Processor API",
+    "description": "Complete end-to-end test collection for the Payment Processor Azure Functions API.\n\nSet the `baseUrl` and `hostKey` collection variables before running.\n\n- `baseUrl`: e.g. `http://localhost:7075/api` (local) or `https://<func>.azurewebsites.net/api` (Azure)\n- `hostKey`: Azure Function host key (omit for anonymous endpoints)\n\nEndpoints tested:\n1. Health check\n2. Form Builder CRUD\n3. Form embed & Salesforce metadata\n4. Process transaction (checkout session)\n5. Stripe webhook\n6. Payout sync trigger\n7. Stripe true-up\n8. Manual QBO sync\n9. Salesforce payments sync\n10. QBO customers sync\n11. QBO receipts sync\n12. Salesforce record QBO sync\n13. Stripe duplicate check\n14. Test artifact cleanup\n15. OpenAPI docs & Swagger UI",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "payment-processor-api-v1"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:7075/api" },
+    { "key": "hostKey", "value": "" },
+    { "key": "configId", "value": "" },
+    { "key": "sfContactId", "value": "0034x00001cRQs2AAG" }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('status ok', () => pm.expect(j.status).to.eql('ok'));",
+                  "pm.test('all connections healthy', () => {",
+                  "  j.connections.forEach(c => pm.expect(c.healthy).to.be.true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Form Builder",
+      "item": [
+        {
+          "name": "POST /form-builder/configs (save)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('has id', () => pm.expect(j.id).to.be.a('string'));",
+                  "pm.test('has config', () => pm.expect(j.config).to.be.an('object'));",
+                  "pm.test('has embedSnippets', () => pm.expect(j.embedSnippets).to.be.an('object'));",
+                  "pm.collectionVariables.set('configId', j.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/form-builder/configs?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"micah test Form\",\n  \"displayMode\": \"embedded\",\n  \"config\": {\n    \"fields\": [\n      { \"name\": \"amount\", \"label\": \"Donation Amount\", \"type\": \"number\" }\n    ]\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /form-builder/configs (list)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('returns array', () => pm.expect(j).to.be.an('array'));",
+                  "pm.test('records have id', () => pm.expect(j[0].id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/configs?code={{hostKey}}"
+          }
+        },
+        {
+          "name": "GET /form-builder/configs/:id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('id matches', () => pm.expect(j.id).to.eql(pm.collectionVariables.get('configId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/configs/{{configId}}?code={{hostKey}}"
+          }
+        },
+        {
+          "name": "PUT /form-builder/configs/:id (update)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('has config in response', () => pm.expect(j.config).to.be.an('object'));",
+                  "pm.test('has embedSnippets', () => pm.expect(j.embedSnippets).to.be.an('object'));",
+                  "pm.test('has embeddedEmbedSnippet', () => pm.expect(j.embeddedEmbedSnippet).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "url": "{{baseUrl}}/form-builder/configs/{{configId}}?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"micah test Form (Updated)\",\n  \"displayMode\": \"modal\",\n  \"config\": {\n    \"fields\": [\n      { \"name\": \"amount\", \"label\": \"Updated Amount\", \"type\": \"number\" }\n    ]\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "DELETE /form-builder/configs/:id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('ok=true', () => pm.expect(j.ok).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/form-builder/configs/{{configId}}?code={{hostKey}}"
+          }
+        },
+        {
+          "name": "GET /form-builder/configs/:id (after delete → 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404 after delete', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/configs/{{configId}}?code={{hostKey}}"
+          }
+        },
+        {
+          "name": "GET /form-builder/embed.js (with config)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Re-create a config to get a valid ID",
+                  "// (run after the save test has set configId)"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Note: run this request with a valid configId set from a previous save",
+                  "// pm.test('Status 200 JavaScript', () => {",
+                  "//   pm.response.to.have.status(200);",
+                  "//   pm.expect(pm.response.headers.get('Content-Type')).to.include('javascript');",
+                  "// });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/embed.js?config={{configId}}&code={{hostKey}}"
+          }
+        },
+        {
+          "name": "GET /form-builder/embed.js (missing config → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 without config param', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/embed.js"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Salesforce Metadata",
+      "item": [
+        {
+          "name": "GET /form-builder/sf/objects",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('returns array of objects', () => pm.expect(j).to.be.an('array'));",
+                  "pm.test('has > 100 objects', () => pm.expect(j.length).to.be.above(100));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/sf/objects?code={{hostKey}}"
+          }
+        },
+        {
+          "name": "GET /form-builder/sf/fields/Contact",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('returns array of fields', () => pm.expect(j).to.be.an('array'));",
+                  "pm.test('has > 50 fields', () => pm.expect(j.length).to.be.above(50));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/sf/fields/Contact?code={{hostKey}}"
+          }
+        },
+        {
+          "name": "GET /form-builder/sf/fields/:invalid (→ 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404 for unknown object', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/form-builder/sf/fields/NonExistentObject__c?code={{hostKey}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Process Transaction",
+      "item": [
+        {
+          "name": "POST /transaction (one-time)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('returns session id', () => pm.expect(j.id).to.match(/^cs_test_/));",
+                  "pm.test('returns stripe URL', () => pm.expect(j.url).to.include('stripe.com'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transaction?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 5000,\n  \"currency\": \"usd\",\n  \"email\": \"micah.test@example.com\",\n  \"name\": \"micah test\",\n  \"frequency\": \"one-time\",\n  \"metadata\": {\n    \"source_test_tag\": \"postman-test\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /transaction (monthly recurring)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('returns session id', () => pm.expect(j.id).to.match(/^cs_test_/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transaction?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 2500,\n  \"currency\": \"usd\",\n  \"email\": \"micah.test@example.com\",\n  \"name\": \"micah test\",\n  \"frequency\": \"monthly\",\n  \"metadata\": {\n    \"source_test_tag\": \"postman-test\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /transaction (cover fees)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('returns session id', () => pm.expect(j.id).to.match(/^cs_test_/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transaction?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 10000,\n  \"currency\": \"usd\",\n  \"email\": \"micah.test@example.com\",\n  \"name\": \"micah test\",\n  \"frequency\": \"one-time\",\n  \"coverFees\": true,\n  \"metadata\": {\n    \"source_test_tag\": \"postman-test\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /transaction (invalid frequency → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 for invalid frequency', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transaction?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 5000,\n  \"currency\": \"usd\",\n  \"email\": \"micah.test@example.com\",\n  \"name\": \"micah test\",\n  \"frequency\": \"weekly\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /transaction (negative amount → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 for negative amount', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transaction?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": -100,\n  \"currency\": \"usd\",\n  \"email\": \"micah.test@example.com\",\n  \"name\": \"micah test\",\n  \"frequency\": \"one-time\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Stripe Webhook",
+      "item": [
+        {
+          "name": "POST /stripe/webhook (missing signature → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 without signature', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('invalid_signature error', () => pm.expect(j.error).to.eql('invalid_signature'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/webhook",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"type\":\"payment_intent.succeeded\",\"data\":{\"object\":{\"id\":\"pi_test\"}}}"
+            }
+          }
+        },
+        {
+          "name": "POST /stripe/webhook (invalid signature → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 with invalid signature', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('invalid_signature error', () => pm.expect(j.error).to.eql('invalid_signature'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/webhook",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Stripe-Signature", "value": "t=1234,v1=invalidsignature" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"type\":\"payment_intent.succeeded\",\"data\":{\"object\":{\"id\":\"pi_test\"}}}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Payout Sync",
+      "item": [
+        {
+          "name": "POST /stripe/payout-sync (lookbackDays=10)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('summary present', () => pm.expect(j.summary).to.be.an('object'));",
+                  "pm.test('lookbackDays=10', () => pm.expect(j.summary.lookbackDays).to.eql(10));",
+                  "pm.test('not clamped', () => pm.expect(j.summary.lookbackDaysClamped).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/payout-sync?code={{hostKey}}&lookbackDays=10&mode=test"
+          }
+        },
+        {
+          "name": "POST /stripe/payout-sync (lookbackDays=1 → clamped to 7)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('effective lookbackDays=7', () => pm.expect(j.summary.lookbackDays).to.eql(7));",
+                  "pm.test('requestedLookbackDays=1', () => pm.expect(j.summary.requestedLookbackDays).to.eql(1));",
+                  "pm.test('lookbackDaysClamped=true', () => pm.expect(j.summary.lookbackDaysClamped).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/payout-sync?code={{hostKey}}&lookbackDays=1&mode=test"
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Stripe True-Up",
+      "item": [
+        {
+          "name": "POST /stripe/true-up (missing from → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 without from param', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/true-up?code={{hostKey}}&type=payments&mode=test"
+          }
+        },
+        {
+          "name": "POST /stripe/true-up (payments dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('type=payments', () => pm.expect(j.type).to.eql('payments'));",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);",
+                  "pm.test('liveMode=false', () => pm.expect(j.liveMode).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/true-up?code={{hostKey}}&from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z&type=payments&mode=test&dryRun=true&limit=5"
+          }
+        },
+        {
+          "name": "POST /stripe/true-up (refunds dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('type=refunds', () => pm.expect(j.type).to.eql('refunds'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/true-up?code={{hostKey}}&from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z&type=refunds&mode=test&dryRun=true&limit=5"
+          }
+        },
+        {
+          "name": "POST /stripe/true-up (payouts dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('type=payouts', () => pm.expect(j.type).to.eql('payouts'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/stripe/true-up?code={{hostKey}}&from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z&type=payouts&mode=test&dryRun=true&limit=5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Manual QBO Sync",
+      "item": [
+        {
+          "name": "POST /qbo/manual-sync (empty body → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('invalid type error', () => pm.expect(j.error).to.eql('Invalid request body'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/qbo/manual-sync?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "POST /qbo/manual-sync (invalid type → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/qbo/manual-sync?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"type\":\"invalid\",\"data\":{}}" }
+          }
+        },
+        {
+          "name": "POST /qbo/manual-sync (sales-receipt)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('type=sales-receipt', () => pm.expect(j.type).to.eql('sales-receipt'));",
+                  "pm.test('has id', () => pm.expect(j.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/qbo/manual-sync?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"sales-receipt\",\n  \"data\": {\n    \"TxnDate\": \"2024-01-01\",\n    \"Line\": [\n      {\n        \"Amount\": 100.00,\n        \"DetailType\": \"SalesItemLineDetail\",\n        \"SalesItemLineDetail\": {\n          \"ItemRef\": { \"name\": \"Donations\" },\n          \"ItemAccountRef\": { \"name\": \"Contribution Income\" }\n        }\n      }\n    ]\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /qbo/manual-sync (journal-entry)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('type=journal-entry', () => pm.expect(j.type).to.eql('journal-entry'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/qbo/manual-sync?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"journal-entry\",\n  \"data\": {\n    \"TxnDate\": \"2024-01-01\",\n    \"Line\": [\n      {\n        \"Amount\": 50.00,\n        \"DetailType\": \"JournalEntryLineDetail\",\n        \"JournalEntryLineDetail\": {\n          \"PostingType\": \"Debit\",\n          \"AccountRef\": { \"name\": \"Checking\" }\n        }\n      },\n      {\n        \"Amount\": 50.00,\n        \"DetailType\": \"JournalEntryLineDetail\",\n        \"JournalEntryLineDetail\": {\n          \"PostingType\": \"Credit\",\n          \"AccountRef\": { \"name\": \"Checking\" }\n        }\n      }\n    ]\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /qbo/manual-sync (bank-deposit, Check without CheckNum → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('CheckNum required message', () => pm.expect(j.details[0].message).to.include('CheckNum'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/qbo/manual-sync?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"bank-deposit\",\n  \"data\": {\n    \"TxnDate\": \"2024-01-01\",\n    \"DepositToAccountRef\": { \"name\": \"Checking\" },\n    \"Line\": [\n      {\n        \"Amount\": 200.00,\n        \"DetailType\": \"DepositLineDetail\",\n        \"DepositLineDetail\": {\n          \"AccountRef\": { \"name\": \"Undeposited Funds\" },\n          \"PaymentMethodRef\": { \"name\": \"Check\" }\n        }\n      }\n    ]\n  }\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Salesforce Payments Sync",
+      "item": [
+        {
+          "name": "GET /stripe/salesforce-payments-sync (dryRun JSON)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);",
+                  "pm.test('has paymentCount', () => pm.expect(j.paymentCount).to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/stripe/salesforce-payments-sync?code={{hostKey}}&dryRun=true&mode=test&limit=5"
+          }
+        },
+        {
+          "name": "GET /stripe/salesforce-payments-sync (dryRun CSV)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('CSV content type', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('csv'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/stripe/salesforce-payments-sync?code={{hostKey}}&dryRun=true&mode=test&limit=2&format=csv"
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. QBO Customers Sync",
+      "item": [
+        {
+          "name": "GET /qbo/customers-salesforce-sync (create-and-update dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/customers-salesforce-sync?code={{hostKey}}&dryRun=true&syncMode=create-and-update&pageSize=5&maxPages=1"
+          }
+        },
+        {
+          "name": "GET /qbo/customers-salesforce-sync (create-only dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('syncMode=create-only', () => pm.expect(j.syncMode).to.eql('create-only'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/customers-salesforce-sync?code={{hostKey}}&dryRun=true&syncMode=create-only&pageSize=5&maxPages=1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "11. QBO Receipts Sync",
+      "item": [
+        {
+          "name": "GET /qbo/receipts-salesforce-sync (dryRun, limit=5)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);",
+                  "pm.test('has summary', () => pm.expect(j.summary).to.be.an('object'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/receipts-salesforce-sync?code={{hostKey}}&dryRun=true&limit=5"
+          }
+        },
+        {
+          "name": "GET /qbo/receipts-salesforce-sync (with date range)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/receipts-salesforce-sync?code={{hostKey}}&dryRun=true&startDate=2026-01-01&endDate=2026-06-01&limit=5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "12. Salesforce Record QBO Sync",
+      "item": [
+        {
+          "name": "GET /qbo/salesforce-record-sync (missing sfId → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('salesforceId required', () => pm.expect(j.message).to.include('salesforceId'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/salesforce-record-sync?code={{hostKey}}&dryRun=true"
+          }
+        },
+        {
+          "name": "GET /qbo/salesforce-record-sync (link-only dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);",
+                  "pm.test('resolvedSalesforceRecordId matches', () => pm.expect(j.summary.resolvedSalesforceRecordId).to.eql(pm.collectionVariables.get('sfContactId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/salesforce-record-sync?code={{hostKey}}&salesforceId={{sfContactId}}&dryRun=true&importQboReceipts=false"
+          }
+        },
+        {
+          "name": "GET /qbo/salesforce-record-sync (importQboReceipts=true dryRun)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('importQboReceipts=true', () => pm.expect(j.importQboReceipts).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/qbo/salesforce-record-sync?code={{hostKey}}&salesforceId={{sfContactId}}&dryRun=true&importQboReceipts=true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "13. Stripe Duplicate Check",
+      "item": [
+        {
+          "name": "GET /ops/stripe-duplicate-check (QBO+SF, dryRun, date range)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('success=true', () => pm.expect(j.success).to.be.true);",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);",
+                  "pm.test('qbo.checked is number', () => pm.expect(j.qbo.checked).to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/ops/stripe-duplicate-check?code={{hostKey}}&dryRun=true&system=both&startDate=2026-05-01&endDate=2026-05-22"
+          }
+        },
+        {
+          "name": "GET /ops/stripe-duplicate-check (SF only)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('sf.checked is number', () => pm.expect(j.salesforce.checked).to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/ops/stripe-duplicate-check?code={{hostKey}}&dryRun=true&system=salesforce"
+          }
+        }
+      ]
+    },
+    {
+      "name": "14. Test Artifact Cleanup",
+      "item": [
+        {
+          "name": "POST /ops/test-artifact-cleanup (missing tag → 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "const j = pm.response.json();",
+                  "pm.test('human-readable error message', () => pm.expect(j.message).to.include('cleanup tag'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/ops/test-artifact-cleanup?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"dryRun\":true}" }
+          }
+        },
+        {
+          "name": "POST /ops/test-artifact-cleanup (dryRun, Stripe only)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('tag present', () => pm.expect(j.tag).to.eql('postman-test'));",
+                  "pm.test('dryRun=true', () => pm.expect(j.dryRun).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/ops/test-artifact-cleanup?code={{hostKey}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tag\": \"postman-test\",\n  \"dryRun\": true,\n  \"systems\": [\"stripe\"]\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "15. OpenAPI & Swagger",
+      "item": [
+        {
+          "name": "GET /swagger (Swagger UI HTML)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('HTML response', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/html'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/swagger"
+          }
+        },
+        {
+          "name": "GET /openapi-3.1.0.json",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('OpenAPI 3.1.0', () => pm.expect(j.openapi).to.eql('3.1.0'));",
+                  "pm.test('has paths', () => pm.expect(Object.keys(j.paths).length).to.be.above(10));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/openapi-3.1.0.json"
+          }
+        },
+        {
+          "name": "GET /openapi-3.1.0.yaml",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('YAML content type', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('yaml'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/openapi-3.1.0.yaml"
+          }
+        }
+      ]
+    }
+  ]
+}

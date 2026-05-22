@@ -7,7 +7,9 @@ const SYSTEM_SCHEMA = z.enum(['stripe', 'salesforce', 'qbo']);
 
 const REQUEST_BODY_SCHEMA = z
   .object({
-    tag: z.string().min(1),
+    tag: z
+      .string({ required_error: 'A cleanup tag is required.' })
+      .min(1, 'A cleanup tag must not be empty.'),
     dryRun: z.boolean().optional(),
     liveMode: z.boolean().optional(),
     systems: z.array(SYSTEM_SCHEMA).optional(),
