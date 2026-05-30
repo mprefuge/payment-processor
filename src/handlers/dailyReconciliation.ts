@@ -33,6 +33,7 @@ import {
   patchQboDocClassRef,
   postManualEntryAsJournalEntry,
   postChargeToQbo,
+  postPayoutToQbo,
 } from '../services/qboSvc';
 import {
   fetchStripeChargesSince,
@@ -302,6 +303,7 @@ type SfTransactionRow = {
   QBO_Doc_Type__c?: string | null;
   QBO_Doc_Id__c?: string | null;
   Amount_Gross__c?: number | null;
+  Amount_Net__c?: number | null;
   Received_At__c?: string | null;
   transaction_type__c?: string | null;
   /** Record name (auto-number or user-defined) — used as memo when posting to QBO */
@@ -344,7 +346,7 @@ const queryTransactionsForRange = async (
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
-    `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
+    `Amount_Gross__c, Amount_Net__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
     `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name${includeCampaignClass ? ', Campaign__r.Class__c' : ''}, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
@@ -404,7 +406,7 @@ type QboDocRow = {
 };
 
 type QboDocWithEntity = QboDocRow & {
-  entityType: 'SalesReceipt' | 'JournalEntry' | 'Deposit';
+  entityType: 'SalesReceipt' | 'JournalEntry' | 'Deposit' | 'Transfer';
 };
 
 /**
@@ -613,7 +615,7 @@ const findPayoutsMissingQbo = (
       system: 'stripe',
       type: 'payout_missing_qbo',
       id: p.id,
-      description: `Payout ${p.id} exists in Stripe but has no corresponding QBO Bank Deposit`,
+      description: `Payout ${p.id} exists in Stripe but has no corresponding QBO payout movement (Transfer/Deposit)`,
       stripeId: p.id,
       amount: p.amount != null ? p.amount / 100 : null,
       date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString().slice(0, 10) : null,
@@ -671,15 +673,16 @@ const findSalesforceMissingQbo = (
 
 const resolveQboEntityTypeForSfRow = (
   row: SfTransactionRow
-): 'SalesReceipt' | 'JournalEntry' | 'Deposit' => {
+): 'SalesReceipt' | 'JournalEntry' | 'Deposit' | 'Transfer' => {
   const sfDocType = row.QBO_Doc_Type__c?.trim().toLowerCase() ?? null;
+  if (sfDocType === 'transfer') return 'Transfer';
   if (sfDocType === 'bank-deposit') return 'Deposit';
   if (sfDocType === 'journal-entry') return 'JournalEntry';
   if (sfDocType === 'sales-receipt') return 'SalesReceipt';
 
   const payoutId = row.Stripe_Payout_Id__c?.trim() ?? null;
   const refundId = row.Stripe_Refund_Id__c?.trim() ?? null;
-  if (payoutId?.startsWith('po_') || payoutId?.startsWith('py_')) return 'Deposit';
+  if (payoutId?.startsWith('po_') || payoutId?.startsWith('py_')) return 'Transfer';
   if (refundId) return 'JournalEntry';
   return 'SalesReceipt';
 };
@@ -1121,20 +1124,22 @@ const patchMissingQboClassRefs = async (
       sfRow.Stripe_Payment_Intent_Id__c?.trim() ||
       sfRow.Stripe_Payout_Id__c?.trim() ||
       null;
-    const entityType: 'SalesReceipt' | 'JournalEntry' | 'Deposit' =
-      sfDocType === 'bank-deposit'
-        ? 'Deposit'
-        : sfDocType === 'journal-entry'
-          ? 'JournalEntry'
-          : sfDocType === 'sales-receipt'
-            ? 'SalesReceipt'
-            : stripeId?.startsWith('po_') || stripeId?.startsWith('py_')
-              ? 'Deposit'
-              : sfRow.Stripe_Refund_Id__c?.trim()
-                ? 'JournalEntry'
-                : 'SalesReceipt';
+    const entityType: 'SalesReceipt' | 'JournalEntry' | 'Deposit' | 'Transfer' =
+      sfDocType === 'transfer'
+        ? 'Transfer'
+        : sfDocType === 'bank-deposit'
+          ? 'Deposit'
+          : sfDocType === 'journal-entry'
+            ? 'JournalEntry'
+            : sfDocType === 'sales-receipt'
+              ? 'SalesReceipt'
+              : stripeId?.startsWith('po_') || stripeId?.startsWith('py_')
+                ? 'Transfer'
+                : sfRow.Stripe_Refund_Id__c?.trim()
+                  ? 'JournalEntry'
+                  : 'SalesReceipt';
 
-    if (entityType === 'Deposit') continue; // Deposits don't carry ClassRef
+    if (entityType === 'Deposit' || entityType === 'Transfer') continue; // No ClassRef tracking on payout movements
 
     const classRefStr = await resolveClassRef(sfRow);
     if (!classRefStr) continue; // No class to assign
@@ -1372,7 +1377,26 @@ const repairMissingSfToQbo = async (
     try {
       let result: { qboId: string; type: string };
 
-      if (stripeId && stripeClient && chargeId) {
+      const isPayoutType = sfRow.transaction_type__c?.trim().toLowerCase() === 'payout';
+      const payoutId = sfRow.Stripe_Payout_Id__c?.trim() || null;
+
+      if (isPayoutType && payoutId) {
+        const payoutAmountDollars =
+          typeof sfRow.Amount_Net__c === 'number' && sfRow.Amount_Net__c > 0
+            ? sfRow.Amount_Net__c
+            : grossDollars;
+        result = await postPayoutToQbo({
+          amount: Math.round(payoutAmountDollars * 100),
+          memo,
+          date: new Date(`${date}T00:00:00Z`),
+          payoutId,
+        });
+        context.log('[DailyReconciliation] Posted SF payout record to QBO as bank deposit', {
+          sfId,
+          payoutId,
+          qboId: result.qboId,
+        });
+      } else if (stripeId && stripeClient && chargeId) {
         // ── Stripe path: fetch charge with fee data, post with full context ─────
         let charge: Stripe.Charge | null = null;
         try {
@@ -1760,9 +1784,10 @@ export const runReconciliation = async (
   let qboReceipts: QboDocRow[] = [];
   let qboJournalEntries: QboDocRow[] = [];
   let qboDeposits: QboDocRow[] = [];
+  let qboTransfers: QboDocRow[] = [];
 
   if (systems.includes('qbo')) {
-    [qboReceipts, qboJournalEntries, qboDeposits] = await Promise.all([
+    [qboReceipts, qboJournalEntries, qboDeposits, qboTransfers] = await Promise.all([
       queryQboDocumentsForRange('SalesReceipt', startDate, endDate, null).then((docs) => {
         counts.qbo.salesReceipts = docs.length;
         return docs;
@@ -1775,6 +1800,7 @@ export const runReconciliation = async (
         counts.qbo.deposits = docs.length;
         return docs;
       }),
+      queryQboDocumentsForRange('Transfer', startDate, endDate, null),
     ]);
   }
 
@@ -1851,14 +1877,14 @@ export const runReconciliation = async (
   //                   REF-{refundId}   (refunds)
   //                   DSP-{disputeId}  (dispute losses)
   //                   DSPREV-{disputeId} (dispute reversals/wins)
-  //   BankDeposit   → PO-{payoutId}
+  //   Transfer/Deposit → PO-{payoutId} in legacy docs; PrivateNote contains payout ID
   //
   // We also search PrivateNote as a fallback because some older records store
   // the Stripe ID there rather than (or in addition to) DocNumber.
 
   const qboChargeIds = new Set<string>(); // ch_xxx from receipts + JEs
   const qboRefundIds = new Set<string>(); // re_xxx from JEs
-  const qboPayoutIds = new Set<string>(); // po_xxx from deposits
+  const qboPayoutIds = new Set<string>(); // po_xxx from payout movements (Transfer/Deposit)
   const qboDocIds = new Set<string>(); // all QBO doc IDs (for SF Posted_to_QBO validation)
 
   for (const doc of qboReceipts) {
@@ -1880,9 +1906,15 @@ export const runReconciliation = async (
       if (sid.startsWith('po_')) qboPayoutIds.add(sid);
     }
   }
+  for (const doc of qboTransfers) {
+    if (doc.Id) qboDocIds.add(String(doc.Id));
+    for (const sid of extractStripeIdsFromDoc(doc)) {
+      if (sid.startsWith('po_')) qboPayoutIds.add(sid);
+    }
+  }
 
   // Full union for qboMissingSalesforce
-  const allQboDocs = [...qboReceipts, ...qboJournalEntries, ...qboDeposits];
+  const allQboDocs = [...qboReceipts, ...qboJournalEntries, ...qboDeposits, ...qboTransfers];
   const allQboStripeIds = new Set<string>();
   for (const doc of allQboDocs) {
     for (const sid of extractStripeIdsFromDoc(doc)) {
@@ -1895,6 +1927,7 @@ export const runReconciliation = async (
     ...qboReceipts.map((d) => ({ ...d, entityType: 'SalesReceipt' as const })),
     ...qboJournalEntries.map((d) => ({ ...d, entityType: 'JournalEntry' as const })),
     ...qboDeposits.map((d) => ({ ...d, entityType: 'Deposit' as const })),
+    ...qboTransfers.map((d) => ({ ...d, entityType: 'Transfer' as const })),
   ];
 
   // -------------------------------------------------------------------------
@@ -1929,14 +1962,16 @@ export const runReconciliation = async (
     discrepancies.duplicatesInQbo.push(
       ...findQboDuplicates(qboReceipts, 'SalesReceipt'),
       ...findQboDuplicates(qboJournalEntries, 'JournalEntry'),
-      ...findQboDuplicates(qboDeposits, 'Deposit')
+      ...findQboDuplicates(qboDeposits, 'Deposit'),
+      ...findQboDuplicates(qboTransfers, 'Transfer')
     );
 
     if (systems.includes('salesforce')) {
       discrepancies.qboMissingSalesforce.push(
         ...findQboMissingSalesforce(qboReceipts, 'SalesReceipt', allSfStripeIds),
         ...findQboMissingSalesforce(qboJournalEntries, 'JournalEntry', allSfStripeIds),
-        ...findQboMissingSalesforce(qboDeposits, 'Deposit', allSfStripeIds)
+        ...findQboMissingSalesforce(qboDeposits, 'Deposit', allSfStripeIds),
+        ...findQboMissingSalesforce(qboTransfers, 'Transfer', allSfStripeIds)
       );
     }
   }
@@ -1995,24 +2030,28 @@ export const runReconciliation = async (
         const stripeId =
           sfRow?.Stripe_Payout_Id__c?.trim() ?? sfRow?.Stripe_Refund_Id__c?.trim() ?? null;
         const entityType =
-          sfDocType === 'bank-deposit'
-            ? 'Deposit'
-            : sfDocType === 'journal-entry'
-              ? 'JournalEntry'
-              : sfDocType === 'sales-receipt'
-                ? 'SalesReceipt'
-                : stripeId?.startsWith('po_') || stripeId?.startsWith('py_')
-                  ? 'Deposit'
-                  : sfRow?.Stripe_Refund_Id__c?.trim()
-                    ? 'JournalEntry'
-                    : 'SalesReceipt';
+          sfDocType === 'transfer'
+            ? 'Transfer'
+            : sfDocType === 'bank-deposit'
+              ? 'Deposit'
+              : sfDocType === 'journal-entry'
+                ? 'JournalEntry'
+                : sfDocType === 'sales-receipt'
+                  ? 'SalesReceipt'
+                  : stripeId?.startsWith('po_') || stripeId?.startsWith('py_')
+                    ? 'Transfer'
+                    : sfRow?.Stripe_Refund_Id__c?.trim()
+                      ? 'JournalEntry'
+                      : 'SalesReceipt';
         const docTypeForSalesforce =
           sfDocType ??
-          (entityType === 'Deposit'
-            ? 'bank-deposit'
-            : entityType === 'JournalEntry'
-              ? 'journal-entry'
-              : 'sales-receipt');
+          (entityType === 'Transfer'
+            ? 'transfer'
+            : entityType === 'Deposit'
+              ? 'bank-deposit'
+              : entityType === 'JournalEntry'
+                ? 'journal-entry'
+                : 'sales-receipt');
 
         try {
           const stillExists = await qboDocumentExists(entityType, docId);

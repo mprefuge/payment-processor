@@ -29,7 +29,7 @@ import {
 import { createSalesforceSvc } from '../services/salesforceSvc';
 
 type SalesforceObjectType = 'Contact' | 'Account';
-type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
+type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer';
 
 type SalesforceRecord = {
   Id?: string;

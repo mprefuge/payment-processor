@@ -19,12 +19,12 @@ const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
 
 const DOC_NUMBER_MAX_LENGTH = 21;
 
-type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
+type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer';
 
 type QuickBooksEntityMetadata = {
-  apiPath: 'salesreceipt' | 'journalentry' | 'deposit';
-  queryEntity: 'SalesReceipt' | 'JournalEntry' | 'Deposit';
-  responseContainer: 'SalesReceipt' | 'JournalEntry' | 'Deposit';
+  apiPath: 'salesreceipt' | 'journalentry' | 'deposit' | 'transfer';
+  queryEntity: 'SalesReceipt' | 'JournalEntry' | 'Deposit' | 'Transfer';
+  responseContainer: 'SalesReceipt' | 'JournalEntry' | 'Deposit' | 'Transfer';
 };
 
 const QUICKBOOKS_ENTITY_METADATA: Record<QuickBooksDocType, QuickBooksEntityMetadata> = {
@@ -42,6 +42,11 @@ const QUICKBOOKS_ENTITY_METADATA: Record<QuickBooksDocType, QuickBooksEntityMeta
     apiPath: 'deposit',
     queryEntity: 'Deposit',
     responseContainer: 'Deposit',
+  },
+  transfer: {
+    apiPath: 'transfer',
+    queryEntity: 'Transfer',
+    responseContainer: 'Transfer',
   },
 };
 
@@ -175,6 +180,14 @@ export interface QuickBooksBankDeposit {
   PrivateNote?: string;
   DepositToAccountRef: QuickBooksReference;
   Line: QuickBooksDepositLine[];
+}
+
+export interface QuickBooksTransfer {
+  TxnDate: string;
+  PrivateNote?: string;
+  Amount: number;
+  FromAccountRef: QuickBooksReference;
+  ToAccountRef: QuickBooksReference;
 }
 
 interface PostOptions {
@@ -314,7 +327,7 @@ export interface PostChargeToQboInput {
 
 export interface PostChargeToQboResult {
   qboId: string;
-  type: Extract<QuickBooksDocType, 'sales-receipt' | 'journal-entry' | 'bank-deposit'>;
+  type: Extract<QuickBooksDocType, 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer'>;
 }
 
 export interface TaggedQuickBooksDocument {
@@ -2610,7 +2623,11 @@ type ReferenceCollections = {
 
 const collectReferences = (
   entity: QuickBooksDocType,
-  payload: QuickBooksSalesReceipt | QuickBooksJournalEntry | QuickBooksBankDeposit
+  payload:
+    | QuickBooksSalesReceipt
+    | QuickBooksJournalEntry
+    | QuickBooksBankDeposit
+    | QuickBooksTransfer
 ): ReferenceCollections => {
   const accounts: AccountRefWithMetadata[] = [];
   const items: ItemRefWithMetadata[] = [];
@@ -2644,6 +2661,10 @@ const collectReferences = (
         addAccountRef(line.JournalEntryLineDetail.AccountRef);
       }
     }
+  } else if (entity === 'transfer') {
+    const transfer = payload as QuickBooksTransfer;
+    addAccountRef(transfer.FromAccountRef);
+    addAccountRef(transfer.ToAccountRef);
   } else {
     const deposit = payload as QuickBooksBankDeposit;
     addAccountRef(deposit.DepositToAccountRef);
@@ -3008,27 +3029,50 @@ const checkForDuplicate = async (
 };
 
 /**
- * Check if a bank deposit already exists for a given Stripe payout.
- * Searches by date and amount to find identical deposits.
- * @param payoutId The Stripe payout ID (for logging purposes)
- * @param date The transaction date
- * @param amount The payout amount in cents
- * @param options Optional request options
- * @returns The existing deposit ID if found, null otherwise
+ * Checks whether a payout movement already exists in QBO for the same date+amount.
+ *
+ * Preference order:
+ * 1) Transfer (new canonical posting shape)
+ * 2) Bank Deposit (legacy posting shape)
  */
-const checkForPayoutDeposit = async (
+const checkForPayoutMovement = async (
   payoutId: string,
   date: Date,
   amount: number,
   options?: PostOptions
-): Promise<string | null> => {
-  try {
-    const formattedDate = normalizeDate(date);
-    const amountDollars = centsToDollars(amount);
+): Promise<{ id: string; type: 'transfer' | 'bank-deposit' } | null> => {
+  const formattedDate = normalizeDate(date);
+  const amountDollars = centsToDollars(amount);
 
-    // Query for deposits with the same date, then check amount in code
-    // QuickBooks query language has limitations with decimal comparisons
-    const queryString = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
+  try {
+    const transferQuery = `SELECT Id, TxnDate, Amount FROM Transfer WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
+    const transferResult = await query<{
+      QueryResponse: {
+        Transfer?: Array<{ Id: string; TxnDate?: string; Amount?: number }>;
+      };
+    }>(transferQuery, options);
+    const transfers = transferResult?.QueryResponse?.Transfer;
+    if (transfers && transfers.length > 0) {
+      const matchingTransfer = transfers.find((transfer) => transfer.Amount === amountDollars);
+      if (matchingTransfer?.Id) {
+        logger.info('[QBO] Found existing transfer for payout by date and amount check', {
+          payoutId,
+          existingId: matchingTransfer.Id,
+          date: matchingTransfer.TxnDate,
+          amount: matchingTransfer.Amount,
+        });
+        return { id: matchingTransfer.Id, type: 'transfer' };
+      }
+    }
+  } catch (error) {
+    logger.warn('[QBO] Payout transfer check failed', {
+      payoutId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    const depositQuery = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
 
     logger.debug('[QBO] Checking for existing payout deposit by date', {
       payoutId,
@@ -3036,18 +3080,16 @@ const checkForPayoutDeposit = async (
       amount: amountDollars,
     });
 
-    const result = await query<{
+    const depositResult = await query<{
       QueryResponse: {
         Deposit?: Array<{ Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number }>;
       };
-    }>(queryString, options);
+    }>(depositQuery, options);
 
-    const deposits = result?.QueryResponse?.Deposit;
+    const deposits = depositResult?.QueryResponse?.Deposit;
     if (deposits && deposits.length > 0) {
-      // Find deposits with matching amount
       const matchingDeposit = deposits.find((deposit) => deposit.TotalAmt === amountDollars);
-
-      if (matchingDeposit) {
+      if (matchingDeposit?.Id) {
         logger.info('[QBO] Found existing deposit for payout by date and amount check', {
           payoutId,
           existingId: matchingDeposit.Id,
@@ -3055,11 +3097,11 @@ const checkForPayoutDeposit = async (
           date: matchingDeposit.TxnDate,
           amount: matchingDeposit.TotalAmt,
         });
-        return matchingDeposit.Id;
+        return { id: matchingDeposit.Id, type: 'bank-deposit' };
       }
     }
 
-    logger.debug('[QBO] No existing payout deposit found by date and amount check', {
+    logger.debug('[QBO] No existing payout movement found by date and amount check', {
       payoutId,
       date: formattedDate,
       amount: amountDollars,
@@ -3081,7 +3123,9 @@ const postToQbo = async <T extends QuickBooksDocType>(
     ? QuickBooksSalesReceipt
     : T extends 'journal-entry'
       ? QuickBooksJournalEntry
-      : QuickBooksBankDeposit,
+      : T extends 'transfer'
+        ? QuickBooksTransfer
+        : QuickBooksBankDeposit,
   options?: PostOptions
 ): Promise<PostResult> => {
   // Extract DocNumber from payload for duplicate checking
@@ -3297,6 +3341,11 @@ export const postBankDeposit = (
   options?: PostOptions
 ): Promise<PostResult> => postToQbo('bank-deposit', bankDeposit, options);
 
+export const postTransfer = (
+  transfer: QuickBooksTransfer,
+  options?: PostOptions
+): Promise<PostResult> => postToQbo('transfer', transfer, options);
+
 const postChargeAsSalesReceipt = async (input: {
   grossAmount: number;
   feeAmount: number;
@@ -3467,16 +3516,17 @@ const resolveExistingPayoutDepositResult = async (
     return null;
   }
 
-  const existingDepositId = await checkForPayoutDeposit(payoutId, date, payoutAmount, options);
-  if (!existingDepositId) {
+  const existingMovement = await checkForPayoutMovement(payoutId, date, payoutAmount, options);
+  if (!existingMovement) {
     return null;
   }
 
-  logger.info('[QBO] Found existing deposit for payout', {
+  logger.info('[QBO] Found existing payout movement', {
     payoutId,
-    existingId: existingDepositId,
+    existingId: existingMovement.id,
+    type: existingMovement.type,
   });
-  return { qboId: existingDepositId, type: 'bank-deposit' };
+  return { qboId: existingMovement.id, type: existingMovement.type };
 };
 
 const buildResolvedPayoutDeposit = async (input: {
@@ -3499,6 +3549,26 @@ const buildResolvedPayoutDeposit = async (input: {
     sourceAccountId: sourceAccountRef.value,
     targetAccountId: targetAccountRef.value,
   });
+};
+
+const buildResolvedPayoutTransfer = async (input: {
+  amountCents: number;
+  memo?: string;
+  date: Date;
+  options?: PostOptions;
+}): Promise<QuickBooksTransfer> => {
+  const context = await createRequestContext(input.options);
+  const sourceAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
+  const targetAccountRef = createAccountRef(env.quickBooks.accounts.operatingBank);
+  await resolveAccountReferences([sourceAccountRef, targetAccountRef], context);
+
+  return {
+    TxnDate: normalizeDate(input.date),
+    PrivateNote: input.memo,
+    Amount: centsToDollars(input.amountCents),
+    FromAccountRef: sourceAccountRef,
+    ToAccountRef: targetAccountRef,
+  };
 };
 
 export const postChargeToQbo = async ({
@@ -3735,16 +3805,15 @@ export const postPayoutToQbo = async ({
     return existingDepositResult;
   }
 
-  const deposit = await buildResolvedPayoutDeposit({
-    docNumber: buildDocNumber('PO', date, payoutAmount, payoutId),
+  const transfer = await buildResolvedPayoutTransfer({
     amountCents: payoutAmount,
     memo: normalizedMemo,
     date,
     options,
   });
 
-  const result = await postBankDeposit(deposit, options);
-  return { qboId: result.id, type: 'bank-deposit' };
+  const result = await postTransfer(transfer, options);
+  return { qboId: result.id, type: 'transfer' };
 };
 
 export const postDisputeToQbo = async ({
@@ -4005,7 +4074,7 @@ export const deleteQuickBooksDocument = async (
  * read or query against the document).  QBO rejects updates with a stale token.
  */
 export const updateQboDocPrivateNote = async (
-  entity: 'SalesReceipt' | 'JournalEntry' | 'Deposit',
+  entity: 'SalesReceipt' | 'JournalEntry' | 'Deposit' | 'Transfer',
   docId: string,
   syncToken: string,
   privateNote: string,
@@ -4017,7 +4086,12 @@ export const updateQboDocPrivateNote = async (
   if (!trimmedToken) throw new Error(`QBO document ${trimmedId} is missing SyncToken.`);
 
   const apiPath = (
-    { SalesReceipt: 'salesreceipt', JournalEntry: 'journalentry', Deposit: 'deposit' } as const
+    {
+      SalesReceipt: 'salesreceipt',
+      JournalEntry: 'journalentry',
+      Deposit: 'deposit',
+      Transfer: 'transfer',
+    } as const
   )[entity];
   const url = `${buildQboUrl(apiPath)}?operation=update`;
   const context = await createRequestContext(options);
@@ -4764,6 +4838,7 @@ export default {
   postSalesReceipt,
   postJournalEntry,
   postBankDeposit,
+  postTransfer,
   postChargeToQbo,
   postRefundToQbo,
   postDisputeToQbo,

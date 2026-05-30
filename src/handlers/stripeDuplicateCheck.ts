@@ -23,6 +23,7 @@ const QBO_DELETABLE_ENTITY_TYPES = new Set<QuickBooksDocEntityType>([
   'sales-receipt',
   'journal-entry',
   'bank-deposit',
+  'transfer',
 ]);
 
 // DocNumber prefixes for documents whose suffix encodes a Stripe ID
@@ -39,6 +40,17 @@ const extractStripeIdsFromText = (text: string | null | undefined): string[] => 
   if (!text?.trim()) return [];
   const matches = [...text.matchAll(STRIPE_ID_PATTERN)].map((m) => m[0]);
   return [...new Set(matches)];
+};
+
+const isPayoutId = (id: string): boolean => id.startsWith('po_') || id.startsWith('py_');
+
+/**
+ * Returns true when the extracted Stripe IDs indicate a "pure payout" document:
+ * exactly one payout ID and no charge/refund/payment/dispute/etc IDs.
+ */
+const isPurePayoutStripeIdSet = (ids: string[]): boolean => {
+  if (ids.length !== 1) return false;
+  return isPayoutId(ids[0]);
 };
 
 type QboDocumentRecord = {
@@ -79,6 +91,20 @@ type SystemResult = {
   duplicateGroups: DuplicateGroup[];
   deleted: number;
   errors: string[];
+  plannedActions?: {
+    qbo?: Array<{
+      stripeKey: string;
+      keep: { id: string; entity: string; docNumber: string | null };
+      delete: Array<{ id: string; entity: string; docNumber: string | null }>;
+      update: Array<{ id: string; entity: string; action: string }>;
+    }>;
+    salesforce?: Array<{
+      stripeKey: string;
+      keep: { id: string; entity: string };
+      delete: Array<{ id: string; entity: string }>;
+      update: Array<{ id: string; entity: string; action: string }>;
+    }>;
+  };
   inspectMatches?: Array<{
     entity: string;
     id: string;
@@ -88,6 +114,86 @@ type SystemResult = {
   }>;
   debugLineFetch?: Array<{ id: string; lineDescription: string | null }>;
 };
+
+const QBO_ENTITY_DELETE_PRIORITY: Record<string, number> = {
+  transfer: 0,
+  'bank-deposit': 1,
+  'sales-receipt': 2,
+  'journal-entry': 3,
+};
+
+const toDateOnlyTimestamp = (value: string | null): number => {
+  if (!value) return Number.POSITIVE_INFINITY;
+  const t = new Date(`${value}T00:00:00Z`).getTime();
+  return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+};
+
+const toDateTimeTimestamp = (value: string | null): number => {
+  if (!value) return Number.POSITIVE_INFINITY;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+};
+
+const sortQboGroupForCanonicalKeep = (records: DuplicateRecord[]): DuplicateRecord[] =>
+  [...records].sort((a, b) => {
+    const pa = QBO_ENTITY_DELETE_PRIORITY[a.entity] ?? 50;
+    const pb = QBO_ENTITY_DELETE_PRIORITY[b.entity] ?? 50;
+    if (pa !== pb) return pa - pb;
+
+    const da = toDateOnlyTimestamp(a.txnDate);
+    const db = toDateOnlyTimestamp(b.txnDate);
+    if (da !== db) return da - db;
+
+    const ca = toDateTimeTimestamp(a.createTime);
+    const cb = toDateTimeTimestamp(b.createTime);
+    if (ca !== cb) return ca - cb;
+
+    return a.id.localeCompare(b.id);
+  });
+
+const buildQboPlannedActions = (
+  groups: DuplicateGroup[]
+): NonNullable<SystemResult['plannedActions']>['qbo'] =>
+  groups.map((group) => {
+    const sorted = sortQboGroupForCanonicalKeep(group.records);
+    const keepRecord = sorted[0];
+    const deleteRecords = sorted.slice(1);
+    return {
+      stripeKey: group.key,
+      keep: {
+        id: keepRecord.id,
+        entity: keepRecord.entity,
+        docNumber: keepRecord.docNumber,
+      },
+      delete: deleteRecords.map((doc) => ({
+        id: doc.id,
+        entity: doc.entity,
+        docNumber: doc.docNumber,
+      })),
+      // Reserved for future reconciliation-specific state repairs.
+      update: [],
+    };
+  });
+
+const buildSalesforcePlannedActions = (
+  groups: DuplicateGroup[]
+): NonNullable<SystemResult['plannedActions']>['salesforce'] =>
+  groups.map((group) => {
+    const sorted = [...group.records].sort((a, b) => {
+      const ta = a.createTime ? new Date(a.createTime).getTime() : 0;
+      const tb = b.createTime ? new Date(b.createTime).getTime() : 0;
+      return ta - tb;
+    });
+    const keepRecord = sorted[0];
+    const deleteRecords = sorted.slice(1);
+    return {
+      stripeKey: group.key,
+      keep: { id: keepRecord.id, entity: keepRecord.entity },
+      delete: deleteRecords.map((doc) => ({ id: doc.id, entity: doc.entity })),
+      // Reserved for future reconciliation-specific state repairs.
+      update: [],
+    };
+  });
 
 /**
  * Parse the DocNumber prefix and Stripe ID suffix from a QBO DocNumber in pattern
@@ -285,10 +391,20 @@ const detectQboDuplicates = async (
     const noteIds = extractStripeIdsFromText(privateNote);
     if (noteIds.length > 0) {
       for (const stripeId of noteIds) {
+        // For payout grouping, only treat documents as payout docs when they carry
+        // only a single payout ID and no other Stripe object IDs.
+        if (isPayoutId(stripeId) && !isPurePayoutStripeIdSet(noteIds)) {
+          continue;
+        }
         addToGroup(`${groupEntity}:${stripeId}`, doc);
       }
     } else if (extractStripeIdsFromText(lineDescription).length > 0) {
-      for (const stripeId of extractStripeIdsFromText(lineDescription)) {
+      const lineIds = extractStripeIdsFromText(lineDescription);
+      for (const stripeId of lineIds) {
+        // Same payout-only guard for line-description sourced IDs.
+        if (isPayoutId(stripeId) && !isPurePayoutStripeIdSet(lineIds)) {
+          continue;
+        }
         addToGroup(`${groupEntity}:${stripeId}`, doc);
       }
     } else {
@@ -340,10 +456,10 @@ const deleteQboDuplicates = async (
   const errors: string[] = [];
 
   const ENTITY_DELETE_PRIORITY: Record<string, number> = {
-    'bank-deposit': 0,
-    'sales-receipt': 1,
-    'journal-entry': 2,
-    transfer: 99,
+    transfer: 0,
+    'bank-deposit': 1,
+    'sales-receipt': 2,
+    'journal-entry': 3,
   };
 
   const toDateOnlyTimestamp = (value: string | null): number => {
@@ -386,7 +502,7 @@ const deleteQboDuplicates = async (
       }
       try {
         const tagged: TaggedQuickBooksDocument = {
-          type: doc.entity as 'sales-receipt' | 'journal-entry' | 'bank-deposit',
+          type: doc.entity as 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer',
           id: doc.id,
           syncToken: doc.syncToken,
           docNumber: doc.docNumber,
@@ -548,6 +664,7 @@ const stripeDuplicateCheck = async (
   const system = (request.query.get('system') ?? 'both') as 'qbo' | 'salesforce' | 'both';
   const deleteDuplicates = readBooleanQuery(request, 'deleteDuplicates', false);
   const dryRun = readBooleanQuery(request, 'dryRun', true);
+  const onlyPayouts = readBooleanQuery(request, 'onlyPayouts', false);
   const startDate = request.query.get('startDate') ?? undefined;
   const endDate = request.query.get('endDate') ?? undefined;
   const inspectStripeId = request.query.get('inspectStripeId') ?? undefined;
@@ -560,6 +677,7 @@ const stripeDuplicateCheck = async (
     success: boolean;
     dryRun: boolean;
     deleteDuplicates: boolean;
+    onlyPayouts: boolean;
     dateRange: { startDate: string | null; endDate: string | null };
     qbo?: SystemResult;
     salesforce?: SystemResult;
@@ -567,6 +685,7 @@ const stripeDuplicateCheck = async (
     success: true,
     dryRun,
     deleteDuplicates,
+    onlyPayouts,
     dateRange: { startDate: startDate ?? null, endDate: endDate ?? null },
   };
 
@@ -578,20 +697,26 @@ const stripeDuplicateCheck = async (
         inspectStripeId,
         fetchLineDescriptions
       );
+      const filteredGroups = onlyPayouts
+        ? groups.filter(
+            (g) => g.key.startsWith('bank-deposit:po_') || g.key.startsWith('bank-deposit:py_')
+          )
+        : groups;
       let deleted = 0;
       let errors: string[] = [];
 
-      if (deleteDuplicates && !dryRun && groups.length > 0) {
-        const result = await deleteQboDuplicates(groups);
+      if (deleteDuplicates && !dryRun && filteredGroups.length > 0) {
+        const result = await deleteQboDuplicates(filteredGroups);
         deleted = result.deleted;
         errors = result.errors;
       }
 
       responseBody.qbo = {
         checked,
-        duplicateGroups: groups,
+        duplicateGroups: filteredGroups,
         deleted,
         errors,
+        ...(dryRun && { plannedActions: { qbo: buildQboPlannedActions(filteredGroups) } }),
         ...(inspectMatches !== undefined && { inspectMatches }),
         ...(debugLineFetch !== undefined && { debugLineFetch }),
       };
@@ -605,19 +730,34 @@ const stripeDuplicateCheck = async (
         startDate,
         endDate
       );
+      const filteredGroups = onlyPayouts
+        ? groups.filter(
+            (g) =>
+              g.key.startsWith('Stripe_Payout_Id__c:po_') ||
+              g.key.startsWith('Stripe_Payout_Id__c:py_')
+          )
+        : groups;
       let deleted = 0;
       let errors: string[] = [];
 
-      if (deleteDuplicates && !dryRun && groups.length > 0) {
+      if (deleteDuplicates && !dryRun && filteredGroups.length > 0) {
         const result = await deleteSalesforceDuplicates(
           connection as unknown as JsforceConnection,
-          groups
+          filteredGroups
         );
         deleted = result.deleted;
         errors = result.errors;
       }
 
-      responseBody.salesforce = { checked, duplicateGroups: groups, deleted, errors };
+      responseBody.salesforce = {
+        checked,
+        duplicateGroups: filteredGroups,
+        deleted,
+        errors,
+        ...(dryRun && {
+          plannedActions: { salesforce: buildSalesforcePlannedActions(filteredGroups) },
+        }),
+      };
     }
   } catch (error) {
     logger.error('[stripeDuplicateCheck] Handler error', {

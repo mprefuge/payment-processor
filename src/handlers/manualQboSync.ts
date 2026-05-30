@@ -18,7 +18,7 @@ import { createQboDeposit } from '../services/qbo/createDeposit';
 import tokenManager from '../services/qbo/qboTokenManager';
 import { logger } from '../lib/logger';
 
-type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit';
+type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer';
 
 // Comprehensive schemas for all QuickBooks document types
 

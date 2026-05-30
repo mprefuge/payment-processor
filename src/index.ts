@@ -280,6 +280,9 @@ const StripeDuplicateCheckQuerySchema = z
     system: z.enum(['qbo', 'salesforce', 'both']).optional(),
     deleteDuplicates: BoolLikeQuerySchema.optional(),
     dryRun: BoolLikeQuerySchema.optional(),
+    onlyPayouts: BoolLikeQuerySchema.optional(),
+    inspectStripeId: z.string().optional(),
+    fetchLineDescriptions: BoolLikeQuerySchema.optional(),
     startDate: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -1698,7 +1701,8 @@ registerFunction(
       'Duplicate QBO documents are identified by a shared Stripe ID suffix in their DocNumber ' +
       '(CHG-, CHGJE-, PO- prefixes). Duplicate Salesforce Transaction__c records are identified ' +
       'by repeating values in any of the ten Stripe ID fields. ' +
-      'Set deleteDuplicates=true with dryRun=false to permanently remove extras (oldest record is kept).',
+      'Set deleteDuplicates=true with dryRun=false to permanently remove extras (oldest record is kept). ' +
+      'Use onlyPayouts=true to scope checks to payout IDs and use dryRun=true to review plannedActions before delete mode.',
     tags: ['QBO', 'Salesforce'],
     operationId: 'stripeDuplicateCheck',
     methods: ['GET'],
@@ -1717,9 +1721,22 @@ registerFunction(
               success: true,
               dryRun: true,
               deleteDuplicates: false,
+              onlyPayouts: true,
               dateRange: { startDate: null, endDate: null },
-              qbo: { checked: 42, duplicateGroups: [], deleted: 0, errors: [] },
-              salesforce: { checked: 38, duplicateGroups: [], deleted: 0, errors: [] },
+              qbo: {
+                checked: 42,
+                duplicateGroups: [],
+                deleted: 0,
+                errors: [],
+                plannedActions: { qbo: [] },
+              },
+              salesforce: {
+                checked: 38,
+                duplicateGroups: [],
+                deleted: 0,
+                errors: [],
+                plannedActions: { salesforce: [] },
+              },
             },
           },
         },
