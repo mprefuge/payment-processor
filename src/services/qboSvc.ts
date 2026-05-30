@@ -3645,8 +3645,24 @@ export const postManualEntryAsSalesReceipt = async (input: {
   );
   const context = await createRequestContext(input.options);
 
+  // Resolve accounts and item
+  const undepositedFundsRef = createAccountRef('Undeposited Funds');
   const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
-  await resolveAccountReferences([revenueAccountRef], context);
+  await resolveAccountReferences([undepositedFundsRef, revenueAccountRef], context);
+
+  // Resolve revenue item (same as Stripe sales receipts use)
+  let revenueItemReference: QuickBooksReference;
+  try {
+    revenueItemReference = await resolveRevenueItemReference('Manual Donation', context);
+  } catch (error) {
+    logger.warn(
+      '[QBOSvc] postManualEntryAsSalesReceipt: failed to resolve revenue item; using default',
+      {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    );
+    revenueItemReference = { value: '1', name: 'Services' };
+  }
 
   // Resolve QBO customer if name or email provided
   let resolvedEntityRef: QuickBooksReference | null = null;
@@ -3694,8 +3710,8 @@ export const postManualEntryAsSalesReceipt = async (input: {
     TxnDate: typeof input.date === 'string' ? input.date : input.date.toISOString().split('T')[0],
     PrivateNote: input.memo,
     DepositToAccountRef: {
-      name: 'Undeposited Funds',
-      value: 'Undeposited Funds',
+      name: undepositedFundsRef.name,
+      value: undepositedFundsRef.value,
     },
     CustomerRef: resolvedEntityRef
       ? {
@@ -3710,8 +3726,8 @@ export const postManualEntryAsSalesReceipt = async (input: {
         Description: input.memo,
         SalesItemLineDetail: {
           ItemRef: {
-            name: 'Services',
-            value: 'Uncategorized Service',
+            value: revenueItemReference.value,
+            name: revenueItemReference.name ?? undefined,
           },
           TaxCodeRef: {
             value: 'NON',
