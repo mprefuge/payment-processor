@@ -163,6 +163,12 @@ export interface SalesforceSvc {
   ) => Promise<UpsertResult>;
   linkPayoutOnTransactions: (payoutId: string, btIds: string[]) => Promise<UpsertResult[]>;
   markPostedToQbo: (salesforceId: string, doc: QuickBooksDocumentReference) => Promise<void>;
+  /**
+   * Clears the QBO document link on a Transaction__c whose referenced QBO doc has been
+   * deleted or voided.  Sets Posted_to_QBO__c = false and nulls QBO_Doc_Id__c /
+   * QBO_Doc_Type__c so the record is eligible for re-posting.
+   */
+  clearStaleQboDocReference: (salesforceId: string) => Promise<void>;
   findTransactionIdByExternalId: (
     key: TransactionExternalIdField,
     value: string,
@@ -1078,6 +1084,26 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     }
   };
 
+  const clearStaleQboDocReference = async (salesforceId: string): Promise<void> => {
+    const normalizedId = ensureNonEmpty(salesforceId, 'Salesforce transaction ID');
+    const record = sanitizeTransactionRecord({
+      Id: normalizedId,
+      posted_to_qbo__c: false,
+      qbo_doc_type__c: null,
+      qbo_doc_id__c: null,
+      posting_error__c: 'QBO document was deleted or voided; link cleared by reconciliation',
+    });
+    const [result] = toArray(
+      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', TRANSACTION_DML_OPTIONS)
+    );
+    if (!result.success) {
+      const message =
+        collectErrorMessages([result]) ||
+        `Failed to clear stale QBO doc reference on transaction ${normalizedId}.`;
+      throw new Error(message);
+    }
+  };
+
   const findTransactionIdByExternalId = async (
     key: TransactionExternalIdField,
     value: string,
@@ -1543,6 +1569,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
     markPostedToQbo,
+    clearStaleQboDocReference,
     findTransactionIdByExternalId,
     findTransactionRecordByExternalId,
     upsertCustomerByStripeId,

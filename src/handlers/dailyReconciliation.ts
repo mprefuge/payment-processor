@@ -68,6 +68,8 @@ interface RepairSummary {
   transactionsCreated: number;
   /** QBO→SF and Stripe metadata links written by repairCrossSystemLinks */
   linkedRecords: number;
+  /** SF records whose stale QBO_Doc_Id__c was cleared (doc was deleted/voided in QBO) */
+  staleLinksCleared: number;
   errors: string[];
 }
 
@@ -1394,6 +1396,33 @@ export const runReconciliation = async (
     let contactsUpserted = 0;
     let transactionsCreated = 0;
     let linkedRecords = 0;
+    let staleLinksCleared = 0;
+
+    // Clear stale QBO doc references: SF rows pointing to QBO docs that have been deleted or
+    // voided.  Setting Posted_to_QBO__c = false and nulling QBO_Doc_Id__c makes the record
+    // eligible for re-posting on the next true-up or reconciliation run.
+    if (systems.includes('salesforce')) {
+      const staleItems = discrepancies.salesforceMissingQbo.filter(
+        (i) => i.type === 'sf_qbo_doc_deleted'
+      );
+      for (const item of staleItems) {
+        try {
+          await salesforceSvc.clearStaleQboDocReference(item.id);
+          staleLinksCleared++;
+          context.log('[DailyReconciliation] Cleared stale QBO doc reference on SF record', {
+            sfId: item.id,
+            stripeId: item.stripeId,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          repairErrors.push(`Failed to clear stale QBO ref on ${item.id}: ${msg}`);
+          context.log('[DailyReconciliation] Failed to clear stale QBO doc reference', {
+            sfId: item.id,
+            error: msg,
+          });
+        }
+      }
+    }
 
     // Contact coalescing: update SF contacts with latest Stripe billing data
     if (systems.includes('stripe') && systems.includes('salesforce')) {
@@ -1449,7 +1478,13 @@ export const runReconciliation = async (
       repairErrors.push(...linkResult.errors);
     }
 
-    repairs = { contactsUpserted, transactionsCreated, linkedRecords, errors: repairErrors };
+    repairs = {
+      contactsUpserted,
+      transactionsCreated,
+      linkedRecords,
+      staleLinksCleared,
+      errors: repairErrors,
+    };
 
     if (repairs.errors.length > 0) {
       errors.push(...repairs.errors.map((e) => `[repair] ${e}`));
@@ -1459,6 +1494,7 @@ export const runReconciliation = async (
       contactsUpserted: repairs.contactsUpserted,
       transactionsCreated: repairs.transactionsCreated,
       linkedRecords: repairs.linkedRecords,
+      staleLinksCleared: repairs.staleLinksCleared,
       repairErrors: repairs.errors.length,
     });
   }

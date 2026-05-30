@@ -149,6 +149,9 @@ const createDisabledSalesforceSvc = (): SalesforceSvc => {
     async markPostedToQbo(): Promise<void> {
       return;
     },
+    async clearStaleQboDocReference(): Promise<void> {
+      return;
+    },
     async findTransactionIdByExternalId(): Promise<string | null> {
       return null;
     },
