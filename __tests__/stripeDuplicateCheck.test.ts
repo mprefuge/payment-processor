@@ -422,6 +422,45 @@ describe('stripeDuplicateCheck', () => {
       expect(group.records).toHaveLength(2);
     });
 
+    it('groups payout journal entries with payout movement duplicates', async () => {
+      mockQboQuery
+        .mockResolvedValueOnce([]) // SalesReceipt
+        .mockResolvedValueOnce([
+          makeQboDoc(
+            'j1',
+            '0',
+            'CHGJE-20260528-Fc1YAH',
+            '2026-05-28',
+            '2026-05-28T09:00:00Z',
+            'Stripe Payout po_1TbrWiBJf9YYVP9mdlqoBSc9'
+          ),
+        ]) // JournalEntry
+        .mockResolvedValueOnce([
+          makeQboDoc(
+            'd1',
+            '0',
+            null,
+            '2026-05-28',
+            '2026-05-28T10:00:00Z',
+            'Stripe PayoutID: po_1TbrWiBJf9YYVP9mdlqoBSc9 Initiated automatic payout'
+          ),
+        ]) // Deposit
+        .mockResolvedValueOnce([]); // Transfer
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      const group = result.jsonBody.qbo.duplicateGroups.find(
+        (g: any) => g.key === 'bank-deposit:po_1TbrWiBJf9YYVP9mdlqoBSc9'
+      );
+      expect(group).toBeDefined();
+      expect(group.records).toHaveLength(2);
+      expect(group.records.some((r: any) => r.entity === 'journal-entry')).toBe(true);
+      expect(group.records.some((r: any) => r.entity === 'bank-deposit')).toBe(true);
+    });
+
     it('ignores payout grouping when a document contains payout ID plus other Stripe IDs', async () => {
       // Mixed-ID records should not be considered canonical payout documents.
       mockQboQuery

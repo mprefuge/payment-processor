@@ -368,10 +368,17 @@ const detectQboDuplicates = async (
       : undefined;
 
   // Group by {entity}:{stripeId}.
-  // Entity-key normalization: QBO bank-feed may book a payout as a Transfer instead of a
-  // Deposit (or alongside a Deposit). For grouping purposes we treat 'transfer' the same as
-  // 'bank-deposit' so both land in the same duplicate group under 'bank-deposit:{stripeId}'.
-  const entityKeyFor = (entity: string) => (entity === 'transfer' ? 'bank-deposit' : entity);
+  // Entity-key normalization for payout movements:
+  // - QBO bank-feed may book payouts as Transfer instead of Deposit.
+  // - Legacy payout postings may exist as JournalEntry.
+  // For pure payout IDs we normalize all movement entities to bank-deposit so they are
+  // considered one duplicate set and can be cleaned with the same rule.
+  const entityKeyForStripe = (entity: string, stripeId: string): string => {
+    if (isPayoutId(stripeId) && (entity === 'transfer' || entity === 'journal-entry')) {
+      return 'bank-deposit';
+    }
+    return entity;
+  };
 
   // Primary source:  PrivateNote — extract full Stripe IDs via regex. This catches all
   //   DocNumber formats including the legacy 'payout_{id}' pattern because the memo
@@ -387,7 +394,6 @@ const detectQboDuplicates = async (
   };
 
   for (const { privateNote, lineDescription, ...doc } of allDocs) {
-    const groupEntity = entityKeyFor(doc.entity);
     const noteIds = extractStripeIdsFromText(privateNote);
     if (noteIds.length > 0) {
       for (const stripeId of noteIds) {
@@ -396,6 +402,7 @@ const detectQboDuplicates = async (
         if (isPayoutId(stripeId) && !isPurePayoutStripeIdSet(noteIds)) {
           continue;
         }
+        const groupEntity = entityKeyForStripe(doc.entity, stripeId);
         addToGroup(`${groupEntity}:${stripeId}`, doc);
       }
     } else if (extractStripeIdsFromText(lineDescription).length > 0) {
@@ -405,12 +412,14 @@ const detectQboDuplicates = async (
         if (isPayoutId(stripeId) && !isPurePayoutStripeIdSet(lineIds)) {
           continue;
         }
+        const groupEntity = entityKeyForStripe(doc.entity, stripeId);
         addToGroup(`${groupEntity}:${stripeId}`, doc);
       }
     } else {
       // Fallback: use DocNumber prefix pattern
       const parts = parseDocNumberParts(doc.docNumber);
       if (parts) {
+        const groupEntity = entityKeyForStripe(doc.entity, parts.stripeKey);
         addToGroup(`${groupEntity}:${parts.prefix}:${parts.stripeKey}`, doc);
       }
     }
