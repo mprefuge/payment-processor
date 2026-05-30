@@ -4124,17 +4124,26 @@ export const patchQboDocClassRef = async (
   const classRef = createClassRef(classRefStr);
 
   if (entity === 'SalesReceipt') {
-    // If the receipt already has a ClassRef, leave it alone.
-    if (doc.ClassRef) return false;
+    // QBO's CLASS column is per-line (SalesItemLineDetail.ClassRef), not the header ClassRef.
+    // We must re-send the full Line array to set it — sparse update only covers the header.
+    const rawLines = Array.isArray(doc.Line) ? (doc.Line as Array<Record<string, unknown>>) : [];
+    let patched = false;
+    const patchedLines = rawLines.map((line) => {
+      const detail = line.SalesItemLineDetail as Record<string, unknown> | undefined;
+      if (!detail) return line; // non-revenue line (e.g. SubTotal) — leave as-is
+      if (detail.ClassRef) return line; // already has a class on this line
+      patched = true;
+      return {
+        ...line,
+        SalesItemLineDetail: { ...detail, ClassRef: classRef },
+      };
+    });
+
+    if (!patched) return false;
 
     const apiContext = await createRequestContext(options);
     const url = `${buildQboUrl('salesreceipt')}?operation=update`;
-    const body = JSON.stringify({
-      sparse: true,
-      Id: docId,
-      SyncToken: syncToken,
-      ClassRef: classRef,
-    });
+    const body = JSON.stringify({ ...doc, Line: patchedLines, SyncToken: syncToken });
     const response = await apiContext.request(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
