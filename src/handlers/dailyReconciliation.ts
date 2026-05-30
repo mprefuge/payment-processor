@@ -1445,10 +1445,13 @@ const repairMissingSfToQbo = async (
             customerEmail,
             classRef: classRefStr,
           });
-          context.log('[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt (Stripe fallback)', {
-            sfId,
-            qboId: result.qboId,
-          });
+          context.log(
+            '[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt (Stripe fallback)',
+            {
+              sfId,
+              qboId: result.qboId,
+            }
+          );
         }
       } else {
         // ── Manual entry path: no Stripe charge, post as Sales Receipt to Undeposited Funds ──
