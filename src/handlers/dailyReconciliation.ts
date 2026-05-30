@@ -1579,7 +1579,9 @@ export const runReconciliation = async (
 
     // Clear stale QBO doc references: SF rows pointing to QBO docs that have been deleted or
     // voided.  Setting Posted_to_QBO__c = false and nulling QBO_Doc_Id__c makes the record
-    // eligible for re-posting on the next true-up or reconciliation run.
+    // eligible for re-posting.  Cleared items are collected so they are re-posted to QBO
+    // immediately in this same run rather than waiting for the next scheduled reconciliation.
+    const staleClearedForReposting: DiscrepancyItem[] = [];
     if (systems.includes('salesforce')) {
       const staleItems = discrepancies.salesforceMissingQbo.filter(
         (i) => i.type === 'sf_qbo_doc_deleted'
@@ -1588,6 +1590,8 @@ export const runReconciliation = async (
         try {
           await salesforceSvc.clearStaleQboDocReference(item.id);
           staleLinksCleared++;
+          // Re-type as sf_missing_qbo so repairMissingSfToQbo processes it below
+          staleClearedForReposting.push({ ...item, type: 'sf_missing_qbo' });
           context.log('[DailyReconciliation] Cleared stale QBO doc reference on SF record', {
             sfId: item.id,
             stripeId: item.stripeId,
@@ -1603,11 +1607,15 @@ export const runReconciliation = async (
       }
     }
 
-    // Post SF records missing from QBO into QuickBooks (manual entries + Stripe-linked)
+    // Post SF records missing from QBO into QuickBooks (manual entries + Stripe-linked).
+    // Combines:
+    //   • Original sf_missing_qbo items (never had a QBO link)
+    //   • Records whose stale QBO link was just cleared above (re-post in same run)
     if (systems.includes('salesforce') && systems.includes('qbo')) {
-      const sfMissingQboItems = discrepancies.salesforceMissingQbo.filter(
-        (i) => i.type === 'sf_missing_qbo'
-      );
+      const sfMissingQboItems = [
+        ...discrepancies.salesforceMissingQbo.filter((i) => i.type === 'sf_missing_qbo'),
+        ...staleClearedForReposting,
+      ];
       if (sfMissingQboItems.length > 0) {
         const postResult = await repairMissingSfToQbo(
           sfMissingQboItems,
