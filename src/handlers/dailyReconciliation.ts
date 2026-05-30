@@ -481,7 +481,7 @@ const findChargesMissingQbo = (
       const piId =
         typeof c.payment_intent === 'string'
           ? c.payment_intent
-          : (c.payment_intent as any)?.id ?? null;
+          : ((c.payment_intent as any)?.id ?? null);
       if (piId && qboChargeIds.has(piId)) return false;
       return true;
     })
@@ -1080,9 +1080,7 @@ export const runReconciliation = async (
 
   // Dispute matching: dp_xxx — prevents false qboMissingSalesforce for dispute JEs
   const sfDisputeIds = new Set(
-    sfRows
-      .filter((r) => r.Stripe_Dispute_Id__c)
-      .map((r) => r.Stripe_Dispute_Id__c as string)
+    sfRows.filter((r) => r.Stripe_Dispute_Id__c).map((r) => r.Stripe_Dispute_Id__c as string)
   );
 
   // Union of all SF Stripe IDs (for QBO → SF cross-reference).
