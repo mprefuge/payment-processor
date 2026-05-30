@@ -3611,6 +3611,129 @@ export const postChargeToQbo = async ({
 };
 
 /**
+ * Posts a manually-entered Salesforce Transaction__c to QBO as a Sales Receipt in Undeposited Funds.
+ *
+ * Use this when a Transaction__c has no Stripe charge (manual check/ACH deposit) and should
+ * wait in Undeposited Funds until the accountant deposits it to the bank.
+ *
+ * @param grossAmountCents - Gross amount in CENTS (multiply Amount_Gross__c dollars × 100)
+ * @param date             - Transaction date (YYYY-MM-DD or Date)
+ * @param memo             - PrivateNote / memo text
+ * @param uniqueId         - Unique identifier (e.g. SF record Id) to produce collision-resistant DocNumber
+ * @param customerName     - Donor / customer display name; finds or creates the QBO customer
+ * @param customerEmail    - Email used as primary lookup key for the QBO customer.
+ * @param classRef         - QBO class in "Name|Id" format (e.g. "General Fund|42"); sets line class
+ * @param options          - Post options (context, dryRun, cleanupTag)
+ */
+export const postManualEntryAsSalesReceipt = async (input: {
+  grossAmountCents: number;
+  date: string | Date;
+  memo?: string;
+  uniqueId?: string | null;
+  customerName?: string | null;
+  customerEmail?: string | null;
+  classRef?: string | null;
+  options?: PostOptions;
+}): Promise<PostChargeToQboResult> => {
+  const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
+  const docNumber = buildDocNumber(
+    'CHG-MANUAL',
+    input.date,
+    grossAmount,
+    null,
+    input.uniqueId ?? null
+  );
+  const context = await createRequestContext(input.options);
+
+  const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
+  await resolveAccountReferences([revenueAccountRef], context);
+
+  // Resolve QBO customer if name or email provided
+  let resolvedEntityRef: QuickBooksReference | null = null;
+  if (input.customerName?.trim() || input.customerEmail?.trim()) {
+    try {
+      const customerResult = await ensureSalesReceiptCustomer(
+        {
+          displayName: (input.customerName?.trim() || input.customerEmail?.trim())!,
+          email: input.customerEmail?.trim() || null,
+        },
+        context
+      );
+      if (customerResult?.ref.value) {
+        resolvedEntityRef = customerResult.ref;
+      }
+    } catch (customerErr) {
+      logger.warn(
+        '[QBOSvc] postManualEntryAsSalesReceipt: customer resolution failed; posting without customer',
+        {
+          customerName: input.customerName,
+          error: customerErr instanceof Error ? customerErr.message : String(customerErr),
+        }
+      );
+    }
+  }
+
+  // Parse class ref string ("Name|Id" format)
+  let resolvedClassRef: QuickBooksReference | null = null;
+  if (input.classRef?.trim()) {
+    try {
+      resolvedClassRef = createClassRef(input.classRef.trim());
+    } catch {
+      logger.warn(
+        '[QBOSvc] postManualEntryAsSalesReceipt: invalid classRef format; posting without class',
+        {
+          classRef: input.classRef,
+        }
+      );
+    }
+  }
+
+  // Build Sales Receipt with Undeposited Funds as deposit destination
+  const salesReceipt: QuickBooksSalesReceipt = {
+    DocNumber: docNumber,
+    TxnDate: typeof input.date === 'string' ? input.date : input.date.toISOString().split('T')[0],
+    PrivateNote: input.memo,
+    DepositToAccountRef: {
+      name: 'Undeposited Funds',
+      value: 'Undeposited Funds',
+    },
+    CustomerRef: resolvedEntityRef
+      ? {
+          value: resolvedEntityRef.value,
+          name: resolvedEntityRef.name ?? undefined,
+        }
+      : undefined,
+    Line: [
+      {
+        Amount: grossAmount / 100,
+        DetailType: 'SalesItemLineDetail',
+        Description: input.memo,
+        SalesItemLineDetail: {
+          ItemRef: {
+            name: 'Services',
+            value: 'Uncategorized Service',
+          },
+          TaxCodeRef: {
+            value: 'NON',
+          },
+          ClassRef: resolvedClassRef
+            ? {
+                value: resolvedClassRef.value,
+                name: resolvedClassRef.name ?? undefined,
+              }
+            : undefined,
+          UnitPrice: grossAmount / 100,
+          Qty: 1,
+        },
+      },
+    ],
+  };
+
+  const result = await postSalesReceipt(salesReceipt, input.options);
+  return { qboId: result.id, type: 'sales-receipt' };
+};
+
+/**
  * Posts a manually-entered Salesforce Transaction__c to QBO as a journal entry.
  *
  * Use this when a Transaction__c has no Stripe charge (manual entry) and therefore
@@ -3656,15 +3779,15 @@ export const postManualEntryAsJournalEntry = async (input: {
   const clearingAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
   const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
   const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
-    const depositAccountRef =
-      input.depositAccount === 'operatingBank'
-        ? createAccountRef(env.quickBooks.accounts.operatingBank)
-        : clearingAccountRef;
-    const accountRefsToResolve =
-      depositAccountRef !== clearingAccountRef
-        ? [clearingAccountRef, depositAccountRef, revenueAccountRef, feesAccountRef]
-        : [clearingAccountRef, revenueAccountRef, feesAccountRef];
-    await resolveAccountReferences(accountRefsToResolve, context);
+  const depositAccountRef =
+    input.depositAccount === 'operatingBank'
+      ? createAccountRef(env.quickBooks.accounts.operatingBank)
+      : clearingAccountRef;
+  const accountRefsToResolve =
+    depositAccountRef !== clearingAccountRef
+      ? [clearingAccountRef, depositAccountRef, revenueAccountRef, feesAccountRef]
+      : [clearingAccountRef, revenueAccountRef, feesAccountRef];
+  await resolveAccountReferences(accountRefsToResolve, context);
 
   // Resolve QBO customer if name or email provided
   let resolvedEntityRef: QuickBooksReference | null = null;

@@ -31,7 +31,7 @@ import {
   qboDocumentExists,
   updateQboDocPrivateNote,
   patchQboDocClassRef,
-  postManualEntryAsJournalEntry,
+  postManualEntryAsSalesReceipt,
   postChargeToQbo,
   postPayoutToQbo,
 } from '../services/qboSvc';
@@ -1435,8 +1435,8 @@ const repairMissingSfToQbo = async (
             qboId: result.qboId,
           });
         } else {
-          // Stripe fetch failed — fall back to manual JE with known gross
-          result = await postManualEntryAsJournalEntry({
+          // Stripe fetch failed — fall back to manual Sales Receipt to Undeposited Funds
+          result = await postManualEntryAsSalesReceipt({
             grossAmountCents: Math.round(grossDollars * 100),
             date,
             memo,
@@ -1445,14 +1445,14 @@ const repairMissingSfToQbo = async (
             customerEmail,
             classRef: classRefStr,
           });
-          context.log('[DailyReconciliation] Posted manual JE to QBO (Stripe fallback)', {
+          context.log('[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt (Stripe fallback)', {
             sfId,
             qboId: result.qboId,
           });
         }
       } else {
-        // ── Manual entry path: no Stripe charge, post as JE ─────────────────────
-        result = await postManualEntryAsJournalEntry({
+        // ── Manual entry path: no Stripe charge, post as Sales Receipt to Undeposited Funds ──
+        result = await postManualEntryAsSalesReceipt({
           grossAmountCents: Math.round(grossDollars * 100),
           date,
           memo,
@@ -1460,9 +1460,8 @@ const repairMissingSfToQbo = async (
           customerName,
           customerEmail,
           classRef: classRefStr,
-          depositAccount: 'operatingBank',
         });
-        context.log('[DailyReconciliation] Posted manual SF entry to QBO as JE', {
+        context.log('[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt', {
           sfId,
           amount: grossDollars,
           qboId: result.qboId,
