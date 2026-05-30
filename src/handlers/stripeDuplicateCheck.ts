@@ -594,12 +594,10 @@ const detectSalesforceDuplicates = async (
     const sfId = typeof record.Id === 'string' ? record.Id.trim() : null;
     if (!sfId) continue;
 
-    const populatedStripeIds = STRIPE_ID_FIELDS
-      .map((field) => {
-        const value = record[field];
-        return typeof value === 'string' && value.trim() ? { field, value: value.trim() } : null;
-      })
-      .filter(Boolean) as Array<{ field: (typeof STRIPE_ID_FIELDS)[number]; value: string }>;
+    const populatedStripeIds = STRIPE_ID_FIELDS.map((field) => {
+      const value = record[field];
+      return typeof value === 'string' && value.trim() ? { field, value: value.trim() } : null;
+    }).filter(Boolean) as Array<{ field: (typeof STRIPE_ID_FIELDS)[number]; value: string }>;
 
     const hasPayoutIdOnly =
       populatedStripeIds.length === 1 && populatedStripeIds[0].field === 'Stripe_Payout_Id__c';
