@@ -3640,6 +3640,7 @@ export const postManualEntryAsJournalEntry = async (input: {
   customerEmail?: string | null;
   classRef?: string | null;
   options?: PostOptions;
+  depositAccount?: 'stripeClearing' | 'operatingBank';
 }): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
   const feeAmount = ensurePositiveAmount(input.feeAmountCents ?? 0, 'Fee amount');
@@ -3655,7 +3656,15 @@ export const postManualEntryAsJournalEntry = async (input: {
   const clearingAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
   const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
   const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
-  await resolveAccountReferences([clearingAccountRef, revenueAccountRef, feesAccountRef], context);
+    const depositAccountRef =
+      input.depositAccount === 'operatingBank'
+        ? createAccountRef(env.quickBooks.accounts.operatingBank)
+        : clearingAccountRef;
+    const accountRefsToResolve =
+      depositAccountRef !== clearingAccountRef
+        ? [clearingAccountRef, depositAccountRef, revenueAccountRef, feesAccountRef]
+        : [clearingAccountRef, revenueAccountRef, feesAccountRef];
+    await resolveAccountReferences(accountRefsToResolve, context);
 
   // Resolve QBO customer if name or email provided
   let resolvedEntityRef: QuickBooksReference | null = null;
@@ -3703,7 +3712,7 @@ export const postManualEntryAsJournalEntry = async (input: {
     feeAmountCents: feeAmount,
     memo: input.memo,
     date: input.date,
-    clearingAccountId: clearingAccountRef.value,
+    clearingAccountId: depositAccountRef.value,
     revenueAccountId: revenueAccountRef.value,
     feesAccountId: feesAccountRef.value,
     classRef: resolvedClassRef,

@@ -1460,6 +1460,7 @@ const repairMissingSfToQbo = async (
           customerName,
           customerEmail,
           classRef: classRefStr,
+          depositAccount: 'operatingBank',
         });
         context.log('[DailyReconciliation] Posted manual SF entry to QBO as JE', {
           sfId,
