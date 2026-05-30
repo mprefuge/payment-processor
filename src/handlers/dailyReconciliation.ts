@@ -27,6 +27,7 @@ import {
 import { createSalesforceSvc } from '../services/salesforceSvc';
 import {
   query as qboQuery,
+  queryReference,
   qboDocumentExists,
   updateQboDocPrivateNote,
   postManualEntryAsJournalEntry,
@@ -302,8 +303,6 @@ type SfTransactionRow = {
   transaction_type__c?: string | null;
   /** Record name (auto-number or user-defined) — used as memo when posting to QBO */
   Name?: string | null;
-  /** Related To lookup text (custom field) — preferred for QBO customer association */
-  Related_To__c?: string | null;
   /** User-supplied memo field — preferred over Name when building QBO memo */
   Memo__c?: string | null;
   /** ISO datetime string — used as posting date fallback when Received_At__c is null */
@@ -316,8 +315,8 @@ type SfTransactionRow = {
   } | null;
   /** Related Account — used for QBO memo display name when Contact is absent */
   Account__r?: { Name?: string | null } | null;
-  /** Related Campaign — appended to QBO memo */
-  Campaign__r?: { Name?: string | null } | null;
+  /** Related Campaign — appended to QBO memo; Class__c is used to resolve QBO class */
+  Campaign__r?: { Name?: string | null; Class__c?: string | null } | null;
   /** QBO class ID — used to set ClassRef on revenue lines for fund-based reporting */
   QBO_Class_Id__c?: string | null;
   /** QBO class name — paired with QBO_Class_Id__c to form "Name|Id" classRef string */
@@ -342,8 +341,8 @@ const queryTransactionsForRange = async (
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
-    `Amount_Gross__c, Received_At__c, transaction_type__c, Related_To__c, Memo__c, CreatedDate, ` +
-    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name, ` +
+    `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
+    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name, Campaign__r.Class__c, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
     `WHERE (` +
@@ -1054,6 +1053,53 @@ const repairMissingSfToQbo = async (
   postedItems: Array<{ sfId: string; qboId: string; qboType: string; stripeId: string | null }>;
 }> => {
   const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
+  const classRefByCampaignClass = new Map<string, string | null>();
+
+  const resolveClassRefFromSfRow = async (sfRow: SfTransactionRow): Promise<string | null> => {
+    // Preferred path: explicit QBO class id stored on the transaction
+    const explicitId = sfRow.QBO_Class_Id__c?.trim();
+    if (explicitId) {
+      return `${sfRow.QBO_Class_Name__c?.trim() ?? ''}|${explicitId}`;
+    }
+
+    // Fallback: derive from Campaign.Class__c (e.g. "UNRESTRICTED FUNDS:General")
+    const campaignClassRaw = sfRow.Campaign__r?.Class__c?.trim();
+    if (!campaignClassRaw) {
+      return null;
+    }
+    if (classRefByCampaignClass.has(campaignClassRaw)) {
+      return classRefByCampaignClass.get(campaignClassRaw) ?? null;
+    }
+
+    const candidates = new Set<string>([campaignClassRaw]);
+    if (campaignClassRaw.includes(':')) {
+      const leaf = campaignClassRaw.split(':').pop()?.trim();
+      if (leaf) {
+        candidates.add(leaf);
+      }
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const reference = await queryReference('Class', candidate);
+        if (reference?.value) {
+          const resolved = `${reference.name ?? candidate}|${reference.value}`;
+          classRefByCampaignClass.set(campaignClassRaw, resolved);
+          return resolved;
+        }
+      } catch {
+        // Best effort; continue trying fallback candidates.
+      }
+    }
+
+    classRefByCampaignClass.set(campaignClassRaw, null);
+    context.log('[DailyReconciliation] Could not resolve Campaign.Class__c to QBO class', {
+      sfId: sfRow.Id,
+      campaignClass: campaignClassRaw,
+    });
+    return null;
+  };
+
   let posted = 0;
   const errors: string[] = [];
   const postedItems: Array<{
@@ -1087,7 +1133,7 @@ const repairMissingSfToQbo = async (
         : (item.date ?? new Date().toISOString().slice(0, 10));
 
     // Build names for two separate purposes:
-    //   - customerName (QBO customer entity): Related_To__c → Contact → Account → Transaction Name
+    //   - customerName (QBO customer entity): Contact → Account → Transaction Name
     //   - memo text (QBO description/private note): Memo__c → Contact/Account → Transaction Name
     const contactName = sfRow.Contact__r
       ? [sfRow.Contact__r.FirstName?.trim(), sfRow.Contact__r.LastName?.trim()]
@@ -1095,9 +1141,7 @@ const repairMissingSfToQbo = async (
           .join(' ') || null
       : null;
     const accountName = sfRow.Account__r?.Name?.trim() || null;
-    const relatedToName = sfRow.Related_To__c?.trim() || null;
-
-    const customerName = relatedToName || contactName || accountName || sfRow.Name?.trim() || null;
+    const customerName = contactName || accountName || sfRow.Name?.trim() || null;
 
     const memoDisplayName =
       sfRow.Memo__c?.trim() || contactName || accountName || sfRow.Name?.trim() || null;
@@ -1115,10 +1159,9 @@ const repairMissingSfToQbo = async (
     // Customer email for QBO customer lookup (billing email preferred over contact email)
     const customerEmail = sfRow.Billing_Email__c?.trim() || sfRow.Contact__r?.Email?.trim() || null;
 
-    // QBO class ref in "Name|Id" format — only valid when we have an explicit Id
-    const classRefStr = sfRow.QBO_Class_Id__c?.trim()
-      ? `${sfRow.QBO_Class_Name__c?.trim() ?? ''}|${sfRow.QBO_Class_Id__c.trim()}`
-      : null;
+    // QBO class ref in "Name|Id" format.
+    // Prefers explicit fields on Transaction__c, then Campaign.Class__c lookup.
+    const classRefStr = await resolveClassRefFromSfRow(sfRow);
 
     const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
     const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
