@@ -1493,7 +1493,9 @@ export const runReconciliation = async (
         startDate,
         endDate,
       });
-      sfRows = await queryTransactionsForRange(connection, startDate, endDate, limit);
+      // IMPORTANT: discovery scans must not be limited; `limit` is applied during
+      // repair slices only so repeated runs can progress through all discrepancies.
+      sfRows = await queryTransactionsForRange(connection, startDate, endDate, null);
       counts.salesforce.transactions = sfRows.length;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -1512,15 +1514,15 @@ export const runReconciliation = async (
 
   if (systems.includes('qbo')) {
     [qboReceipts, qboJournalEntries, qboDeposits] = await Promise.all([
-      queryQboDocumentsForRange('SalesReceipt', startDate, endDate, limit).then((docs) => {
+      queryQboDocumentsForRange('SalesReceipt', startDate, endDate, null).then((docs) => {
         counts.qbo.salesReceipts = docs.length;
         return docs;
       }),
-      queryQboDocumentsForRange('JournalEntry', startDate, endDate, limit).then((docs) => {
+      queryQboDocumentsForRange('JournalEntry', startDate, endDate, null).then((docs) => {
         counts.qbo.journalEntries = docs.length;
         return docs;
       }),
-      queryQboDocumentsForRange('Deposit', startDate, endDate, limit).then((docs) => {
+      queryQboDocumentsForRange('Deposit', startDate, endDate, null).then((docs) => {
         counts.qbo.deposits = docs.length;
         return docs;
       }),
