@@ -25,7 +25,7 @@ import {
   parseBoolean,
 } from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
-import { query as qboQuery, updateQboDocPrivateNote } from '../services/qboSvc';
+import { query as qboQuery, updateQboDocPrivateNote, postManualEntryAsJournalEntry, postChargeToQbo } from '../services/qboSvc';
 import {
   fetchStripeChargesSince,
   fetchStripeRefundsSince,
@@ -70,6 +70,8 @@ interface RepairSummary {
   linkedRecords: number;
   /** SF records whose stale QBO_Doc_Id__c was cleared (doc was deleted/voided in QBO) */
   staleLinksCleared: number;
+  /** SF Transaction__c rows (including manual entries) that were posted to QBO this run */
+  sfPostedToQbo: number;
   errors: string[];
 }
 
@@ -284,6 +286,8 @@ type SfTransactionRow = {
   Amount_Gross__c?: number | null;
   Received_At__c?: string | null;
   transaction_type__c?: string | null;
+  /** Record name (auto-number or user-defined) — used as memo when posting to QBO */
+  Name?: string | null;
 };
 
 const queryTransactionsForRange = async (
@@ -297,7 +301,7 @@ const queryTransactionsForRange = async (
   const limitClause = limit && limit > 0 ? ` LIMIT ${limit}` : ' LIMIT 2000';
 
   const soql =
-    `SELECT Id, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
+    `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Id__c, ` +
     `Amount_Gross__c, Received_At__c, transaction_type__c ` +
@@ -916,6 +920,133 @@ const repairContactCoalescing = async (
 };
 
 /**
+ * For each Salesforce Transaction__c row that has no QBO document link, post it to QBO
+ * and call markPostedToQbo to link the systems.
+ *
+ * Two paths:
+ *   - Has Stripe charge ID: fetches the charge (with balance_transaction) from Stripe and
+ *     calls `postChargeToQbo` for a fully correct posting with customer/fee data.
+ *   - No Stripe charge ID (manual entry): calls `postManualEntryAsJournalEntry` using the
+ *     SF record Id as uniqueId so the DocNumber is collision-resistant.
+ */
+const repairMissingSfToQbo = async (
+  sfMissingQboItems: DiscrepancyItem[],
+  sfRows: SfTransactionRow[],
+  stripeClient: Stripe | null,
+  salesforceSvc: ReturnType<typeof createSalesforceSvc>,
+  context: InvocationContext
+): Promise<{ posted: number; errors: string[] }> => {
+  const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
+  let posted = 0;
+  const errors: string[] = [];
+
+  for (const item of sfMissingQboItems) {
+    if (item.type !== 'sf_missing_qbo') continue;
+
+    const sfRow = sfRowById.get(item.id);
+    if (!sfRow) continue;
+
+    const sfId = sfRow.Id;
+    if (!sfId) continue;
+
+    const grossDollars = sfRow.Amount_Gross__c;
+    if (!grossDollars || grossDollars <= 0) {
+      context.log('[DailyReconciliation] Skipping SF row with zero/missing gross amount', {
+        sfId,
+      });
+      continue;
+    }
+
+    const date =
+      sfRow.Received_At__c ? sfRow.Received_At__c.slice(0, 10) : item.date ?? new Date().toISOString().slice(0, 10);
+
+    const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
+    const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
+    const stripeId = chargeId || piId;
+
+    try {
+      let result: { qboId: string; type: string };
+
+      if (stripeId && stripeClient && chargeId) {
+        // ── Stripe path: fetch charge with fee data, post with full context ─────
+        let charge: Stripe.Charge | null = null;
+        try {
+          charge = await stripeClient.charges.retrieve(chargeId, {
+            expand: ['balance_transaction'],
+          });
+        } catch (fetchErr) {
+          context.log('[DailyReconciliation] Could not fetch Stripe charge; falling back to manual JE', {
+            chargeId,
+            error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
+          });
+        }
+
+        if (charge) {
+          const bt = typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null
+            ? (charge.balance_transaction as Stripe.BalanceTransaction)
+            : null;
+          const grossCents = bt ? Math.abs(bt.amount) : charge.amount;
+          const feeCents = bt ? Math.abs(bt.fee) : 0;
+          result = await postChargeToQbo({
+            gross: grossCents,
+            fee: feeCents,
+            memo: `Stripe charge ${charge.id}`,
+            date: bt?.created ? new Date(bt.created * 1000) : date,
+            stripe: { charge },
+          });
+          context.log('[DailyReconciliation] Posted Stripe charge to QBO', {
+            sfId,
+            chargeId,
+            qboId: result.qboId,
+          });
+        } else {
+          // Stripe fetch failed — fall back to manual JE with known gross
+          result = await postManualEntryAsJournalEntry({
+            grossAmountCents: Math.round(grossDollars * 100),
+            date,
+            memo: `SF:${sfId}${sfRow.Name ? ` ${sfRow.Name}` : ''}`,
+            uniqueId: sfId,
+          });
+          context.log('[DailyReconciliation] Posted manual JE to QBO (Stripe fallback)', {
+            sfId,
+            qboId: result.qboId,
+          });
+        }
+      } else {
+        // ── Manual entry path: no Stripe charge, post as JE ─────────────────────
+        result = await postManualEntryAsJournalEntry({
+          grossAmountCents: Math.round(grossDollars * 100),
+          date,
+          memo: `SF:${sfId}${sfRow.Name ? ` ${sfRow.Name}` : ''}`,
+          uniqueId: sfId,
+        });
+        context.log('[DailyReconciliation] Posted manual SF entry to QBO as JE', {
+          sfId,
+          amount: grossDollars,
+          qboId: result.qboId,
+        });
+      }
+
+      // Mark SF record as posted
+      await salesforceSvc.markPostedToQbo(sfId, {
+        type: result.type,
+        id: result.qboId,
+      });
+      // Update in-memory row so cross-system link repair sees the new link
+      sfRow.QBO_Doc_Id__c = result.qboId;
+      sfRow.Posted_to_QBO__c = true;
+      posted++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`Failed to post SF ${sfId} to QBO: ${msg}`);
+      context.log('[DailyReconciliation] Failed to post SF row to QBO', { sfId, error: msg });
+    }
+  }
+
+  return { posted, errors };
+};
+
+/**
  * Cross-system link repair: for each QBO document whose PrivateNote or DocNumber
  * contains a Stripe ID that matches a Salesforce Transaction__c row, ensure the
  * three systems are linked to each other:
@@ -1397,6 +1528,7 @@ export const runReconciliation = async (
     let transactionsCreated = 0;
     let linkedRecords = 0;
     let staleLinksCleared = 0;
+    let sfPostedToQbo = 0;
 
     // Clear stale QBO doc references: SF rows pointing to QBO docs that have been deleted or
     // voided.  Setting Posted_to_QBO__c = false and nulling QBO_Doc_Id__c makes the record
@@ -1421,6 +1553,24 @@ export const runReconciliation = async (
             error: msg,
           });
         }
+      }
+    }
+
+    // Post SF records missing from QBO into QuickBooks (manual entries + Stripe-linked)
+    if (systems.includes('salesforce') && systems.includes('qbo')) {
+      const sfMissingQboItems = discrepancies.salesforceMissingQbo.filter(
+        (i) => i.type === 'sf_missing_qbo'
+      );
+      if (sfMissingQboItems.length > 0) {
+        const postResult = await repairMissingSfToQbo(
+          sfMissingQboItems,
+          sfRows,
+          stripeClient,
+          salesforceSvc,
+          context
+        );
+        sfPostedToQbo += postResult.posted;
+        repairErrors.push(...postResult.errors);
       }
     }
 
@@ -1483,6 +1633,7 @@ export const runReconciliation = async (
       transactionsCreated,
       linkedRecords,
       staleLinksCleared,
+      sfPostedToQbo,
       errors: repairErrors,
     };
 

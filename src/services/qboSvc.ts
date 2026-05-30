@@ -3518,6 +3518,60 @@ export const postChargeToQbo = async ({
   });
 };
 
+/**
+ * Posts a manually-entered Salesforce Transaction__c to QBO as a journal entry.
+ *
+ * Use this when a Transaction__c has no Stripe charge (manual entry) and therefore
+ * has no Checkout Session transactionType metadata required by the sales-receipt path.
+ * A JE is always correct for manual entries regardless of env.accounting.postingStrategy.
+ *
+ * @param grossAmountCents - Gross amount in CENTS (multiply Amount_Gross__c dollars × 100)
+ * @param feeAmountCents   - Fee in CENTS (default 0)
+ * @param date             - Transaction date (YYYY-MM-DD or Date)
+ * @param memo             - PrivateNote / memo text
+ * @param uniqueId         - Unique identifier (e.g. SF record Id) to produce a
+ *                           collision-resistant DocNumber even when two entries share the
+ *                           same date and amount.
+ */
+export const postManualEntryAsJournalEntry = async (input: {
+  grossAmountCents: number;
+  feeAmountCents?: number;
+  date: string | Date;
+  memo?: string;
+  uniqueId?: string | null;
+  options?: PostOptions;
+}): Promise<PostChargeToQboResult> => {
+  const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
+  const feeAmount = ensurePositiveAmount(input.feeAmountCents ?? 0, 'Fee amount');
+  const docNumber = buildDocNumber(
+    'CHGJE',
+    input.date,
+    grossAmount + feeAmount,
+    null,
+    input.uniqueId ?? null
+  );
+  const context = await createRequestContext(input.options);
+
+  const clearingAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
+  const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
+  const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
+  await resolveAccountReferences([clearingAccountRef, revenueAccountRef, feesAccountRef], context);
+
+  const journalEntry = buildSingleJE({
+    docNumber,
+    grossAmountCents: grossAmount,
+    feeAmountCents: feeAmount,
+    memo: input.memo,
+    date: input.date,
+    clearingAccountId: clearingAccountRef.value,
+    revenueAccountId: revenueAccountRef.value,
+    feesAccountId: feesAccountRef.value,
+  });
+
+  const result = await postJournalEntry(journalEntry, input.options);
+  return { qboId: result.id, type: 'journal-entry' };
+};
+
 export const postRefundToQbo = async ({
   amount,
   feeAmount = 0,
@@ -4442,5 +4496,6 @@ export default {
   getQuickBooksCustomerById,
   updateQuickBooksCustomerSalesforceId,
   updateQboDocPrivateNote,
+  postManualEntryAsJournalEntry,
   query,
 };
