@@ -302,6 +302,8 @@ type SfTransactionRow = {
   transaction_type__c?: string | null;
   /** Record name (auto-number or user-defined) — used as memo when posting to QBO */
   Name?: string | null;
+  /** Related To lookup text (custom field) — preferred for QBO customer association */
+  Related_To__c?: string | null;
   /** User-supplied memo field — preferred over Name when building QBO memo */
   Memo__c?: string | null;
   /** ISO datetime string — used as posting date fallback when Received_At__c is null */
@@ -340,7 +342,7 @@ const queryTransactionsForRange = async (
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
-    `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
+    `Amount_Gross__c, Received_At__c, transaction_type__c, Related_To__c, Memo__c, CreatedDate, ` +
     `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
@@ -1084,25 +1086,27 @@ const repairMissingSfToQbo = async (
         ? sfRow.CreatedDate.slice(0, 10)
         : (item.date ?? new Date().toISOString().slice(0, 10));
 
-    // Build display name following salesforceRecordQboSync pattern:
-    //   Memo__c → Contact first+last → Account name → Transaction name → SF ID
+    // Build names for two separate purposes:
+    //   - customerName (QBO customer entity): Related_To__c → Contact → Account → Transaction Name
+    //   - memo text (QBO description/private note): Memo__c → Contact/Account → Transaction Name
     const contactName = sfRow.Contact__r
       ? [sfRow.Contact__r.FirstName?.trim(), sfRow.Contact__r.LastName?.trim()]
           .filter(Boolean)
           .join(' ') || null
       : null;
-    const displayName =
-      sfRow.Memo__c?.trim() ||
-      contactName ||
-      sfRow.Account__r?.Name?.trim() ||
-      sfRow.Name?.trim() ||
-      null;
+    const accountName = sfRow.Account__r?.Name?.trim() || null;
+    const relatedToName = sfRow.Related_To__c?.trim() || null;
+
+    const customerName = relatedToName || contactName || accountName || sfRow.Name?.trim() || null;
+
+    const memoDisplayName =
+      sfRow.Memo__c?.trim() || contactName || accountName || sfRow.Name?.trim() || null;
     const campaign = sfRow.Campaign__r?.Name?.trim() ?? null;
     // Base memo (donor/account name + campaign)
-    const baseMemo = displayName
+    const baseMemo = memoDisplayName
       ? campaign
-        ? `${displayName} — ${campaign}`
-        : displayName
+        ? `${memoDisplayName} — ${campaign}`
+        : memoDisplayName
       : `SF:${sfId}`;
     // Append SF record name for cross-reference (e.g. TRX-260505-5594)
     const sfName = sfRow.Name?.trim() ?? null;
@@ -1168,7 +1172,7 @@ const repairMissingSfToQbo = async (
             date,
             memo,
             uniqueId: sfId,
-            customerName: displayName,
+            customerName,
             customerEmail,
             classRef: classRefStr,
           });
@@ -1184,7 +1188,7 @@ const repairMissingSfToQbo = async (
           date,
           memo,
           uniqueId: sfId,
-          customerName: displayName,
+          customerName,
           customerEmail,
           classRef: classRefStr,
         });
