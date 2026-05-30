@@ -16,6 +16,19 @@ if (sendGridApiKey) {
 }
 
 /**
+ * Parse a comma-separated string of email addresses into a trimmed, non-empty array.
+ * @param {string | undefined} raw
+ * @returns {string[]}
+ */
+const parseRecipients = (raw) => {
+  if (!raw || typeof raw !== 'string') return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+};
+
+/**
  * Determine if an email notification should be sent based on configuration
  * @param {Object} stripe - Stripe instance
  * @param {Object} customer - Stripe customer object
@@ -105,11 +118,12 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
   }
 
   const isLiveMode = paymentData.livemode || paymentIntent.livemode;
-  const toEmail = isLiveMode
+  const recipientsEnv = isLiveMode
     ? process.env.NOTIFICATION_EMAIL_LIVE
     : process.env.NOTIFICATION_EMAIL_TEST;
+  const recipients = parseRecipients(recipientsEnv);
 
-  if (!toEmail) {
+  if (recipients.length === 0) {
     logger.info('No notification email configured');
     return { status: 'skipped', reason: 'missing_recipient' };
   }
@@ -173,7 +187,7 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
     </div>`;
 
   const msg = {
-    to: toEmail,
+    to: recipients,
     from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
     subject: subject,
     html: html,
@@ -190,6 +204,133 @@ const sendPaymentSuccessEmail = async (paymentData, paymentIntent, stripe) => {
   }
 };
 
+/**
+ * Send a notification email when a first-time or new recurring transaction occurs.
+ *
+ * Recipients are configured via comma-separated environment variables:
+ *   NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST  (test/sandbox mode)
+ *   NEW_TRANSACTION_NOTIFICATION_EMAILS_LIVE  (live mode)
+ *
+ * Multiple recipients example:
+ *   NEW_TRANSACTION_NOTIFICATION_EMAILS_LIVE=alice@example.com,bob@example.com
+ *
+ * @param {{
+ *   billingName: string | null,
+ *   billingEmail: string | null,
+ *   amountCents: number | null,
+ *   currency: string | null,
+ *   paymentIntentId: string,
+ *   customerId: string | null,
+ *   subscriptionId: string | null,
+ *   isLiveMode: boolean
+ * }} paymentData
+ * @param {'first_time' | 'new_recurring' | 'first_time_recurring'} notificationType
+ * @returns {Promise<{status: string, reason?: string, recipients?: number, error?: unknown}>}
+ */
+const sendNewTransactionNotification = async (paymentData, notificationType) => {
+  if (!isSendGridEnabled) {
+    logger.warn('SendGrid API key not configured. Skipping new transaction notification.');
+    return { status: 'skipped', reason: 'sendgrid_disabled' };
+  }
+
+  const { isLiveMode } = paymentData;
+  const recipientsEnv = isLiveMode
+    ? process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_LIVE
+    : process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST;
+  const recipients = parseRecipients(recipientsEnv);
+
+  if (recipients.length === 0) {
+    logger.info('No new transaction notification recipients configured');
+    return { status: 'skipped', reason: 'no_recipients_configured' };
+  }
+
+  const typeLabels = {
+    first_time: 'New First-Time Donor',
+    new_recurring: 'New Recurring Donor',
+    first_time_recurring: 'New Recurring Donor (First-Time)',
+  };
+
+  const typeLabel = typeLabels[notificationType] || 'New Transaction';
+  const donorName = paymentData.billingName || paymentData.billingEmail || 'Unknown Donor';
+  const subject = `${typeLabel} – ${donorName}`;
+
+  const amountFormatted =
+    paymentData.amountCents != null
+      ? `$${(paymentData.amountCents / 100).toFixed(2)} ${(paymentData.currency || '').toUpperCase()}`
+      : 'N/A';
+
+  const modeLabel = isLiveMode ? 'LIVE' : 'TEST';
+  const stripeCustomerUrl = paymentData.customerId
+    ? `https://dashboard.stripe.com/${isLiveMode ? '' : 'test/'}customers/${paymentData.customerId}`
+    : null;
+
+  const html = `<div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
+        <h2 style='color: #BD2135;'>${typeLabel}</h2>
+        <div style='background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px;'>
+            <table style='width: 100%; border-collapse: collapse;'>
+                <tr>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Donor:</strong></td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${donorName}</td>
+                </tr>
+                ${
+                  paymentData.billingEmail
+                    ? `<tr>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Email:</strong></td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.billingEmail}</td>
+                </tr>`
+                    : ''
+                }
+                <tr>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Amount:</strong></td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${amountFormatted}</td>
+                </tr>
+                ${
+                  paymentData.subscriptionId
+                    ? `<tr>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Subscription:</strong></td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.subscriptionId}</td>
+                </tr>`
+                    : ''
+                }
+                <tr>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Payment ID:</strong></td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${paymentData.paymentIntentId}</td>
+                </tr>
+                <tr>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'><strong>Mode:</strong></td>
+                    <td style='padding: 10px; border-bottom: 1px solid #ddd;'>${modeLabel}</td>
+                </tr>
+            </table>
+        </div>
+        <div style='text-align: center;'>
+            ${
+              stripeCustomerUrl
+                ? `<a href='${stripeCustomerUrl}' style='display: inline-block; background-color: #BD2135; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; margin-top: 20px;'>View Donor in Stripe</a>`
+                : `<a href='https://dashboard.stripe.com/payments/${paymentData.paymentIntentId}' style='display: inline-block; background-color: #BD2135; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; margin-top: 20px;'>View Payment in Stripe</a>`
+            }
+        </div>
+    </div>`;
+
+  const msg = {
+    to: recipients,
+    from: process.env.NOTIFICATION_EMAIL_FROM || 'noreply@example.com',
+    subject,
+    html,
+  };
+
+  try {
+    await sgMail.send(msg);
+    logger.info(`New transaction notification sent (${notificationType})`, {
+      recipients: recipients.length,
+    });
+    return { status: 'sent', recipients: recipients.length };
+  } catch (error) {
+    logger.error('Error sending new transaction notification email:', error);
+    return { status: 'failed', error };
+  }
+};
+
 module.exports = {
   sendPaymentSuccessEmail,
+  sendNewTransactionNotification,
 };

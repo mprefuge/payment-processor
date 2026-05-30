@@ -24,6 +24,23 @@ import {
 import { ensureStripeClient, markPosted } from './common';
 import { loadConfig, normalizeTransactionCategory } from '../../config/contactMatching';
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const emailService = require('../../services/payoutRecon/emailService') as {
+  sendNewTransactionNotification: (
+    paymentData: {
+      billingName: string | null;
+      billingEmail: string | null;
+      amountCents: number | null;
+      currency: string | null;
+      paymentIntentId: string;
+      customerId: string | null;
+      subscriptionId: string | null;
+      isLiveMode: boolean;
+    },
+    notificationType: string
+  ) => Promise<{ status: string; reason?: string }>;
+};
+
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
   if (input === null || input === undefined) {
     return;
@@ -792,6 +809,16 @@ const processSuccessfulPaymentIntent = async ({
     stripeCustomer,
     checkoutSession
   );
+
+  await sendFirstTransactionNotifications(
+    context,
+    stripe,
+    paymentIntent,
+    charge,
+    subscriptionId,
+    invoice,
+    livemode ?? null
+  );
 };
 
 const buildFailureTransaction = (
@@ -845,6 +872,112 @@ const buildPaymentIntentStatusOptions = (
 
 const canUpsertPaymentIntentTransaction = (payload: TransactionUpsertDTO): boolean =>
   payload.status__c != null && (payload as any).status__c !== '' && payload.amount_gross__c != null;
+
+/**
+ * Returns true when this is the customer's first successful payment.
+ * Uses Stripe's paymentIntents.list and counts succeeded results — if only
+ * the current one exists (≤ 1), the customer is new.
+ */
+const checkIsFirstTimeCustomer = async (stripe: Stripe, customerId: string): Promise<boolean> => {
+  try {
+    const paymentIntents = await stripe.paymentIntents.list({ customer: customerId, limit: 2 });
+    const succeeded = paymentIntents.data.filter((pi) => pi.status === 'succeeded');
+    return succeeded.length <= 1;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Returns true when this is the first payment of a new recurring subscription.
+ * Prefers invoice.billing_reason === 'subscription_create'; falls back to
+ * comparing the subscription's created timestamp against current_period_start.
+ */
+const checkIsNewRecurringSubscription = async (
+  stripe: Stripe,
+  subscriptionId: string | null,
+  invoice: Stripe.Invoice | null | undefined
+): Promise<boolean> => {
+  if (!subscriptionId) return false;
+
+  if ((invoice as any)?.billing_reason === 'subscription_create') {
+    return true;
+  }
+
+  try {
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    // Within 1 hour of period start ⟹ newly created subscription
+    return Math.abs(subscription.created - subscription.current_period_start) < 3600;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Fire-and-forget: sends an admin notification email when a first-time donor
+ * pays or when a new recurring subscription starts.  Errors are swallowed so
+ * the main payment-processing flow is never disrupted.
+ */
+const sendFirstTransactionNotifications = async (
+  context: HttpContext,
+  stripe: Stripe,
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  subscriptionId: string | null,
+  invoice: Stripe.Invoice | null | undefined,
+  livemode: boolean | null
+): Promise<void> => {
+  try {
+    const customerId =
+      normalizeStripeId(paymentIntent.customer) ??
+      normalizeStripeId(charge?.customer ?? null);
+    if (!customerId) return;
+
+    const [isFirstTime, isNewRecurring] = await Promise.all([
+      checkIsFirstTimeCustomer(stripe, customerId),
+      checkIsNewRecurringSubscription(stripe, subscriptionId, invoice),
+    ]);
+
+    if (!isFirstTime && !isNewRecurring) return;
+
+    let notificationType: string;
+    if (isFirstTime && isNewRecurring) {
+      notificationType = 'first_time_recurring';
+    } else if (isNewRecurring) {
+      notificationType = 'new_recurring';
+    } else {
+      notificationType = 'first_time';
+    }
+
+    const billingName =
+      charge?.billing_details?.name ??
+      (paymentIntent as any).billing_details?.name ??
+      null;
+    const billingEmail =
+      charge?.billing_details?.email ??
+      (paymentIntent as any).billing_details?.email ??
+      null;
+
+    await emailService.sendNewTransactionNotification(
+      {
+        billingName,
+        billingEmail,
+        amountCents: paymentIntent.amount ?? null,
+        currency: paymentIntent.currency ?? null,
+        paymentIntentId: paymentIntent.id,
+        customerId,
+        subscriptionId,
+        isLiveMode: typeof livemode === 'boolean' ? livemode : Boolean(paymentIntent.livemode),
+      },
+      notificationType
+    );
+  } catch (error) {
+    context.log('[StripeWebhook] Failed to send first-transaction notification (non-fatal)', {
+      paymentIntentId: paymentIntent.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
 
 const logPaymentIntentStatusUpdate = (
   context: HttpContext,

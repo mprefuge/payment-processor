@@ -272,7 +272,148 @@ describe('emailService – SendGrid enabled', () => {
       makeStripe()
     );
     expect(sgMail.send).toHaveBeenCalledWith(
-      expect.objectContaining({ to: 'live-admin@example.com' })
+      expect.objectContaining({ to: ['live-admin@example.com'] })
     );
+  });
+
+  it('sends to multiple recipients when comma-separated emails are configured', async () => {
+    process.env.NOTIFICATION_EMAIL_TEST = 'alice@example.com, bob@example.com';
+    sendPaymentSuccessEmail = reloadEmailService().sendPaymentSuccessEmail;
+    await sendPaymentSuccessEmail(
+      {
+        firstname: 'Jane',
+        lastname: 'Doe',
+        email: 'jane@example.com',
+        amount: 5000,
+        frequency: 'one-time',
+        livemode: false,
+      },
+      { id: 'pi_1', customer: 'cus_1', livemode: false, amount: 5000 },
+      makeStripe()
+    );
+    expect(sgMail.send).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ['alice@example.com', 'bob@example.com'] })
+    );
+  });
+});
+
+// ── sendNewTransactionNotification ───────────────────────────────────────────
+
+describe('sendNewTransactionNotification', () => {
+  let sendNewTransactionNotification;
+  const originalEnv = { ...process.env };
+
+  function reloadSendNewTransactionNotification() {
+    const emailServicePath = require.resolve('../dist/services/payoutRecon/emailService.js');
+    delete require.cache[emailServicePath];
+    return require('../dist/services/payoutRecon/emailService.js').sendNewTransactionNotification;
+  }
+
+  beforeEach(() => {
+    vi.spyOn(sgMail, 'setApiKey').mockImplementation(() => {});
+    vi.spyOn(sgMail, 'send').mockResolvedValue([{ statusCode: 202 }]);
+
+    process.env.SENDGRID_API_KEY = 'SG.testkey.abcdef';
+    process.env.NOTIFICATION_EMAIL_FROM = 'noreply@example.com';
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST = 'admin@example.com';
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_LIVE = 'live-admin@example.com';
+    delete process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST;
+
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+  });
+
+  const makePaymentData = (overrides = {}) => ({
+    billingName: 'Jane Doe',
+    billingEmail: 'jane@example.com',
+    amountCents: 5000,
+    currency: 'usd',
+    paymentIntentId: 'pi_test_1',
+    customerId: 'cus_test_1',
+    subscriptionId: null,
+    isLiveMode: false,
+    ...overrides,
+  });
+
+  it('returns skipped/sendgrid_disabled when SendGrid not configured', async () => {
+    delete process.env.SENDGRID_API_KEY;
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    const result = await sendNewTransactionNotification(makePaymentData(), 'first_time');
+    expect(result.status).toBe('skipped');
+    expect(result.reason).toBe('sendgrid_disabled');
+  });
+
+  it('returns skipped/no_recipients_configured when env var is not set', async () => {
+    delete process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST;
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    const result = await sendNewTransactionNotification(makePaymentData(), 'first_time');
+    expect(result.status).toBe('skipped');
+    expect(result.reason).toBe('no_recipients_configured');
+  });
+
+  it('sends to a single recipient', async () => {
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST = 'admin@example.com';
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    const result = await sendNewTransactionNotification(makePaymentData(), 'first_time');
+    expect(result.status).toBe('sent');
+    expect(result.recipients).toBe(1);
+    expect(sgMail.send).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ['admin@example.com'] })
+    );
+  });
+
+  it('sends to multiple comma-separated recipients', async () => {
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST =
+      'alice@example.com, bob@example.com, carol@example.com';
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    const result = await sendNewTransactionNotification(makePaymentData(), 'new_recurring');
+    expect(result.status).toBe('sent');
+    expect(result.recipients).toBe(3);
+    expect(sgMail.send).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ['alice@example.com', 'bob@example.com', 'carol@example.com'] })
+    );
+  });
+
+  it('uses live recipients in live mode', async () => {
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_LIVE = 'live@example.com';
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    await sendNewTransactionNotification(makePaymentData({ isLiveMode: true }), 'first_time');
+    expect(sgMail.send).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ['live@example.com'] })
+    );
+  });
+
+  it('uses test recipients in test mode', async () => {
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST = 'test@example.com';
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    await sendNewTransactionNotification(makePaymentData({ isLiveMode: false }), 'first_time');
+    expect(sgMail.send).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ['test@example.com'] })
+    );
+  });
+
+  it('includes subscription ID in email for recurring type', async () => {
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST = 'admin@example.com';
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    await sendNewTransactionNotification(
+      makePaymentData({ subscriptionId: 'sub_abc123' }),
+      'new_recurring'
+    );
+    const callArg = sgMail.send.mock.calls[0][0];
+    expect(callArg.html).toContain('sub_abc123');
+  });
+
+  it('returns failed status when sgMail.send throws', async () => {
+    process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST = 'admin@example.com';
+    sendNewTransactionNotification = reloadSendNewTransactionNotification();
+    vi.spyOn(sgMail, 'send').mockRejectedValueOnce(new Error('Network error'));
+    const result = await sendNewTransactionNotification(makePaymentData(), 'first_time');
+    expect(result.status).toBe('failed');
   });
 });
