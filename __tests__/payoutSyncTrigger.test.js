@@ -54,7 +54,7 @@ describe('payoutSyncTrigger', () => {
       has_more: false,
     });
 
-    const postPayoutToQbo = vi.fn().mockResolvedValue({ qboId: 'dep_1', type: 'bank-deposit' });
+    const postPayoutToQbo = vi.fn().mockResolvedValue({ qboId: 'tr_1', type: 'transfer' });
     const linkPayoutOnTransactions = vi.fn().mockResolvedValue([]);
     const processedStore = {
       isProcessed: vi.fn().mockResolvedValue(false),
@@ -105,7 +105,7 @@ describe('payoutSyncTrigger', () => {
       {
         status: 'processed',
         payoutId: 'po_123',
-        bankDepositId: 'dep_1',
+        bankDepositId: 'tr_1',
       },
     ]);
   });

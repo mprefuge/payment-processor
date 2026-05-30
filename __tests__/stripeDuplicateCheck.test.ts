@@ -422,6 +422,43 @@ describe('stripeDuplicateCheck', () => {
       expect(group.records).toHaveLength(2);
     });
 
+    it('ignores payout grouping when a document contains payout ID plus other Stripe IDs', async () => {
+      // Mixed-ID records should not be considered canonical payout documents.
+      mockQboQuery
+        .mockResolvedValueOnce([]) // SalesReceipt
+        .mockResolvedValueOnce([]) // JournalEntry
+        .mockResolvedValueOnce([
+          makeQboDoc(
+            'd1',
+            '0',
+            null,
+            '2026-03-28',
+            '2026-03-28T10:00:00Z',
+            'Stripe payout po_1TRLq7BJf9YYVP9mB0NuhrM7'
+          ),
+          makeQboDoc(
+            'd2',
+            '0',
+            null,
+            '2026-03-28',
+            '2026-03-28T11:00:00Z',
+            'Stripe payout po_1TRLq7BJf9YYVP9mB0NuhrM7 includes charge ch_123abc'
+          ),
+        ])
+        .mockResolvedValueOnce([]); // Transfer
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      const payoutGroup = result.jsonBody.qbo.duplicateGroups.find(
+        (g: any) => g.key === 'bank-deposit:po_1TRLq7BJf9YYVP9mB0NuhrM7'
+      );
+      // Only the pure payout document should be in payout grouping; no duplicate group.
+      expect(payoutGroup).toBeUndefined();
+    });
+
     it('ignores REF and DSP DocNumbers (no Stripe ID in suffix)', async () => {
       mockQboQuery
         .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))

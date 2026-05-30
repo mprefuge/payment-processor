@@ -1719,11 +1719,11 @@ describe('postRefundToQbo', () => {
 });
 
 describe('postPayoutToQbo', () => {
-  it('creates bank deposit moving funds from clearing to operating bank', async () => {
+  it('creates transfer moving funds from clearing to operating bank', async () => {
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} },
       { QueryResponse: {} },
-      { Deposit: { Id: 'deposit-1' } }
+      { Transfer: { Id: 'transfer-1' } }
     );
     const { postPayoutToQbo } = await importQboSvc();
 
@@ -1735,26 +1735,18 @@ describe('postPayoutToQbo', () => {
       options: { fetcher, accessToken: 'token' },
     });
 
-    expect(result).toEqual({ qboId: 'deposit-1', type: 'bank-deposit' });
+    expect(result).toEqual({ qboId: 'transfer-1', type: 'transfer' });
 
-    const depositBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
-    expect(depositBody.DepositToAccountRef).toMatchObject({
+    const transferBody = JSON.parse((requests[2].init?.body ?? '{}') as string);
+    expect(transferBody.FromAccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      name: 'Stripe Clearing',
+    });
+    expect(transferBody.ToAccountRef).toMatchObject({
       value: 'QBO_ACCOUNT_OPERATING_BANK',
       name: 'Operating Bank',
     });
-    const depositLines = depositBody.Line.map((line: any) => ({
-      accountRef: line.DepositLineDetail.AccountRef,
-      amount: line.Amount,
-    }));
-    expect(depositLines).toEqual([
-      {
-        accountRef: {
-          value: 'QBO_ACCOUNT_STRIPE_CLEARING',
-          name: 'Stripe Clearing',
-        },
-        amount: 150,
-      },
-    ]);
+    expect(transferBody.Amount).toBe(150);
   });
 });
 
@@ -1798,6 +1790,11 @@ describe('findDocumentsByPrivateNoteTag', () => {
               PrivateNote: 'cleanup | [source_test_tag:deploy-smoke-123]',
             },
           ],
+        },
+      },
+      {
+        QueryResponse: {
+          Transfer: [],
         },
       }
     );
