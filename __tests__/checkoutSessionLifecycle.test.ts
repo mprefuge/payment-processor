@@ -183,7 +183,12 @@ describe('checkout session lifecycle', () => {
       stripe: stripeDeps,
       idempotencyStore: store,
       getSalesforceSvc: async () => crmServiceMock,
-      accounting: { postChargeToQbo: vi.fn(), postRefundToQbo: vi.fn(), postDisputeToQbo: vi.fn() },
+      accounting: {
+        postChargeToQbo: vi.fn(),
+        postRefundToQbo: vi.fn(),
+        postDisputeToQbo: vi.fn(),
+        postDisputeReversalToQbo: vi.fn(),
+      },
     });
 
     // Call the payment intent handler directly to exercise the successful payment flow
@@ -197,6 +202,7 @@ describe('checkout session lifecycle', () => {
         postChargeToQbo: vi.fn().mockResolvedValue({ qboId: 'q_1', type: 'journal-entry' }),
         postRefundToQbo: vi.fn(),
         postDisputeToQbo: vi.fn(),
+        postDisputeReversalToQbo: vi.fn(),
       },
     };
 

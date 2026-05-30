@@ -58,12 +58,6 @@ module.exports = async function donationFormConfigUpdate(request) {
   const configUrl = baseUrl + '/api/form-builder/configs/' + encodeURIComponent(record.id);
   const embedScriptUrl =
     baseUrl + '/api/form-builder/embed.js?config=' + encodeURIComponent(record.id);
-  const selectedMode =
-    record && record.config && record.config.display && record.config.display.mode === 'modal'
-      ? 'modal'
-      : 'embedded';
-  const embedSnippet =
-    '<div data-donation-form></div>\n<script src="' + embedScriptUrl + '"></script>';
 
   const embeddedEmbedSnippet =
     '<div id="donation-form-embedded"></div>\n' +
@@ -73,6 +67,11 @@ module.exports = async function donationFormConfigUpdate(request) {
     'script>';
   const modalEmbedSnippet =
     '<div data-donation-form></div>\n' + '<script src="' + embedScriptUrl + '"></' + 'script>';
+  const selectedMode =
+    record && record.config && record.config.display && record.config.display.mode === 'modal'
+      ? 'modal'
+      : 'embedded';
+  const embedSnippet = selectedMode === 'modal' ? modalEmbedSnippet : embeddedEmbedSnippet;
 
   return {
     status: 200,

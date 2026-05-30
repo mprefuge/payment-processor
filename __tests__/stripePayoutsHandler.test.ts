@@ -108,6 +108,7 @@ const createDeps = ({
       postChargeToQbo: vi.fn(),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
       payouts: {
         upsertDeposit,
         markDepositForReview,

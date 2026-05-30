@@ -1,7 +1,10 @@
 import jsforce from 'jsforce';
 import type { Connection } from 'jsforce/lib/connection';
 
-const DEFAULT_SALESFORCE_LOGIN_URL = 'https://login.salesforce.com';
+import { parseBoolean } from '../lib/parsing';
+import { DEFAULT_SALESFORCE_LOGIN_URL } from '../config/env';
+
+export { parseBoolean };
 
 export type SalesforceServiceConfig = {
   loginUrl: string;
@@ -35,19 +38,6 @@ export const chunkArray = <T>(items: T[], size: number): T[][] => {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
-};
-
-/**
- * Coerces an unknown value to boolean. String values like "true", "1", "yes", "on"
- * map to true; "false", "0", "no", "off" map to false. All other values return defaultValue.
- */
-export const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
-  if (typeof value === 'boolean') return value;
-  if (typeof value !== 'string') return defaultValue;
-  const normalized = value.trim().toLowerCase();
-  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
-  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
-  return defaultValue;
 };
 
 export const buildSalesforceConfig = (): SalesforceServiceConfig => ({

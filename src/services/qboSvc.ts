@@ -176,6 +176,13 @@ export interface QuickBooksBankDeposit {
 interface PostOptions {
   fetcher?: Fetcher;
   accessToken?: string;
+  /**
+   * When true, a duplicate DocNumber collision found by pre-check or returned by QBO
+   * will throw an error instead of silently returning the existing document.
+   * Set this when the DocNumber encodes a globally-unique ID (refundId, disputeId) so
+   * that an unexpected collision surfaces as an actionable error.
+   */
+  strictDocNumber?: boolean;
   debugLogger?: (event: {
     operation: string;
     stage: 'request' | 'response' | 'error';
@@ -316,6 +323,8 @@ export interface PostRefundToQboInput {
   feeAmount?: number;
   memo?: string;
   date: string | Date;
+  /** Stripe refund ID (e.g. re_...). Used as a unique suffix in the QBO DocNumber to prevent collisions. */
+  refundId?: string | null;
   cleanupTag?: string;
   options?: PostOptions;
 }
@@ -325,6 +334,24 @@ export interface PostDisputeToQboInput {
   feeAmount: number;
   memo?: string;
   date: string | Date;
+  /** Stripe dispute ID (e.g. dp_...). Used as a unique suffix in the QBO DocNumber to prevent collisions. */
+  disputeId?: string | null;
+  cleanupTag?: string;
+  options?: PostOptions;
+}
+
+/**
+ * Input for posting a won-dispute reversal journal entry to QuickBooks.
+ * This reverses the debit originally posted when the dispute was created,
+ * reflecting that Stripe has returned the funds to the account.
+ */
+export interface PostDisputeReversalToQboInput {
+  lossAmount: number;
+  feeAmount: number;
+  memo?: string;
+  date: string | Date;
+  /** Stripe dispute ID. Used as the unique suffix in the DSPREV DocNumber. */
+  disputeId?: string | null;
   cleanupTag?: string;
   options?: PostOptions;
 }
@@ -1771,7 +1798,8 @@ const buildDocNumber = (
   prefix: string,
   date: string | Date,
   amountCents: number,
-  chargeId?: string | null
+  chargeId?: string | null,
+  uniqueId?: string | null
 ): string => {
   // If a charge ID is provided, use it for uniqueness instead of amount
   if (chargeId) {
@@ -1783,7 +1811,28 @@ const buildDocNumber = (
     return `${prefix}-${formattedDate}-${uniqueChargeSuffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
   }
 
-  // Fallback to original behavior using amount
+  // If a unique ID is provided (e.g. refund ID, dispute ID), use it as the unique suffix.
+  // Strip common Stripe-style prefixes (re_, dp_, py_, etc.) to save space.
+  if (uniqueId) {
+    const uniqueIdPart = uniqueId.replace(/^[a-z]+_/, '');
+    const formattedDate = normalizeDate(date).replace(/-/g, '');
+    const reservedLength = prefix.length + formattedDate.length + 2;
+    const availableIdLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - reservedLength);
+    const uniqueSuffix = uniqueIdPart.slice(-availableIdLength);
+    logger.info('[QBOSvc] buildDocNumber: using uniqueId path', {
+      prefix,
+      date: normalizeDate(date),
+      uniqueId,
+    });
+    return `${prefix}-${formattedDate}-${uniqueSuffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
+  }
+
+  // Fallback to original behavior using amount+date. This is NOT globally unique —
+  // two transactions of the same amount on the same day will collide.
+  logger.debug(
+    '[QBOSvc] buildDocNumber: using amount+date fallback — potential collision if duplicate amount+date',
+    { prefix, date: normalizeDate(date), amountCents }
+  );
   const formattedDate = normalizeDate(date).replace(/-/g, '');
   const amountPart = Math.abs(Math.round(amountCents)).toString().slice(-10);
   const suffix = `${formattedDate}-${amountPart}`;
@@ -2879,6 +2928,8 @@ const markItemReferencesForRetry = (references: ItemRefWithMetadata[]): boolean 
       continue;
     }
     metadata.resolved = false;
+    // Evict the stale cache entry so the retry performs a fresh lookup
+    itemLookupCache.delete(buildItemCacheKey(metadata.lookupName));
     marked = true;
   }
   return marked;
@@ -3018,6 +3069,18 @@ const postToQbo = async <T extends QuickBooksDocType>(
   if (docNumber) {
     const existingId = await checkForDuplicate(entity, docNumber, options);
     if (existingId) {
+      if (options?.strictDocNumber) {
+        logger.warn('[QBO] Unexpected DocNumber collision on strictly-unique document', {
+          alert: 'qbo_docnumber_collision',
+          entity,
+          docNumber,
+          existingId,
+        });
+        throw new Error(
+          `DocNumber collision detected for ${entity}: DocNumber "${docNumber}" already exists (id=${existingId}). ` +
+            `This DocNumber was expected to be globally unique.`
+        );
+      }
       logger.info('[QBO] Returning existing document instead of creating duplicate', {
         entity,
         docNumber,
@@ -3070,6 +3133,22 @@ const postToQbo = async <T extends QuickBooksDocType>(
         docNumber,
         error: errorText,
       });
+
+      // If the DocNumber encodes a unique ID, this collision is unexpected — escalate.
+      if (options?.strictDocNumber) {
+        logger.warn(
+          '[QBO] Unexpected DocNumber collision on strictly-unique document (QBO error)',
+          {
+            alert: 'qbo_docnumber_collision',
+            entity,
+            docNumber,
+          }
+        );
+        throw new Error(
+          `DocNumber collision returned by QBO for ${entity}: DocNumber "${docNumber ?? 'unknown'}" already exists. ` +
+            `This DocNumber was expected to be globally unique. Original error: ${errorText ?? response.statusText}`
+        );
+      }
 
       // First: try to extract TxnId directly from the error message
       // e.g. "DocNumber=CHG-... is assigned to TxnType=Sales Receipt with TxnId=10679"
@@ -3286,8 +3365,12 @@ const postChargeAsSalesReceipt = async (input: {
     memo: normalizedMemo,
     date,
     revenueItemName: revenueItemPayload,
-    depositAccountName: depositAccountRef.value,
-    feesAccountName: feesAccountRef.value,
+    depositAccountName: depositAccountRef.name
+      ? `${depositAccountRef.name}|${depositAccountRef.value}`
+      : depositAccountRef.value,
+    feesAccountName: feesAccountRef.name
+      ? `${feesAccountRef.name}|${feesAccountRef.value}`
+      : feesAccountRef.value,
     stripeFeeAmountCents: feeAmount,
     stripeChargeId: stripe?.charge?.id ?? null,
     stripeInvoiceId:
@@ -3440,6 +3523,7 @@ export const postRefundToQbo = async ({
   feeAmount = 0,
   memo,
   date,
+  refundId,
   cleanupTag,
   options,
 }: PostRefundToQboInput): Promise<PostChargeToQboResult> => {
@@ -3451,8 +3535,17 @@ export const postRefundToQbo = async ({
     throw new Error('Refund amount must be greater than zero.');
   }
 
+  if (!refundId) {
+    logger.warn('[QBOSvc] postRefundToQbo called without refundId — DocNumber may collide', {
+      date,
+      amount: refundAmount,
+    });
+  }
+
+  const effectiveOptions = refundId ? { ...options, strictDocNumber: true } : options;
+
   return postJournalEntryFromLines({
-    docNumber: buildDocNumber('REF', date, refundAmount + refundFeeAmount),
+    docNumber: buildDocNumber('REF', date, refundAmount + refundFeeAmount, null, refundId ?? null),
     memo: normalizedMemo,
     date,
     lines: [
@@ -3478,7 +3571,7 @@ export const postRefundToQbo = async ({
       ),
     ],
     emptyLineError: 'Refund journal entry must include at least one non-zero line.',
-    options,
+    options: effectiveOptions,
   });
 };
 
@@ -3533,6 +3626,7 @@ export const postDisputeToQbo = async ({
   feeAmount,
   memo,
   date,
+  disputeId,
   cleanupTag,
   options,
 }: PostDisputeToQboInput): Promise<PostChargeToQboResult> => {
@@ -3545,8 +3639,18 @@ export const postDisputeToQbo = async ({
     throw new Error('Dispute posting requires a non-zero amount.');
   }
 
+  if (!disputeId) {
+    logger.warn('[QBOSvc] postDisputeToQbo called without disputeId — DocNumber may collide', {
+      date,
+      lossAmount: normalizedLoss,
+      feeAmount: normalizedFee,
+    });
+  }
+
+  const effectiveOptions = disputeId ? { ...options, strictDocNumber: true } : options;
+
   return postJournalEntryFromLines({
-    docNumber: buildDocNumber('DSP', date, total),
+    docNumber: buildDocNumber('DSP', date, total, null, disputeId ?? null),
     memo: normalizedMemo,
     date,
     lines: [
@@ -3574,7 +3678,84 @@ export const postDisputeToQbo = async ({
       ),
     ],
     emptyLineError: 'Dispute journal entry must contain at least one non-zero line.',
-    options,
+    options: effectiveOptions,
+  });
+};
+
+/**
+ * Post a won-dispute reversal journal entry to QuickBooks.
+ *
+ * When Stripe rules a dispute in the merchant’s favour it returns the
+ * originally debited funds.  This function posts the mirror-image journal
+ * entry that reverses the original `postDisputeToQbo` debit:
+ *
+ *   Debit  stripeClearing   (total = loss + fee)   ← funds back in account
+ *   Credit disputeLosses    (loss amount)            ← reversal of loss
+ *   Credit fees             (fee amount, if any)     ← reversal of chargeback fee
+ *
+ * The DocNumber uses the `DSPREV` prefix so it is a separate, traceable
+ * document distinct from the original `DSP-…` entry.
+ */
+export const postDisputeReversalToQbo = async ({
+  lossAmount,
+  feeAmount,
+  memo,
+  date,
+  disputeId,
+  cleanupTag,
+  options,
+}: PostDisputeReversalToQboInput): Promise<PostChargeToQboResult> => {
+  const normalizedLoss = ensurePositiveAmount(lossAmount, 'Dispute loss amount');
+  const normalizedFee = ensurePositiveAmount(feeAmount, 'Dispute fee amount');
+  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
+  const total = normalizedLoss + normalizedFee;
+
+  if (total === 0) {
+    throw new Error('Dispute reversal posting requires a non-zero amount.');
+  }
+
+  if (!disputeId) {
+    logger.warn(
+      '[QBOSvc] postDisputeReversalToQbo called without disputeId — DocNumber may collide',
+      { date, lossAmount: normalizedLoss, feeAmount: normalizedFee }
+    );
+  }
+
+  const effectiveOptions = disputeId ? { ...options, strictDocNumber: true } : options;
+
+  return postJournalEntryFromLines({
+    docNumber: buildDocNumber('DSPREV', date, total, null, disputeId ?? null),
+    memo: normalizedMemo,
+    date,
+    lines: [
+      // Debit stripeClearing — Stripe returns the full disputed amount to the account.
+      createJournalEntryLine(
+        'debit',
+        env.quickBooks.accounts.stripeClearing,
+        total,
+        normalizedMemo
+      ),
+      // Credit disputeLosses — reverses the original loss debit.
+      normalizedLoss > 0
+        ? createJournalEntryLine(
+            'credit',
+            env.quickBooks.accounts.disputeLosses,
+            normalizedLoss,
+            normalizedMemo
+          )
+        : null,
+      // Credit fees — reverses the chargeback fee debit.
+      normalizedFee > 0
+        ? createJournalEntryLine(
+            'credit',
+            env.quickBooks.accounts.fees,
+            normalizedFee,
+            normalizedMemo
+          )
+        : null,
+    ],
+    emptyLineError: 'Dispute reversal journal entry must contain at least one non-zero line.',
+    options: effectiveOptions,
   });
 };
 
@@ -4206,6 +4387,7 @@ export default {
   postChargeToQbo,
   postRefundToQbo,
   postDisputeToQbo,
+  postDisputeReversalToQbo,
   postPayoutToQbo,
   ensureItem,
   ensureCustomer,

@@ -1,0 +1,51 @@
+{
+  "type": "journal-entry",
+  "data": {
+    "DocNumber": "JE-2024-12345",
+    "TxnDate": "2024-10-31",
+    "PrivateNote": "Monthly fee reconciliation for Stripe processing fees",
+    "Adjustment": false,
+    "Line": [
+      {
+        "Amount": 125.50,
+        "DetailType": "JournalEntryLineDetail",
+        "Description": "Stripe processing fees for October 2024",
+        "JournalEntryLineDetail": {
+          "PostingType": "Debit",
+          "AccountRef": {
+            "name": "Bank Fees Expense"
+          },
+          "Entity": {
+            "EntityRef": {
+              "name": "Stripe, Inc."
+            },
+            "Type": "Vendor"
+          },
+          "ClassRef": {
+            "name": "Operating Expenses"
+          },
+          "DepartmentRef": {
+            "name": "Finance"
+          }
+        }
+      },
+      {
+        "Amount": 125.50,
+        "DetailType": "JournalEntryLineDetail",
+        "Description": "Offset for Stripe processing fees",
+        "JournalEntryLineDetail": {
+          "PostingType": "Credit",
+          "AccountRef": {
+            "name": "Checking Account"
+          },
+          "ClassRef": {
+            "name": "Operating Expenses"
+          },
+          "DepartmentRef": {
+            "name": "Finance"
+          }
+        }
+      }
+    ]
+  }
+}

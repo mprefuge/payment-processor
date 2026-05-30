@@ -5,6 +5,8 @@ import { StripeEventRouter } from './StripeEventRouter';
 import { DefaultWebhookResponseFormatter } from './WebhookResponseFormatter';
 import type { StripeWebhookDependencies } from '../../stripe/types';
 import { logger } from '../../lib/logger';
+import { isRequestLimitExceeded } from '../../lib/salesforceErrors';
+import { checkReplayWindow } from '../../lib/replayProtection';
 
 export class StripeWebhookProcessor implements WebhookRequestHandler {
   private readonly eventRouter: StripeEventRouter;
@@ -19,6 +21,24 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     const verification = await this.verifyRequest(req);
     if ('response' in verification) {
       return verification.response;
+    }
+
+    // Reject events outside the configured replay window before acquiring the
+    // idempotency lock.  Return HTTP 200 (same as duplicate) so Stripe does not
+    // retry — a stale event is not a transient error, it should simply be ignored.
+    const replayCheck = checkReplayWindow(verification.event.created);
+    if (!replayCheck.valid) {
+      logger.warn('[StripeWebhook] Stale event rejected by replay-window check', {
+        alert: 'stale_stripe_event',
+        eventId: verification.event.id,
+        eventType: verification.event.type,
+        created: verification.event.created,
+        reason: replayCheck.reason,
+      });
+      return this.responseFormatter.staleEvent(
+        verification.event.type,
+        replayCheck.reason ?? 'stale'
+      );
     }
 
     return this.processVerifiedEvent(verification.event, context);
@@ -50,6 +70,9 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     return this.dependencies.idempotencyStore.withLock(
       `stripe_webhook_evt_${event.id}`,
       async () => {
+        // Re-check after acquiring the lock: guards against TTL expiry races where
+        // the lock expired while we waited, another instance processed the event and
+        // marked it processed, and we then acquired the (now-stale) lock slot.
         const isProcessed = await this.dependencies.idempotencyStore.isProcessed(event.id);
         if (isProcessed) {
           logger.info('[StripeWebhook] Duplicate event detected', { eventId: event.id });
@@ -61,12 +84,26 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
           await this.dependencies.idempotencyStore.markProcessed(event.id);
           return this.responseFormatter.success(event.type);
         } catch (error) {
+          if (isRequestLimitExceeded(error)) {
+            logger.error('[StripeWebhook] Salesforce API daily limit exceeded', {
+              alert: 'salesforce_api_limit',
+              correlationId: event.id,
+              eventId: event.id,
+              eventType: event.type,
+              limitExceededAt: new Date().toISOString(),
+            });
+            return this.responseFormatter.apiLimitExceeded(event.type);
+          }
           logger.error('[StripeWebhook] Event processing failed', {
             eventId: event.id,
             eventType: event.type,
             error: error instanceof Error ? error.message : String(error),
           });
-          return this.responseFormatter.error('processing_error');
+          // Return 503 so Stripe retries this event.  Only use 400 (permanent
+          // failure / no retry) for signature errors, which are handled before
+          // this point.  Any exception thrown by route() — auth failure, network
+          // timeout, downstream service error — is by definition transient.
+          return this.responseFormatter.transientError('processing_error');
         }
       }
     );

@@ -3,7 +3,12 @@ import type Stripe from 'stripe';
 
 import type { AzureIdempotencyStore, IdempotencyStore } from '../services/idempotencyStore';
 import type { SalesforceSvc, QuickBooksDocumentReference } from '../services/salesforceSvc';
-import type { postChargeToQbo, postRefundToQbo, postDisputeToQbo } from '../services/qboSvc';
+import type {
+  postChargeToQbo,
+  postRefundToQbo,
+  postDisputeToQbo,
+  postDisputeReversalToQbo,
+} from '../services/qboSvc';
 
 export interface StripeServices {
   verifyEvent: (payload: Buffer | string, signature: string) => Stripe.Event;
@@ -131,6 +136,7 @@ export interface AccountingServices {
   postChargeToQbo: typeof postChargeToQbo;
   postRefundToQbo: typeof postRefundToQbo;
   postDisputeToQbo: typeof postDisputeToQbo;
+  postDisputeReversalToQbo: typeof postDisputeReversalToQbo;
   refundReceipts?: RefundReceiptAccountingAdapter;
   payouts?: PayoutAccountingAdapter;
 }

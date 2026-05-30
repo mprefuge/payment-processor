@@ -1,4 +1,5 @@
 const { logger } = require('../lib/logger');
+const { parseBoolean } = require('../lib/parsing');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 const Stripe = require('stripe');
@@ -17,6 +18,9 @@ const {
 const { createCrmConfigResolver } = require('./processTransaction/crmConfig');
 const { createCrmContactWorkflow } = require('./processTransaction/crmContactWorkflow');
 const { createCrmTransactionWorkflow } = require('./processTransaction/crmTransactionWorkflow');
+
+const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
+const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
 
 // Create in-memory idempotency store
 const createInMemoryStore = () => {
@@ -55,35 +59,8 @@ const setIdempotencyStore = (store) => {
 const resetIdempotencyStore = () => {
   idempotencyStore = createIdempotencyStore();
 };
-const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
-const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
-
 const defaultStripeClientFactory = (key) => new Stripe(key);
 let stripeClientFactory = defaultStripeClientFactory;
-
-const parseBooleanFlag = (value) => {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-
-  if (typeof value === 'number') {
-    return value !== 0;
-  }
-
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-
-    if (TRUTHY_VALUES.has(normalized)) {
-      return true;
-    }
-
-    if (FALSY_VALUES.has(normalized)) {
-      return false;
-    }
-  }
-
-  return Boolean(value);
-};
 
 const normalizeModeToggle = (value) => {
   if (typeof value === 'string') {
@@ -203,7 +180,7 @@ const getConfiguredMode = (requestOrContext, maybeContext, requestData) => {
   }
 
   if (context?.bindingData && typeof context.bindingData.livemode !== 'undefined') {
-    return parseBooleanFlag(context.bindingData.livemode);
+    return parseBoolean(context.bindingData.livemode);
   }
 
   const configuredMode = normalizeConfiguredMode(process.env.STRIPE_MODE);
@@ -217,7 +194,7 @@ const getConfiguredMode = (requestOrContext, maybeContext, requestData) => {
       : process.env.STRIPE_LIVEMODE;
 
   if (typeof envFlag !== 'undefined') {
-    return parseBooleanFlag(envFlag);
+    return parseBoolean(envFlag);
   }
 
   return !isTestingCategory(requestData?.category);
@@ -525,7 +502,7 @@ function sanitizeStripeMetadata(metadata) {
  * @returns {number} The fee amount in cents
  */
 function calculateCoverFees(baseAmountCents, paymentMethod = 'card') {
-  const isNonprofit = parseBooleanFlag(process.env.STRIPE_NONPROFIT_RATES);
+  const isNonprofit = parseBoolean(process.env.STRIPE_NONPROFIT_RATES);
 
   let percentageFee;
   let fixedFee;
@@ -687,7 +664,7 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
       logger.info(`Cover fees enabled: using provided fee amount ${coverFeesAmount} cents`);
     } else {
       coverFeesAmount = calculateCoverFees(transactionData.amount, transactionData.paymentMethod);
-      const isNonprofit = parseBooleanFlag(process.env.STRIPE_NONPROFIT_RATES);
+      const isNonprofit = parseBoolean(process.env.STRIPE_NONPROFIT_RATES);
       logger.info(
         `Cover fees enabled: calculated fee for ${transactionData.paymentMethod} ` +
           `(${isNonprofit ? 'nonprofit' : 'standard'} rates): ` +
@@ -927,7 +904,7 @@ module.exports = async function (request, context) {
   const requestId = randomUUID();
   const secureDebugEnabled = process.env.SECURE_DEBUG === 'true';
   const log = (message, extra = {}) => {
-    console.log(message, { requestId, ...extra });
+    logger.log(message, { requestId, ...extra });
   };
   const debugLog = (message, extra = {}) => {
     if (secureDebugEnabled) {

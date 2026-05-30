@@ -6,7 +6,7 @@ local.settings.json
 test
 __tests__
 scripts
-docs
+
 src
 tsconfig.json
 vitest.config.mjs

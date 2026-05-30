@@ -18,17 +18,19 @@ import {
   resolveBalanceTransaction,
   timestampToDate,
   timestampToIsoString,
+  toSafeInteger,
 } from '../utils';
 import {
   ensureStripeClient,
   markDocumentPosted,
   normalizeMetadataValue,
-  SALES_RECEIPT_DOC_NUMBER_KEYS,
+  resolveDocNumberFromMetadata,
 } from './common';
-import type { TransactionUpsertDTO } from '../../domain/transactions';
+import {
+  type TransactionUpsertDTO,
+  SF_RECORD_TYPE_STRIPE_TRANSACTION,
+} from '../../domain/transactions';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
-
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 
 type Nullable<T> = T | null | undefined;
 
@@ -103,9 +105,6 @@ const fetchChargeById = async (
     return null;
   }
 };
-
-const toSafeInteger = (value: unknown): number =>
-  typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
 const summarizeBalanceTransaction = (
   balanceTransaction: Stripe.BalanceTransaction | null
@@ -363,28 +362,12 @@ const parseSalesReceiptLines = (metadata: Nullable<Stripe.Metadata>): SalesRecei
   }
 };
 
-const resolveSalesReceiptDocNumber = (sources: Nullable<Stripe.Metadata>[]): string | null => {
-  for (const metadata of sources) {
-    if (!metadata) {
-      continue;
-    }
-    for (const key of SALES_RECEIPT_DOC_NUMBER_KEYS) {
-      const value = normalizeMetadataValue(metadata, key);
-      if (value) {
-        return value;
-      }
-    }
-  }
-
-  return null;
-};
-
 const resolveSalesReceiptContext = (
   paymentIntent: Stripe.PaymentIntent | null,
   charge: Stripe.Charge | null
 ): SalesReceiptContext => {
   const metadataSources = [paymentIntent?.metadata ?? null, charge?.metadata ?? null];
-  const docNumber = resolveSalesReceiptDocNumber(metadataSources);
+  const docNumber = resolveDocNumberFromMetadata(metadataSources);
 
   for (const metadata of metadataSources) {
     const lines = parseSalesReceiptLines(metadata);
@@ -662,7 +645,7 @@ const upsertSalesforceTransaction = async (
       parentId = await salesforce.findTransactionIdByExternalId(
         'stripe_charge_id__c',
         stripeContext.charge.id,
-        STRIPE_TRANSACTION_RECORD_TYPE_NAME,
+        SF_RECORD_TYPE_STRIPE_TRANSACTION,
         'charge'
       );
     } catch (error) {

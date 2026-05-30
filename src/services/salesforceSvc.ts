@@ -1,9 +1,11 @@
 import type { Connection } from 'jsforce/lib/connection';
 import type { UpsertResult } from 'jsforce/lib/types';
 
-import type { TransactionUpsertDTO } from '../domain/transactions';
+import {
+  type TransactionUpsertDTO,
+  SF_RECORD_TYPE_STRIPE_TRANSACTION,
+} from '../domain/transactions';
 
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 const PAYOUT_TRANSACTION_RECORD_TYPE_NAME = 'Payout';
 const SALES_RECEIPT_RECORD_TYPE_NAME = 'Sales Receipt';
 const JOURNAL_ENTRY_RECORD_TYPE_NAME = 'Journal Entry';
@@ -791,7 +793,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
   const resolveTransactionRecordTypeName = (
     dto: TransactionUpsertDTO
   ):
-    | typeof STRIPE_TRANSACTION_RECORD_TYPE_NAME
+    | typeof SF_RECORD_TYPE_STRIPE_TRANSACTION
     | typeof PAYOUT_TRANSACTION_RECORD_TYPE_NAME
     | typeof SALES_RECEIPT_RECORD_TYPE_NAME
     | typeof JOURNAL_ENTRY_RECORD_TYPE_NAME
@@ -806,7 +808,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       default:
         return dto.transaction_type__c === 'payout'
           ? PAYOUT_TRANSACTION_RECORD_TYPE_NAME
-          : STRIPE_TRANSACTION_RECORD_TYPE_NAME;
+          : SF_RECORD_TYPE_STRIPE_TRANSACTION;
     }
   };
 

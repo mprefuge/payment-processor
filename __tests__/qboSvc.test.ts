@@ -674,52 +674,56 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.Line.find((l: any) => l.Amount < 0)).toBeUndefined();
   });
 
-  it('reads cover fees from paymentIntent/charge metadata when session unavailable', async () => {
-    baseEnv.accounting.postingStrategy = 'sales-receipt';
-    const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} }, // Customer email lookup
-      { QueryResponse: {} }, // Customer name lookup
-      { Customer: { Id: 'cust-meta', DisplayName: 'Meta Donor' } }, // Customer create
-      {
-        QueryResponse: {
-          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+  it(
+    'reads cover fees from paymentIntent/charge metadata when session unavailable',
+    async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: {} }, // Customer email lookup
+        { QueryResponse: {} }, // Customer name lookup
+        { Customer: { Id: 'cust-meta', DisplayName: 'Meta Donor' } }, // Customer create
+        {
+          QueryResponse: {
+            Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+          },
+        }, // Item lookup
+        { QueryResponse: {} }, // Duplicate check for sales receipt
+        { SalesReceipt: { Id: 'sr-meta' } }, // Sales receipt create
+        { QueryResponse: {} }, // Duplicate check for fee journal entry
+        { JournalEntry: { Id: 'fee-je-meta' } } // Fee journal entry create
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const coverAmount = 300; // $3.00
+      const result = await postChargeToQbo({
+        gross: 10_000,
+        fee: 0,
+        memo: 'Charge memo',
+        date: new Date('2024-03-01'),
+        stripe: {
+          // include an email so the email lookup step runs and response ordering
+          // matches other tests
+          charge: {
+            metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) },
+            billing_details: { email: 'donor@example.com' },
+          } as any,
+          paymentIntent: { metadata: {} } as any,
+          customer: null,
+          checkoutSession: null,
         },
-      }, // Item lookup
-      { QueryResponse: {} }, // Duplicate check for sales receipt
-      { SalesReceipt: { Id: 'sr-meta' } }, // Sales receipt create
-      { QueryResponse: {} }, // Duplicate check for fee journal entry
-      { JournalEntry: { Id: 'fee-je-meta' } } // Fee journal entry create
-    );
-    const { postChargeToQbo } = await importQboSvc();
+        options: { fetcher, accessToken: 'token' },
+      });
 
-    const coverAmount = 300; // $3.00
-    const result = await postChargeToQbo({
-      gross: 10_000,
-      fee: 0,
-      memo: 'Charge memo',
-      date: new Date('2024-03-01'),
-      stripe: {
-        // include an email so the email lookup step runs and response ordering
-        // matches other tests
-        charge: {
-          metadata: { cover_fees: 'true', cover_fees_amount: String(coverAmount) },
-          billing_details: { email: 'donor@example.com' },
-        } as any,
-        paymentIntent: { metadata: {} } as any,
-        customer: null,
-        checkoutSession: null,
-      },
-      options: { fetcher, accessToken: 'token' },
-    });
+      expect(result).toEqual({ qboId: 'sr-meta', type: 'sales-receipt' });
+      const salesReceiptRequest = requests.find((r) => r.url.includes('salesreceipt'));
+      const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
 
-    expect(result).toEqual({ qboId: 'sr-meta', type: 'sales-receipt' });
-    const salesReceiptRequest = requests.find((r) => r.url.includes('salesreceipt'));
-    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
-
-    // should have two lines: base + cover-fee line
-    expect(salesReceiptBody.Line.length).toBe(2);
-    expect(salesReceiptBody.Line[1].Amount).toBe(3.0);
-  });
+      // should have two lines: base + cover-fee line
+      expect(salesReceiptBody.Line.length).toBe(2);
+      expect(salesReceiptBody.Line[1].Amount).toBe(3.0);
+    },
+    { timeout: 20000 }
+  );
 
   // directly exercise getCoverFeesInfo to verify metadata aggregation
   describe('getCoverFeesInfo helper', () => {
@@ -1054,7 +1058,7 @@ describe('postChargeToQbo', () => {
     });
   });
 
-  it.skip('prefers the Stripe customer name over billing details when refreshing QuickBooks customers', async () => {
+  it('prefers the Stripe customer name over billing details when refreshing QuickBooks customers', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(
       {
@@ -1131,7 +1135,7 @@ describe('postChargeToQbo', () => {
     expect(result).toEqual({ qboId: 'sr-4', type: 'sales-receipt' });
     expect(fetcher).toHaveBeenCalledTimes(6); // Customer lookup, get, update, item lookup, duplicate check, sales receipt
 
-    const [, , customerUpdate, , salesReceiptPost] = requests;
+    const [, , customerUpdate, , , salesReceiptPost] = requests;
     const updateBody = JSON.parse((customerUpdate.init?.body ?? '{}') as string);
     expect(updateBody).toMatchObject({
       DisplayName: 'Member Stripe',
@@ -1146,7 +1150,7 @@ describe('postChargeToQbo', () => {
     });
   });
 
-  it.skip('retries sales receipt with looked up item id when QuickBooks rejects provided item reference', async () => {
+  it('retries sales receipt with looked up item id when QuickBooks rejects provided item reference', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const invalidReferenceResponse = {
       Fault: {
@@ -1171,6 +1175,7 @@ describe('postChargeToQbo', () => {
           Item: { Id: 'STALE_ID', Name: 'Stripe Sales Item' },
         },
       }, // Item lookup
+      { QueryResponse: {} }, // Duplicate check for sales receipt
       {
         ok: false,
         status: 400,
@@ -1200,11 +1205,11 @@ describe('postChargeToQbo', () => {
     const salesReceiptRequests = requests.filter((request) => request.url.includes('salesreceipt'));
     expect(salesReceiptRequests).toHaveLength(2);
     const [initialPost, retryPost] = salesReceiptRequests;
-    const itemLookupRequests = requests.filter((request, index) => {
+    const itemLookupRequests = requests.filter((request) => {
       if (!request.url.includes('/query?query=')) {
         return false;
       }
-      return index > 1;
+      return decodeURIComponent(request.url).toLowerCase().includes('from item');
     });
     expect(itemLookupRequests).toHaveLength(2);
     expect(itemLookupRequests[0]?.url).toContain('/query?query=');
@@ -1309,7 +1314,7 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.BillEmail).toEqual({ Address: 'ada@example.com' });
   });
 
-  it.skip('looks up account IDs when configuration only provides a name', async () => {
+  it('looks up account IDs when configuration only provides a name', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
     const { fetcher, requests } = createFetchMock(
@@ -1465,7 +1470,7 @@ describe('postChargeToQbo', () => {
     ).rejects.toThrow(/could not be found/i);
   });
 
-  it.skip('refreshes the QuickBooks access token when an account lookup returns 401', async () => {
+  it('refreshes the QuickBooks access token when an account lookup returns 401', async () => {
     baseEnv.accounting.postingStrategy = 'je-transfer';
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
     baseEnv.quickBooks.refreshToken = 'refresh-token';
@@ -1524,7 +1529,7 @@ describe('postChargeToQbo', () => {
     expect(baseEnv.quickBooks.refreshToken).toBe('next-refresh-token');
   });
 
-  it.skip('throws a descriptive error when token refresh fails after an unauthorized response', async () => {
+  it('throws a descriptive error when token refresh fails after an unauthorized response', async () => {
     baseEnv.accounting.postingStrategy = 'je-transfer';
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';
     baseEnv.quickBooks.refreshToken = 'refresh-token';
@@ -1678,14 +1683,15 @@ describe('postRefundToQbo', () => {
     expect(journalBody.PrivateNote).toContain('[source_test_tag:deploy-smoke-123]');
   });
 
-  it.skip('auto-creates the refunds account when configured by name', async () => {
+  it('auto-creates the refunds account when configured by name', async () => {
     baseEnv.quickBooks.accounts.refunds = 'Refunds';
+    baseEnv.accounting.accounts.autoCreate = true;
 
     const { fetcher, requests } = createFetchMock(
-      { QueryResponse: {} },
-      { Account: { Id: '789', Name: 'Refunds' } },
-      { QueryResponse: {} },
-      { JournalEntry: { Id: 'refund-2' } }
+      { QueryResponse: {} }, // Duplicate check for journal entry
+      { QueryResponse: {} }, // Account lookup by name (not found)
+      { Account: { Id: '789', Name: 'Refunds' } }, // Account auto-create
+      { JournalEntry: { Id: 'refund-2' } } // Journal entry create
     );
 
     const { postRefundToQbo } = await importQboSvc();
@@ -1699,7 +1705,7 @@ describe('postRefundToQbo', () => {
 
     expect(result).toEqual({ qboId: 'refund-2', type: 'journal-entry' });
     expect(requests[0].url).toContain('/query?query=');
-    expect(requests[1].url).toContain('/account');
+    expect(requests[2].url).toContain('/account');
 
     const journalBody = JSON.parse((requests[3].init?.body ?? '{}') as string);
     const debitLine = journalBody.Line.find(

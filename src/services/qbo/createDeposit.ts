@@ -46,7 +46,7 @@ export async function createQboDeposit({
     DepositToAccountRef: { value: String(bankId) },
     Line: [
       {
-        Amount: (amountDollars / 100).toFixed(2),
+        Amount: amountDollars.toFixed(2),
         DetailType: 'DepositLineDetail',
         DepositLineDetail: {
           LinkedTxn: [{ TxnId: String(salesReceiptId), TxnType: 'SalesReceipt', TxnLineId: '0' }],

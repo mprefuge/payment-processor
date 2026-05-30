@@ -285,7 +285,14 @@ const resolveRequestDependencies = (deps, modeToggle) => {
   };
 };
 
-const buildSummary = (lookbackDays, requestedLookbackDays, payouts, processed, skipped, errors) => ({
+const buildSummary = (
+  lookbackDays,
+  requestedLookbackDays,
+  payouts,
+  processed,
+  skipped,
+  errors
+) => ({
   lookbackDays,
   requestedLookbackDays,
   lookbackDaysClamped: requestedLookbackDays !== lookbackDays,
@@ -472,7 +479,7 @@ const handler = async (request, context) => {
   try {
     deps = resolveDependencies();
   } catch (error) {
-    console.error('[payoutSyncTrigger] Failed to initialize dependencies', error);
+    logger.error('[payoutSyncTrigger] Failed to initialize dependencies', error);
     return buildHandlerResponse(500, {
       error: 'Initialization failed',
       message: error.message,
@@ -515,7 +522,7 @@ const handler = async (request, context) => {
         const outcome = await processPayout({ payout, deps, salesforce, context });
         outcomes.push(outcome);
       } catch (error) {
-        console.error('[payoutSyncTrigger] Failed to process payout', {
+        logger.error('[payoutSyncTrigger] Failed to process payout', {
           payoutId: payout?.id,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -530,13 +537,20 @@ const handler = async (request, context) => {
     const skipped = outcomes.filter((entry) => entry.status === 'skipped');
 
     return buildHandlerResponse(errors.length > 0 ? 207 : 200, {
-      summary: buildSummary(lookbackDays, requestedLookbackDays, payouts, processed, skipped, errors),
+      summary: buildSummary(
+        lookbackDays,
+        requestedLookbackDays,
+        payouts,
+        processed,
+        skipped,
+        errors
+      ),
       processed,
       skipped,
       errors,
     });
   } catch (error) {
-    console.error('[payoutSyncTrigger] Unexpected error', error);
+    logger.error('[payoutSyncTrigger] Unexpected error', error);
     return buildHandlerResponse(500, {
       error: 'Processing failed',
       message: error.message,

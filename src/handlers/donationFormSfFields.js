@@ -11,19 +11,42 @@ function getSvc() {
 // SF field types that map to each broad category we use on the frontend for filtering.
 // Kept here as authoritative reference; the frontend mirrors these.
 const WRITABLE_SF_TYPES = new Set([
-  'string', 'textarea', 'email', 'phone', 'url', 'id',
-  'reference', 'picklist', 'multipicklist', 'combobox',
+  'string',
+  'textarea',
+  'email',
+  'phone',
+  'url',
+  'id',
+  'reference',
+  'picklist',
+  'multipicklist',
+  'combobox',
   'boolean',
-  'double', 'integer', 'long', 'currency', 'percent',
-  'date', 'datetime', 'time',
+  'double',
+  'integer',
+  'long',
+  'currency',
+  'percent',
+  'date',
+  'datetime',
+  'time',
   'base64', // file bytes
 ]);
 
 // System fields we never surface as mapping targets
 const SYSTEM_FIELD_NAMES = new Set([
-  'Id', 'IsDeleted', 'SystemModstamp', 'CreatedById', 'LastModifiedById',
-  'CreatedDate', 'LastModifiedDate', 'LastActivityDate', 'LastViewedDate',
-  'LastReferencedDate', 'MasterRecordId', 'RecordTypeId',
+  'Id',
+  'IsDeleted',
+  'SystemModstamp',
+  'CreatedById',
+  'LastModifiedById',
+  'CreatedDate',
+  'LastModifiedDate',
+  'LastActivityDate',
+  'LastViewedDate',
+  'LastReferencedDate',
+  'MasterRecordId',
+  'RecordTypeId',
 ]);
 
 /**
@@ -62,7 +85,7 @@ module.exports = async function donationFormSfFields(request) {
         (f) =>
           (f.createable || f.updateable) &&
           WRITABLE_SF_TYPES.has(f.type) &&
-          !SYSTEM_FIELD_NAMES.has(f.name),
+          !SYSTEM_FIELD_NAMES.has(f.name)
       )
       .map((f) => ({
         name: f.name,
@@ -73,7 +96,9 @@ module.exports = async function donationFormSfFields(request) {
         length: f.length || f.precision || null,
         picklistValues:
           (f.type === 'picklist' || f.type === 'multipicklist') && Array.isArray(f.picklistValues)
-            ? f.picklistValues.filter((p) => p.active).map((p) => ({ label: p.label, value: p.value }))
+            ? f.picklistValues
+                .filter((p) => p.active)
+                .map((p) => ({ label: p.label, value: p.value }))
             : [],
       }))
       .sort((a, b) => {
@@ -94,7 +119,8 @@ module.exports = async function donationFormSfFields(request) {
     const isNotFound =
       err.errorCode === 'NOT_FOUND' ||
       err.statusCode === 404 ||
-      (err.message && (err.message.includes('NOT_FOUND') || err.message.includes('does not exist')));
+      (err.message &&
+        (err.message.includes('NOT_FOUND') || err.message.includes('does not exist')));
     if (isNotFound) {
       return {
         status: 404,
@@ -106,11 +132,16 @@ module.exports = async function donationFormSfFields(request) {
     return {
       status: 502,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'Failed to retrieve Salesforce fields.', details: err.message }),
+      body: JSON.stringify({
+        error: 'Failed to retrieve Salesforce fields.',
+        details: err.message,
+      }),
     };
   }
 };
 
 module.exports.__internals = {
-  resetService: () => { _svc = null; },
+  resetService: () => {
+    _svc = null;
+  },
 };

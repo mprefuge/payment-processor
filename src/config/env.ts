@@ -69,7 +69,7 @@ type ResolveOptions = {
   trim?: boolean;
 };
 
-const DEFAULT_SALESFORCE_LOGIN_URL = 'https://login.salesforce.com';
+export const DEFAULT_SALESFORCE_LOGIN_URL = 'https://login.salesforce.com';
 
 function resolveEnv(name: string, options: ResolveOptions = {}): string | undefined {
   const { fallbackNames = [], defaultValue, trim = true } = options;

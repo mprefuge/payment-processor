@@ -147,6 +147,7 @@ const setup = ({
       postChargeToQbo: vi.fn(),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
       refundReceipts: refundAdapter,
     },
   };

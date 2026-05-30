@@ -10,9 +10,10 @@ import {
   timestampToIsoString,
 } from '../utils';
 import { markPosted } from './common';
-import type { TransactionUpsertDTO } from '../../domain/transactions';
-
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
+import {
+  type TransactionUpsertDTO,
+  SF_RECORD_TYPE_STRIPE_TRANSACTION,
+} from '../../domain/transactions';
 
 const resolveDisputeBalanceTransactions = async (
   stripe: Stripe,
@@ -34,6 +35,108 @@ const resolveDisputeBalanceTransactions = async (
   return results;
 };
 
+/**
+ * Handle a dispute that Stripe has ruled in the merchant's favour.
+ *
+ * When a dispute is won, Stripe returns the originally debited funds to the
+ * account.  This function:
+ *  1. Updates the Salesforce Transaction__c record to status "won".
+ *  2. Posts a reversal journal entry to QuickBooks (DSPREV- DocNumber) to
+ *     mirror the credit back from Stripe and reverse the original DSP- debit.
+ *  3. Marks the SF record as posted once the QBO entry is created.
+ */
+const handleDisputeWon = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies,
+  dispute: Stripe.Dispute
+): Promise<void> => {
+  const stripe = deps.stripe.getClient(Boolean(event.livemode));
+  const salesforce = await deps.getSalesforceSvc();
+
+  const chargeId = normalizeStripeId(dispute.charge);
+
+  const balanceTransactions = await resolveDisputeBalanceTransactions(stripe, dispute);
+
+  // For a won dispute Stripe posts positive adjustments crediting funds back.
+  const recoveryTransactions = balanceTransactions.filter(
+    (bt) => bt.reporting_category === 'chargeback' || bt.type === 'adjustment'
+  );
+  const feeTransactions = balanceTransactions.filter(
+    (bt) => bt.reporting_category === 'chargeback_fee' || bt.type === 'stripe_fee'
+  );
+
+  const recoveryAmountCents = recoveryTransactions.reduce(
+    (sum, bt) => sum + Math.abs(bt.amount ?? 0),
+    0
+  );
+  const feeAmountCents = feeTransactions.reduce((sum, bt) => sum + Math.abs(bt.amount ?? 0), 0);
+
+  const primaryBalanceTransaction = recoveryTransactions[0] || balanceTransactions[0] || null;
+
+  // Update Salesforce: mark the dispute record as won.
+  const transaction: TransactionUpsertDTO = {
+    transaction_type__c: 'dispute',
+    status__c: 'disputed',
+    stripe_dispute_id__c: dispute.id,
+    stripe_event_id__c: event.id,
+    stripe_livemode__c: typeof event.livemode === 'boolean' ? event.livemode : null,
+    stripe_charge_id__c: chargeId,
+    dispute_status__c: 'won',
+    dispute_reason__c: dispute.reason ?? null,
+    posted_to_qbo__c: false,
+  };
+
+  context.log('[StripeWebhook] Upserting won dispute transaction in Salesforce', {
+    disputeId: dispute.id,
+    chargeId,
+  });
+
+  const upsertResult = await salesforce.upsertTransactionByExternalId(
+    transaction,
+    'stripe_dispute_id__c'
+  );
+
+  if (!env.accounting.syncEnabled) {
+    return;
+  }
+
+  const totalCents = recoveryAmountCents + feeAmountCents;
+  if (totalCents === 0) {
+    context.log('[StripeWebhook] Won dispute has no balance transactions — skipping QBO reversal', {
+      disputeId: dispute.id,
+    });
+    return;
+  }
+
+  const lockId = primaryBalanceTransaction?.id || `dispute_won_${dispute.id}`;
+
+  await deps.idempotencyStore.withLock(`bt_${lockId}`, async () => {
+    const posting = await deps.accounting.postDisputeReversalToQbo({
+      lossAmount: recoveryAmountCents,
+      feeAmount: feeAmountCents,
+      memo: `Stripe dispute won ${dispute.id} (charge ${chargeId || '-'})`,
+      date: timestampToDate(
+        primaryBalanceTransaction?.created ??
+          primaryBalanceTransaction?.available_on ??
+          dispute.created ??
+          null
+      ),
+      disputeId: dispute.id,
+    });
+
+    await markPosted(salesforce, upsertResult, posting);
+
+    context.log('[StripeWebhook] Won dispute QBO reversal posted successfully', {
+      alert: 'dispute_won_reversal',
+      disputeId: dispute.id,
+      chargeId,
+      reversalQboId: posting.qboId,
+      reversalType: posting.type,
+    });
+  });
+};
+
 export const handleDisputeClosed = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -41,8 +144,13 @@ export const handleDisputeClosed = async (
 ): Promise<void> => {
   const dispute = event.data.object as Stripe.Dispute;
 
+  if (dispute.status === 'won') {
+    await handleDisputeWon(context, event, deps, dispute);
+    return;
+  }
+
   if (dispute.status !== 'lost') {
-    context.log('[StripeWebhook] Dispute closed without loss, ignoring', {
+    context.log('[StripeWebhook] Dispute closed without loss or win, ignoring', {
       disputeId: dispute.id,
       status: dispute.status,
     });
@@ -73,7 +181,7 @@ export const handleDisputeClosed = async (
     ? await salesforce.findTransactionIdByExternalId(
         'stripe_charge_id__c',
         chargeId,
-        STRIPE_TRANSACTION_RECORD_TYPE_NAME
+        SF_RECORD_TYPE_STRIPE_TRANSACTION
       )
     : null;
 
@@ -171,6 +279,7 @@ export const handleDisputeClosed = async (
           dispute.created ??
           null
       ),
+      disputeId: dispute.id,
     });
 
     await markPosted(salesforce, upsertResult, posting);

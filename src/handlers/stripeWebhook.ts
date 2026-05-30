@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 
 import env from '../config/env';
 import { logger } from '../lib/logger';
+import { isRequestLimitExceeded } from '../lib/salesforceErrors';
 import { AzureIdempotencyStore, type IdempotencyStore } from '../services/idempotencyStore';
 import { createSalesforceSvc, type SalesforceSvc } from '../services/salesforceSvc';
 import { SalesforceService, buildSalesforceConfig } from '../services/salesforceService';
@@ -10,6 +11,7 @@ import {
   postChargeToQbo,
   postRefundToQbo,
   postDisputeToQbo,
+  postDisputeReversalToQbo,
   postPayoutToQbo,
 } from '../services/qboSvc';
 import {
@@ -163,6 +165,13 @@ const createCachedServiceGetter = <T>(options: {
   setCachedPromise: (promise: Promise<T> | null) => void;
   initialize: () => Promise<T>;
   onInitializationError?: (error: unknown) => void;
+  /**
+   * When true, initialization errors are re-thrown rather than swallowed.
+   * The caller receives a rejected Promise and any dependent webhook processing
+   * will return HTTP 503 (retryable) instead of silently succeeding with a
+   * no-op service.
+   */
+  rethrowOnError?: boolean;
 }): (() => Promise<T>) => {
   if (env.salesforce.authMode === 'disabled') {
     return async () => options.disabledService;
@@ -184,6 +193,9 @@ const createCachedServiceGetter = <T>(options: {
       } catch (error) {
         options.setCachedPromise(null);
         options.onInitializationError?.(error);
+        if (options.rethrowOnError) {
+          throw error;
+        }
         return options.disabledService;
       }
     })();
@@ -208,10 +220,24 @@ const createSalesforceGetter = (): (() => Promise<SalesforceSvc>) => {
       const connection = await service.authenticate();
       return createSalesforceSvc({ connection });
     },
+    // Log the failure so it is visible in Application Insights, then re-throw
+    // so the in-flight webhook request returns HTTP 503 (Stripe will retry)
+    // rather than silently succeeding with a no-op service that drops all writes.
+    onInitializationError: (error) => {
+      logger.error(
+        '[StripeWebhook] Salesforce authentication failed; returning HTTP 503 so Stripe retries',
+        {
+          error: error instanceof Error ? error.message : String(error),
+        }
+      );
+    },
+    rethrowOnError: true,
   });
 };
 
 let defaultCrmSvcPromise: Promise<CrmService> | null = null;
+
+const isCriticalSalesforceError = (error: unknown): boolean => isRequestLimitExceeded(error);
 
 const createCrmGetter = (): (() => Promise<CrmService>) => {
   const disabledCrmSvc = createDisabledCrmSvc();
@@ -241,6 +267,9 @@ const createCrmGetter = (): (() => Promise<CrmService>) => {
     onInitializationError: (error) => {
       const message = error instanceof Error ? error.message : 'Unknown CRM initialization error';
       logger.error('[StripeWebhook] CRM initialization failed:', message);
+      if (isCriticalSalesforceError(error)) {
+        throw error;
+      }
     },
   });
 };
@@ -277,6 +306,7 @@ const createRefundReceiptAdapter = (): RefundReceiptAccountingAdapter => ({
         feeAmount: Math.max(0, Math.trunc(input.feeAmountCents ?? 0)),
         memo: input.memo,
         date: input.txnDate,
+        refundId: input.stripeRefundId,
       })
     );
   },
@@ -303,18 +333,35 @@ const createAccountingDependencies = (): StripeWebhookDependencies['accounting']
   postChargeToQbo,
   postRefundToQbo,
   postDisputeToQbo,
+  postDisputeReversalToQbo,
   refundReceipts: createRefundReceiptAdapter(),
   payouts: createPayoutAdapter(),
 });
 
-const createDefaultDependencies = (): StripeWebhookDependencies => ({
-  stripe: createStripeServices(),
-  idempotencyStore:
-    process.env.DISABLE_AZURE_TABLES === '1' ? createInMemoryStore() : new AzureIdempotencyStore(),
-  getSalesforceSvc: createSalesforceGetter(),
-  getCrmSvc: createCrmGetter(),
-  accounting: createAccountingDependencies(),
-});
+const createDefaultDependencies = (): StripeWebhookDependencies => {
+  // Azure Functions Consumption Plan sets WEBSITE_INSTANCE_ID when running in
+  // Azure.  DISABLE_AZURE_TABLES=1 disables the distributed lock entirely and
+  // must never be used in multi-instance deployments.
+  if (process.env.DISABLE_AZURE_TABLES === '1' && process.env.WEBSITE_INSTANCE_ID) {
+    throw new Error(
+      'DISABLE_AZURE_TABLES=1 cannot be used in Azure deployments. ' +
+        'This setting disables distributed locking and idempotency persistence, which ' +
+        'is only safe for local development. Remove DISABLE_AZURE_TABLES from your ' +
+        'Azure Function App configuration.'
+    );
+  }
+
+  return {
+    stripe: createStripeServices(),
+    idempotencyStore:
+      process.env.DISABLE_AZURE_TABLES === '1'
+        ? createInMemoryStore()
+        : new AzureIdempotencyStore(),
+    getSalesforceSvc: createSalesforceGetter(),
+    getCrmSvc: createCrmGetter(),
+    accounting: createAccountingDependencies(),
+  };
+};
 
 let dependencies: StripeWebhookDependencies | null = null;
 

@@ -223,6 +223,7 @@ describe('stripeWebhook', () => {
       postChargeToQbo: vi.fn().mockResolvedValue({ qboId: '123', type: 'journal-entry' }),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
     };
 
     const salesforce = {
@@ -340,6 +341,7 @@ describe('stripeWebhook', () => {
       postChargeToQbo: vi.fn().mockResolvedValue({ qboId: '123', type: 'journal-entry' }),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
     };
 
     const salesforce = {
@@ -390,6 +392,7 @@ describe('stripeWebhook', () => {
     const store = mockIdempotencyStore();
     const invoiceEvent: any = {
       id: 'evt_invoice',
+      created: Math.floor(Date.now() / 1000),
       type: 'invoice.payment_succeeded',
       data: {
         object: {
@@ -479,6 +482,7 @@ describe('stripeWebhook', () => {
       postChargeToQbo: vi.fn().mockResolvedValue({ qboId: '999', type: 'journal-entry' }),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
     };
 
     const salesforce = {
@@ -534,6 +538,7 @@ describe('stripeWebhook', () => {
     const store = mockIdempotencyStore();
     const invoiceEvent: any = {
       id: 'evt_invoice_paid',
+      created: Math.floor(Date.now() / 1000),
       type: 'invoice.paid',
       data: {
         object: {
@@ -615,6 +620,7 @@ describe('stripeWebhook', () => {
       postChargeToQbo: vi.fn().mockResolvedValue({ qboId: 'paid', type: 'journal-entry' }),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
     };
 
     const stripe = {
@@ -652,6 +658,7 @@ describe('stripeWebhook', () => {
     const store = mockIdempotencyStore();
     const disputeEvent: any = {
       id: 'evt_dispute',
+      created: Math.floor(Date.now() / 1000),
       type: 'charge.dispute.closed',
       data: {
         object: {

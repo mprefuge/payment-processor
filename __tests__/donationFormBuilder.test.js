@@ -82,7 +82,10 @@ describe('donation form builder handlers', () => {
     expect(response.jsonBody.embedScriptUrl).toContain(
       '/api/form-builder/embed.js?config=cfg_test_123'
     );
-    expect(response.jsonBody.embedSnippet).toContain('data-donation-form');
+    // no display.mode set → defaults to 'embedded' → embedSnippet uses donation-form-embedded
+    expect(response.jsonBody.embedSnippet).toContain('donation-form-embedded');
+    expect(response.jsonBody.embedSnippets.embedded).toContain('donation-form-embedded');
+    expect(response.jsonBody.embedSnippets.modal).toContain('data-donation-form');
 
     handler.__internals.resetConfigStore();
   });

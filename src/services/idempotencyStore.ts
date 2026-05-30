@@ -20,6 +20,8 @@ export interface AzureIdempotencyStoreOptions {
   lockMaxAttempts?: number;
   /** Base delay (in milliseconds) between lock attempts. */
   lockRetryDelayMs?: number;
+  /** Interval in ms at which the lock lease is renewed. Defaults to 40% of lockTtlSeconds. Set to 0 to disable. */
+  lockRenewalIntervalMs?: number;
   /** Optional logger implementation. */
   logger?: Pick<Logger, 'debug' | 'info' | 'warn' | 'error'>;
 }
@@ -40,6 +42,7 @@ const DEFAULT_LOCK_RETRY_DELAY_MS = 200;
 
 type LockEntity = {
   leaseExpiresAt?: string;
+  renewedAt?: string;
   ttl?: number;
 };
 
@@ -76,13 +79,11 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   private readonly lockTtlSeconds: number;
   private readonly lockMaxAttempts: number;
   private readonly lockRetryDelayMs: number;
+  private readonly lockRenewalIntervalMs: number;
   private readonly logger: Pick<Logger, 'debug' | 'info' | 'warn' | 'error'>;
   private readonly ensureTablePromise: Promise<void>;
 
   private readonly processedKeys = new Set<string>();
-  private readonly pendingPersist = new Set<string>();
-  private persistPromise: Promise<void> | null = null;
-  private reschedulePersist = false;
 
   constructor(options: AzureIdempotencyStoreOptions = {}) {
     const logger = options.logger ?? rootLogger;
@@ -94,6 +95,8 @@ export class AzureIdempotencyStore implements IdempotencyStore {
     this.lockTtlSeconds = options.lockTtlSeconds ?? DEFAULT_LOCK_TTL_SECONDS;
     this.lockMaxAttempts = options.lockMaxAttempts ?? DEFAULT_LOCK_MAX_ATTEMPTS;
     this.lockRetryDelayMs = options.lockRetryDelayMs ?? DEFAULT_LOCK_RETRY_DELAY_MS;
+    this.lockRenewalIntervalMs =
+      options.lockRenewalIntervalMs ?? Math.floor(this.lockTtlSeconds * 0.4 * 1000);
 
     if (this.lockTtlSeconds <= 0) {
       throw new Error('lockTtlSeconds must be greater than 0.');
@@ -159,6 +162,13 @@ export class AzureIdempotencyStore implements IdempotencyStore {
       if (isStatus(error, 404)) {
         return false;
       }
+      // 412 Precondition Failed means the entity exists but was modified by
+      // another process (ETag mismatch).  In the lock-release context this means
+      // the lock was already claimed by another instance after our TTL expired,
+      // so there is nothing for us to delete.
+      if (isStatus(error, 412)) {
+        return false;
+      }
       throw error;
     }
   }
@@ -178,13 +188,44 @@ export class AzureIdempotencyStore implements IdempotencyStore {
   private createLockEntity(
     key: string,
     ttl: number
-  ): { partitionKey: string; rowKey: string; leaseExpiresAt: string; ttl: number } {
+  ): {
+    partitionKey: string;
+    rowKey: string;
+    leaseExpiresAt: string;
+    renewedAt: string;
+    ttl: number;
+  } {
+    const now = new Date().toISOString();
     return {
       partitionKey: this.lockPartitionKey,
       rowKey: key,
       leaseExpiresAt: nowPlusSeconds(this.lockTtlSeconds),
+      renewedAt: now,
       ttl,
     };
+  }
+
+  private async renewLease(key: string, etag: string): Promise<string | null> {
+    const leaseExpiresAt = nowPlusSeconds(this.lockTtlSeconds);
+    try {
+      const result = await (this.client as any).updateEntity(
+        {
+          partitionKey: this.lockPartitionKey,
+          rowKey: key,
+          leaseExpiresAt,
+          renewedAt: new Date().toISOString(),
+          ttl: Math.ceil(this.lockTtlSeconds),
+        },
+        'Merge',
+        { etag }
+      );
+      return (result as { etag?: string } | null | undefined)?.etag ?? null;
+    } catch (error) {
+      if (isStatus(error, 412)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async isProcessed(key: string): Promise<boolean> {
@@ -210,83 +251,86 @@ export class AzureIdempotencyStore implements IdempotencyStore {
 
     await this.ensureReady();
 
+    // Write synchronously so the processed state is durable before the lock is
+    // released.  A fire-and-forget write here would leave a window where the
+    // lock is released but Azure Tables hasn't recorded the key yet, allowing a
+    // racing instance to re-execute the same event.
+    await this.client.upsertEntity(this.createProcessedEntity(normalizedKey));
     this.processedKeys.add(normalizedKey);
-    this.pendingPersist.add(normalizedKey);
-    this.schedulePersist();
   }
 
   async flush(): Promise<void> {
-    await this.ensureReady();
-
-    if (this.pendingPersist.size === 0 && !this.persistPromise) {
-      return;
-    }
-
-    this.schedulePersist();
-    if (this.persistPromise) {
-      await this.persistPromise;
-    }
-  }
-
-  private schedulePersist(): void {
-    if (this.persistPromise) {
-      this.reschedulePersist = true;
-      return;
-    }
-
-    this.persistPromise = this.persistPending()
-      .catch((error) => {
-        this.logger.error?.('[IdempotencyStore] Failed to persist processed keys', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      })
-      .finally(() => {
-        this.persistPromise = null;
-        if (this.reschedulePersist || this.pendingPersist.size > 0) {
-          this.reschedulePersist = false;
-          this.schedulePersist();
-        }
-      });
-  }
-
-  private async persistPending(): Promise<void> {
-    if (this.pendingPersist.size === 0) {
-      return;
-    }
-
-    const keys = Array.from(this.pendingPersist);
-    this.pendingPersist.clear();
-
-    for (let i = 0; i < keys.length; i += 1) {
-      const key = keys[i];
-      try {
-        await this.client.upsertEntity(this.createProcessedEntity(key));
-      } catch (error) {
-        for (let j = i; j < keys.length; j += 1) {
-          this.pendingPersist.add(keys[j]);
-        }
-        throw error;
-      }
-    }
+    // markProcessed now writes synchronously to Azure Tables; nothing to flush.
   }
 
   async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const normalizedKey = requireKey(key, 'withLock');
 
     await this.ensureReady();
-    const release = await this.acquireLock(normalizedKey);
+    const { lockEtag } = await this.acquireLock(normalizedKey);
+
+    const leaseExpiresAt = nowPlusSeconds(this.lockTtlSeconds);
+    this.logger.debug('[IdempotencyStore] Lock acquired', {
+      key: normalizedKey,
+      ttlSeconds: this.lockTtlSeconds,
+      leaseExpiresAt,
+    });
+
+    // currentEtag tracks the latest ETag for this lock. Renewal updates it so that the
+    // release always deletes with the correct ETag, never accidentally removing a
+    // replacement lock held by another instance after a TTL expiry.
+    let currentEtag = lockEtag;
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await this.deleteEntityIfPresent(this.lockPartitionKey, normalizedKey, {
+        etag: currentEtag,
+      });
+    };
+
+    let renewalInterval: ReturnType<typeof setInterval> | undefined;
+
+    if (this.lockRenewalIntervalMs > 0 && currentEtag && currentEtag !== '*') {
+      renewalInterval = setInterval(() => {
+        const etag = currentEtag;
+        if (!etag || etag === '*') return;
+        void this.renewLease(normalizedKey, etag)
+          .then((newEtag) => {
+            if (newEtag === null) {
+              this.logger.error('[IdempotencyStore] Lock stolen — another instance took over', {
+                key: normalizedKey,
+                alert: 'lock_stolen',
+              });
+            } else {
+              currentEtag = newEtag;
+              this.logger.debug('[IdempotencyStore] Lock renewed', {
+                key: normalizedKey,
+                newLeaseExpiresAt: nowPlusSeconds(this.lockTtlSeconds),
+              });
+            }
+          })
+          .catch(() => {
+            clearInterval(renewalInterval);
+            renewalInterval = undefined;
+          });
+      }, this.lockRenewalIntervalMs);
+    }
 
     try {
       const result = await fn();
       return result;
     } finally {
+      if (renewalInterval !== undefined) {
+        clearInterval(renewalInterval);
+      }
       try {
         await release();
+        this.logger.debug('[IdempotencyStore] Lock released', { key: normalizedKey });
       } catch (error) {
         if (!isStatus(error, 404)) {
           this.logger.warn?.('[IdempotencyStore] Failed to release lock', {
-            key,
+            key: normalizedKey,
             error: error instanceof Error ? error.message : String(error),
           });
         }
@@ -294,24 +338,17 @@ export class AzureIdempotencyStore implements IdempotencyStore {
     }
   }
 
-  private async acquireLock(key: string): Promise<() => Promise<void>> {
+  private async acquireLock(key: string): Promise<{ lockEtag: string | undefined }> {
     const ttl = Math.max(1, Math.ceil(this.lockTtlSeconds));
 
     for (let attempt = 0; attempt < this.lockMaxAttempts; attempt += 1) {
       try {
-        await this.client.createEntity(this.createLockEntity(key, ttl));
-
-        let released = false;
-        return async () => {
-          if (released) {
-            return;
-          }
-          released = true;
-          const deleted = await this.deleteEntityIfPresent(this.lockPartitionKey, key);
-          if (!deleted) {
-            return;
-          }
-        };
+        const insertHeaders = await this.client.createEntity(this.createLockEntity(key, ttl));
+        // Capture ETag so withLock can use it for the release and renewal loop.
+        // If our TTL expires and another instance takes the lock, the ETag changes
+        // and our release will silently no-op (412) rather than removing their lock.
+        const lockEtag = (insertHeaders as { etag?: string } | null | undefined)?.etag;
+        return { lockEtag };
       } catch (error) {
         if (!isStatus(error, 409)) {
           throw error;
@@ -325,6 +362,7 @@ export class AzureIdempotencyStore implements IdempotencyStore {
         }
 
         if (existing) {
+          this.logger.warn('[IdempotencyStore] Stale lock evicted', { key });
           try {
             await this.deleteEntityIfPresent(this.lockPartitionKey, key, { etag: existing.etag });
           } catch (deleteError) {

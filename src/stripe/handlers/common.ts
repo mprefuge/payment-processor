@@ -10,8 +10,8 @@ import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
 import { centsToMajorUnits, normalizeStripeId, timestampToIsoString } from '../utils';
 
-/** 18-character Salesforce Campaign record ID (Record Type prefix 701). */
-const SALESFORCE_CAMPAIGN_ID_PATTERN = /^701[a-zA-Z0-9]{15}$/;
+/** 15-character or 18-character Salesforce Campaign record ID (Record Type prefix 701). */
+const SALESFORCE_CAMPAIGN_ID_PATTERN = /^701[0-9A-Za-z]{12}(?:[0-9A-Za-z]{3})?$/;
 
 export const markPosted = async (
   salesforce: SalesforceSvc,
@@ -99,6 +99,30 @@ export const SALES_RECEIPT_DOC_NUMBER_KEYS: readonly string[] = [
   'qbo_doc_number',
   'qbo_sales_receipt_doc_number',
 ];
+
+/**
+ * Searches an ordered list of Stripe metadata sources for a QBO sales-receipt
+ * doc number, returning the first non-empty value found.
+ *
+ * Used by refund and credit-note handlers that need to locate the originating
+ * receipt number from whatever metadata is available.
+ */
+export const resolveDocNumberFromMetadata = (
+  sources: (Stripe.Metadata | null | undefined)[]
+): string | null => {
+  for (const metadata of sources) {
+    if (!metadata) {
+      continue;
+    }
+    for (const key of SALES_RECEIPT_DOC_NUMBER_KEYS) {
+      const value = normalizeMetadataValue(metadata, key);
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return null;
+};
 
 const logCheckoutSessionEvent = (
   context: HttpContext,

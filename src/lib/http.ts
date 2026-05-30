@@ -1,6 +1,6 @@
 import type { HttpRequest } from '@azure/functions';
 
-import { parseBoolean } from '../services/salesforceService';
+import { parseBoolean } from './parsing';
 
 export interface HttpResponse<T = unknown> {
   status: number;

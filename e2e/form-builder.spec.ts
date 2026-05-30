@@ -60,7 +60,9 @@ test.describe('Form Builder – End-to-End', () => {
   });
 
   // ── 2. Topbar ──────────────────────────────────────────────────────────────
-  test('2. Topbar shows brand, name input, device toggles, and Publish button', async ({ page }) => {
+  test('2. Topbar shows brand, name input, device toggles, and Publish button', async ({
+    page,
+  }) => {
     await page.goto('/');
     await expect(page.locator('.vb-topbar-brand')).toContainText('FormBuilder');
     await expect(page.locator('.vb-topbar-name')).toBeVisible();
@@ -180,7 +182,9 @@ test.describe('Form Builder – End-to-End', () => {
   });
 
   // ── 10. Inspector Form Settings tab ───────────────────────────────────────
-  test('10. Form Settings tab is accessible and shows Salesforce object config', async ({ page }) => {
+  test('10. Form Settings tab is accessible and shows Salesforce object config', async ({
+    page,
+  }) => {
     await page.goto('/');
     await page.locator('.insp-tab', { hasText: /form/i }).click();
     await expect(page.locator('.insp-tab.is-active')).toContainText(/form/i);
@@ -208,7 +212,7 @@ test.describe('Form Builder – End-to-End', () => {
 
     // Capture the save response to grab the returned ID for cleanup
     const saveResponse = page.waitForResponse(
-      (r) => r.url().includes('/api/form-builder/configs') && r.request().method() === 'POST',
+      (r) => r.url().includes('/api/form-builder/configs') && r.request().method() === 'POST'
     );
 
     await page.locator('.vb-topbar button.vb-btn-primary').click();
@@ -230,7 +234,7 @@ test.describe('Form Builder – End-to-End', () => {
 
     // Capture the list API response to verify it's fresh
     const listResponse = page.waitForResponse(
-      (r) => r.url().includes('/api/form-builder/configs') && r.request().method() === 'GET',
+      (r) => r.url().includes('/api/form-builder/configs') && r.request().method() === 'GET'
     );
     await loadSelect.click(); // triggers loadLibrary()
     await listResponse;
@@ -259,7 +263,9 @@ test.describe('Form Builder – End-to-End', () => {
   });
 
   // ── 15. Undo button state ──────────────────────────────────────────────────
-  test('15. Undo button is disabled on fresh load and enabled after a field action', async ({ page }) => {
+  test('15. Undo button is disabled on fresh load and enabled after a field action', async ({
+    page,
+  }) => {
     await page.goto('/');
 
     // On fresh load, history stack is empty — undo should be disabled

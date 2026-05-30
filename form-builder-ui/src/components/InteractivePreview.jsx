@@ -11,22 +11,26 @@ import { formatMoney } from '../utils';
 function evalCondition(cond, values) {
   if (!cond.fieldId) return true;
   const raw = values[cond.fieldId];
-  const fieldVal = Array.isArray(raw)
-    ? raw.join(',')
-    : raw == null
-    ? ''
-    : String(raw);
+  const fieldVal = Array.isArray(raw) ? raw.join(',') : raw == null ? '' : String(raw);
   const compare = String(cond.value ?? '');
 
   switch (cond.operator) {
-    case 'equals':       return fieldVal === compare;
-    case 'not_equals':   return fieldVal !== compare;
-    case 'contains':     return fieldVal.toLowerCase().includes(compare.toLowerCase());
-    case 'is_empty':     return fieldVal.trim() === '';
-    case 'is_not_empty': return fieldVal.trim() !== '';
-    case 'greater_than': return parseFloat(fieldVal) > parseFloat(compare);
-    case 'less_than':    return parseFloat(fieldVal) < parseFloat(compare);
-    default:             return true;
+    case 'equals':
+      return fieldVal === compare;
+    case 'not_equals':
+      return fieldVal !== compare;
+    case 'contains':
+      return fieldVal.toLowerCase().includes(compare.toLowerCase());
+    case 'is_empty':
+      return fieldVal.trim() === '';
+    case 'is_not_empty':
+      return fieldVal.trim() !== '';
+    case 'greater_than':
+      return parseFloat(fieldVal) > parseFloat(compare);
+    case 'less_than':
+      return parseFloat(fieldVal) < parseFloat(compare);
+    default:
+      return true;
   }
 }
 
@@ -45,8 +49,8 @@ function evalFieldVisibility(field, values) {
   for (const cond of conditions) {
     const passes = evalCondition(cond, values);
     if (passes) {
-      if (cond.action === 'hide')    visible = false;
-      if (cond.action === 'show')    visible = true;
+      if (cond.action === 'hide') visible = false;
+      if (cond.action === 'show') visible = true;
       if (cond.action === 'require') required = true;
     }
   }
@@ -56,7 +60,20 @@ function evalFieldVisibility(field, values) {
 
 // ─── Individual interactive field renderers ────────────────────────────────────
 
-function PreviewField({ field, value, onChange, accent, required, isPreview, allValues, onNext, isLast, nextLabel, submitLabel, validationMsg }) {
+function PreviewField({
+  field,
+  value,
+  onChange,
+  accent,
+  required,
+  isPreview,
+  allValues,
+  onNext,
+  isLast,
+  nextLabel,
+  submitLabel,
+  validationMsg,
+}) {
   const [specifyText, setSpecifyText] = useState('');
   const { type, label, placeholder, settings = {} } = field;
   const currency = settings.currency === 'USD' ? '$' : settings.currency || '$';
@@ -78,7 +95,10 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
     case 'heading': {
       const Tag = settings.level || 'h2';
       return (
-        <Tag className={`pvw-heading pvw-heading-${Tag}`} style={{ textAlign: settings.align || 'left', color: settings.color || undefined }}>
+        <Tag
+          className={`pvw-heading pvw-heading-${Tag}`}
+          style={{ textAlign: settings.align || 'left', color: settings.color || undefined }}
+        >
           {settings.text || label}
         </Tag>
       );
@@ -93,9 +113,16 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
 
     case 'image':
       return settings.src ? (
-        <img src={settings.src} alt={settings.alt || ''} className="pvw-image" style={{ width: settings.width || '100%' }} />
+        <img
+          src={settings.src}
+          alt={settings.alt || ''}
+          className="pvw-image"
+          style={{ width: settings.width || '100%' }}
+        />
       ) : (
-        <div className="pvw-image-placeholder"><span>🖼</span></div>
+        <div className="pvw-image-placeholder">
+          <span>🖼</span>
+        </div>
       );
 
     case 'divider':
@@ -118,7 +145,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
         <div className="pvw-section-header">
           <div className="pvw-section-title">{settings.title || 'Section Title'}</div>
           {settings.subtitle && <div className="pvw-section-subtitle">{settings.subtitle}</div>}
-          {settings.showLine !== false && <div className="pvw-section-line" style={{ background: accent }} />}
+          {settings.showLine !== false && (
+            <div className="pvw-section-line" style={{ background: accent }} />
+          )}
         </div>
       );
 
@@ -168,11 +197,23 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
       return inp(placeholder || 'Postal code');
 
     case 'country': {
-      const countries = [{ label: 'United States', value: 'US' }, { label: 'Canada', value: 'CA' }, { label: 'United Kingdom', value: 'GB' }];
+      const countries = [
+        { label: 'United States', value: 'US' },
+        { label: 'Canada', value: 'CA' },
+        { label: 'United Kingdom', value: 'GB' },
+      ];
       return (
-        <select className="pvw-input" value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+        <select
+          className="pvw-input"
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+        >
           <option value="">Select country…</option>
-          {countries.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          {countries.map((c) => (
+            <option key={c.value} value={c.value}>
+              {c.label}
+            </option>
+          ))}
         </select>
       );
     }
@@ -181,11 +222,7 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
     case 'checkbox':
       return (
         <label className="pvw-checkbox-row">
-          <input
-            type="checkbox"
-            checked={!!value}
-            onChange={(e) => onChange(e.target.checked)}
-          />
+          <input type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />
           <span>{settings.checkboxLabel || 'I agree'}</span>
         </label>
       );
@@ -193,7 +230,10 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
     case 'toggle':
       return (
         <label className="pvw-toggle-row" onClick={() => onChange(!value)}>
-          <div className={`pvw-toggle-track${value ? ' is-on' : ''}`} style={value ? { background: accent } : {}}>
+          <div
+            className={`pvw-toggle-track${value ? ' is-on' : ''}`}
+            style={value ? { background: accent } : {}}
+          >
             <div className="pvw-toggle-thumb" />
           </div>
           <span>{settings.toggleLabel || 'Enable this option'}</span>
@@ -203,14 +243,15 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
     case 'terms_acceptance':
       return (
         <label className="pvw-checkbox-row">
-          <input
-            type="checkbox"
-            checked={!!value}
-            onChange={(e) => onChange(e.target.checked)}
-          />
+          <input type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />
           <span>
             {settings.text || 'I agree to the'}{' '}
-            <a href={settings.linkUrl || '#'} target="_blank" rel="noreferrer" style={{ color: accent }}>
+            <a
+              href={settings.linkUrl || '#'}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: accent }}
+            >
               {settings.linkText || 'Terms and Conditions'}
             </a>
           </span>
@@ -265,12 +306,23 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
 
     case 'dropdown': {
       const opts = settings.options || [];
-      const isOtherSpec = typeof value === 'string' && value.toLowerCase().includes('other') && value.toLowerCase().includes('specify');
+      const isOtherSpec =
+        typeof value === 'string' &&
+        value.toLowerCase().includes('other') &&
+        value.toLowerCase().includes('specify');
       return (
         <div>
-          <select className="pvw-input" value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+          <select
+            className="pvw-input"
+            value={value ?? ''}
+            onChange={(e) => onChange(e.target.value)}
+          >
             <option value="">{settings.placeholder || 'Choose…'}</option>
-            {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {opts.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
           {isOtherSpec && (
             <input
@@ -298,15 +350,25 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
                 className={`pvw-pill${value === o.value ? ' is-active' : ''}`}
                 style={value === o.value ? { background: accent, borderColor: accent } : {}}
                 onClick={() => onChange(value === o.value ? '' : o.value)}
-              >{o.label}</button>
+              >
+                {o.label}
+              </button>
             ))}
           </div>
         );
       }
       return (
-        <select className="pvw-input" value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+        <select
+          className="pvw-input"
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+        >
           <option value="">Select…</option>
-          {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          {opts.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
         </select>
       );
     }
@@ -323,7 +385,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
               className={`pvw-star${i < cur ? ' is-active' : ''}`}
               style={i < cur ? { color: accent } : {}}
               onClick={() => onChange(i + 1)}
-            >★</button>
+            >
+              ★
+            </button>
           ))}
         </div>
       );
@@ -346,7 +410,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
             style={{ '--accent': accent }}
           />
           <span className="pvw-slider-value">
-            {settings.prefix || ''}{cur}{settings.suffix || ''}
+            {settings.prefix || ''}
+            {cur}
+            {settings.suffix || ''}
           </span>
         </div>
       );
@@ -362,7 +428,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
               key={s.value}
               type="button"
               className={`pvw-likert-item${cur === s.value ? ' is-active' : ''}`}
-              style={cur === s.value ? { background: accent, color: '#fff', borderColor: accent } : {}}
+              style={
+                cur === s.value ? { background: accent, color: '#fff', borderColor: accent } : {}
+              }
               onClick={() => onChange(s.value)}
             >
               <div className="pvw-likert-dot" />
@@ -389,7 +457,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
               className={`pvw-pill pvw-freq-pill${cur === o.value ? ' is-active' : ''}`}
               style={cur === o.value ? { background: accent, borderColor: accent } : {}}
               onClick={() => onChange(o.value)}
-            >{o.label}</button>
+            >
+              {o.label}
+            </button>
           ))}
         </div>
       );
@@ -402,15 +472,40 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
       return (
         <div className="pvw-name-row">
           {settings.showPrefix && (
-            <input className="pvw-input pvw-input-xs" placeholder="Mr/Ms" value={obj.prefix ?? ''} onChange={(e) => set('prefix', e.target.value)} />
+            <input
+              className="pvw-input pvw-input-xs"
+              placeholder="Mr/Ms"
+              value={obj.prefix ?? ''}
+              onChange={(e) => set('prefix', e.target.value)}
+            />
           )}
-          <input className="pvw-input" placeholder="First name" value={obj.first ?? ''} onChange={(e) => set('first', e.target.value)} />
+          <input
+            className="pvw-input"
+            placeholder="First name"
+            value={obj.first ?? ''}
+            onChange={(e) => set('first', e.target.value)}
+          />
           {settings.showMiddle && (
-            <input className="pvw-input pvw-input-sm" placeholder="Middle" value={obj.middle ?? ''} onChange={(e) => set('middle', e.target.value)} />
+            <input
+              className="pvw-input pvw-input-sm"
+              placeholder="Middle"
+              value={obj.middle ?? ''}
+              onChange={(e) => set('middle', e.target.value)}
+            />
           )}
-          <input className="pvw-input" placeholder="Last name" value={obj.last ?? ''} onChange={(e) => set('last', e.target.value)} />
+          <input
+            className="pvw-input"
+            placeholder="Last name"
+            value={obj.last ?? ''}
+            onChange={(e) => set('last', e.target.value)}
+          />
           {settings.showSuffix && (
-            <input className="pvw-input pvw-input-xs" placeholder="Jr./Sr." value={obj.suffix ?? ''} onChange={(e) => set('suffix', e.target.value)} />
+            <input
+              className="pvw-input pvw-input-xs"
+              placeholder="Jr./Sr."
+              value={obj.suffix ?? ''}
+              onChange={(e) => set('suffix', e.target.value)}
+            />
           )}
         </div>
       );
@@ -421,19 +516,48 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
       const set = (k, v) => onChange({ ...obj, [k]: v });
       return (
         <div className="pvw-stack">
-          <input className="pvw-input" placeholder="Street address" value={obj.line1 ?? ''} onChange={(e) => set('line1', e.target.value)} />
+          <input
+            className="pvw-input"
+            placeholder="Street address"
+            value={obj.line1 ?? ''}
+            onChange={(e) => set('line1', e.target.value)}
+          />
           {settings.showAddress2 && (
-            <input className="pvw-input" placeholder="Apt, suite, unit…" value={obj.line2 ?? ''} onChange={(e) => set('line2', e.target.value)} />
+            <input
+              className="pvw-input"
+              placeholder="Apt, suite, unit…"
+              value={obj.line2 ?? ''}
+              onChange={(e) => set('line2', e.target.value)}
+            />
           )}
           <div className="pvw-city-row">
-            <input className="pvw-input" placeholder="City" value={obj.city ?? ''} onChange={(e) => set('city', e.target.value)} />
+            <input
+              className="pvw-input"
+              placeholder="City"
+              value={obj.city ?? ''}
+              onChange={(e) => set('city', e.target.value)}
+            />
             {settings.showState !== false && (
-              <input className="pvw-input pvw-input-sm" placeholder="State" value={obj.state ?? ''} onChange={(e) => set('state', e.target.value)} />
+              <input
+                className="pvw-input pvw-input-sm"
+                placeholder="State"
+                value={obj.state ?? ''}
+                onChange={(e) => set('state', e.target.value)}
+              />
             )}
-            <input className="pvw-input pvw-input-sm" placeholder="ZIP" value={obj.zip ?? ''} onChange={(e) => set('zip', e.target.value)} />
+            <input
+              className="pvw-input pvw-input-sm"
+              placeholder="ZIP"
+              value={obj.zip ?? ''}
+              onChange={(e) => set('zip', e.target.value)}
+            />
           </div>
           {settings.showCountry && (
-            <select className="pvw-input" value={obj.country ?? ''} onChange={(e) => set('country', e.target.value)}>
+            <select
+              className="pvw-input"
+              value={obj.country ?? ''}
+              onChange={(e) => set('country', e.target.value)}
+            >
               <option value="">Country…</option>
               <option value="US">United States</option>
               <option value="CA">Canada</option>
@@ -452,7 +576,10 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
       const rowSize = 3;
       const btnRows = [];
       for (let i = 0; i < allBtns.length; i += rowSize) btnRows.push(allBtns.slice(i, i + rowSize));
-      const custom = value != null && value !== '' && (value === '__other__' || !presets.includes(Number(value)));
+      const custom =
+        value != null &&
+        value !== '' &&
+        (value === '__other__' || !presets.includes(Number(value)));
       return (
         <div className="pvw-pills-stack">
           {btnRows.map((rowItems, ri) => (
@@ -482,7 +609,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
                 type="number"
                 placeholder="Enter custom amount"
                 value={value === '__other__' ? '' : (value ?? '')}
-                onChange={(e) => onChange(e.target.value === '' ? '__other__' : Number(e.target.value))}
+                onChange={(e) =>
+                  onChange(e.target.value === '' ? '__other__' : Number(e.target.value))
+                }
                 autoFocus
               />
             </div>
@@ -492,12 +621,17 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
     }
 
     case 'donation_frequency': {
-      const opts = settings.options || [{ label: 'One-time', value: 'one_time' }, { label: 'Monthly', value: 'monthly' }];
+      const opts = settings.options || [
+        { label: 'One-time', value: 'one_time' },
+        { label: 'Monthly', value: 'monthly' },
+      ];
       const style = settings.style || 'pills';
       // Normalize value to object form { mode, period }
-      const freq = !value ? { mode: opts[0]?.value || 'one_time' }
-        : typeof value === 'string' ? { mode: value }
-        : value;
+      const freq = !value
+        ? { mode: opts[0]?.value || 'one_time' }
+        : typeof value === 'string'
+          ? { mode: value }
+          : value;
       const isRecurring = freq.mode === 'recurring';
       const periods = [
         { value: 'year', label: 'Yearly' },
@@ -505,7 +639,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
         { value: 'biweek', label: 'Bi-Weekly' },
         { value: 'week', label: 'Weekly' },
       ];
-      const periodIdx = isRecurring ? periods.findIndex(p => p.value === (freq.period || 'month')) : 1;
+      const periodIdx = isRecurring
+        ? periods.findIndex((p) => p.value === (freq.period || 'month'))
+        : 1;
       const safePeriodIdx = periodIdx < 0 ? 1 : periodIdx;
       if (style === 'pills') {
         return (
@@ -518,10 +654,13 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
                   className={`pvw-pill pvw-freq-pill${freq.mode === o.value ? ' is-active' : ''}`}
                   style={freq.mode === o.value ? { background: accent, borderColor: accent } : {}}
                   onClick={() => {
-                    if (o.value === 'recurring') onChange({ mode: 'recurring', period: freq.period || 'month' });
+                    if (o.value === 'recurring')
+                      onChange({ mode: 'recurring', period: freq.period || 'month' });
                     else onChange({ mode: o.value });
                   }}
-                >{o.label}</button>
+                >
+                  {o.label}
+                </button>
               ))}
             </div>
             {isRecurring && (
@@ -531,16 +670,24 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
                   className="pvw-stepper-btn"
                   style={{ color: accent, borderColor: accent }}
                   disabled={safePeriodIdx === 0}
-                  onClick={() => onChange({ mode: 'recurring', period: periods[safePeriodIdx - 1].value })}
-                >−</button>
+                  onClick={() =>
+                    onChange({ mode: 'recurring', period: periods[safePeriodIdx - 1].value })
+                  }
+                >
+                  −
+                </button>
                 <span className="pvw-stepper-display">{periods[safePeriodIdx].label}</span>
                 <button
                   type="button"
                   className="pvw-stepper-btn"
                   style={{ color: accent, borderColor: accent }}
                   disabled={safePeriodIdx === periods.length - 1}
-                  onClick={() => onChange({ mode: 'recurring', period: periods[safePeriodIdx + 1].value })}
-                >+</button>
+                  onClick={() =>
+                    onChange({ mode: 'recurring', period: periods[safePeriodIdx + 1].value })
+                  }
+                >
+                  +
+                </button>
               </div>
             )}
           </div>
@@ -548,8 +695,16 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
       }
       if (style === 'dropdown') {
         return (
-          <select className="pvw-input" value={freq.mode} onChange={(e) => onChange({ mode: e.target.value })}>
-            {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          <select
+            className="pvw-input"
+            value={freq.mode}
+            onChange={(e) => onChange({ mode: e.target.value })}
+          >
+            {opts.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
         );
       }
@@ -574,16 +729,26 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
     case 'cover_fee': {
       const checked = value != null ? !!value : !!settings.defaultChecked;
       const base = 100; // demo amount
-      const fee = ((base * (settings.feePercent ?? 2.9)) / 100 + (settings.feeFixed ?? 0.3)).toFixed(2);
+      const fee = (
+        (base * (settings.feePercent ?? 2.9)) / 100 +
+        (settings.feeFixed ?? 0.3)
+      ).toFixed(2);
       return (
         <div className="pvw-cover-fee">
           <label className="pvw-checkbox-row">
             <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-            <span>Cover the {settings.feePercent ?? 2.9}% + ${(settings.feeFixed ?? 0.3).toFixed(2)} processing fee</span>
+            <span>
+              Cover the {settings.feePercent ?? 2.9}% + ${(settings.feeFixed ?? 0.3).toFixed(2)}{' '}
+              processing fee
+            </span>
           </label>
           <div className="pvw-fee-breakdown">
-            <span>Base: <strong>$100.00</strong></span>
-            <span>Fee: <strong>+${fee}</strong></span>
+            <span>
+              Base: <strong>$100.00</strong>
+            </span>
+            <span>
+              Fee: <strong>+${fee}</strong>
+            </span>
           </div>
         </div>
       );
@@ -591,7 +756,12 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
 
     case 'payment_method': {
       const opts = settings.options || ['card', 'ach'];
-      const labels = { card: '💳 Card', ach: '🏦 ACH', apple_pay: ' Apple Pay', google_pay: '⬛ Google Pay' };
+      const labels = {
+        card: '💳 Card',
+        ach: '🏦 ACH',
+        apple_pay: ' Apple Pay',
+        google_pay: '⬛ Google Pay',
+      };
       const cur = value ?? opts[0] ?? 'card';
       return (
         <div className="pvw-pills">
@@ -602,7 +772,9 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
               className={`pvw-pill${cur === o ? ' is-active' : ''}`}
               style={cur === o ? { background: accent, borderColor: accent } : {}}
               onClick={() => onChange(o)}
-            >{labels[o] || o}</button>
+            >
+              {labels[o] || o}
+            </button>
           ))}
         </div>
       );
@@ -615,8 +787,11 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
             {(settings.paymentMethods || ['card', 'us_bank_account']).map((m, i) => {
               const n = { card: 'Card', us_bank_account: 'Bank', link: 'Link' }[m] || m;
               return (
-                <span key={m} className={`pvw-stripe-tab${i === 0 ? ' is-active' : ''}`}
-                  style={i === 0 ? { borderBottomColor: accent, color: accent } : {}}>
+                <span
+                  key={m}
+                  className={`pvw-stripe-tab${i === 0 ? ' is-active' : ''}`}
+                  style={i === 0 ? { borderBottomColor: accent, color: accent } : {}}
+                >
                   {n}
                 </span>
               );
@@ -647,20 +822,36 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
           if (v && typeof v === 'object' && !Array.isArray(v) && v.mode === 'recurring') {
             recurringPeriod = v.period || 'month';
           }
-          const n = typeof v === 'number' ? v : (typeof v === 'string' ? parseFloat(v) : NaN);
+          const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN;
           if (!isNaN(n) && n > 0 && total === 0) total = n;
         }
       }
-      const periodMap = { year: 'every year', month: 'every month', biweek: 'every 2 weeks', week: 'every week' };
+      const periodMap = {
+        year: 'every year',
+        month: 'every month',
+        biweek: 'every 2 weeks',
+        week: 'every week',
+      };
       const periodText = recurringPeriod ? ` ${periodMap[recurringPeriod] || ''}` : '';
-      const formatted = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(total);
+      const formatted = new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+      }).format(total);
       return (
         <>
           {validationMsg && <div className="pvw-validation-msg">{validationMsg}</div>}
           <div className="pvw-order-summary">
-            <div className="pvw-total-amount">Total: {formatted}{periodText}</div>
+            <div className="pvw-total-amount">
+              Total: {formatted}
+              {periodText}
+            </div>
             {onNext && (
-              <button type="button" className="pvw-next-btn pvw-next-inline" style={{ background: accent }} onClick={onNext}>
+              <button
+                type="button"
+                className="pvw-next-btn pvw-next-inline"
+                style={{ background: accent }}
+                onClick={onNext}
+              >
                 {isLast ? submitLabel : nextLabel}
               </button>
             )}
@@ -676,18 +867,43 @@ function PreviewField({ field, value, onChange, accent, required, isPreview, all
 
 // ─── Page renderer ─────────────────────────────────────────────────────────────
 
-function PreviewPage({ page, values, setValues, accent, onNext, isLast, nextLabel, submitLabel, validationMsg }) {
+function PreviewPage({
+  page,
+  values,
+  setValues,
+  accent,
+  onNext,
+  isLast,
+  nextLabel,
+  submitLabel,
+  validationMsg,
+}) {
   return (
     <div className="pvw-page-body">
       {page?.rows?.map((row) => (
-        <div key={row.id} className="pvw-row" style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}>
+        <div
+          key={row.id}
+          className="pvw-row"
+          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
+        >
           {(row.columns || []).map((col) => {
             if (!col.field) return null;
             const field = col.field;
             const { visible, required } = evalFieldVisibility(field, values);
             if (!visible) return null;
             const span = typeof col.width === 'number' && col.width > 0 ? col.width : 12;
-            const isContentOnly = ['heading', 'paragraph', 'image', 'divider', 'spacer', 'html_embed', 'section_header', 'hidden', 'order_summary', 'donor_type'].includes(field.type);
+            const isContentOnly = [
+              'heading',
+              'paragraph',
+              'image',
+              'divider',
+              'spacer',
+              'html_embed',
+              'section_header',
+              'hidden',
+              'order_summary',
+              'donor_type',
+            ].includes(field.type);
             return (
               <div key={col.id} className="pvw-col" style={{ gridColumn: `span ${span}` }}>
                 {!isContentOnly && (
@@ -756,14 +972,14 @@ function PreviewFormCard({ state, onClose }) {
   const submitLabel = pages[pages.length - 1]?.nextLabel || 'Complete Donation';
   const showProgress = currentPage?.showProgress !== false && pages.length > 1;
 
-  const hasOrderSummary = currentPage?.rows?.some(row =>
-    row.columns?.some(col => col.field?.type === 'order_summary')
+  const hasOrderSummary = currentPage?.rows?.some((row) =>
+    row.columns?.some((col) => col.field?.type === 'order_summary')
   );
 
   const handleNext = () => {
     let errorMsg = null;
-    for (const row of (currentPage?.rows || [])) {
-      for (const col of (row.columns || [])) {
+    for (const row of currentPage?.rows || []) {
+      for (const col of row.columns || []) {
         const f = col.field;
         if (f?.type === 'amount_pills') {
           const v = values[f.id];
@@ -773,34 +989,51 @@ function PreviewFormCard({ state, onClose }) {
         }
       }
     }
-    if (errorMsg) { setValidationMsg(errorMsg); return; }
+    if (errorMsg) {
+      setValidationMsg(errorMsg);
+      return;
+    }
     setValidationMsg(null);
     if (isLast) setSubmitted(true);
     else setPageIdx((i) => i + 1);
   };
 
   if (submitted) {
-    const msg = state.confirmationPage?.message || 'Thank you for your generous gift! You will receive a confirmation email shortly.';
+    const msg =
+      state.confirmationPage?.message ||
+      'Thank you for your generous gift! You will receive a confirmation email shortly.';
     return (
       <div className="pvw-card">
         {onClose && (
-          <button className="pvw-modal-close" type="button" onClick={onClose}>✕</button>
+          <button className="pvw-modal-close" type="button" onClick={onClose}>
+            ✕
+          </button>
         )}
         <div className="pvw-card-header" style={{ borderBottomColor: `${accent}33` }}>
-          {logoUrl ? <img src={logoUrl} alt="logo" className="pvw-logo" /> : <div className="pvw-logo-fallback" />}
+          {logoUrl ? (
+            <img src={logoUrl} alt="logo" className="pvw-logo" />
+          ) : (
+            <div className="pvw-logo-fallback" />
+          )}
           <div>
             <div className="pvw-card-title">{title}</div>
             <div className="pvw-card-subtitle">{subtitle}</div>
           </div>
         </div>
         <div className="pvw-confirmation">
-          <div className="pvw-confirmation-icon" style={{ color: accent }}>✓</div>
+          <div className="pvw-confirmation-icon" style={{ color: accent }}>
+            ✓
+          </div>
           <p className="pvw-confirmation-message">{msg}</p>
           <button
             className="pvw-next-btn"
             style={{ background: accent }}
             type="button"
-            onClick={() => { setPageIdx(0); setValues({}); setSubmitted(false); }}
+            onClick={() => {
+              setPageIdx(0);
+              setValues({});
+              setSubmitted(false);
+            }}
           >
             Fill out again (preview)
           </button>
@@ -812,15 +1045,28 @@ function PreviewFormCard({ state, onClose }) {
   return (
     <div className="pvw-card">
       {/* Compact header: logo centered, thick brand-color bottom border — matching real form header */}
-      <div className="pvw-card-header pvw-card-header-compact" style={{ borderBottomColor: accent }}>
+      <div
+        className="pvw-card-header pvw-card-header-compact"
+        style={{ borderBottomColor: accent }}
+      >
         {!isFirst && (
-          <button type="button" className="pvw-back-btn pvw-back-btn-header" onClick={() => setPageIdx((i) => i - 1)}>
+          <button
+            type="button"
+            className="pvw-back-btn pvw-back-btn-header"
+            onClick={() => setPageIdx((i) => i - 1)}
+          >
             ←
           </button>
         )}
-        {logoUrl ? <img src={logoUrl} alt="logo" className="pvw-logo" /> : <div className="pvw-logo-fallback" />}
+        {logoUrl ? (
+          <img src={logoUrl} alt="logo" className="pvw-logo" />
+        ) : (
+          <div className="pvw-logo-fallback" />
+        )}
         {onClose && (
-          <button className="pvw-modal-close" type="button" onClick={onClose}>✕</button>
+          <button className="pvw-modal-close" type="button" onClick={onClose}>
+            ✕
+          </button>
         )}
       </div>
 
@@ -831,7 +1077,9 @@ function PreviewFormCard({ state, onClose }) {
             <span
               key={p.id}
               className={`pvw-page-dot${i === pageIdx ? ' is-active' : ''}${i < pageIdx ? ' is-done' : ''}`}
-              style={i === pageIdx ? { background: accent } : i < pageIdx ? { background: '#000' } : {}}
+              style={
+                i === pageIdx ? { background: accent } : i < pageIdx ? { background: '#000' } : {}
+              }
               title={p.name}
             />
           ))}
@@ -839,9 +1087,7 @@ function PreviewFormCard({ state, onClose }) {
       )}
 
       {/* Page title inside body, matching "dp-title" style on the real form */}
-      {currentPage?.name && (
-        <div className="pvw-page-title">{currentPage.name}</div>
-      )}
+      {currentPage?.name && <div className="pvw-page-title">{currentPage.name}</div>}
 
       <PreviewPage
         page={currentPage}
@@ -879,26 +1125,34 @@ export default function InteractivePreview({ state }) {
   const accent = state.branding?.accentColor || '#bd2135';
 
   // Reset modal on mode switch
-  useEffect(() => { setModalOpen(false); }, [mode]);
+  useEffect(() => {
+    setModalOpen(false);
+  }, [mode]);
 
   // Lock body scroll when modal is open
   useEffect(() => {
     if (modalOpen) document.body.style.overflow = 'hidden';
     else document.body.style.overflow = '';
-    return () => { document.body.style.overflow = ''; };
+    return () => {
+      document.body.style.overflow = '';
+    };
   }, [modalOpen]);
 
-  const modalPortal = modalOpen && createPortal(
-    <div
-      className="pvw-modal-overlay"
-      onClick={(e) => { if (e.target === e.currentTarget) setModalOpen(false); }}
-    >
-      <div className="pvw-modal-inner">
-        <PreviewFormCard state={state} onClose={() => setModalOpen(false)} />
-      </div>
-    </div>,
-    document.body
-  );
+  const modalPortal =
+    modalOpen &&
+    createPortal(
+      <div
+        className="pvw-modal-overlay"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) setModalOpen(false);
+        }}
+      >
+        <div className="pvw-modal-inner">
+          <PreviewFormCard state={state} onClose={() => setModalOpen(false)} />
+        </div>
+      </div>,
+      document.body
+    );
 
   return (
     <div className="pvw-root">
@@ -909,13 +1163,17 @@ export default function InteractivePreview({ state }) {
           className={`pvw-mode-btn${mode === 'embedded' ? ' is-active' : ''}`}
           style={mode === 'embedded' ? { '--accent': accent } : {}}
           onClick={() => setMode('embedded')}
-        >Embedded</button>
+        >
+          Embedded
+        </button>
         <button
           type="button"
           className={`pvw-mode-btn${mode === 'modal' ? ' is-active' : ''}`}
           style={mode === 'modal' ? { '--accent': accent } : {}}
           onClick={() => setMode('modal')}
-        >Modal Pop-up</button>
+        >
+          Modal Pop-up
+        </button>
       </div>
 
       {/* Fake site chrome */}
@@ -926,7 +1184,9 @@ export default function InteractivePreview({ state }) {
             type="button"
             className="pvw-site-donate"
             style={{ background: accent }}
-            onClick={() => { if (mode === 'modal') setModalOpen(true); }}
+            onClick={() => {
+              if (mode === 'modal') setModalOpen(true);
+            }}
             title={mode === 'modal' ? 'Click to open the form' : undefined}
           >
             Donate

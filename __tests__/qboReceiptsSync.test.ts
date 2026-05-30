@@ -9,7 +9,8 @@ describe('qboReceiptsSync', () => {
   let internals: any;
 
   beforeEach(async () => {
-    const loaded = await import(`../src/handlers/qboReceiptsSync?t=${Date.now()}`);
+    vi.resetModules();
+    const loaded = await import('../src/handlers/qboReceiptsSync');
     handler = loaded.default || loaded;
     internals = handler.__internals;
   });

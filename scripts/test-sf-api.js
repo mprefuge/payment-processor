@@ -39,7 +39,11 @@ async function run() {
 
     const body = await res.json().catch(() => null);
     assert('body is JSON', body !== null);
-    assert('body has objects array', Array.isArray(body?.objects), JSON.stringify(body).slice(0, 80));
+    assert(
+      'body has objects array',
+      Array.isArray(body?.objects),
+      JSON.stringify(body).slice(0, 80)
+    );
 
     const objects = body?.objects ?? [];
     assert('at least 1 object returned', objects.length > 0, `count=${objects.length}`);
@@ -51,7 +55,7 @@ async function run() {
         typeof firstObj.name === 'string' &&
         typeof firstObj.label === 'string' &&
         typeof firstObj.custom === 'boolean',
-      JSON.stringify(firstObj),
+      JSON.stringify(firstObj)
     );
 
     // All returned objects must be queryable (we can't re-check server-side but spot-check known standard objects)
@@ -64,14 +68,22 @@ async function run() {
     // Objects must be sorted by label (spot-check first 5)
     const labels = objects.slice(0, 20).map((o) => o.label);
     const sorted = [...labels].sort((a, b) => a.localeCompare(b));
-    assert('objects are returned sorted by label', JSON.stringify(labels) === JSON.stringify(sorted),
-      `first labels: ${labels.slice(0, 5).join(', ')}`);
+    assert(
+      'objects are returned sorted by label',
+      JSON.stringify(labels) === JSON.stringify(sorted),
+      `first labels: ${labels.slice(0, 5).join(', ')}`
+    );
 
     // Cache header
     const cc = res.headers()['cache-control'] ?? '';
     assert('cache-control header present', cc.includes('max-age'), `cache-control: ${cc}`);
 
-    console.log(`  → ${objects.length} objects returned (first 5: ${objects.slice(0, 5).map((o) => o.name).join(', ')})`);
+    console.log(
+      `  → ${objects.length} objects returned (first 5: ${objects
+        .slice(0, 5)
+        .map((o) => o.name)
+        .join(', ')})`
+    );
   }
 
   // ── 2. GET /form-builder/sf/fields/Contact ────────────────────────────────
@@ -98,7 +110,7 @@ async function run() {
         typeof f.type === 'string' &&
         typeof f.required === 'boolean' &&
         typeof f.custom === 'boolean',
-      JSON.stringify(f),
+      JSON.stringify(f)
     );
 
     // System fields must be excluded
@@ -116,13 +128,15 @@ async function run() {
     assert(
       'standard fields precede custom fields',
       firstCustomIdx === -1 || lastStandardIdx < firstCustomIdx,
-      `firstCustomIdx=${firstCustomIdx} lastStandardIdx=${lastStandardIdx}`,
+      `firstCustomIdx=${firstCustomIdx} lastStandardIdx=${lastStandardIdx}`
     );
 
     // Email field should be present (it's a standard Contact field)
     assert('Email field is present', fieldNames.has('Email'));
 
-    console.log(`  → ${fields.length} fields (${allStandard.length} standard, ${allCustom.length} custom)`);
+    console.log(
+      `  → ${fields.length} fields (${allStandard.length} standard, ${allCustom.length} custom)`
+    );
   }
 
   // ── 3. GET /form-builder/sf/fields/Account ───────────────────────────────
@@ -184,7 +198,11 @@ async function run() {
   {
     const res = await ctx.get(`${BASE}/form-builder/sf/objects`);
     const ct = res.headers()['content-type'] ?? '';
-    assert('Content-Type is application/json', ct.includes('application/json'), `content-type: ${ct}`);
+    assert(
+      'Content-Type is application/json',
+      ct.includes('application/json'),
+      `content-type: ${ct}`
+    );
   }
 
   await ctx.dispose();

@@ -94,6 +94,8 @@ describe('payoutSyncTrigger', () => {
     expect(result.status).toBe(200);
     expect(result.jsonBody.summary).toEqual({
       lookbackDays: 7,
+      lookbackDaysClamped: true,
+      requestedLookbackDays: 0,
       total: 1,
       processed: 1,
       skipped: 0,

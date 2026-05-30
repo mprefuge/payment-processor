@@ -871,7 +871,7 @@ registerFunction('donationFormConfigSave', 'Save a donation form configuration',
   tags: ['Builder'],
   operationId: 'donationFormConfigSave',
   methods: ['POST'],
-  ...withAnonymousAuth({}),
+  ...withFunctionAuth({}),
   route: 'form-builder/configs',
   responses: {
     201: {
@@ -940,7 +940,7 @@ registerFunction('donationFormConfigDelete', 'Delete a published donation form c
   tags: ['Builder'],
   operationId: 'donationFormConfigDelete',
   methods: ['DELETE'],
-  ...withAnonymousAuth({}),
+  ...withFunctionAuth({}),
   route: 'form-builder/configs/{configId}',
   responses: {
     200: {
@@ -968,7 +968,7 @@ registerFunction('donationFormConfigUpdate', 'Update an existing donation form c
   tags: ['Builder'],
   operationId: 'donationFormConfigUpdate',
   methods: ['PUT'],
-  ...withAnonymousAuth({}),
+  ...withFunctionAuth({}),
   route: 'form-builder/configs/{configId}',
   responses: {
     200: {
@@ -1026,7 +1026,7 @@ registerFunction('donationFormSfObjects', 'List available Salesforce objects for
   tags: ['Builder'],
   operationId: 'donationFormSfObjects',
   methods: ['GET'],
-  ...withAnonymousAuth({}),
+  ...withFunctionAuth({}),
   route: 'form-builder/sf/objects',
   responses: {
     200: {
@@ -1047,7 +1047,7 @@ registerFunction('donationFormSfFields', 'List Salesforce fields for a given obj
   tags: ['Builder'],
   operationId: 'donationFormSfFields',
   methods: ['GET'],
-  ...withAnonymousAuth({}),
+  ...withFunctionAuth({}),
   route: 'form-builder/sf/fields/{objectName}',
   responses: {
     200: {

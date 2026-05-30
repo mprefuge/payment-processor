@@ -14,7 +14,7 @@ describe('salesforceRecordQboSync', () => {
       env: { accounting: { postingStrategy: 'sales-receipt' } },
       default: { accounting: { postingStrategy: 'sales-receipt' } },
     }));
-    const loaded = await import(`../src/handlers/salesforceRecordQboSync?t=${Date.now()}`);
+    const loaded = await import('../src/handlers/salesforceRecordQboSync');
     handler = loaded.default || loaded;
     internals = handler.__internals;
   });

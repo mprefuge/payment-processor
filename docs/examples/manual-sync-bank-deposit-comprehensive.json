@@ -1,0 +1,52 @@
+{
+  "type": "bank-deposit",
+  "data": {
+    "DocNumber": "BD-2024-12345",
+    "TxnDate": "2024-10-31",
+    "PrivateNote": "Stripe payout deposit - Weekly batch processing",
+    "DepositToAccountRef": {
+      "name": "Operating Bank Account"
+    },
+    "DepartmentRef": {
+      "name": "Finance"
+    },
+    "Line": [
+      {
+        "Amount": 5000.00,
+        "DetailType": "DepositLineDetail",
+        "Description": "Stripe payout #po_1234567890abcdef - Sales receipts batch",
+        "DepositLineDetail": {
+          "AccountRef": {
+            "name": "Undeposited Funds"
+          },
+          "Entity": {
+            "EntityRef": {
+              "name": "Stripe Payments"
+            },
+            "Type": "Other"
+          },
+          "ClassRef": {
+            "name": "Online Revenue"
+          },
+          "PaymentMethodRef": {
+            "name": "ACH Transfer"
+          }
+        }
+      },
+      {
+        "Amount": 2500.00,
+        "DetailType": "DepositLineDetail",
+        "Description": "Additional revenue - Consulting payments",
+        "DepositLineDetail": {
+          "AccountRef": {
+            "name": "Undeposited Funds"
+          },
+          "ClassRef": {
+            "name": "Consulting Revenue"
+          },
+          "CheckNum": "1234"
+        }
+      }
+    ]
+  }
+}

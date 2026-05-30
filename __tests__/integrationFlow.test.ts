@@ -290,6 +290,7 @@ describe('Integration: Complete Payment Flow', () => {
       stripe: {
         verifyEvent: vi.fn().mockReturnValue({
           id: 'evt_test_' + randomUUID().substring(0, 8),
+          created: Math.floor(Date.now() / 1000),
           type: 'payment_intent.succeeded',
           data: {
             object: mockPaymentIntent,
@@ -308,6 +309,7 @@ describe('Integration: Complete Payment Flow', () => {
         }),
         postRefundToQbo: vi.fn(),
         postDisputeToQbo: vi.fn(),
+        postDisputeReversalToQbo: vi.fn(),
       },
     });
 
@@ -607,6 +609,7 @@ describe('Integration: Complete Payment Flow', () => {
       stripe: {
         verifyEvent: vi.fn().mockReturnValue({
           id: 'evt_cover',
+          created: Math.floor(Date.now() / 1000),
           type: 'payment_intent.succeeded',
           data: { object: mockPaymentIntent2 },
           livemode: false,
@@ -624,6 +627,7 @@ describe('Integration: Complete Payment Flow', () => {
         }),
         postRefundToQbo: vi.fn(),
         postDisputeToQbo: vi.fn(),
+        postDisputeReversalToQbo: vi.fn(),
       },
     });
 

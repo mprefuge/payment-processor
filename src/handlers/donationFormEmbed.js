@@ -91,7 +91,12 @@ module.exports = async function donationFormEmbed(request) {
       window.DonationFormRuntime.renderForm(target, config, { mode: 'live' });
     })
     .catch(function (error) {
-      target.innerHTML = '<div style="padding:16px;border:1px solid #bd2135;border-radius:16px;color:#bd2135;background:#fff5f3;font-family:Georgia,serif;">' + (error && error.message ? error.message : 'Unable to load donation form.') + '</div>';
+      var errMsg = error && error.message ? error.message : 'Unable to load donation form.';
+      var errDiv = document.createElement('div');
+      errDiv.style.cssText = 'padding:16px;border:1px solid #bd2135;border-radius:16px;color:#bd2135;background:#fff5f3;font-family:Georgia,serif;';
+      errDiv.textContent = errMsg;
+      target.innerHTML = '';
+      target.appendChild(errDiv);
     });
 })();`;
 

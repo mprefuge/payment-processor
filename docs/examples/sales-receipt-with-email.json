@@ -1,0 +1,25 @@
+{
+  "type": "sales-receipt",
+  "data": {
+    "TxnDate": "2025-01-29",
+    "CustomerRef": {
+      "name": "John Doe"
+    },
+    "BillEmail": {
+      "Address": "john.doe@example.com"
+    },
+    "Line": [
+      {
+        "Amount": 100,
+        "DetailType": "SalesItemLineDetail",
+        "SalesItemLineDetail": {
+          "ItemRef": {
+            "name": "Product A"
+          },
+          "Qty": 1,
+          "UnitPrice": 100
+        }
+      }
+    ]
+  }
+}

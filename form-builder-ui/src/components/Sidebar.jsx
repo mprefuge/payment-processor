@@ -36,7 +36,14 @@ function PaletteItem({ type, label, icon, desc, catColor }) {
 
 export default function Sidebar() {
   const [query, setQuery] = useState('');
-  const [collapsed, setCollapsed] = useState({ content: false, basic: false, selection: false, personal: false, advanced: true, payment: false });
+  const [collapsed, setCollapsed] = useState({
+    content: false,
+    basic: false,
+    selection: false,
+    personal: false,
+    advanced: true,
+    payment: false,
+  });
 
   const q = query.trim().toLowerCase();
 
@@ -56,8 +63,17 @@ export default function Sidebar() {
       <div className="vb-sidebar-head">
         <h2 className="vb-sidebar-title">Blocks</h2>
         <div className="vb-sidebar-search">
-          <svg className="vb-sidebar-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          <svg
+            className="vb-sidebar-search-icon"
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.35-4.35" />
           </svg>
           <input
             className="vb-sidebar-search-input"

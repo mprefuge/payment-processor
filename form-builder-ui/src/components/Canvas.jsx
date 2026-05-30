@@ -136,7 +136,10 @@ export default function Canvas({ state, dispatch, devicePreview = 'desktop' }) {
         {/* Progress bar */}
         {showProgress && (
           <div className="vb-progress-bar-wrap">
-            <div className="vb-progress-bar" style={{ width: `${progressPct}%`, background: accent }} />
+            <div
+              className="vb-progress-bar"
+              style={{ width: `${progressPct}%`, background: accent }}
+            />
           </div>
         )}
 

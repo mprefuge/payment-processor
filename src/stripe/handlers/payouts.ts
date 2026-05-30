@@ -8,7 +8,7 @@ import type {
   StripeWebhookDependencies,
   UpsertPayoutDepositInput,
 } from '../types';
-import { normalizeStripeId, timestampToDate } from '../utils';
+import { normalizeStripeId, timestampToDate, toSafeInteger } from '../utils';
 import { ensureStripeClient } from './common';
 import env from '../../config/env';
 
@@ -24,13 +24,6 @@ const normalizeCurrency = (currency: unknown, fallback: string | null): string =
     return currency.trim().toLowerCase();
   }
   return fallback?.toLowerCase() ?? 'usd';
-};
-
-const toCents = (value: unknown): number => {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return Math.trunc(value);
-  }
-  return 0;
 };
 
 const hasRequiredPayoutTransactionFields = (status: unknown, amountGross: unknown): boolean =>
@@ -232,7 +225,7 @@ const categorizeTransactions = async (
   >();
 
   for (const charge of charges) {
-    const amount = toCents(charge.amount);
+    const amount = toSafeInteger(charge.amount);
     if (amount === 0) {
       continue;
     }
@@ -275,7 +268,7 @@ const categorizeTransactions = async (
     { amount: number; references: PayoutDepositLineReference[] }
   >();
   for (const fee of fees) {
-    const amount = toCents(fee.amount);
+    const amount = toSafeInteger(fee.amount);
     if (amount === 0) {
       continue;
     }
@@ -310,7 +303,7 @@ const categorizeTransactions = async (
 
   const refundLines: PayoutDepositLineInput[] = [];
   for (const refund of refunds) {
-    const amount = toCents(refund.amount);
+    const amount = toSafeInteger(refund.amount);
     if (amount === 0) {
       continue;
     }
@@ -343,7 +336,7 @@ const categorizeTransactions = async (
 
   const adjustmentLines: PayoutDepositLineInput[] = [];
   for (const adjustment of adjustments) {
-    const amount = toCents(adjustment.amount);
+    const amount = toSafeInteger(adjustment.amount);
     if (amount === 0) {
       continue;
     }
@@ -391,7 +384,7 @@ const buildDepositInput = async (
       isManual: payout.automatic === false,
     });
 
-    const payoutAmount = toCents(payout.amount);
+    const payoutAmount = toSafeInteger(payout.amount);
     const lines: PayoutDepositLineInput[] = [
       {
         type: 'charge',
@@ -436,7 +429,7 @@ const buildDepositInput = async (
     return null;
   }
 
-  const payoutAmount = toCents(payout.amount);
+  const payoutAmount = toSafeInteger(payout.amount);
   const summary = {
     payoutAmountCents: payoutAmount,
     calculatedAmountCents: calculatedTotal,
@@ -490,9 +483,9 @@ const buildPayoutTransaction = async (
       stripe_event_id__c: eventId,
       stripe_livemode__c: typeof payout.livemode === 'boolean' ? payout.livemode : null,
       stripe_balance_transaction_id__c: normalizeStripeId(payout.balance_transaction) ?? payout.id,
-      amount_gross__c: toCents(payout.amount) / 100,
+      amount_gross__c: toSafeInteger(payout.amount) / 100,
       amount_fee__c: 0,
-      amount_net__c: toCents(payout.amount) / 100,
+      amount_net__c: toSafeInteger(payout.amount) / 100,
       currency_iso_code__c: (typeof payout.currency === 'string'
         ? payout.currency
         : 'usd'

@@ -1,0 +1,10 @@
+{
+  "type": "bank-deposit",
+  "data": {
+    "TxnDate": "2024-10-31",
+    "DepositToAccountRef": {
+      "name": "Operating Bank"
+    },
+    "SalesReceiptIds": ["123", "456", "789"]
+  }
+}

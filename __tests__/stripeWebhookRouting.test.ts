@@ -73,6 +73,7 @@ const createDeps = ({
       postChargeToQbo: vi.fn(),
       postRefundToQbo: vi.fn(),
       postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
     },
   };
 };
@@ -492,6 +493,7 @@ describe('stripeWebhook idempotency', () => {
     const stripe = {
       verifyEvent: vi.fn().mockReturnValue({
         id: 'evt_duplicate',
+        created: Math.floor(Date.now() / 1000),
         type: 'refund.created',
         data: { object: { id: 're_123', charge: 'ch_123' } },
         livemode: false,

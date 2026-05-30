@@ -49,7 +49,12 @@ export const FIELD_CATEGORIES = [
     label: 'Personal Info',
     icon: '👤',
     fields: [
-      { type: 'donor_type', label: 'Donor Type', icon: '⊙', desc: 'Individual / Organization toggle' },
+      {
+        type: 'donor_type',
+        label: 'Donor Type',
+        icon: '⊙',
+        desc: 'Individual / Organization toggle',
+      },
       { type: 'full_name', label: 'Full Name', icon: '👤', desc: 'First + Last name' },
       { type: 'billing_address', label: 'Address', icon: '🏠', desc: 'Full address block' },
       { type: 'country', label: 'Country', icon: '🌍', desc: 'Country dropdown' },
@@ -76,14 +81,29 @@ export const FIELD_CATEGORIES = [
     fields: [
       { type: 'amount', label: 'Amount', icon: '$', desc: 'Fixed or custom amount' },
       { type: 'amount_pills', label: 'Amount Pills', icon: '💊', desc: 'Preset amount buttons' },
-      { type: 'donation_frequency', label: 'Frequency', icon: '🔄', desc: 'One-time / monthly / yearly' },
+      {
+        type: 'donation_frequency',
+        label: 'Frequency',
+        icon: '🔄',
+        desc: 'One-time / monthly / yearly',
+      },
       { type: 'category', label: 'Fund / Category', icon: '🏷', desc: 'Fund / designation' },
       { type: 'cover_fee', label: 'Cover Fee', icon: '🧾', desc: 'Processing fee toggle' },
       { type: 'payment_method', label: 'Payment Method', icon: '💳', desc: 'Card / ACH / wallet' },
-      { type: 'stripe_payment_element', label: 'Stripe Element', icon: '⚡', desc: 'Stripe unified payment UI' },
+      {
+        type: 'stripe_payment_element',
+        label: 'Stripe Element',
+        icon: '⚡',
+        desc: 'Stripe unified payment UI',
+      },
       { type: 'card_input', label: 'Card Input', icon: '💳', desc: 'Card number, exp, CVC' },
       { type: 'ach_input', label: 'ACH Input', icon: '🏦', desc: 'Bank account input' },
-      { type: 'order_summary', label: 'Order Summary', icon: '📋', desc: 'Display total before submit' },
+      {
+        type: 'order_summary',
+        label: 'Order Summary',
+        icon: '📋',
+        desc: 'Display total before submit',
+      },
     ],
   },
 ];
@@ -120,7 +140,11 @@ export const SF_SUGGESTIONS = {
     { object: 'Lead', field: 'Company', label: 'Lead Company' },
   ],
   billing_address: [
-    { object: 'Contact', field: 'MailingStreet+City+State+Zip+Country', label: 'Contact Mailing Address' },
+    {
+      object: 'Contact',
+      field: 'MailingStreet+City+State+Zip+Country',
+      label: 'Contact Mailing Address',
+    },
     { object: 'Lead', field: 'Street+City+State+PostalCode+Country', label: 'Lead Address' },
   ],
   amount: [
@@ -134,9 +158,7 @@ export const SF_SUGGESTIONS = {
     { object: 'Transaction__c', field: 'Campaign__c', label: 'Campaign (lookup)' },
     { object: 'Transaction__c', field: 'Fund__c', label: 'Fund' },
   ],
-  date_of_birth: [
-    { object: 'Contact', field: 'Birthdate', label: 'Contact Birthdate' },
-  ],
+  date_of_birth: [{ object: 'Contact', field: 'Birthdate', label: 'Contact Birthdate' }],
   checkbox: [
     { object: 'Contact', field: 'Email_Opt_In__c', label: 'Email Opt-in' },
     { object: 'Lead', field: 'Email_Opt_In__c', label: 'Lead Email Opt-in' },
@@ -332,7 +354,15 @@ export function createDefaultField(type) {
       break;
     case 'range_slider':
       base.label = 'Select a Value';
-      base.settings = { min: 0, max: 100, step: 1, defaultValue: 50, showValue: true, prefix: '', suffix: '' };
+      base.settings = {
+        min: 0,
+        max: 100,
+        step: 1,
+        defaultValue: 50,
+        showValue: true,
+        prefix: '',
+        suffix: '',
+      };
       break;
     case 'likert':
       base.label = 'Likert Scale';
@@ -358,7 +388,11 @@ export function createDefaultField(type) {
     case 'billing_address':
       base.label = 'Billing Address';
       base.settings = { showAddress2: true, showCountry: true, showState: true };
-      base.salesforce = { object: 'Contact', field: 'MailingStreet+City+State+Zip+Country', transform: '' };
+      base.salesforce = {
+        object: 'Contact',
+        field: 'MailingStreet+City+State+Zip+Country',
+        transform: '',
+      };
       break;
     case 'date_of_birth':
       base.label = 'Date of Birth';

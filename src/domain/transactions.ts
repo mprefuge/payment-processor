@@ -722,3 +722,14 @@ export const mapStripeToTransaction = (
 
   return transactionUpsertSchema.parse(transactionCandidate);
 };
+
+// ---------------------------------------------------------------------------
+// Salesforce record type name constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Salesforce `RecordType.Name` for a transaction created directly from a
+ * Stripe event.  Used by multiple handlers to set `RecordTypeId` on
+ * `Transaction__c` records.
+ */
+export const SF_RECORD_TYPE_STRIPE_TRANSACTION = 'Stripe Transaction' as const;

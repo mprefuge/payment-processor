@@ -7,12 +7,13 @@ import {
   resolveCharge,
   timestampToDate,
   timestampToIsoString,
+  toPositiveCents,
 } from '../utils';
 import {
   ensureStripeClient,
   markDocumentPosted,
   normalizeMetadataValue,
-  SALES_RECEIPT_DOC_NUMBER_KEYS,
+  resolveDocNumberFromMetadata,
 } from './common';
 import type {
   HttpContext,
@@ -22,16 +23,10 @@ import type {
   StripeWebhookDependencies,
   UpsertRefundReceiptInput,
 } from '../types';
-import type { TransactionUpsertDTO } from '../../domain/transactions';
-
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
-
-const toPositiveCents = (value: number | null | undefined): number => {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
-    return 0;
-  }
-  return Math.abs(Math.trunc(value));
-};
+import {
+  type TransactionUpsertDTO,
+  SF_RECORD_TYPE_STRIPE_TRANSACTION,
+} from '../../domain/transactions';
 
 const mapStatus = (
   status: Stripe.CreditNote.Status | null | undefined
@@ -44,28 +39,6 @@ const mapStatus = (
     default:
       return normalized ? 'refunded' : 'pending';
   }
-};
-
-const resolveSalesReceiptDocNumber = (
-  paymentIntent: Stripe.PaymentIntent | null,
-  charge: Stripe.Charge | null
-): string | null => {
-  const metadataSources = [paymentIntent?.metadata ?? null, charge?.metadata ?? null];
-
-  for (const metadata of metadataSources) {
-    if (!metadata) {
-      continue;
-    }
-
-    for (const key of SALES_RECEIPT_DOC_NUMBER_KEYS) {
-      const value = normalizeMetadataValue(metadata, key);
-      if (value) {
-        return value;
-      }
-    }
-  }
-
-  return null;
 };
 
 const buildCreditNoteTransaction = (
@@ -209,7 +182,10 @@ const buildRefundReceiptInput = (
 ): UpsertRefundReceiptInput => {
   const { lines, fallbackReason } = buildRefundReceiptLines(creditNote);
   const docNumber =
-    resolveSalesReceiptDocNumber(context.paymentIntent, context.charge) ||
+    resolveDocNumberFromMetadata([
+      context.paymentIntent?.metadata ?? null,
+      context.charge?.metadata ?? null,
+    ]) ||
     creditNote.number ||
     null;
 
@@ -364,7 +340,7 @@ const findParentInvoiceTransactionId = async (
     return await salesforce.findTransactionIdByExternalId(
       'stripe_invoice_id__c',
       invoiceId,
-      STRIPE_TRANSACTION_RECORD_TYPE_NAME
+      SF_RECORD_TYPE_STRIPE_TRANSACTION
     );
   } catch (error) {
     context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {

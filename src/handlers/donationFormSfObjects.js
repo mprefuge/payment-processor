@@ -38,7 +38,7 @@ module.exports = async function donationFormSfObjects() {
           (o.createable || o.updateable) &&
           !o.customSetting &&
           !o.hidden &&
-          !o.isInterface,
+          !o.isInterface
       )
       .map((o) => ({
         name: o.name,
@@ -61,11 +61,16 @@ module.exports = async function donationFormSfObjects() {
     return {
       status: 502,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'Failed to retrieve Salesforce objects.', details: err.message }),
+      body: JSON.stringify({
+        error: 'Failed to retrieve Salesforce objects.',
+        details: err.message,
+      }),
     };
   }
 };
 
 module.exports.__internals = {
-  resetService: () => { _svc = null; },
+  resetService: () => {
+    _svc = null;
+  },
 };

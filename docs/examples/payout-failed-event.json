@@ -1,0 +1,39 @@
+{
+  "id": "evt_test_payout_failed_001",
+  "object": "event",
+  "api_version": "2023-10-16",
+  "created": 1699564800,
+  "data": {
+    "object": {
+      "id": "po_2QAbCdEfGhIjKlMnOpQrStUv",
+      "object": "payout",
+      "amount": 78500,
+      "arrival_date": 1699651200,
+      "automatic": true,
+      "balance_transaction": null,
+      "created": 1699478400,
+      "currency": "usd",
+      "description": "STRIPE PAYOUT",
+      "destination": "ba_2QAbCdEfGhIjKlMnOpQrStUv",
+      "failure_balance_transaction": "txn_2QAbCdEfGhIjKlMnOpQr",
+      "failure_code": "account_closed",
+      "failure_message": "The bank account for this payout has been closed.",
+      "livemode": false,
+      "metadata": {},
+      "method": "standard",
+      "original_payout": null,
+      "reversed_by": null,
+      "source_type": "card",
+      "statement_descriptor": null,
+      "status": "failed",
+      "type": "bank_account"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "payout.failed"
+}

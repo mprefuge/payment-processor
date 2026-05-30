@@ -1,0 +1,95 @@
+{
+  "type": "sales-receipt",
+  "data": {
+    "DocNumber": "SR-2024-12345",
+    "TxnDate": "2024-10-31",
+    "PrivateNote": "Internal note for accounting team - payment received via Stripe",
+    "CustomerMemo": {
+      "value": "Thank you for your business! We appreciate your prompt payment."
+    },
+    "DepositToAccountRef": {
+      "name": "Checking Account"
+    },
+    "CustomerRef": {
+      "name": "Acme Corporation"
+    },
+    "BillEmail": {
+      "Address": "billing@acmecorp.com"
+    },
+    "BillAddr": {
+      "Line1": "123 Main Street",
+      "Line2": "Suite 100",
+      "City": "Seattle",
+      "CountrySubDivisionCode": "WA",
+      "PostalCode": "98101",
+      "Country": "USA"
+    },
+    "ShipAddr": {
+      "Line1": "456 Shipping Lane",
+      "City": "Portland",
+      "CountrySubDivisionCode": "OR",
+      "PostalCode": "97201",
+      "Country": "USA"
+    },
+    "ShipDate": "2024-11-01",
+    "ShipMethodRef": {
+      "name": "FedEx Ground"
+    },
+    "ClassRef": {
+      "name": "Revenue:Online Sales"
+    },
+    "SalesTermRef": {
+      "name": "Net 30"
+    },
+    "DepartmentRef": {
+      "name": "Sales Department"
+    },
+    "PaymentMethodRef": {
+      "name": "Credit Card"
+    },
+    "PaymentRefNum": "ch_1234567890abcdef",
+    "Line": [
+      {
+        "Amount": 300.00,
+        "DetailType": "SalesItemLineDetail",
+        "Description": "Professional consulting services - October 2024",
+        "SalesItemLineDetail": {
+          "ItemRef": {
+            "name": "Consulting Services"
+          },
+          "Qty": 6,
+          "UnitPrice": 50.00,
+          "ServiceDate": "2024-10-31",
+          "ClassRef": {
+            "name": "Professional Services"
+          }
+        }
+      },
+      {
+        "Amount": 150.00,
+        "DetailType": "SalesItemLineDetail",
+        "Description": "Software license - Annual subscription",
+        "SalesItemLineDetail": {
+          "ItemRef": {
+            "name": "Software License"
+          },
+          "Qty": 1,
+          "UnitPrice": 150.00
+        }
+      },
+      {
+        "Amount": 75.00,
+        "DetailType": "SalesItemLineDetail",
+        "Description": "Support services",
+        "SalesItemLineDetail": {
+          "ItemRef": {
+            "name": "Support Services"
+          },
+          "Qty": 1,
+          "UnitPrice": 100.00,
+          "DiscountAmt": 25.00
+        }
+      }
+    ]
+  }
+}

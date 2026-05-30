@@ -1,6 +1,8 @@
 import type { InvocationContext, HttpRequest } from '@azure/functions';
 import Stripe from 'stripe';
 
+import { logger } from '../lib/logger';
+
 import {
   centsToPositiveMajorUnits,
   findCheckoutSessionForPaymentIntent,
@@ -22,14 +24,16 @@ import {
   type SalesforceSvc,
   type QuickBooksDocumentReference,
 } from '../services/salesforceSvc';
-
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 import {
   SalesforceService,
   buildSalesforceConfig,
   parseBoolean,
 } from '../services/salesforceService';
-import { mapStripeToTransaction, type TransactionUpsertDTO } from '../domain/transactions';
+import {
+  mapStripeToTransaction,
+  type TransactionUpsertDTO,
+  SF_RECORD_TYPE_STRIPE_TRANSACTION,
+} from '../domain/transactions';
 import { ensureSalesforceIdOnCustomer } from '../stripe/utils';
 import { trimToNull as toTrimmedString } from '../stripe/customerIdentity';
 import { loadConfig, normalizeTransactionCategory } from '../config/contactMatching';
@@ -73,7 +77,7 @@ const getQboFunctions = () => {
         postPayoutToQbo: qboSvc.postPayoutToQbo,
       };
     } catch (error) {
-      console.warn('[StripeTrueUp] Could not load qboSvc, QBO posting will be disabled:', error);
+      logger.warn('[StripeTrueUp] Could not load qboSvc, QBO posting will be disabled:', error);
       qboFunctions = createNoopAccountingServices();
     }
   }
@@ -279,7 +283,7 @@ const createCrmGetter = (): (() => Promise<CrmService>) => {
           defaultCrmSvcPromise = null;
           const message =
             error instanceof Error ? error.message : 'Unknown CRM initialization error';
-          console.error('[StripeTrueUp] CRM initialization failed:', message);
+          logger.error('[StripeTrueUp] CRM initialization failed:', message);
           return disabledCrmService;
         }
       })();
@@ -893,7 +897,7 @@ const buildContactUpdateFields = (
 const ensureContactRecordTypeId = async (
   connection: any,
   currentRecordTypeId: string | undefined,
-  contextLog: typeof console.log
+  contextLog: (...args: unknown[]) => void
 ): Promise<string | undefined> => {
   if (currentRecordTypeId) {
     return currentRecordTypeId;
@@ -1148,7 +1152,7 @@ const processPayments = async (
             const existingRecord = await salesforce.findTransactionRecordByExternalId(
               'stripe_charge_id__c',
               charge.id,
-              STRIPE_TRANSACTION_RECORD_TYPE_NAME
+              SF_RECORD_TYPE_STRIPE_TRANSACTION
             );
 
             if (existingRecord?.id) {
@@ -1193,7 +1197,7 @@ const processPayments = async (
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             charge.id,
-            STRIPE_TRANSACTION_RECORD_TYPE_NAME
+            SF_RECORD_TYPE_STRIPE_TRANSACTION
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
@@ -1591,7 +1595,7 @@ const processRefunds = async (
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_refund_id__c',
             refund.id,
-            STRIPE_TRANSACTION_RECORD_TYPE_NAME
+            SF_RECORD_TYPE_STRIPE_TRANSACTION
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
@@ -1622,7 +1626,7 @@ const processRefunds = async (
           parentId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             chargeId,
-            STRIPE_TRANSACTION_RECORD_TYPE_NAME
+            SF_RECORD_TYPE_STRIPE_TRANSACTION
           );
         }
 
@@ -1899,6 +1903,7 @@ const processRefunds = async (
             date: timestampToDate(
               balanceTransaction.created ?? balanceTransaction.available_on ?? null
             ),
+            refundId: refund.id,
           });
           summary.qboPosts += 1;
 

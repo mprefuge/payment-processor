@@ -1,6 +1,6 @@
 import env from '../../config/env';
 import { logger } from '../../lib/logger';
-import { createTokenStore, TokenStore, Tokens } from './tokenStore';
+import { createTokenStore, TokenStore, Tokens, RefreshLockStore } from './tokenStore';
 
 interface TokenData {
   accessToken: string;
@@ -30,12 +30,24 @@ const QBO_OAUTH_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/
 
 type OAuthFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+function isRefreshLockStore(store: TokenStore): store is TokenStore & RefreshLockStore {
+  return typeof (store as TokenStore & Partial<RefreshLockStore>).acquireRefreshLock === 'function';
+}
+
 class QBOTokenManager {
   private store: TokenStore | null = null;
   private initialized = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private autoRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private lastRefreshAt: number | null = null;
+  /**
+   * In-process coalescing lock for `refreshTokens`.  QBO refresh tokens are
+   * single-use: if two concurrent calls both read the same refresh token and
+   * issue simultaneous requests, the second will receive `invalid_grant` and
+   * break QBO auth for all subsequent calls.  Coalescing concurrent calls into
+   * one shared Promise prevents this within a single function instance.
+   */
+  private refreshPromise: Promise<RefreshTokenResult> | null = null;
 
   private updateRuntimeTokens(accessToken: string, refreshToken?: string): void {
     process.env.QBO_ACCESS_TOKEN = accessToken;
@@ -139,6 +151,8 @@ class QBOTokenManager {
     this.store = createTokenStore();
     this.initialized = true;
 
+    if (process.env.NODE_ENV === 'test') return;
+
     try {
       const tokens = (await this.store.get('tokens')) as Tokens | null;
       if (tokens && typeof tokens.accessTokenExpiresAt === 'string') {
@@ -204,26 +218,46 @@ class QBOTokenManager {
     return Date.now() + leadMs >= tokens[expiresAt];
   }
 
-  private async throwRefreshTokenRequestError(response: Response): Promise<never> {
+  private async handleInvalidGrant(response: Response): Promise<RefreshTokenResult> {
     const rawText = await this.readTextBody(response);
-    let parsed: any = undefined;
+    let parsed: Record<string, unknown> | undefined = undefined;
 
     try {
-      parsed = rawText ? JSON.parse(rawText) : undefined;
+      parsed = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : undefined;
     } catch {
       // ignore parse errors
     }
 
     const isInvalidGrant =
       response.status === 400 &&
-      ((parsed && parsed.error === 'invalid_grant') ||
+      (parsed?.error === 'invalid_grant' ||
         (typeof rawText === 'string' && /invalid_grant/i.test(rawText)) ||
         (typeof rawText === 'string' && /incorrect or invalid refresh token/i.test(rawText)));
 
     if (isInvalidGrant) {
+      // Before clearing, check if another instance already refreshed successfully
+      if (this.store) {
+        try {
+          const freshTokens = (await this.store.get('tokens')) as TokenData | null;
+          if (freshTokens && Date.now() < freshTokens.accessTokenExpiresAt) {
+            logger.warn(
+              '[QBOTokenManager] invalid_grant but peer instance has fresh tokens — recovering',
+              { expiresAt: freshTokens.accessTokenExpiresAt }
+            );
+            this.updateRuntimeTokens(freshTokens.accessToken, freshTokens.refreshToken);
+            return { accessToken: freshTokens.accessToken, refreshToken: freshTokens.refreshToken };
+          }
+        } catch (readErr) {
+          this.logWarn('[QBOTokenManager] Failed to re-read tokens after invalid_grant', readErr);
+        }
+      }
+
+      const instanceId = process.env.WEBSITE_INSTANCE_ID ?? 'local';
       try {
         await this.clearTokens();
-        logger.warn('QBO refresh token appears invalid or revoked; cleared stored tokens');
+        logger.error('[QBOTokenManager] QBO refresh token invalid_grant — clearing tokens', {
+          instanceId,
+        });
       } catch (error) {
         this.logWarn('Failed to clear stored QBO tokens after invalid refresh token', error);
       }
@@ -234,7 +268,9 @@ class QBOTokenManager {
     }
 
     throw new Error(
-      `Failed to refresh QuickBooks access token (status ${response.status}): ${rawText ?? response.statusText}`
+      `Failed to refresh QuickBooks access token (status ${response.status}): ${
+        rawText ?? response.statusText
+      }`
     );
   }
 
@@ -263,43 +299,120 @@ class QBOTokenManager {
   }
 
   async refreshTokens(fetcher?: OAuthFetcher): Promise<RefreshTokenResult> {
-    const usedFetcher = this.resolveFetcher(fetcher);
-
-    this.lastRefreshAt = Date.now();
-    const refreshToken = await this.getRefreshToken();
-
-    if (!refreshToken) {
-      throw new Error(
-        'No refresh token available for QBO token refresh. ' +
-          'Please run "npm run setup:qbo" to set up QuickBooks Online integration.'
-      );
+    // Coalesce concurrent in-process refresh calls.  Only one HTTP request is
+    // issued; all concurrent callers await the same Promise and receive the
+    // same result.
+    if (this.refreshPromise) {
+      return this.refreshPromise;
     }
 
-    if (await this.isRefreshTokenExpired()) {
-      throw new Error('QBO refresh token has expired. Manual re-authentication required.');
-    }
-
-    const response = await this.postTokenRequest(
-      usedFetcher,
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-      })
-    );
-
-    if (!response.ok) {
-      await this.throwRefreshTokenRequestError(response);
-    }
-
-    const payload = this.parseTokenPayload(await this.readJsonBody(response), {
-      requireRefreshToken: false,
-      missingMessage: 'QBO token refresh response did not include an access_token',
+    this.refreshPromise = this._performTokenRefresh(fetcher).finally(() => {
+      this.refreshPromise = null;
     });
 
-    await this.storeAndActivateTokens(payload.accessToken, payload.refreshToken || refreshToken);
+    return this.refreshPromise;
+  }
 
-    logger.info('QBO tokens refreshed successfully');
-    return payload;
+  private async _performTokenRefresh(fetcher?: OAuthFetcher): Promise<RefreshTokenResult> {
+    const usedFetcher = this.resolveFetcher(fetcher);
+    const instanceId = process.env.WEBSITE_INSTANCE_ID ?? 'local';
+
+    // Distributed lock coordination (active when the store supports it, i.e. Azure Tables)
+    const lockStore = this.store && isRefreshLockStore(this.store) ? this.store : null;
+    let lockEtag: string | undefined;
+
+    if (lockStore) {
+      const WAIT_MS = 2000;
+      const MAX_WAIT_ATTEMPTS = 3;
+      let lockResult = await lockStore.acquireRefreshLock(30);
+
+      if (!lockResult.acquired) {
+        for (let attempt = 1; attempt <= MAX_WAIT_ATTEMPTS; attempt++) {
+          logger.info(
+            '[QBOTokenManager] Distributed refresh lock not acquired — waiting for peer refresh',
+            { attempt, waitMs: WAIT_MS }
+          );
+          await new Promise<void>((resolve) => setTimeout(resolve, WAIT_MS));
+
+          const freshTokens = (await this.store!.get('tokens')) as TokenData | null;
+          if (freshTokens && Date.now() < freshTokens.accessTokenExpiresAt) {
+            this.updateRuntimeTokens(freshTokens.accessToken, freshTokens.refreshToken);
+            return {
+              accessToken: freshTokens.accessToken,
+              refreshToken: freshTokens.refreshToken,
+            };
+          }
+
+          lockResult = await lockStore.acquireRefreshLock(30);
+          if (lockResult.acquired) break;
+        }
+      }
+
+      if (lockResult.acquired) {
+        lockEtag = lockResult.etag;
+        logger.info('[QBOTokenManager] Distributed refresh lock acquired', { instanceId });
+      } else {
+        logger.warn(
+          '[QBOTokenManager] Could not acquire distributed refresh lock after retries — proceeding without lock (degraded mode)',
+          { instanceId }
+        );
+      }
+    }
+
+    try {
+      const refreshToken = await this.getRefreshToken();
+
+      if (!refreshToken) {
+        throw new Error(
+          'No refresh token available for QBO token refresh. ' +
+            'Please run "npm run setup:qbo" to set up QuickBooks Online integration.'
+        );
+      }
+
+      if (await this.isRefreshTokenExpired()) {
+        throw new Error('QBO refresh token has expired. Manual re-authentication required.');
+      }
+
+      // Record the refresh attempt time after all pre-flight checks pass and
+      // immediately before issuing the HTTP request, so it accurately reflects
+      // when a real network call was made.
+      this.lastRefreshAt = Date.now();
+
+      const response = await this.postTokenRequest(
+        usedFetcher,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        })
+      );
+
+      if (!response.ok) {
+        return await this.handleInvalidGrant(response);
+      }
+
+      const payload = this.parseTokenPayload(await this.readJsonBody(response), {
+        requireRefreshToken: false,
+        missingMessage: 'QBO token refresh response did not include an access_token',
+      });
+
+      await this.storeAndActivateTokens(payload.accessToken, payload.refreshToken || refreshToken);
+
+      logger.info('QBO tokens refreshed successfully');
+      return payload;
+    } finally {
+      if (lockStore !== null && lockEtag !== undefined) {
+        try {
+          await lockStore.releaseRefreshLock(lockEtag);
+          logger.info('[QBOTokenManager] Distributed refresh lock released', { instanceId });
+        } catch (releaseErr) {
+          logger.warn(
+            `[QBOTokenManager] Failed to release distributed refresh lock: ${
+              releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+            }`
+          );
+        }
+      }
+    }
   }
 
   async clearTokens(): Promise<void> {

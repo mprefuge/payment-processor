@@ -75,12 +75,12 @@ export default function Row({
       {/* Row drag handle */}
       <div className="vb-row-handle" {...dragHandleProps} title="Drag to reorder row">
         <svg width="12" height="16" viewBox="0 0 12 16" fill="none">
-          <circle cx="3" cy="3" r="1.4" fill="currentColor"/>
-          <circle cx="9" cy="3" r="1.4" fill="currentColor"/>
-          <circle cx="3" cy="8" r="1.4" fill="currentColor"/>
-          <circle cx="9" cy="8" r="1.4" fill="currentColor"/>
-          <circle cx="3" cy="13" r="1.4" fill="currentColor"/>
-          <circle cx="9" cy="13" r="1.4" fill="currentColor"/>
+          <circle cx="3" cy="3" r="1.4" fill="currentColor" />
+          <circle cx="9" cy="3" r="1.4" fill="currentColor" />
+          <circle cx="3" cy="8" r="1.4" fill="currentColor" />
+          <circle cx="9" cy="8" r="1.4" fill="currentColor" />
+          <circle cx="3" cy="13" r="1.4" fill="currentColor" />
+          <circle cx="9" cy="13" r="1.4" fill="currentColor" />
         </svg>
       </div>
 
@@ -134,7 +134,12 @@ export default function Row({
           }}
         >
           <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-            <path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+            <path
+              d="M1 1l9 9M10 1l-9 9"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
           </svg>
         </button>
       </div>

@@ -38,7 +38,7 @@ module.exports = async function donationFormConfigSave(request) {
     record && record.config && record.config.display && record.config.display.mode === 'modal'
       ? 'modal'
       : 'embedded';
-  const embedSnippet = modalEmbedSnippet;
+  const embedSnippet = selectedMode === 'modal' ? modalEmbedSnippet : embeddedEmbedSnippet;
 
   return {
     status: 201,

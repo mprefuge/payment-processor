@@ -36,6 +36,14 @@ export const centsToPositiveMajorUnits = (value: number | null | undefined): num
   return Math.abs(converted);
 };
 
+/** Returns the value as a safe truncated integer; NaN/infinity/non-number → 0. */
+export const toSafeInteger = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0;
+
+/** Returns the absolute value as a positive integer; NaN/null/undefined → 0. */
+export const toPositiveCents = (value: number | null | undefined): number =>
+  Math.abs(toSafeInteger(value));
+
 export const timestampToDate = (timestamp: number | null | undefined): Date => {
   if (typeof timestamp === 'number' && Number.isFinite(timestamp)) {
     return new Date(timestamp * 1000);

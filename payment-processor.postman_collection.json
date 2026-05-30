@@ -617,9 +617,7 @@
             {
               "listen": "test",
               "script": {
-                "exec": [
-                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
-                ]
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
               }
             }
           ],
@@ -825,9 +823,7 @@
             {
               "listen": "test",
               "script": {
-                "exec": [
-                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
-                ]
+                "exec": ["pm.test('Status 200', () => pm.response.to.have.status(200));"]
               }
             }
           ],

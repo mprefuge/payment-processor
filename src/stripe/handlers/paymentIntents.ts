@@ -1,7 +1,11 @@
 import Stripe from 'stripe';
 
 import env from '../../config/env';
-import { mapStripeToTransaction, type TransactionUpsertDTO } from '../../domain/transactions';
+import {
+  mapStripeToTransaction,
+  type TransactionUpsertDTO,
+  SF_RECORD_TYPE_STRIPE_TRANSACTION,
+} from '../../domain/transactions';
 import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { HttpContext, StripeWebhookDependencies } from '../types';
@@ -19,8 +23,6 @@ import {
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
 import { loadConfig, normalizeTransactionCategory } from '../../config/contactMatching';
-
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
 
 const collectUnixTimestamps = (input: unknown, accumulator: number[]): void => {
   if (input === null || input === undefined) {
@@ -308,7 +310,7 @@ const findExistingTransactionId = async (
       const existingTransactionId = await salesforce.findTransactionIdByExternalId(
         lookupStep.fieldName,
         lookupStep.externalValue,
-        STRIPE_TRANSACTION_RECORD_TYPE_NAME
+        SF_RECORD_TYPE_STRIPE_TRANSACTION
       );
 
       if (existingTransactionId) {

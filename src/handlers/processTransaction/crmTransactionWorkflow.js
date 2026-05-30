@@ -1,4 +1,4 @@
-const STRIPE_TRANSACTION_RECORD_TYPE_NAME = 'Stripe Transaction';
+const { SF_RECORD_TYPE_STRIPE_TRANSACTION } = require('../../domain/transactions');
 const DEFAULT_CAMPAIGN_NAME = 'General Giving';
 
 /** Matches an 18-character Salesforce Campaign record ID (prefix 701). */
@@ -180,24 +180,24 @@ const createCrmTransactionWorkflow = ({ CrmFactory, logger, getCrmConfig }) => {
     try {
       const recordTypeId = await crmService.getRecordTypeIdByName(
         'Transaction__c',
-        STRIPE_TRANSACTION_RECORD_TYPE_NAME
+        SF_RECORD_TYPE_STRIPE_TRANSACTION
       );
 
       if (recordTypeId) {
         logger.info('Resolved transaction record type', {
-          recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
+          recordTypeName: SF_RECORD_TYPE_STRIPE_TRANSACTION,
           recordTypeId,
         });
       } else {
         logger.info('Transaction record type not found by name', {
-          recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
+          recordTypeName: SF_RECORD_TYPE_STRIPE_TRANSACTION,
         });
       }
 
       return recordTypeId;
     } catch (error) {
       logger.warn('Failed to resolve transaction record type', {
-        recordTypeName: STRIPE_TRANSACTION_RECORD_TYPE_NAME,
+        recordTypeName: SF_RECORD_TYPE_STRIPE_TRANSACTION,
         error: error.message,
       });
       return null;
