@@ -138,6 +138,10 @@ export interface QuickBooksSalesReceipt {
 interface QuickBooksJournalEntryLineDetail {
   PostingType: 'Debit' | 'Credit';
   AccountRef: QuickBooksReference;
+  /** Fund / class tracking — required for class-based P&L reporting */
+  ClassRef?: QuickBooksReference;
+  /** Customer, vendor, or employee linked to this line */
+  Entity?: { Type: 'Customer' | 'Vendor' | 'Employee'; EntityRef: QuickBooksReference };
 }
 
 interface QuickBooksJournalEntryLine {
@@ -274,6 +278,10 @@ interface BuildSingleJournalEntryInput {
   clearingAccountId?: string;
   revenueAccountId?: string;
   feesAccountId?: string;
+  /** Pre-resolved QBO ClassRef to apply to revenue and fee lines */
+  classRef?: QuickBooksReference | null;
+  /** Pre-resolved QBO customer ref — set as Entity on the revenue credit line */
+  entityRef?: QuickBooksReference | null;
 }
 
 interface BuildBankDepositInput {
@@ -2074,21 +2082,28 @@ const createJournalEntryLine = (
   type: 'debit' | 'credit',
   accountName: string,
   amountCents: number,
-  memo?: string
+  memo?: string,
+  options?: { classRef?: QuickBooksReference | null; entityRef?: QuickBooksReference | null }
 ): QuickBooksJournalEntryLine | null => {
   const amount = ensurePositiveAmount(amountCents, 'Journal entry amount');
   if (amount === 0) {
     return null;
   }
 
+  const detail: QuickBooksJournalEntryLineDetail = {
+    PostingType: type === 'debit' ? 'Debit' : 'Credit',
+    AccountRef: createAccountRef(accountName),
+  };
+  if (options?.classRef) detail.ClassRef = options.classRef;
+  if (options?.entityRef) {
+    detail.Entity = { Type: 'Customer', EntityRef: options.entityRef };
+  }
+
   return {
     Amount: centsToDollars(amount),
     DetailType: 'JournalEntryLineDetail',
     Description: memo,
-    JournalEntryLineDetail: {
-      PostingType: type === 'debit' ? 'Debit' : 'Credit',
-      AccountRef: createAccountRef(accountName),
-    },
+    JournalEntryLineDetail: detail,
   };
 };
 
@@ -2128,6 +2143,8 @@ export const buildSingleJE = ({
   clearingAccountId = env.quickBooks.accounts.stripeClearing,
   revenueAccountId = env.quickBooks.accounts.revenue,
   feesAccountId = env.quickBooks.accounts.fees,
+  classRef,
+  entityRef,
 }: BuildSingleJournalEntryInput): QuickBooksJournalEntry => {
   const grossAmount = ensurePositiveAmount(grossAmountCents, 'Gross amount');
   const feeAmount = ensurePositiveAmount(feeAmountCents, 'Fee amount');
@@ -2138,12 +2155,17 @@ export const buildSingleJE = ({
 
   const lines = [
     createJournalEntryLine('debit', clearingAccountId, grossAmount, memo),
-    createJournalEntryLine('credit', revenueAccountId, grossAmount, memo),
+    createJournalEntryLine('credit', revenueAccountId, grossAmount, memo, {
+      classRef: classRef ?? null,
+      entityRef: entityRef ?? null,
+    }),
   ];
 
   if (feeAmount > 0) {
     lines.push(
-      createJournalEntryLine('debit', feesAccountId, feeAmount, memo),
+      createJournalEntryLine('debit', feesAccountId, feeAmount, memo, {
+        classRef: classRef ?? null,
+      }),
       createJournalEntryLine('credit', clearingAccountId, feeAmount, memo)
     );
   }
@@ -3532,6 +3554,11 @@ export const postChargeToQbo = async ({
  * @param uniqueId         - Unique identifier (e.g. SF record Id) to produce a
  *                           collision-resistant DocNumber even when two entries share the
  *                           same date and amount.
+ * @param customerName     - Donor / customer display name; finds or creates the QBO customer
+ *                           and attaches them as Entity on the revenue credit line.
+ * @param customerEmail    - Email used as primary lookup key for the QBO customer.
+ * @param classRef         - QBO class in "Name|Id" format (e.g. "General Fund|42"); sets
+ *                           ClassRef on revenue and fee lines for fund-based reporting.
  */
 export const postManualEntryAsJournalEntry = async (input: {
   grossAmountCents: number;
@@ -3539,6 +3566,9 @@ export const postManualEntryAsJournalEntry = async (input: {
   date: string | Date;
   memo?: string;
   uniqueId?: string | null;
+  customerName?: string | null;
+  customerEmail?: string | null;
+  classRef?: string | null;
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
@@ -3557,6 +3587,40 @@ export const postManualEntryAsJournalEntry = async (input: {
   const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
   await resolveAccountReferences([clearingAccountRef, revenueAccountRef, feesAccountRef], context);
 
+  // Resolve QBO customer if name or email provided
+  let resolvedEntityRef: QuickBooksReference | null = null;
+  if (input.customerName?.trim() || input.customerEmail?.trim()) {
+    try {
+      const customerResult = await ensureSalesReceiptCustomer(
+        {
+          displayName: (input.customerName?.trim() || input.customerEmail?.trim())!,
+          email: input.customerEmail?.trim() || null,
+        },
+        context
+      );
+      if (customerResult?.ref.value) {
+        resolvedEntityRef = customerResult.ref;
+      }
+    } catch (customerErr) {
+      logger.warn('[QBOSvc] postManualEntryAsJournalEntry: customer resolution failed; posting without customer', {
+        customerName: input.customerName,
+        error: customerErr instanceof Error ? customerErr.message : String(customerErr),
+      });
+    }
+  }
+
+  // Parse class ref string ("Name|Id" format)
+  let resolvedClassRef: QuickBooksReference | null = null;
+  if (input.classRef?.trim()) {
+    try {
+      resolvedClassRef = createClassRef(input.classRef.trim());
+    } catch {
+      logger.warn('[QBOSvc] postManualEntryAsJournalEntry: invalid classRef format; posting without class', {
+        classRef: input.classRef,
+      });
+    }
+  }
+
   const journalEntry = buildSingleJE({
     docNumber,
     grossAmountCents: grossAmount,
@@ -3566,6 +3630,8 @@ export const postManualEntryAsJournalEntry = async (input: {
     clearingAccountId: clearingAccountRef.value,
     revenueAccountId: revenueAccountRef.value,
     feesAccountId: feesAccountRef.value,
+    classRef: resolvedClassRef,
+    entityRef: resolvedEntityRef,
   });
 
   const result = await postJournalEntry(journalEntry, input.options);

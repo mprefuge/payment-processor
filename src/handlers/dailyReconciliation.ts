@@ -298,11 +298,17 @@ type SfTransactionRow = {
   /** ISO datetime string — used as posting date fallback when Received_At__c is null */
   CreatedDate?: string | null;
   /** Related Contact — used for QBO memo display name */
-  Contact__r?: { FirstName?: string | null; LastName?: string | null } | null;
+  Contact__r?: { FirstName?: string | null; LastName?: string | null; Email?: string | null } | null;
   /** Related Account — used for QBO memo display name when Contact is absent */
   Account__r?: { Name?: string | null } | null;
   /** Related Campaign — appended to QBO memo */
   Campaign__r?: { Name?: string | null } | null;
+  /** QBO class ID — used to set ClassRef on revenue lines for fund-based reporting */
+  QBO_Class_Id__c?: string | null;
+  /** QBO class name — paired with QBO_Class_Id__c to form "Name|Id" classRef string */
+  QBO_Class_Name__c?: string | null;
+  /** Billing email — primary lookup key when finding/creating the QBO customer */
+  Billing_Email__c?: string | null;
 };
 
 const queryTransactionsForRange = async (
@@ -322,7 +328,8 @@ const queryTransactionsForRange = async (
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Id__c, ` +
     `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
-    `Contact__r.FirstName, Contact__r.LastName, Account__r.Name, Campaign__r.Name ` +
+    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name, ` +
+    `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
     `WHERE (` +
     `(Received_At__c >= ${escapedStart}T00:00:00Z AND Received_At__c <= ${escapedEnd}T23:59:59Z) ` +
@@ -997,11 +1004,24 @@ const repairMissingSfToQbo = async (
       sfRow.Name?.trim() ||
       null;
     const campaign = sfRow.Campaign__r?.Name?.trim() ?? null;
-    const memo = displayName
+    // Base memo (donor/account name + campaign)
+    const baseMemo = displayName
       ? campaign
         ? `${displayName} — ${campaign}`
         : displayName
       : `SF:${sfId}`;
+    // Append SF record name for cross-reference (e.g. TRX-260505-5594)
+    const sfName = sfRow.Name?.trim() ?? null;
+    const memo = sfName ? `${baseMemo} (${sfName})` : baseMemo;
+
+    // Customer email for QBO customer lookup (billing email preferred over contact email)
+    const customerEmail =
+      sfRow.Billing_Email__c?.trim() || sfRow.Contact__r?.Email?.trim() || null;
+
+    // QBO class ref in "Name|Id" format — only valid when we have an explicit Id
+    const classRefStr = sfRow.QBO_Class_Id__c?.trim()
+      ? `${sfRow.QBO_Class_Name__c?.trim() ?? ''}|${sfRow.QBO_Class_Id__c.trim()}`
+      : null;
 
     const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
     const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
@@ -1037,7 +1057,7 @@ const repairMissingSfToQbo = async (
           result = await postChargeToQbo({
             gross: grossCents,
             fee: feeCents,
-            memo: `Stripe charge ${charge.id}`,
+            memo: sfName ? `SF: ${sfName} — Stripe charge ${charge.id}` : `Stripe charge ${charge.id}`,
             date: bt?.created ? new Date(bt.created * 1000) : date,
             stripe: { charge },
           });
@@ -1053,6 +1073,9 @@ const repairMissingSfToQbo = async (
             date,
             memo,
             uniqueId: sfId,
+            customerName: displayName,
+            customerEmail,
+            classRef: classRefStr,
           });
           context.log('[DailyReconciliation] Posted manual JE to QBO (Stripe fallback)', {
             sfId,
@@ -1066,6 +1089,9 @@ const repairMissingSfToQbo = async (
           date,
           memo,
           uniqueId: sfId,
+          customerName: displayName,
+          customerEmail,
+          classRef: classRefStr,
         });
         context.log('[DailyReconciliation] Posted manual SF entry to QBO as JE', {
           sfId,
