@@ -1847,9 +1847,10 @@ export const runReconciliation = async (
       discrepancies.stripeMissingSalesforce.filter((i) => i.type === 'stripe_only_charge').length >
         0
     ) {
-      const chargeItems = discrepancies.stripeMissingSalesforce.filter(
+      const allChargeItems = discrepancies.stripeMissingSalesforce.filter(
         (i) => i.type === 'stripe_only_charge'
       );
+      const chargeItems = limit && limit > 0 ? allChargeItems.slice(0, limit) : allChargeItems;
       const repairResult = await repairMissingCharges(
         chargeItems,
         stripeCharges,
