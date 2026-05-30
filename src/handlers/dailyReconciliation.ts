@@ -27,6 +27,7 @@ import {
 import { createSalesforceSvc } from '../services/salesforceSvc';
 import {
   query as qboQuery,
+  qboDocumentExists,
   updateQboDocPrivateNote,
   postManualEntryAsJournalEntry,
   postChargeToQbo,
@@ -294,6 +295,7 @@ type SfTransactionRow = {
   /** Dispute ID (dp_xxx) — needed so dispute JEs in QBO are matched to SF rows */
   Stripe_Dispute_Id__c?: string | null;
   Posted_to_QBO__c?: boolean | null;
+  QBO_Doc_Type__c?: string | null;
   QBO_Doc_Id__c?: string | null;
   Amount_Gross__c?: number | null;
   Received_At__c?: string | null;
@@ -337,7 +339,7 @@ const queryTransactionsForRange = async (
   const soql =
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
-    `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Id__c, ` +
+    `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
     `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
     `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
@@ -1638,33 +1640,86 @@ export const runReconciliation = async (
     }> = [];
 
     // Clear stale QBO doc references: SF rows pointing to QBO docs that have been deleted or
-    // voided.  Setting Posted_to_QBO__c = false and nulling QBO_Doc_Id__c makes the record
-    // eligible for re-posting.  Cleared items are collected so they are re-posted to QBO
-    // immediately in this same run rather than waiting for the next scheduled reconciliation.
+    // voided.  Before clearing, we verify the document is actually gone via a direct QBO read
+    // (the date-range query can miss a doc if its TxnDate drifted outside the window, which
+    // would cause the record to be repeatedly flagged as stale and re-posted every run).
+    //
+    // Three outcomes per stale item:
+    //   1. Doc still exists  → re-link SF to the existing ID; no re-post needed.
+    //   2. Doc is gone       → clear the SF link; collect for re-post below.
+    //   3. Verify call fails → skip; log a warning; do not clear.
+    const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
     const staleClearedForReposting: DiscrepancyItem[] = [];
-    if (systems.includes('salesforce')) {
+    if (systems.includes('salesforce') && systems.includes('qbo')) {
       const staleItems = discrepancies.salesforceMissingQbo.filter(
         (i) => i.type === 'sf_qbo_doc_deleted'
       );
       for (const item of staleItems) {
+        const sfRow = sfRowById.get(item.id);
+        const docId = sfRow?.QBO_Doc_Id__c?.trim();
+        if (!docId) continue;
+
+        // Prefer the stored QBO doc type from Salesforce; fall back to Stripe ID hints.
+        const sfDocType = sfRow?.QBO_Doc_Type__c?.trim().toLowerCase() ?? null;
+        const stripeId =
+          sfRow?.Stripe_Payout_Id__c?.trim() ?? sfRow?.Stripe_Refund_Id__c?.trim() ?? null;
+        const entityType =
+          sfDocType === 'bank-deposit'
+            ? 'Deposit'
+            : sfDocType === 'journal-entry'
+              ? 'JournalEntry'
+              : sfDocType === 'sales-receipt'
+                ? 'SalesReceipt'
+                : stripeId?.startsWith('po_') || stripeId?.startsWith('py_')
+                  ? 'Deposit'
+                  : sfRow?.Stripe_Refund_Id__c?.trim()
+                    ? 'JournalEntry'
+                    : 'SalesReceipt';
+        const docTypeForSalesforce =
+          sfDocType ??
+          (entityType === 'Deposit'
+            ? 'bank-deposit'
+            : entityType === 'JournalEntry'
+              ? 'journal-entry'
+              : 'sales-receipt');
+
         try {
-          await salesforceSvc.clearStaleQboDocReference(item.id);
-          staleLinksCleared++;
-          // Re-type as sf_missing_qbo so repairMissingSfToQbo processes it below
-          staleClearedForReposting.push({ ...item, type: 'sf_missing_qbo' });
-          context.log('[DailyReconciliation] Cleared stale QBO doc reference on SF record', {
-            sfId: item.id,
-            stripeId: item.stripeId,
-          });
+          const stillExists = await qboDocumentExists(entityType, docId);
+          if (stillExists) {
+            // Doc is in QBO but wasn't returned by the date-range query (TxnDate drift or
+            // results limit).  Re-link SF to the confirmed ID without clearing/re-posting.
+            await salesforceSvc.markPostedToQbo(item.id, {
+              type: docTypeForSalesforce,
+              id: docId,
+            });
+            context.log(
+              '[DailyReconciliation] Stale link was false-positive; re-linked SF to existing QBO doc',
+              { sfId: item.id, entityType, docId }
+            );
+          } else {
+            // Doc is genuinely gone — clear and queue for re-post
+            await salesforceSvc.clearStaleQboDocReference(item.id);
+            staleLinksCleared++;
+            staleClearedForReposting.push({ ...item, type: 'sf_missing_qbo' });
+            context.log('[DailyReconciliation] Cleared stale QBO doc reference on SF record', {
+              sfId: item.id,
+              stripeId: item.stripeId,
+            });
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           repairErrors.push(`Failed to clear stale QBO ref on ${item.id}: ${msg}`);
-          context.log('[DailyReconciliation] Failed to clear stale QBO doc reference', {
+          context.log('[DailyReconciliation] Failed to process stale QBO doc reference', {
             sfId: item.id,
             error: msg,
           });
         }
       }
+    } else if (systems.includes('salesforce')) {
+      // QBO system not included — cannot verify; skip stale-link processing entirely
+      context.log(
+        '[DailyReconciliation] Skipping stale-link repair: QBO system not included in this run'
+      );
     }
 
     // Post SF records missing from QBO into QuickBooks (manual entries + Stripe-linked).

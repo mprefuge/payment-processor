@@ -4316,6 +4316,65 @@ export const ensureAccount = async (
   };
 };
 
+/**
+ * Returns true if a QBO document with the given entity type and ID actually exists.
+ *
+ * Uses a direct read (GET /entity/{id}) rather than a date-range query so the result is
+ * authoritative regardless of TxnDate.  A 404 or Fault response means the doc is gone.
+ *
+ * @param entityType - e.g. 'SalesReceipt', 'JournalEntry', 'Deposit'
+ * @param docId      - the QBO document ID (TxnId) stored in QBO_Doc_Id__c
+ */
+export const qboDocumentExists = async (
+  entityType: string,
+  docId: string,
+  options?: PostOptions
+): Promise<boolean> => {
+  const context = await createRequestContext(options);
+  const entityPath = entityType.replace(/[^A-Za-z]/g, '').toLowerCase();
+  const url = new URL(`${buildQboUrl(entityPath)}/${encodeURIComponent(docId)}`);
+  url.searchParams.set('minorversion', '75');
+
+  const response = await context.request(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (response.status === 404) return false;
+
+  let data: Record<string, unknown> | null = null;
+  try {
+    data = (await response.json()) as Record<string, unknown>;
+  } catch {
+    // Ignore parse errors; status checks below still handle existence semantics.
+  }
+
+  if (response.status >= 200 && response.status < 300) {
+    return true;
+  }
+
+  const fault = data && typeof data === 'object' ? (data as any).Fault : undefined;
+  const rawErrors = fault && typeof fault === 'object' ? (fault as any).Error : undefined;
+  const errors = Array.isArray(rawErrors) ? rawErrors : rawErrors ? [rawErrors] : [];
+  const faultText = errors
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return '';
+      const e = entry as Record<string, unknown>;
+      return [e.code, e.Message, e.Detail].filter((v) => typeof v === 'string').join(' ');
+    })
+    .join(' ')
+    .toLowerCase();
+
+  // QBO "not found" faults should be treated as absent docs.
+  if (faultText.includes('not found') || /\b610\b/.test(faultText)) {
+    return false;
+  }
+
+  throw new Error(
+    `QuickBooks document existence check failed for ${entityType}:${docId} (status ${response.status})`
+  );
+};
+
 export const query = async <T = unknown>(query: string, options?: PostOptions): Promise<T> => {
   const trimmedQuery = query?.trim();
   if (!trimmedQuery) {
