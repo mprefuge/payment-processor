@@ -760,6 +760,59 @@ describe('stripeDuplicateCheck', () => {
       expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(1);
     });
 
+    it('does not group Stripe_Payout_Id__c duplicates when records also contain other Stripe IDs', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf1',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            Stripe_Payout_Id__c: 'po_shared',
+            Stripe_Charge_Id__c: 'ch_unique_1',
+          },
+          {
+            Id: 'sf2',
+            CreatedDate: '2024-01-01T09:00:00.000Z',
+            Stripe_Payout_Id__c: 'po_shared',
+            Stripe_Charge_Id__c: 'ch_unique_2',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+    });
+
+    it('groups Stripe_Payout_Id__c duplicates when payout ID is the only Stripe ID on each record', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf1',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            Stripe_Payout_Id__c: 'po_only_shared',
+          },
+          {
+            Id: 'sf2',
+            CreatedDate: '2024-01-01T09:00:00.000Z',
+            Stripe_Payout_Id__c: 'po_only_shared',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(1);
+      expect(result.jsonBody.salesforce.duplicateGroups[0].key).toBe(
+        'Stripe_Payout_Id__c:po_only_shared'
+      );
+    });
+
     it('applies date range to Salesforce query', async () => {
       mockSfConnection.query.mockResolvedValue({ records: [] });
 
