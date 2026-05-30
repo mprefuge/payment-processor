@@ -19,7 +19,11 @@ import type { HttpRequest, InvocationContext } from '@azure/functions';
 
 import { logger } from '../lib/logger';
 import { readBooleanQuery } from '../lib/http';
-import { buildSalesforceConfig, SalesforceService, parseBoolean } from '../services/salesforceService';
+import {
+  buildSalesforceConfig,
+  SalesforceService,
+  parseBoolean,
+} from '../services/salesforceService';
 import { query as qboQuery } from '../services/qboSvc';
 import {
   fetchStripeChargesSince,
@@ -33,8 +37,8 @@ import Stripe from 'stripe';
 // ---------------------------------------------------------------------------
 
 interface ReconciliationOptions {
-  startDate: string;        // YYYY-MM-DD
-  endDate: string;          // YYYY-MM-DD (inclusive)
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD (inclusive)
   liveMode: boolean;
   dryRun: boolean;
   systems: ('stripe' | 'salesforce' | 'qbo')[];
@@ -211,8 +215,7 @@ const createStripeClient = (liveMode: boolean): Stripe => {
 // Salesforce query helpers
 // ---------------------------------------------------------------------------
 
-const escapeForSoql = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+const escapeForSoql = (value: string): string => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 type SfTransactionRow = {
   Id: string;
@@ -246,7 +249,9 @@ const queryTransactionsForRange = async (
     `AND Received_At__c <= ${escapedEnd}T23:59:59Z` +
     limitClause;
 
-  const result = await connection.query(soql) as SfTransactionRow[] | { records: SfTransactionRow[] };
+  const result = (await connection.query(soql)) as
+    | SfTransactionRow[]
+    | { records: SfTransactionRow[] };
   if (Array.isArray(result)) return result;
   if (result && Array.isArray((result as any).records)) return (result as any).records;
   return [];
@@ -277,10 +282,13 @@ const queryQboDocumentsForRange = async (
     `MAXRESULTS ${maxResults}`;
 
   try {
-    const result = await qboQuery(qboSql) as { QueryResponse?: { [entity: string]: QboDocRow[] } };
-    const responseKey = Object.keys((result as any)?.QueryResponse ?? {}).find((k) =>
-      k.toLowerCase() === entity.toLowerCase()
-    ) ?? entity;
+    const result = (await qboQuery(qboSql)) as {
+      QueryResponse?: { [entity: string]: QboDocRow[] };
+    };
+    const responseKey =
+      Object.keys((result as any)?.QueryResponse ?? {}).find(
+        (k) => k.toLowerCase() === entity.toLowerCase()
+      ) ?? entity;
     return (result as any)?.QueryResponse?.[responseKey] ?? [];
   } catch (error) {
     logger.warn(`[DailyReconciliation] QBO query failed for ${entity}:`, error);
@@ -521,9 +529,16 @@ export const runReconciliation = async (
   if (systems.includes('stripe')) {
     try {
       const stripeClient = createStripeClient(liveMode);
-      const fetchOptions = { params: { created: { lte: toUnix } }, logger: context.log.bind(context) };
+      const fetchOptions = {
+        params: { created: { lte: toUnix } },
+        logger: context.log.bind(context),
+      };
 
-      context.log('[DailyReconciliation] Fetching Stripe charges', { startDate, endDate, liveMode });
+      context.log('[DailyReconciliation] Fetching Stripe charges', {
+        startDate,
+        endDate,
+        liveMode,
+      });
       stripeCharges = await fetchStripeChargesSince(stripeClient, sinceUnix, fetchOptions);
       counts.stripe.charges = stripeCharges.length;
 
@@ -555,7 +570,10 @@ export const runReconciliation = async (
       const sfService = new SalesforceService(buildSalesforceConfig());
       const connection = await sfService.authenticate();
 
-      context.log('[DailyReconciliation] Querying Salesforce Transaction__c', { startDate, endDate });
+      context.log('[DailyReconciliation] Querying Salesforce Transaction__c', {
+        startDate,
+        endDate,
+      });
       sfRows = await queryTransactionsForRange(connection, startDate, endDate, limit);
       counts.salesforce.transactions = sfRows.length;
     } catch (error) {
@@ -601,31 +619,20 @@ export const runReconciliation = async (
 
   // Salesforce Stripe ID sets (all types together)
   const sfChargeIds = new Set(
-    sfRows
-      .filter((r) => r.Stripe_Charge_Id__c)
-      .map((r) => r.Stripe_Charge_Id__c as string)
+    sfRows.filter((r) => r.Stripe_Charge_Id__c).map((r) => r.Stripe_Charge_Id__c as string)
   );
   const sfRefundIds = new Set(
-    sfRows
-      .filter((r) => r.Stripe_Refund_Id__c)
-      .map((r) => r.Stripe_Refund_Id__c as string)
+    sfRows.filter((r) => r.Stripe_Refund_Id__c).map((r) => r.Stripe_Refund_Id__c as string)
   );
   const sfPayoutIds = new Set(
-    sfRows
-      .filter((r) => r.Stripe_Payout_Id__c)
-      .map((r) => r.Stripe_Payout_Id__c as string)
+    sfRows.filter((r) => r.Stripe_Payout_Id__c).map((r) => r.Stripe_Payout_Id__c as string)
   );
   const sfPiIds = new Set(
     sfRows
       .filter((r) => r.Stripe_Payment_Intent_Id__c)
       .map((r) => r.Stripe_Payment_Intent_Id__c as string)
   );
-  const allSfStripeIds = new Set([
-    ...sfChargeIds,
-    ...sfRefundIds,
-    ...sfPayoutIds,
-    ...sfPiIds,
-  ]);
+  const allSfStripeIds = new Set([...sfChargeIds, ...sfRefundIds, ...sfPayoutIds, ...sfPiIds]);
 
   // QBO Stripe ID sets (from DocNumber + PrivateNote)
   const allQboDocs = [...qboReceipts, ...qboJournalEntries, ...qboDeposits];
@@ -650,9 +657,7 @@ export const runReconciliation = async (
 
   if (systems.includes('stripe') && systems.includes('qbo')) {
     // Only check charges since refunds/payouts use journal entries / deposits
-    discrepancies.stripeMissingQbo.push(
-      ...findStripeMissingQbo(stripeChargeIds, qboStripeIds)
-    );
+    discrepancies.stripeMissingQbo.push(...findStripeMissingQbo(stripeChargeIds, qboStripeIds));
   }
 
   if (systems.includes('salesforce')) {
@@ -764,7 +769,9 @@ export const dailyReconciliationTimer = async (
 
   const enabled = parseBoolean(process.env.ENABLE_DAILY_RECONCILIATION_TIMER, false);
   if (!enabled) {
-    context.log('[DailyReconciliation] Timer is disabled (ENABLE_DAILY_RECONCILIATION_TIMER != true). Exiting.');
+    context.log(
+      '[DailyReconciliation] Timer is disabled (ENABLE_DAILY_RECONCILIATION_TIMER != true). Exiting.'
+    );
     return;
   }
 

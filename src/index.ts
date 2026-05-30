@@ -1746,9 +1746,18 @@ registerFunction(
 
 const DailyReconciliationQuerySchema = z
   .object({
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
+    startDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
+    endDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
     dryRun: BoolLikeQuerySchema.optional(),
     mode: ModeQuerySchema.optional(),
     systems: z.string().optional(),
@@ -1806,7 +1815,7 @@ const reconStripeMissingSfResponse = {
         id: 'ch_3PfABC',
         description: 'charge exists in Stripe but has no matching Salesforce Transaction__c',
         stripeId: 'ch_3PfABC',
-        amount: 250.00,
+        amount: 250.0,
         date: '2026-05-28',
       },
     ],
@@ -1830,7 +1839,7 @@ const reconSfMissingQboResponse = {
         id: 'a1aUQ00000AAAAAYAA',
         description: 'Salesforce Transaction__c has no QuickBooks document link',
         stripeId: 'ch_3PfXXX',
-        amount: 150.00,
+        amount: 150.0,
         date: '2026-05-28',
       },
     ],
@@ -1850,7 +1859,7 @@ const reconQboOrphanResponse = {
         id: '10455',
         description: 'QBO SalesReceipt references Stripe ID ch_3PfORPH not found in Salesforce',
         stripeId: 'ch_3PfORPH',
-        amount: 75.00,
+        amount: 75.0,
         date: '2026-05-28',
       },
     ],
@@ -1892,7 +1901,7 @@ const reconMultiDiscrepancyResponse = {
         id: 'ch_3PfNEW',
         description: 'charge exists in Stripe but has no matching Salesforce Transaction__c',
         stripeId: 'ch_3PfNEW',
-        amount: 500.00,
+        amount: 500.0,
         date: '2026-05-28',
       },
     ],
@@ -1904,7 +1913,7 @@ const reconMultiDiscrepancyResponse = {
         id: 'a1aUQ00000DDDDDYAA',
         description: 'Salesforce Transaction__c has no QuickBooks document link',
         stripeId: 'ch_3PfOLD',
-        amount: 100.00,
+        amount: 100.0,
         date: '2026-05-27',
       },
     ],
@@ -1971,216 +1980,232 @@ const reconDateRangeResponse = {
   summary: { totalDiscrepancies: 0, categories: {} },
 };
 
-registerFunction(
-  'dailyReconciliation',
-  'Cross-system daily reconciliation check',
-  {
-    handler: dailyReconciliation,
-    description:
-      '**Reconciliation walkthrough**\n\n' +
-      'Compares Stripe, Salesforce, and QuickBooks for a given date range and returns a structured ' +
-      'discrepancy report. Always read-only in dry-run mode (the default). Nothing is written, ' +
-      'deleted, or modified.\n\n' +
-      '**How to use it**\n\n' +
-      '1. **Quick probe** — hit `Try it out` with no parameters. Defaults to `dryRun=true`, ' +
-      '`mode=test`, yesterday\'s date, and all three systems. The `counts` block confirms each ' +
-      'API was reached; `summary.totalDiscrepancies: 0` means everything is clean.\n\n' +
-      '2. **Specific date** — add `date=YYYY-MM-DD` to reconcile a single past day.\n\n' +
-      '3. **Date range** — use `startDate` + `endDate` for multi-day sweeps (e.g. after a ' +
-      'deployment or data migration).\n\n' +
-      '4. **Scope to two systems** — set `systems=stripe,salesforce` to skip QBO API calls, or ' +
-      '`systems=salesforce,qbo` to skip Stripe. Useful when one system is slow or rate-limited.\n\n' +
-      '5. **Limit record volume** — add `limit=50` to cap records per entity. Good for fast ' +
-      'spot-checks during high-traffic days.\n\n' +
-      '**What the discrepancy categories mean**\n\n' +
-      '- `stripeMissingSalesforce` — Stripe charges/refunds/payouts with no `Transaction__c` row. ' +
-      'Fix with `/api/stripe/true-up`.\n' +
-      '- `stripeMissingQbo` — Stripe charges with no QBO SalesReceipt. Fix with `/api/stripe/true-up` ' +
-      '(`bypassQbo=false`).\n' +
-      '- `salesforceMissingQbo` — `Transaction__c` rows where `Posted_to_QBO__c` is false or ' +
-      '`QBO_Doc_Id__c` is blank. Fix with `/api/qbo/salesforce-record-sync`.\n' +
-      '- `salesforceMissingStripe` — `Transaction__c` rows with no Stripe ID at all (QBO-origin ' +
-      'imports or manual entries; may be expected).\n' +
-      '- `qboMissingSalesforce` — QBO documents whose DocNumber or PrivateNote Stripe ID is not in ' +
-      'Salesforce. Fix with `/api/qbo/receipts-salesforce-sync`.\n' +
-      '- `duplicatesInSalesforce` — multiple `Transaction__c` rows sharing one Stripe ID. Fix with ' +
-      '`/api/ops/stripe-duplicate-check?deleteDuplicates=true`.\n' +
-      '- `duplicatesInQbo` — multiple QBO documents sharing one Stripe ID. Same fix endpoint.\n\n' +
-      'The timer trigger runs at **02:00 UTC daily** when `ENABLE_DAILY_RECONCILIATION_TIMER=true`.',
-    tags: ['Ops'],
-    operationId: 'dailyReconciliation',
-    methods: ['GET', 'POST'],
-    ...withFunctionAuth({}),
-    route: 'ops/daily-reconciliation',
-    request: {
-      query: DailyReconciliationQuerySchema,
-    },
-    responses: {
-      200: {
-        description: 'Reconciliation complete — no errors',
-        content: {
-          'application/json': {
-            schema: GenericSuccessResponseSchema,
-            example: reconCleanResponse,
-            examples: {
-              // ── Starting points ──────────────────────────────────────────
-              quickProbe: asNamedExample(
-                '1. Quick probe (start here)',
-                {
-                  request: { mode: 'test', dryRun: 'true', limit: '25' },
-                  response: reconCleanResponse,
-                },
-                'Fastest way to validate all three systems are reachable and returning data. ' +
+registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check', {
+  handler: dailyReconciliation,
+  description:
+    '**Reconciliation walkthrough**\n\n' +
+    'Compares Stripe, Salesforce, and QuickBooks for a given date range and returns a structured ' +
+    'discrepancy report. Always read-only in dry-run mode (the default). Nothing is written, ' +
+    'deleted, or modified.\n\n' +
+    '**How to use it**\n\n' +
+    '1. **Quick probe** — hit `Try it out` with no parameters. Defaults to `dryRun=true`, ' +
+    "`mode=test`, yesterday's date, and all three systems. The `counts` block confirms each " +
+    'API was reached; `summary.totalDiscrepancies: 0` means everything is clean.\n\n' +
+    '2. **Specific date** — add `date=YYYY-MM-DD` to reconcile a single past day.\n\n' +
+    '3. **Date range** — use `startDate` + `endDate` for multi-day sweeps (e.g. after a ' +
+    'deployment or data migration).\n\n' +
+    '4. **Scope to two systems** — set `systems=stripe,salesforce` to skip QBO API calls, or ' +
+    '`systems=salesforce,qbo` to skip Stripe. Useful when one system is slow or rate-limited.\n\n' +
+    '5. **Limit record volume** — add `limit=50` to cap records per entity. Good for fast ' +
+    'spot-checks during high-traffic days.\n\n' +
+    '**What the discrepancy categories mean**\n\n' +
+    '- `stripeMissingSalesforce` — Stripe charges/refunds/payouts with no `Transaction__c` row. ' +
+    'Fix with `/api/stripe/true-up`.\n' +
+    '- `stripeMissingQbo` — Stripe charges with no QBO SalesReceipt. Fix with `/api/stripe/true-up` ' +
+    '(`bypassQbo=false`).\n' +
+    '- `salesforceMissingQbo` — `Transaction__c` rows where `Posted_to_QBO__c` is false or ' +
+    '`QBO_Doc_Id__c` is blank. Fix with `/api/qbo/salesforce-record-sync`.\n' +
+    '- `salesforceMissingStripe` — `Transaction__c` rows with no Stripe ID at all (QBO-origin ' +
+    'imports or manual entries; may be expected).\n' +
+    '- `qboMissingSalesforce` — QBO documents whose DocNumber or PrivateNote Stripe ID is not in ' +
+    'Salesforce. Fix with `/api/qbo/receipts-salesforce-sync`.\n' +
+    '- `duplicatesInSalesforce` — multiple `Transaction__c` rows sharing one Stripe ID. Fix with ' +
+    '`/api/ops/stripe-duplicate-check?deleteDuplicates=true`.\n' +
+    '- `duplicatesInQbo` — multiple QBO documents sharing one Stripe ID. Same fix endpoint.\n\n' +
+    'The timer trigger runs at **02:00 UTC daily** when `ENABLE_DAILY_RECONCILIATION_TIMER=true`.',
+  tags: ['Ops'],
+  operationId: 'dailyReconciliation',
+  methods: ['GET', 'POST'],
+  ...withFunctionAuth({}),
+  route: 'ops/daily-reconciliation',
+  request: {
+    query: DailyReconciliationQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Reconciliation complete — no errors',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+          example: reconCleanResponse,
+          examples: {
+            // ── Starting points ──────────────────────────────────────────
+            quickProbe: asNamedExample(
+              '1. Quick probe (start here)',
+              {
+                request: { mode: 'test', dryRun: 'true', limit: '25' },
+                response: reconCleanResponse,
+              },
+              'Fastest way to validate all three systems are reachable and returning data. ' +
                 'Omit the date to default to yesterday. The counts block confirms each API was reached. ' +
                 'totalDiscrepancies: 0 means everything is in sync.'
-              ),
-              singleDate: asNamedExample(
-                '2. Single date dry-run',
-                {
-                  request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
-                  response: reconCleanResponse,
-                },
-                'Reconcile a specific past date. Useful after a webhook outage or deployment to ' +
+            ),
+            singleDate: asNamedExample(
+              '2. Single date dry-run',
+              {
+                request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
+                response: reconCleanResponse,
+              },
+              'Reconcile a specific past date. Useful after a webhook outage or deployment to ' +
                 'confirm the affected day is fully synced.'
-              ),
-              dateRange: asNamedExample(
-                '3. Multi-day date range',
-                {
-                  request: { startDate: '2026-05-01', endDate: '2026-05-07', mode: 'test', dryRun: 'true' },
-                  response: reconDateRangeResponse,
+            ),
+            dateRange: asNamedExample(
+              '3. Multi-day date range',
+              {
+                request: {
+                  startDate: '2026-05-01',
+                  endDate: '2026-05-07',
+                  mode: 'test',
+                  dryRun: 'true',
                 },
-                'Sweep a full week. counts reflects the full volume across all three systems for ' +
+                response: reconDateRangeResponse,
+              },
+              'Sweep a full week. counts reflects the full volume across all three systems for ' +
                 'the range. Useful after a data migration or when catching up after an outage.'
-              ),
-              stripeVsSalesforceOnly: asNamedExample(
-                '4. Stripe vs Salesforce only (skip QBO)',
-                {
-                  request: { date: '2026-05-28', systems: 'stripe,salesforce', mode: 'test', dryRun: 'true' },
-                  response: reconStripeVsSfResponse,
+            ),
+            stripeVsSalesforceOnly: asNamedExample(
+              '4. Stripe vs Salesforce only (skip QBO)',
+              {
+                request: {
+                  date: '2026-05-28',
+                  systems: 'stripe,salesforce',
+                  mode: 'test',
+                  dryRun: 'true',
                 },
-                'Skips all QBO API calls — runs faster and avoids QBO rate limits. ' +
+                response: reconStripeVsSfResponse,
+              },
+              'Skips all QBO API calls — runs faster and avoids QBO rate limits. ' +
                 'Good for a quick Stripe→Salesforce spot-check.'
-              ),
-              salesforceVsQboOnly: asNamedExample(
-                '5. Salesforce vs QBO only (skip Stripe)',
-                {
-                  request: { date: '2026-05-28', systems: 'salesforce,qbo', dryRun: 'true' },
-                  response: reconSfVsQboResponse,
-                },
-                'Skips Stripe API calls entirely. Useful when you want to verify QBO posting ' +
+            ),
+            salesforceVsQboOnly: asNamedExample(
+              '5. Salesforce vs QBO only (skip Stripe)',
+              {
+                request: { date: '2026-05-28', systems: 'salesforce,qbo', dryRun: 'true' },
+                response: reconSfVsQboResponse,
+              },
+              'Skips Stripe API calls entirely. Useful when you want to verify QBO posting ' +
                 'status without consuming Stripe API quota.'
-              ),
-              // ── Discrepancy scenarios ─────────────────────────────────────
-              foundStripeMissingSalesforce: asNamedExample(
-                '6. Finding: charge in Stripe, not in Salesforce',
-                {
-                  request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
-                  response: reconStripeMissingSfResponse,
-                },
-                'stripeMissingSalesforce contains one entry: ch_3PfABC exists in Stripe but has no ' +
+            ),
+            // ── Discrepancy scenarios ─────────────────────────────────────
+            foundStripeMissingSalesforce: asNamedExample(
+              '6. Finding: charge in Stripe, not in Salesforce',
+              {
+                request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
+                response: reconStripeMissingSfResponse,
+              },
+              'stripeMissingSalesforce contains one entry: ch_3PfABC exists in Stripe but has no ' +
                 'matching Transaction__c row. Fix: run /api/stripe/true-up?from=2026-05-28&type=payments&mode=test.'
-              ),
-              foundSalesforceMissingQbo: asNamedExample(
-                '7. Finding: Salesforce row not posted to QBO',
-                {
-                  request: { date: '2026-05-28', dryRun: 'true' },
-                  response: reconSfMissingQboResponse,
-                },
-                'salesforceMissingQbo contains one entry: Transaction__c a1aUQ00000AAAAAYAA has ' +
+            ),
+            foundSalesforceMissingQbo: asNamedExample(
+              '7. Finding: Salesforce row not posted to QBO',
+              {
+                request: { date: '2026-05-28', dryRun: 'true' },
+                response: reconSfMissingQboResponse,
+              },
+              'salesforceMissingQbo contains one entry: Transaction__c a1aUQ00000AAAAAYAA has ' +
                 'Posted_to_QBO__c = false. Fix: run /api/qbo/salesforce-record-sync?salesforceId=a1aUQ00000AAAAAYAA.'
-              ),
-              foundQboOrphan: asNamedExample(
-                '8. Finding: QBO receipt has no Salesforce match',
-                {
-                  request: { date: '2026-05-28', dryRun: 'true' },
-                  response: reconQboOrphanResponse,
-                },
-                'qboMissingSalesforce contains one entry: QBO SalesReceipt 10455 embeds Stripe ID ' +
+            ),
+            foundQboOrphan: asNamedExample(
+              '8. Finding: QBO receipt has no Salesforce match',
+              {
+                request: { date: '2026-05-28', dryRun: 'true' },
+                response: reconQboOrphanResponse,
+              },
+              'qboMissingSalesforce contains one entry: QBO SalesReceipt 10455 embeds Stripe ID ' +
                 'ch_3PfORPH in its DocNumber, but no Salesforce row references that charge. ' +
                 'Fix: run /api/qbo/receipts-salesforce-sync?start_date=2026-05-28&end_date=2026-05-28.'
-              ),
-              foundSalesforceDuplicates: asNamedExample(
-                '9. Finding: duplicate Transaction__c rows for same charge',
-                {
-                  request: { date: '2026-05-28', dryRun: 'true' },
-                  response: reconSfDuplicatesResponse,
-                },
-                'duplicatesInSalesforce contains one entry: two Transaction__c records share ' +
+            ),
+            foundSalesforceDuplicates: asNamedExample(
+              '9. Finding: duplicate Transaction__c rows for same charge',
+              {
+                request: { date: '2026-05-28', dryRun: 'true' },
+                response: reconSfDuplicatesResponse,
+              },
+              'duplicatesInSalesforce contains one entry: two Transaction__c records share ' +
                 'Stripe_Charge_Id__c = ch_3PfDUP. The id field lists both SF record IDs. ' +
                 'Fix: run /api/ops/stripe-duplicate-check?startDate=2026-05-28&deleteDuplicates=true&dryRun=false.'
-              ),
-              foundMultipleDiscrepancies: asNamedExample(
-                '10. Finding: multiple discrepancy types at once',
-                {
-                  request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
-                  response: reconMultiDiscrepancyResponse,
-                },
-                'A realistic noisy day: one Stripe charge never landed in Salesforce, and one ' +
+            ),
+            foundMultipleDiscrepancies: asNamedExample(
+              '10. Finding: multiple discrepancy types at once',
+              {
+                request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
+                response: reconMultiDiscrepancyResponse,
+              },
+              'A realistic noisy day: one Stripe charge never landed in Salesforce, and one ' +
                 'older Salesforce row was never posted to QBO. summary.categories shows both ' +
                 'affected keys and their counts.'
-              ),
-            },
-          },
-        },
-      },
-      207: {
-        description: 'Reconciliation completed with partial errors — one or more systems failed to respond',
-        content: {
-          'application/json': {
-            schema: GenericSuccessResponseSchema,
-            example: reconPartialErrorResponse,
-            examples: {
-              salesforceTimeout: asNamedExample(
-                'Salesforce query timed out',
-                {
-                  request: { date: '2026-05-28', dryRun: 'true' },
-                  response: reconPartialErrorResponse,
-                },
-                'The handler still returns a result when one system fails. counts for the failed ' +
-                'system will be all zeros. The errors array explains what failed. Other systems ' +
-                'that did respond are still cross-referenced against each other.'
-              ),
-            },
-          },
-        },
-      },
-      400: {
-        description: 'Invalid parameters',
-        content: {
-          'application/json': {
-            schema: GenericErrorResponseSchema,
-            examples: {
-              badDate: asNamedExample(
-                'Invalid date format',
-                { error: 'bad_request', message: 'Invalid date format: "2026-13-01". Use YYYY-MM-DD.' },
-                'Returned when date, startDate, or endDate does not match YYYY-MM-DD or is not a valid calendar date.'
-              ),
-              reversedRange: asNamedExample(
-                'Date range reversed',
-                { error: 'bad_request', message: 'startDate (2026-05-07) must not be after endDate (2026-05-01).' },
-                'Returned when startDate is later than endDate.'
-              ),
-            },
-          },
-        },
-      },
-      500: {
-        description: 'Reconciliation failed entirely',
-        content: {
-          'application/json': {
-            schema: GenericErrorResponseSchema,
-            example: { error: 'internal_error', message: 'Daily reconciliation failed unexpectedly.' },
+            ),
           },
         },
       },
     },
-  }
-);
+    207: {
+      description:
+        'Reconciliation completed with partial errors — one or more systems failed to respond',
+      content: {
+        'application/json': {
+          schema: GenericSuccessResponseSchema,
+          example: reconPartialErrorResponse,
+          examples: {
+            salesforceTimeout: asNamedExample(
+              'Salesforce query timed out',
+              {
+                request: { date: '2026-05-28', dryRun: 'true' },
+                response: reconPartialErrorResponse,
+              },
+              'The handler still returns a result when one system fails. counts for the failed ' +
+                'system will be all zeros. The errors array explains what failed. Other systems ' +
+                'that did respond are still cross-referenced against each other.'
+            ),
+          },
+        },
+      },
+    },
+    400: {
+      description: 'Invalid parameters',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          examples: {
+            badDate: asNamedExample(
+              'Invalid date format',
+              {
+                error: 'bad_request',
+                message: 'Invalid date format: "2026-13-01". Use YYYY-MM-DD.',
+              },
+              'Returned when date, startDate, or endDate does not match YYYY-MM-DD or is not a valid calendar date.'
+            ),
+            reversedRange: asNamedExample(
+              'Date range reversed',
+              {
+                error: 'bad_request',
+                message: 'startDate (2026-05-07) must not be after endDate (2026-05-01).',
+              },
+              'Returned when startDate is later than endDate.'
+            ),
+          },
+        },
+      },
+    },
+    500: {
+      description: 'Reconciliation failed entirely',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: {
+            error: 'internal_error',
+            message: 'Daily reconciliation failed unexpectedly.',
+          },
+        },
+      },
+    },
+  },
+});
 
 // Register the daily reconciliation timer trigger (runs at 02:00 UTC every day)
 // Enable via environment variable: ENABLE_DAILY_RECONCILIATION_TIMER=true
 app.timer('dailyReconciliationTimer', {
-  schedule: '0 0 2 * * *',  // 02:00 UTC daily
+  schedule: '0 0 2 * * *', // 02:00 UTC daily
   handler: dailyReconciliationTimer,
   runOnStartup: false,
 });

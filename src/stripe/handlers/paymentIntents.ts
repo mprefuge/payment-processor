@@ -929,8 +929,7 @@ const sendFirstTransactionNotifications = async (
 ): Promise<void> => {
   try {
     const customerId =
-      normalizeStripeId(paymentIntent.customer) ??
-      normalizeStripeId(charge?.customer ?? null);
+      normalizeStripeId(paymentIntent.customer) ?? normalizeStripeId(charge?.customer ?? null);
     if (!customerId) return;
 
     const [isFirstTime, isNewRecurring] = await Promise.all([
@@ -950,13 +949,9 @@ const sendFirstTransactionNotifications = async (
     }
 
     const billingName =
-      charge?.billing_details?.name ??
-      (paymentIntent as any).billing_details?.name ??
-      null;
+      charge?.billing_details?.name ?? (paymentIntent as any).billing_details?.name ?? null;
     const billingEmail =
-      charge?.billing_details?.email ??
-      (paymentIntent as any).billing_details?.email ??
-      null;
+      charge?.billing_details?.email ?? (paymentIntent as any).billing_details?.email ?? null;
 
     await emailService.sendNewTransactionNotification(
       {

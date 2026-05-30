@@ -384,18 +384,14 @@ describe('sendNewTransactionNotification', () => {
     process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_LIVE = 'live@example.com';
     sendNewTransactionNotification = reloadSendNewTransactionNotification();
     await sendNewTransactionNotification(makePaymentData({ isLiveMode: true }), 'first_time');
-    expect(sgMail.send).toHaveBeenCalledWith(
-      expect.objectContaining({ to: ['live@example.com'] })
-    );
+    expect(sgMail.send).toHaveBeenCalledWith(expect.objectContaining({ to: ['live@example.com'] }));
   });
 
   it('uses test recipients in test mode', async () => {
     process.env.NEW_TRANSACTION_NOTIFICATION_EMAILS_TEST = 'test@example.com';
     sendNewTransactionNotification = reloadSendNewTransactionNotification();
     await sendNewTransactionNotification(makePaymentData({ isLiveMode: false }), 'first_time');
-    expect(sgMail.send).toHaveBeenCalledWith(
-      expect.objectContaining({ to: ['test@example.com'] })
-    );
+    expect(sgMail.send).toHaveBeenCalledWith(expect.objectContaining({ to: ['test@example.com'] }));
   });
 
   it('includes subscription ID in email for recurring type', async () => {
