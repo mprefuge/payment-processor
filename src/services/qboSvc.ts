@@ -3602,10 +3602,13 @@ export const postManualEntryAsJournalEntry = async (input: {
         resolvedEntityRef = customerResult.ref;
       }
     } catch (customerErr) {
-      logger.warn('[QBOSvc] postManualEntryAsJournalEntry: customer resolution failed; posting without customer', {
-        customerName: input.customerName,
-        error: customerErr instanceof Error ? customerErr.message : String(customerErr),
-      });
+      logger.warn(
+        '[QBOSvc] postManualEntryAsJournalEntry: customer resolution failed; posting without customer',
+        {
+          customerName: input.customerName,
+          error: customerErr instanceof Error ? customerErr.message : String(customerErr),
+        }
+      );
     }
   }
 
@@ -3615,9 +3618,12 @@ export const postManualEntryAsJournalEntry = async (input: {
     try {
       resolvedClassRef = createClassRef(input.classRef.trim());
     } catch {
-      logger.warn('[QBOSvc] postManualEntryAsJournalEntry: invalid classRef format; posting without class', {
-        classRef: input.classRef,
-      });
+      logger.warn(
+        '[QBOSvc] postManualEntryAsJournalEntry: invalid classRef format; posting without class',
+        {
+          classRef: input.classRef,
+        }
+      );
     }
   }
 

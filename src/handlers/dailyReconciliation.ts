@@ -298,7 +298,11 @@ type SfTransactionRow = {
   /** ISO datetime string — used as posting date fallback when Received_At__c is null */
   CreatedDate?: string | null;
   /** Related Contact — used for QBO memo display name */
-  Contact__r?: { FirstName?: string | null; LastName?: string | null; Email?: string | null } | null;
+  Contact__r?: {
+    FirstName?: string | null;
+    LastName?: string | null;
+    Email?: string | null;
+  } | null;
   /** Related Account — used for QBO memo display name when Contact is absent */
   Account__r?: { Name?: string | null } | null;
   /** Related Campaign — appended to QBO memo */
@@ -1015,8 +1019,7 @@ const repairMissingSfToQbo = async (
     const memo = sfName ? `${baseMemo} (${sfName})` : baseMemo;
 
     // Customer email for QBO customer lookup (billing email preferred over contact email)
-    const customerEmail =
-      sfRow.Billing_Email__c?.trim() || sfRow.Contact__r?.Email?.trim() || null;
+    const customerEmail = sfRow.Billing_Email__c?.trim() || sfRow.Contact__r?.Email?.trim() || null;
 
     // QBO class ref in "Name|Id" format — only valid when we have an explicit Id
     const classRefStr = sfRow.QBO_Class_Id__c?.trim()
@@ -1057,7 +1060,9 @@ const repairMissingSfToQbo = async (
           result = await postChargeToQbo({
             gross: grossCents,
             fee: feeCents,
-            memo: sfName ? `SF: ${sfName} — Stripe charge ${charge.id}` : `Stripe charge ${charge.id}`,
+            memo: sfName
+              ? `SF: ${sfName} — Stripe charge ${charge.id}`
+              : `Stripe charge ${charge.id}`,
             date: bt?.created ? new Date(bt.created * 1000) : date,
             stripe: { charge },
           });
