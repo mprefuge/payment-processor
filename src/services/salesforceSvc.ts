@@ -169,6 +169,12 @@ export interface SalesforceSvc {
    * QBO_Doc_Type__c so the record is eligible for re-posting.
    */
   clearStaleQboDocReference: (salesforceId: string) => Promise<void>;
+  /**
+   * Associates a Transaction__c with a Campaign by setting Campaign__c.
+   * Used during reconciliation to link a transaction to the campaign whose
+   * Class__c matches the QBO class assigned to the transaction.
+   */
+  linkTransactionToCampaign?: (salesforceId: string, campaignId: string) => Promise<void>;
   findTransactionIdByExternalId: (
     key: TransactionExternalIdField,
     value: string,
@@ -198,6 +204,12 @@ export interface SalesforceSvc {
   }) => Promise<StripeBackfillTransactionRecord | null>;
   findContactIdById?: (contactId: string) => Promise<string | null>;
   findAccountIdById?: (accountId: string) => Promise<string | null>;
+  /**
+   * Returns the Id of the first active Campaign in Salesforce whose Class__c field matches
+   * the given QBO class name.  Returns null if no match found or if the Campaign object
+   * does not have a Class__c field in this org.
+   */
+  findCampaignIdByClass?: (className: string) => Promise<string | null>;
 }
 
 type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -1104,6 +1116,27 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     }
   };
 
+  const linkTransactionToCampaign = async (
+    salesforceId: string,
+    campaignId: string
+  ): Promise<void> => {
+    const normalizedId = ensureNonEmpty(salesforceId, 'Salesforce transaction ID');
+    const normalizedCampaignId = ensureNonEmpty(campaignId, 'Campaign ID');
+    const record = sanitizeTransactionRecord({
+      Id: normalizedId,
+      campaign__c: normalizedCampaignId,
+    });
+    const [result] = toArray(
+      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', TRANSACTION_DML_OPTIONS)
+    );
+    if (!result.success) {
+      const message =
+        collectErrorMessages([result]) ||
+        `Failed to link transaction ${normalizedId} to campaign ${normalizedCampaignId}.`;
+      throw new Error(message);
+    }
+  };
+
   const findTransactionIdByExternalId = async (
     key: TransactionExternalIdField,
     value: string,
@@ -1565,11 +1598,28 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     return record?.Id ?? null;
   };
 
+  const findCampaignIdByClass = async (className: string): Promise<string | null> => {
+    const normalizedClass = ensureNonEmpty(className, 'Campaign class name');
+    const escaped = escapeForSoqlLiteral(normalizedClass);
+    try {
+      const record = findFirstRecordWithId(
+        await queryRecords<{ Id?: string }>(
+          `SELECT Id FROM Campaign WHERE Class__c = '${escaped}' AND IsActive = true ORDER BY CreatedDate ASC LIMIT 1`
+        )
+      );
+      return record?.Id ?? null;
+    } catch {
+      // Class__c may not exist in this org; treat as no match
+      return null;
+    }
+  };
+
   return {
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
     markPostedToQbo,
     clearStaleQboDocReference,
+    linkTransactionToCampaign,
     findTransactionIdByExternalId,
     findTransactionRecordByExternalId,
     upsertCustomerByStripeId,
@@ -1577,6 +1627,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     findTransactionForStripeBackfillByStripeIds,
     findContactIdById,
     findAccountIdById,
+    findCampaignIdByClass,
   };
 };
 

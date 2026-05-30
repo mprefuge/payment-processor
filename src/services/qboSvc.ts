@@ -4041,6 +4041,147 @@ export const updateQboDocPrivateNote = async (
   }
 };
 
+/**
+ * Fetches a QBO document by entity type and ID, returning the raw parsed response
+ * body (the entity object itself, not the outer QueryResponse wrapper).
+ * Returns null if the document does not exist (404 or QBO "not found" fault).
+ */
+export const fetchQboDocument = async (
+  entity: 'SalesReceipt' | 'JournalEntry' | 'Deposit',
+  docId: string,
+  options?: PostOptions
+): Promise<Record<string, unknown> | null> => {
+  const context = await createRequestContext(options);
+  const entityPath = entity.toLowerCase() as 'salesreceipt' | 'journalentry' | 'deposit';
+  const url = new URL(`${buildQboUrl(entityPath)}/${encodeURIComponent(docId)}`);
+  url.searchParams.set('minorversion', '75');
+
+  const response = await context.request(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (response.status === 404) return null;
+
+  let data: Record<string, unknown> | null = null;
+  try {
+    data = (await response.json()) as Record<string, unknown>;
+  } catch {
+    // fall through to status check
+  }
+
+  if (response.status >= 200 && response.status < 300 && data) {
+    // QBO wraps the entity under a key matching its type, e.g. { JournalEntry: {...} }
+    const entityKey = Object.keys(data).find((k) => k.toLowerCase() === entity.toLowerCase());
+    const inner = entityKey ? (data[entityKey] as Record<string, unknown>) : data;
+    return inner ?? null;
+  }
+
+  const fault = data ? (data as any).Fault : undefined;
+  const rawErrors = fault ? (fault as any).Error : undefined;
+  const errors = Array.isArray(rawErrors) ? rawErrors : rawErrors ? [rawErrors] : [];
+  const faultText = errors
+    .map((e: any) => [e.code, e.Message, e.Detail].filter(Boolean).join(' '))
+    .join(' ')
+    .toLowerCase();
+  if (faultText.includes('not found') || /\b610\b/.test(faultText)) return null;
+
+  throw new Error(`Failed to fetch QBO ${entity} ${docId} (status ${response.status})`);
+};
+
+/**
+ * Patches the ClassRef on an existing QBO document if it is currently absent.
+ *
+ * - SalesReceipt: sparse-updates the top-level ClassRef field.
+ * - JournalEntry: fetches the full document, adds ClassRef to every
+ *   JournalEntryLineDetail that does not already have one, then posts the
+ *   full document back (QBO does not support sparse Line updates).
+ * - Deposit: class tracking is not supported on Deposits; this is a no-op.
+ *
+ * Returns true if a patch was applied, false if no change was needed or the
+ * doc type does not support ClassRef.
+ */
+export const patchQboDocClassRef = async (
+  entity: 'SalesReceipt' | 'JournalEntry' | 'Deposit',
+  docId: string,
+  classRefStr: string,
+  options?: PostOptions
+): Promise<boolean> => {
+  if (entity === 'Deposit') return false;
+
+  const doc = await fetchQboDocument(entity, docId, options);
+  if (!doc) return false;
+
+  const syncTokenRaw = doc.SyncToken;
+  const syncToken =
+    typeof syncTokenRaw === 'number'
+      ? String(syncTokenRaw)
+      : typeof syncTokenRaw === 'string'
+        ? syncTokenRaw.trim()
+        : null;
+  if (!syncToken) throw new Error(`QBO ${entity} ${docId} is missing SyncToken.`);
+
+  const classRef = createClassRef(classRefStr);
+
+  if (entity === 'SalesReceipt') {
+    // If the receipt already has a ClassRef, leave it alone.
+    if (doc.ClassRef) return false;
+
+    const apiContext = await createRequestContext(options);
+    const url = `${buildQboUrl('salesreceipt')}?operation=update`;
+    const body = JSON.stringify({
+      sparse: true,
+      Id: docId,
+      SyncToken: syncToken,
+      ClassRef: classRef,
+    });
+    const response = await apiContext.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body,
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => undefined);
+      throw new Error(
+        `Failed to patch ClassRef on QBO SalesReceipt ${docId} (status ${response.status}): ${errorText ?? response.statusText}`
+      );
+    }
+    return true;
+  }
+
+  // JournalEntry: must re-send full Line array
+  const rawLines = Array.isArray(doc.Line) ? (doc.Line as Array<Record<string, unknown>>) : [];
+  let patched = false;
+  const patchedLines = rawLines.map((line) => {
+    const detail = line.JournalEntryLineDetail as Record<string, unknown> | undefined;
+    if (!detail) return line;
+    if (detail.ClassRef) return line; // already has a class on this line
+    patched = true;
+    return {
+      ...line,
+      JournalEntryLineDetail: { ...detail, ClassRef: classRef },
+    };
+  });
+
+  if (!patched) return false;
+
+  const apiContext = await createRequestContext(options);
+  const url = `${buildQboUrl('journalentry')}?operation=update`;
+  const body = JSON.stringify({ ...doc, Line: patchedLines, SyncToken: syncToken });
+  const response = await apiContext.request(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body,
+  });
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to patch ClassRef on QBO JournalEntry ${docId} (status ${response.status}): ${errorText ?? response.statusText}`
+    );
+  }
+  return true;
+};
+
 export const ensureCustomer = async (
   customerName: string,
   email?: string,
@@ -4627,6 +4768,8 @@ export default {
   getQuickBooksCustomerById,
   updateQuickBooksCustomerSalesforceId,
   updateQboDocPrivateNote,
+  fetchQboDocument,
+  patchQboDocClassRef,
   postManualEntryAsJournalEntry,
   query,
 };

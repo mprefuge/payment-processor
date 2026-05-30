@@ -30,6 +30,7 @@ import {
   queryReference,
   qboDocumentExists,
   updateQboDocPrivateNote,
+  patchQboDocClassRef,
   postManualEntryAsJournalEntry,
   postChargeToQbo,
 } from '../services/qboSvc';
@@ -79,6 +80,8 @@ interface RepairSummary {
   staleLinksCleared: number;
   /** SF Transaction__c rows (including manual entries) that were posted to QBO this run */
   sfPostedToQbo: number;
+  /** QBO documents whose ClassRef was patched to match the Salesforce campaign class */
+  classRefPatched: number;
   /** ID pairs for every SF→QBO posting made this run */
   sfPostedToQboItems: Array<{
     sfId: string;
@@ -337,12 +340,12 @@ const queryTransactionsForRange = async (
 
   // Include records where Received_At__c is in range OR where it is null (manual entries)
   // and CreatedDate is in range — SOQL null comparisons use = null, not IS NULL.
-  const soql =
+  const buildSoql = (includeCampaignClass: boolean): string =>
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
     `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
-    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name, Campaign__r.Class__c, ` +
+    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name${includeCampaignClass ? ', Campaign__r.Class__c' : ''}, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
     `WHERE (` +
@@ -351,12 +354,39 @@ const queryTransactionsForRange = async (
     `)` +
     limitClause;
 
-  const result = (await connection.query(soql)) as
-    | SfTransactionRow[]
-    | { records: SfTransactionRow[] };
-  if (Array.isArray(result)) return result;
-  if (result && Array.isArray((result as any).records)) return (result as any).records;
-  return [];
+  const normalizeResult = (
+    raw: SfTransactionRow[] | { records: SfTransactionRow[] }
+  ): SfTransactionRow[] => {
+    if (Array.isArray(raw)) return raw;
+    if (raw && Array.isArray((raw as any).records)) return (raw as any).records;
+    return [];
+  };
+
+  try {
+    const result = (await connection.query(buildSoql(true))) as
+      | SfTransactionRow[]
+      | { records: SfTransactionRow[] };
+    return normalizeResult(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const looksLikeMissingCampaignClass =
+      message.includes('Campaign__r.Class__c') ||
+      (message.toLowerCase().includes('no such column') && message.includes('Class__c'));
+    if (!looksLikeMissingCampaignClass) {
+      throw error;
+    }
+
+    logger.warn(
+      '[DailyReconciliation] Campaign__r.Class__c unavailable; retrying query without class field',
+      {
+        error: message,
+      }
+    );
+    const fallbackResult = (await connection.query(buildSoql(false))) as
+      | SfTransactionRow[]
+      | { records: SfTransactionRow[] };
+    return normalizeResult(fallbackResult);
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1062,129 @@ const repairContactCoalescing = async (
 };
 
 /**
+ * For SF rows that are already linked to QBO (`Posted_to_QBO__c = true`), checks whether
+ * the QBO document has a ClassRef.  If not, resolves the class from the SF row (same logic
+ * as repairMissingSfToQbo) and patches the QBO document in-place.
+ *
+ * Returns counts of patched docs and non-fatal errors.
+ */
+const patchMissingQboClassRefs = async (
+  sfRows: SfTransactionRow[],
+  salesforceSvc: ReturnType<typeof createSalesforceSvc>,
+  context: InvocationContext
+): Promise<{ patched: number; errors: string[] }> => {
+  let patched = 0;
+  const errors: string[] = [];
+  const classRefByCampaignClass = new Map<string, string | null>();
+
+  const resolveClassRef = async (sfRow: SfTransactionRow): Promise<string | null> => {
+    const explicitId = sfRow.QBO_Class_Id__c?.trim();
+    if (explicitId) return `${sfRow.QBO_Class_Name__c?.trim() ?? ''}|${explicitId}`;
+
+    const campaignClassRaw = sfRow.Campaign__r?.Class__c?.trim();
+    if (!campaignClassRaw) return null;
+    if (classRefByCampaignClass.has(campaignClassRaw))
+      return classRefByCampaignClass.get(campaignClassRaw) ?? null;
+
+    const candidates = new Set<string>([campaignClassRaw]);
+    if (campaignClassRaw.includes(':')) {
+      const leaf = campaignClassRaw.split(':').pop()?.trim();
+      if (leaf) candidates.add(leaf);
+    }
+    for (const candidate of candidates) {
+      try {
+        const reference = await queryReference('Class', candidate);
+        if (reference?.value) {
+          const resolved = `${reference.name ?? candidate}|${reference.value}`;
+          classRefByCampaignClass.set(campaignClassRaw, resolved);
+          return resolved;
+        }
+      } catch {
+        // continue to next candidate
+      }
+    }
+    classRefByCampaignClass.set(campaignClassRaw, null);
+    return null;
+  };
+
+  for (const sfRow of sfRows) {
+    const sfId = sfRow.Id;
+    if (!sfId) continue;
+    if (!sfRow.Posted_to_QBO__c || !sfRow.QBO_Doc_Id__c) continue;
+
+    const docId = sfRow.QBO_Doc_Id__c.trim();
+    if (!docId) continue;
+
+    const sfDocType = sfRow.QBO_Doc_Type__c?.trim().toLowerCase() ?? null;
+    const stripeId =
+      sfRow.Stripe_Charge_Id__c?.trim() ||
+      sfRow.Stripe_Payment_Intent_Id__c?.trim() ||
+      sfRow.Stripe_Payout_Id__c?.trim() ||
+      null;
+    const entityType: 'SalesReceipt' | 'JournalEntry' | 'Deposit' =
+      sfDocType === 'bank-deposit'
+        ? 'Deposit'
+        : sfDocType === 'journal-entry'
+          ? 'JournalEntry'
+          : sfDocType === 'sales-receipt'
+            ? 'SalesReceipt'
+            : stripeId?.startsWith('po_') || stripeId?.startsWith('py_')
+              ? 'Deposit'
+              : sfRow.Stripe_Refund_Id__c?.trim()
+                ? 'JournalEntry'
+                : 'SalesReceipt';
+
+    if (entityType === 'Deposit') continue; // Deposits don't carry ClassRef
+
+    const classRefStr = await resolveClassRef(sfRow);
+    if (!classRefStr) continue; // No class to assign
+
+    // Also attempt to back-fill SF Campaign link if missing
+    const className = classRefStr.split('|')[0].trim();
+    if (className && !sfRow.Campaign__r?.Name) {
+      try {
+        const campaignId = (await salesforceSvc.findCampaignIdByClass?.(className)) ?? null;
+        if (campaignId) {
+          await salesforceSvc.linkTransactionToCampaign?.(sfId, campaignId);
+          (sfRow as any).Campaign__r = { Name: className };
+          context.log('[DailyReconciliation] Linked existing SF transaction to campaign by class', {
+            sfId,
+            campaignId,
+            className,
+          });
+        }
+      } catch {
+        // Best effort; continue to class patch
+      }
+    }
+
+    try {
+      const wasMissing = await patchQboDocClassRef(entityType, docId, classRefStr);
+      if (wasMissing) {
+        patched++;
+        context.log('[DailyReconciliation] Patched missing ClassRef on QBO document', {
+          sfId,
+          entityType,
+          docId,
+          classRefStr,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`Failed to patch ClassRef on ${entityType} ${docId} for SF ${sfId}: ${msg}`);
+      context.log('[DailyReconciliation] Failed to patch QBO ClassRef', {
+        sfId,
+        entityType,
+        docId,
+        error: msg,
+      });
+    }
+  }
+
+  return { patched, errors };
+};
+
+/**
  * For each Salesforce Transaction__c row that has no QBO document link, post it to QBO
  * and call markPostedToQbo to link the systems.
  *
@@ -1054,6 +1207,51 @@ const repairMissingSfToQbo = async (
 }> => {
   const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
   const classRefByCampaignClass = new Map<string, string | null>();
+  // Cache: QBO class name → SF Campaign Id (null = queried but not found)
+  const sfCampaignIdByClassName = new Map<string, string | null>();
+
+  /**
+   * If a class was resolved for this row but the row has no linked Campaign, query SF
+   * for the first active Campaign whose Class__c matches and link it.
+   */
+  const maybeLinkCampaignFromClassRef = async (
+    sfId: string,
+    sfRow: SfTransactionRow,
+    resolvedClassRef: string | null
+  ): Promise<void> => {
+    if (!resolvedClassRef) return;
+    // Only back-fill when there is no campaign already associated
+    if (sfRow.Campaign__r?.Name) return;
+    const className = resolvedClassRef.split('|')[0].trim();
+    if (!className) return;
+
+    if (!sfCampaignIdByClassName.has(className)) {
+      const campaignId = (await salesforceSvc.findCampaignIdByClass?.(className)) ?? null;
+      sfCampaignIdByClassName.set(className, campaignId);
+    }
+    const campaignId = sfCampaignIdByClassName.get(className) ?? null;
+    if (!campaignId) return;
+
+    try {
+      await salesforceSvc.linkTransactionToCampaign?.(sfId, campaignId);
+      // Update in-memory so the memo built later in this loop reflects the campaign
+      if (!sfRow.Campaign__r) {
+        (sfRow as any).Campaign__r = { Name: className };
+      }
+      context.log('[DailyReconciliation] Linked SF transaction to campaign by class', {
+        sfId,
+        campaignId,
+        className,
+      });
+    } catch (linkErr) {
+      context.log('[DailyReconciliation] Could not link transaction to campaign by class', {
+        sfId,
+        campaignId,
+        className,
+        error: linkErr instanceof Error ? linkErr.message : String(linkErr),
+      });
+    }
+  };
 
   const resolveClassRefFromSfRow = async (sfRow: SfTransactionRow): Promise<string | null> => {
     // Preferred path: explicit QBO class id stored on the transaction
@@ -1162,6 +1360,10 @@ const repairMissingSfToQbo = async (
     // QBO class ref in "Name|Id" format.
     // Prefers explicit fields on Transaction__c, then Campaign.Class__c lookup.
     const classRefStr = await resolveClassRefFromSfRow(sfRow);
+
+    // If a class is now resolved but the SF row has no Campaign linked, find and associate
+    // the first SF Campaign whose Class__c matches the resolved class name.
+    await maybeLinkCampaignFromClassRef(sfId, sfRow, classRefStr);
 
     const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
     const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
@@ -1760,6 +1962,7 @@ export const runReconciliation = async (
     let linkedRecords = 0;
     let staleLinksCleared = 0;
     let sfPostedToQbo = 0;
+    let classRefPatched = 0;
     const sfPostedToQboItems: Array<{
       sfId: string;
       qboId: string;
@@ -1875,6 +2078,12 @@ export const runReconciliation = async (
         repairErrors.push(...postResult.errors);
         sfPostedToQboItems.push(...postResult.postedItems);
       }
+
+      // Patch existing QBO documents that are missing a ClassRef but whose SF row has
+      // a resolvable class (via QBO_Class_Id__c or Campaign__r.Class__c).
+      const patchResult = await patchMissingQboClassRefs(sfRows, salesforceSvc, context);
+      classRefPatched += patchResult.patched;
+      repairErrors.push(...patchResult.errors);
     }
 
     // Contact coalescing: update SF contacts with latest Stripe billing data
@@ -1938,6 +2147,7 @@ export const runReconciliation = async (
       linkedRecords,
       staleLinksCleared,
       sfPostedToQbo,
+      classRefPatched,
       sfPostedToQboItems,
       errors: repairErrors,
     };
