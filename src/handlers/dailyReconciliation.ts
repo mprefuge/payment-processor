@@ -25,7 +25,12 @@ import {
   parseBoolean,
 } from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
-import { query as qboQuery, updateQboDocPrivateNote, postManualEntryAsJournalEntry, postChargeToQbo } from '../services/qboSvc';
+import {
+  query as qboQuery,
+  updateQboDocPrivateNote,
+  postManualEntryAsJournalEntry,
+  postChargeToQbo,
+} from '../services/qboSvc';
 import {
   fetchStripeChargesSince,
   fetchStripeRefundsSince,
@@ -957,8 +962,9 @@ const repairMissingSfToQbo = async (
       continue;
     }
 
-    const date =
-      sfRow.Received_At__c ? sfRow.Received_At__c.slice(0, 10) : item.date ?? new Date().toISOString().slice(0, 10);
+    const date = sfRow.Received_At__c
+      ? sfRow.Received_At__c.slice(0, 10)
+      : (item.date ?? new Date().toISOString().slice(0, 10));
 
     const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
     const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
@@ -975,16 +981,20 @@ const repairMissingSfToQbo = async (
             expand: ['balance_transaction'],
           });
         } catch (fetchErr) {
-          context.log('[DailyReconciliation] Could not fetch Stripe charge; falling back to manual JE', {
-            chargeId,
-            error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
-          });
+          context.log(
+            '[DailyReconciliation] Could not fetch Stripe charge; falling back to manual JE',
+            {
+              chargeId,
+              error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
+            }
+          );
         }
 
         if (charge) {
-          const bt = typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null
-            ? (charge.balance_transaction as Stripe.BalanceTransaction)
-            : null;
+          const bt =
+            typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null
+              ? (charge.balance_transaction as Stripe.BalanceTransaction)
+              : null;
           const grossCents = bt ? Math.abs(bt.amount) : charge.amount;
           const feeCents = bt ? Math.abs(bt.fee) : 0;
           result = await postChargeToQbo({
