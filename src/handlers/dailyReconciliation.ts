@@ -77,6 +77,13 @@ interface RepairSummary {
   staleLinksCleared: number;
   /** SF Transaction__c rows (including manual entries) that were posted to QBO this run */
   sfPostedToQbo: number;
+  /** ID pairs for every SF→QBO posting made this run */
+  sfPostedToQboItems: Array<{
+    sfId: string;
+    qboId: string;
+    qboType: string;
+    stripeId: string | null;
+  }>;
   errors: string[];
 }
 
@@ -966,10 +973,20 @@ const repairMissingSfToQbo = async (
   stripeClient: Stripe | null,
   salesforceSvc: ReturnType<typeof createSalesforceSvc>,
   context: InvocationContext
-): Promise<{ posted: number; errors: string[] }> => {
+): Promise<{
+  posted: number;
+  errors: string[];
+  postedItems: Array<{ sfId: string; qboId: string; qboType: string; stripeId: string | null }>;
+}> => {
   const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
   let posted = 0;
   const errors: string[] = [];
+  const postedItems: Array<{
+    sfId: string;
+    qboId: string;
+    qboType: string;
+    stripeId: string | null;
+  }> = [];
 
   for (const item of sfMissingQboItems) {
     if (item.type !== 'sf_missing_qbo') continue;
@@ -1114,6 +1131,12 @@ const repairMissingSfToQbo = async (
       sfRow.QBO_Doc_Id__c = result.qboId;
       sfRow.Posted_to_QBO__c = true;
       posted++;
+      postedItems.push({
+        sfId,
+        qboId: result.qboId,
+        qboType: result.type,
+        stripeId: stripeId ?? null,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`Failed to post SF ${sfId} to QBO: ${msg}`);
@@ -1121,7 +1144,7 @@ const repairMissingSfToQbo = async (
     }
   }
 
-  return { posted, errors };
+  return { posted, errors, postedItems };
 };
 
 /**
@@ -1607,6 +1630,12 @@ export const runReconciliation = async (
     let linkedRecords = 0;
     let staleLinksCleared = 0;
     let sfPostedToQbo = 0;
+    const sfPostedToQboItems: Array<{
+      sfId: string;
+      qboId: string;
+      qboType: string;
+      stripeId: string | null;
+    }> = [];
 
     // Clear stale QBO doc references: SF rows pointing to QBO docs that have been deleted or
     // voided.  Setting Posted_to_QBO__c = false and nulling QBO_Doc_Id__c makes the record
@@ -1642,11 +1671,15 @@ export const runReconciliation = async (
     // Combines:
     //   • Original sf_missing_qbo items (never had a QBO link)
     //   • Records whose stale QBO link was just cleared above (re-post in same run)
+    // When a `limit` is specified the repair is capped at that count so a caller
+    // can safely test with limit=1 without accidentally bulk-posting everything.
     if (systems.includes('salesforce') && systems.includes('qbo')) {
-      const sfMissingQboItems = [
+      const allSfMissingQboItems = [
         ...discrepancies.salesforceMissingQbo.filter((i) => i.type === 'sf_missing_qbo'),
         ...staleClearedForReposting,
       ];
+      const sfMissingQboItems =
+        limit && limit > 0 ? allSfMissingQboItems.slice(0, limit) : allSfMissingQboItems;
       if (sfMissingQboItems.length > 0) {
         const postResult = await repairMissingSfToQbo(
           sfMissingQboItems,
@@ -1657,6 +1690,7 @@ export const runReconciliation = async (
         );
         sfPostedToQbo += postResult.posted;
         repairErrors.push(...postResult.errors);
+        sfPostedToQboItems.push(...postResult.postedItems);
       }
     }
 
@@ -1720,6 +1754,7 @@ export const runReconciliation = async (
       linkedRecords,
       staleLinksCleared,
       sfPostedToQbo,
+      sfPostedToQboItems,
       errors: repairErrors,
     };
 
