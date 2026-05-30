@@ -293,6 +293,16 @@ type SfTransactionRow = {
   transaction_type__c?: string | null;
   /** Record name (auto-number or user-defined) — used as memo when posting to QBO */
   Name?: string | null;
+  /** User-supplied memo field — preferred over Name when building QBO memo */
+  Memo__c?: string | null;
+  /** ISO datetime string — used as posting date fallback when Received_At__c is null */
+  CreatedDate?: string | null;
+  /** Related Contact — used for QBO memo display name */
+  Contact__r?: { FirstName?: string | null; LastName?: string | null } | null;
+  /** Related Account — used for QBO memo display name when Contact is absent */
+  Account__r?: { Name?: string | null } | null;
+  /** Related Campaign — appended to QBO memo */
+  Campaign__r?: { Name?: string | null } | null;
 };
 
 const queryTransactionsForRange = async (
@@ -305,14 +315,19 @@ const queryTransactionsForRange = async (
   const escapedEnd = escapeForSoql(endDate);
   const limitClause = limit && limit > 0 ? ` LIMIT ${limit}` : ' LIMIT 2000';
 
+  // Include records where Received_At__c is in range OR where it is null (manual entries)
+  // and CreatedDate is in range — SOQL null comparisons use = null, not IS NULL.
   const soql =
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Id__c, ` +
-    `Amount_Gross__c, Received_At__c, transaction_type__c ` +
+    `Amount_Gross__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
+    `Contact__r.FirstName, Contact__r.LastName, Account__r.Name, Campaign__r.Name ` +
     `FROM Transaction__c ` +
-    `WHERE Received_At__c >= ${escapedStart}T00:00:00Z ` +
-    `AND Received_At__c <= ${escapedEnd}T23:59:59Z` +
+    `WHERE (` +
+    `(Received_At__c >= ${escapedStart}T00:00:00Z AND Received_At__c <= ${escapedEnd}T23:59:59Z) ` +
+    `OR (Received_At__c = null AND CreatedDate >= ${escapedStart}T00:00:00Z AND CreatedDate <= ${escapedEnd}T23:59:59Z)` +
+    `)` +
     limitClause;
 
   const result = (await connection.query(soql)) as
@@ -964,7 +979,29 @@ const repairMissingSfToQbo = async (
 
     const date = sfRow.Received_At__c
       ? sfRow.Received_At__c.slice(0, 10)
-      : (item.date ?? new Date().toISOString().slice(0, 10));
+      : sfRow.CreatedDate
+        ? sfRow.CreatedDate.slice(0, 10)
+        : (item.date ?? new Date().toISOString().slice(0, 10));
+
+    // Build display name following salesforceRecordQboSync pattern:
+    //   Memo__c → Contact first+last → Account name → Transaction name → SF ID
+    const contactName = sfRow.Contact__r
+      ? [sfRow.Contact__r.FirstName?.trim(), sfRow.Contact__r.LastName?.trim()]
+          .filter(Boolean)
+          .join(' ') || null
+      : null;
+    const displayName =
+      sfRow.Memo__c?.trim() ||
+      contactName ||
+      sfRow.Account__r?.Name?.trim() ||
+      sfRow.Name?.trim() ||
+      null;
+    const campaign = sfRow.Campaign__r?.Name?.trim() ?? null;
+    const memo = displayName
+      ? campaign
+        ? `${displayName} — ${campaign}`
+        : displayName
+      : `SF:${sfId}`;
 
     const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
     const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
@@ -1014,7 +1051,7 @@ const repairMissingSfToQbo = async (
           result = await postManualEntryAsJournalEntry({
             grossAmountCents: Math.round(grossDollars * 100),
             date,
-            memo: `SF:${sfId}${sfRow.Name ? ` ${sfRow.Name}` : ''}`,
+            memo,
             uniqueId: sfId,
           });
           context.log('[DailyReconciliation] Posted manual JE to QBO (Stripe fallback)', {
@@ -1027,7 +1064,7 @@ const repairMissingSfToQbo = async (
         result = await postManualEntryAsJournalEntry({
           grossAmountCents: Math.round(grossDollars * 100),
           date,
-          memo: `SF:${sfId}${sfRow.Name ? ` ${sfRow.Name}` : ''}`,
+          memo,
           uniqueId: sfId,
         });
         context.log('[DailyReconciliation] Posted manual SF entry to QBO as JE', {
