@@ -638,6 +638,77 @@ const findSalesforceMissingQbo = (
   return items;
 };
 
+const resolveQboEntityTypeForSfRow = (
+  row: SfTransactionRow
+): 'SalesReceipt' | 'JournalEntry' | 'Deposit' => {
+  const sfDocType = row.QBO_Doc_Type__c?.trim().toLowerCase() ?? null;
+  if (sfDocType === 'bank-deposit') return 'Deposit';
+  if (sfDocType === 'journal-entry') return 'JournalEntry';
+  if (sfDocType === 'sales-receipt') return 'SalesReceipt';
+
+  const payoutId = row.Stripe_Payout_Id__c?.trim() ?? null;
+  const refundId = row.Stripe_Refund_Id__c?.trim() ?? null;
+  if (payoutId?.startsWith('po_') || payoutId?.startsWith('py_')) return 'Deposit';
+  if (refundId) return 'JournalEntry';
+  return 'SalesReceipt';
+};
+
+const removeFalsePositiveStaleSfQboDiscrepancies = async (
+  items: DiscrepancyItem[],
+  sfRows: SfTransactionRow[],
+  context: InvocationContext
+): Promise<DiscrepancyItem[]> => {
+  const staleCandidates = items.filter((i) => i.type === 'sf_qbo_doc_deleted');
+  if (staleCandidates.length === 0) {
+    return items;
+  }
+
+  const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
+  const confirmedMissingIds = new Set<string>();
+
+  for (const candidate of staleCandidates) {
+    const row = sfRowById.get(candidate.id);
+    const docId = row?.QBO_Doc_Id__c?.trim();
+    if (!row || !docId) {
+      confirmedMissingIds.add(candidate.id);
+      continue;
+    }
+
+    try {
+      const entityType = resolveQboEntityTypeForSfRow(row);
+      const exists = await qboDocumentExists(entityType, docId);
+      if (!exists) {
+        confirmedMissingIds.add(candidate.id);
+      }
+    } catch (error) {
+      confirmedMissingIds.add(candidate.id);
+      context.log(
+        '[DailyReconciliation] Could not verify stale QBO link by ID; keeping discrepancy',
+        {
+          sfId: candidate.id,
+          docId,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      );
+    }
+  }
+
+  const staleFalsePositiveCount = staleCandidates.length - confirmedMissingIds.size;
+  if (staleFalsePositiveCount > 0) {
+    context.log(
+      '[DailyReconciliation] Filtered stale-link false positives by direct QBO ID checks',
+      {
+        staleCandidates: staleCandidates.length,
+        removed: staleFalsePositiveCount,
+      }
+    );
+  }
+
+  return items.filter(
+    (item) => item.type !== 'sf_qbo_doc_deleted' || confirmedMissingIds.has(item.id)
+  );
+};
+
 /**
  * Salesforce rows that have no Stripe ID at all (QBO-origin imports or manual entries).
  * These may be legitimate; flag for awareness.
@@ -1617,6 +1688,14 @@ export const runReconciliation = async (
         ...findQboMissingSalesforce(qboDeposits, 'Deposit', allSfStripeIds)
       );
     }
+  }
+
+  if (systems.includes('salesforce') && systems.includes('qbo')) {
+    discrepancies.salesforceMissingQbo = await removeFalsePositiveStaleSfQboDiscrepancies(
+      discrepancies.salesforceMissingQbo,
+      sfRows,
+      context
+    );
   }
 
   // -------------------------------------------------------------------------
