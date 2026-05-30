@@ -25,7 +25,7 @@ import {
   parseBoolean,
 } from '../services/salesforceService';
 import { createSalesforceSvc } from '../services/salesforceSvc';
-import { query as qboQuery } from '../services/qboSvc';
+import { query as qboQuery, updateQboDocPrivateNote } from '../services/qboSvc';
 import {
   fetchStripeChargesSince,
   fetchStripeRefundsSince,
@@ -66,6 +66,8 @@ interface DiscrepancyItem {
 interface RepairSummary {
   contactsUpserted: number;
   transactionsCreated: number;
+  /** QBO→SF and Stripe metadata links written by repairCrossSystemLinks */
+  linkedRecords: number;
   errors: string[];
 }
 
@@ -316,11 +318,16 @@ const queryTransactionsForRange = async (
 
 type QboDocRow = {
   Id?: string | number | null;
+  SyncToken?: string | null;
   DocNumber?: string | null;
   TxnDate?: string | null;
   TotalAmt?: number | null;
   PrivateNote?: string | null;
   CustomerRef?: { name?: string | null; value?: string | null } | null;
+};
+
+type QboDocWithEntity = QboDocRow & {
+  entityType: 'SalesReceipt' | 'JournalEntry' | 'Deposit';
 };
 
 /**
@@ -906,6 +913,188 @@ const repairContactCoalescing = async (
   return { updated, errors };
 };
 
+/**
+ * Cross-system link repair: for each QBO document whose PrivateNote or DocNumber
+ * contains a Stripe ID that matches a Salesforce Transaction__c row, ensure the
+ * three systems are linked to each other:
+ *
+ *   1. Salesforce – set `QBO_Doc_Id__c` + `Posted_to_QBO__c = true` via `markPostedToQbo`.
+ *   2. Stripe     – set `metadata.salesforce_id` and `metadata.qbo_doc_id` on the
+ *                   charge / refund / payout object.
+ *   3. QBO        – append `SF:{sfId}` to the document's PrivateNote via sparse update
+ *                   so the QBO record carries the canonical SF record ID.
+ */
+const repairCrossSystemLinks = async (
+  qboDocsWithEntity: QboDocWithEntity[],
+  sfRows: SfTransactionRow[],
+  stripeCharges: Stripe.Charge[],
+  stripeRefunds: Stripe.Refund[],
+  stripePayouts: Stripe.Payout[],
+  stripeClient: Stripe,
+  salesforceSvc: ReturnType<typeof createSalesforceSvc>,
+  context: InvocationContext
+): Promise<{ linked: number; errors: string[] }> => {
+  // ── Salesforce lookup maps ────────────────────────────────────────────────
+  const sfByChargeId = new Map<string, SfTransactionRow>();
+  const sfByPiId = new Map<string, SfTransactionRow>();
+  const sfByBtId = new Map<string, SfTransactionRow>();
+  const sfByRefundId = new Map<string, SfTransactionRow>();
+  const sfByPayoutId = new Map<string, SfTransactionRow>();
+
+  for (const row of sfRows) {
+    if (row.Stripe_Charge_Id__c) sfByChargeId.set(row.Stripe_Charge_Id__c, row);
+    if (row.Stripe_Payment_Intent_Id__c) sfByPiId.set(row.Stripe_Payment_Intent_Id__c, row);
+    if (row.Stripe_Balance_Transaction_Id__c)
+      sfByBtId.set(row.Stripe_Balance_Transaction_Id__c, row);
+    if (row.Stripe_Refund_Id__c) sfByRefundId.set(row.Stripe_Refund_Id__c, row);
+    if (row.transaction_type__c === 'payout' && row.Stripe_Payout_Id__c)
+      sfByPayoutId.set(row.Stripe_Payout_Id__c, row);
+  }
+
+  // ── Stripe object lookup maps ─────────────────────────────────────────────
+  const chargesById = new Map(stripeCharges.map((c) => [c.id, c]));
+  const piToCharge = new Map<string, Stripe.Charge>();
+  for (const c of stripeCharges) {
+    const piId =
+      typeof c.payment_intent === 'string'
+        ? c.payment_intent
+        : ((c.payment_intent as any)?.id ?? null);
+    if (piId) piToCharge.set(piId, c);
+  }
+  const refundsById = new Map(stripeRefunds.map((r) => [r.id, r]));
+  const payoutsById = new Map(stripePayouts.map((p) => [p.id, p]));
+
+  let linked = 0;
+  const errors: string[] = [];
+
+  for (const docWithEntity of qboDocsWithEntity) {
+    const { entityType, ...doc } = docWithEntity;
+    const qboDocId = String(doc.Id ?? '').trim();
+    if (!qboDocId) continue;
+
+    const syncToken = typeof doc.SyncToken === 'string' ? doc.SyncToken.trim() : null;
+    const stripeIds = extractStripeIdsFromDoc(doc);
+
+    for (const stripeId of stripeIds) {
+      // Resolve the matching SF row for this Stripe ID
+      const sfRow =
+        (stripeId.startsWith('ch_') && sfByChargeId.get(stripeId)) ||
+        (stripeId.startsWith('pi_') && sfByPiId.get(stripeId)) ||
+        (stripeId.startsWith('bt_') && sfByBtId.get(stripeId)) ||
+        (stripeId.startsWith('re_') && sfByRefundId.get(stripeId)) ||
+        (stripeId.startsWith('po_') && sfByPayoutId.get(stripeId)) ||
+        null;
+
+      if (!sfRow) continue;
+
+      const sfId = sfRow.Id;
+      const existingQboDocId = sfRow.QBO_Doc_Id__c?.trim() ?? '';
+
+      try {
+        // 1. Update Salesforce: set QBO_Doc_Id__c + Posted_to_QBO__c
+        if (existingQboDocId !== qboDocId) {
+          await salesforceSvc.markPostedToQbo(sfId, { type: entityType, id: qboDocId });
+          // Update in-memory to avoid re-processing on subsequent iterations
+          sfRow.QBO_Doc_Id__c = qboDocId;
+          sfRow.Posted_to_QBO__c = true;
+          linked++;
+          context.log('[DailyReconciliation] Linked QBO doc to Salesforce record', {
+            sfId,
+            qboDocId,
+            entityType,
+            stripeId,
+          });
+        }
+
+        // 2. Update Stripe metadata: salesforce_id + qbo_doc_id
+        try {
+          if (stripeId.startsWith('ch_') && chargesById.has(stripeId)) {
+            const charge = chargesById.get(stripeId)!;
+            const meta = (charge.metadata ?? {}) as Record<string, string>;
+            if (meta.salesforce_id !== sfId || meta.qbo_doc_id !== qboDocId) {
+              await stripeClient.charges.update(stripeId, {
+                metadata: { ...meta, salesforce_id: sfId, qbo_doc_id: qboDocId },
+              });
+            }
+          } else if (stripeId.startsWith('pi_') && piToCharge.has(stripeId)) {
+            const charge = piToCharge.get(stripeId)!;
+            const meta = (charge.metadata ?? {}) as Record<string, string>;
+            if (meta.salesforce_id !== sfId || meta.qbo_doc_id !== qboDocId) {
+              await stripeClient.charges.update(charge.id, {
+                metadata: { ...meta, salesforce_id: sfId, qbo_doc_id: qboDocId },
+              });
+            }
+          } else if (stripeId.startsWith('re_') && refundsById.has(stripeId)) {
+            const refund = refundsById.get(stripeId)!;
+            const meta = (refund.metadata ?? {}) as Record<string, string>;
+            if (meta.salesforce_id !== sfId || meta.qbo_doc_id !== qboDocId) {
+              await stripeClient.refunds.update(stripeId, {
+                metadata: { ...meta, salesforce_id: sfId, qbo_doc_id: qboDocId },
+              });
+            }
+          } else if (stripeId.startsWith('po_') && payoutsById.has(stripeId)) {
+            const payout = payoutsById.get(stripeId)!;
+            const meta = (payout.metadata ?? {}) as Record<string, string>;
+            if (meta.salesforce_id !== sfId || meta.qbo_doc_id !== qboDocId) {
+              await stripeClient.payouts.update(stripeId, {
+                metadata: { ...meta, salesforce_id: sfId, qbo_doc_id: qboDocId },
+              });
+            }
+          }
+        } catch (stripeErr) {
+          const msg = stripeErr instanceof Error ? stripeErr.message : String(stripeErr);
+          errors.push(`Failed to update Stripe ${stripeId} metadata: ${msg}`);
+          context.log('[DailyReconciliation] Stripe metadata update failed', {
+            stripeId,
+            sfId,
+            error: msg,
+          });
+        }
+
+        // 3. Update QBO PrivateNote: append SF record ID if not already present
+        if (syncToken) {
+          const currentNote = doc.PrivateNote ?? '';
+          if (!currentNote.includes(sfId)) {
+            const updatedNote = currentNote ? `${currentNote} | SF:${sfId}` : `SF:${sfId}`;
+            try {
+              await updateQboDocPrivateNote(entityType, qboDocId, syncToken, updatedNote);
+              docWithEntity.PrivateNote = updatedNote; // keep in-memory copy consistent
+              context.log('[DailyReconciliation] Updated QBO PrivateNote with SF ID', {
+                entityType,
+                qboDocId,
+                sfId,
+              });
+            } catch (qboErr) {
+              const msg = qboErr instanceof Error ? qboErr.message : String(qboErr);
+              errors.push(`Failed to update QBO ${entityType} ${qboDocId} PrivateNote: ${msg}`);
+              context.log('[DailyReconciliation] QBO PrivateNote update failed', {
+                entityType,
+                qboDocId,
+                sfId,
+                error: msg,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`Failed to link Stripe ID ${stripeId}: ${msg}`);
+        context.log('[DailyReconciliation] Cross-system link repair failed', {
+          stripeId,
+          sfId,
+          qboDocId,
+          error: msg,
+        });
+      }
+
+      // One QBO doc links to one SF row — stop after the first match
+      break;
+    }
+  }
+
+  return { linked, errors };
+};
+
 // ---------------------------------------------------------------------------
 // Core reconciliation logic
 // ---------------------------------------------------------------------------
@@ -944,10 +1133,12 @@ export const runReconciliation = async (
   let stripeCharges: any[] = [];
   let stripeRefunds: any[] = [];
   let stripePayouts: any[] = [];
+  // stripeClient is hoisted so the repair phase can call .charges/.refunds/.payouts.update()
+  let stripeClient: Stripe | null = null;
 
   if (systems.includes('stripe')) {
     try {
-      const stripeClient = createStripeClient(liveMode);
+      stripeClient = createStripeClient(liveMode);
       const fetchOptions = {
         params: { created: { lte: toUnix } },
         logger: context.log.bind(context),
@@ -1141,6 +1332,13 @@ export const runReconciliation = async (
     }
   }
 
+  // Tagged with entity type — used by repairCrossSystemLinks to call the right QBO update URL
+  const allQboDocsWithEntity: QboDocWithEntity[] = [
+    ...qboReceipts.map((d) => ({ ...d, entityType: 'SalesReceipt' as const })),
+    ...qboJournalEntries.map((d) => ({ ...d, entityType: 'JournalEntry' as const })),
+    ...qboDeposits.map((d) => ({ ...d, entityType: 'Deposit' as const })),
+  ];
+
   // -------------------------------------------------------------------------
   // 5. Cross-reference discrepancies
   // -------------------------------------------------------------------------
@@ -1195,6 +1393,7 @@ export const runReconciliation = async (
     const repairErrors: string[] = [];
     let contactsUpserted = 0;
     let transactionsCreated = 0;
+    let linkedRecords = 0;
 
     // Contact coalescing: update SF contacts with latest Stripe billing data
     if (systems.includes('stripe') && systems.includes('salesforce')) {
@@ -1228,7 +1427,29 @@ export const runReconciliation = async (
       repairErrors.push(...repairResult.errors);
     }
 
-    repairs = { contactsUpserted, transactionsCreated, errors: repairErrors };
+    // Cross-system link repair: ensure QBO doc ID is in SF, SF ID is in QBO PrivateNote,
+    // and Stripe metadata carries both salesforce_id and qbo_doc_id.
+    if (
+      systems.includes('stripe') &&
+      systems.includes('salesforce') &&
+      systems.includes('qbo') &&
+      stripeClient
+    ) {
+      const linkResult = await repairCrossSystemLinks(
+        allQboDocsWithEntity,
+        sfRows,
+        stripeCharges,
+        stripeRefunds,
+        stripePayouts,
+        stripeClient,
+        salesforceSvc,
+        context
+      );
+      linkedRecords += linkResult.linked;
+      repairErrors.push(...linkResult.errors);
+    }
+
+    repairs = { contactsUpserted, transactionsCreated, linkedRecords, errors: repairErrors };
 
     if (repairs.errors.length > 0) {
       errors.push(...repairs.errors.map((e) => `[repair] ${e}`));
@@ -1237,6 +1458,7 @@ export const runReconciliation = async (
     context.log('[DailyReconciliation] Repair phase complete', {
       contactsUpserted: repairs.contactsUpserted,
       transactionsCreated: repairs.transactionsCreated,
+      linkedRecords: repairs.linkedRecords,
       repairErrors: repairs.errors.length,
     });
   }

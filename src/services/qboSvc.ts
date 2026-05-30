@@ -3870,6 +3870,51 @@ export const deleteQuickBooksDocument = async (
   }
 };
 
+/**
+ * Sparse-updates the PrivateNote on an existing QBO document (SalesReceipt,
+ * JournalEntry, or Deposit).  Only the PrivateNote field is changed; all other
+ * document fields are left untouched because `sparse: true` is set.
+ *
+ * `syncToken` must be the current SyncToken of the document (returned by any
+ * read or query against the document).  QBO rejects updates with a stale token.
+ */
+export const updateQboDocPrivateNote = async (
+  entity: 'SalesReceipt' | 'JournalEntry' | 'Deposit',
+  docId: string,
+  syncToken: string,
+  privateNote: string,
+  options?: PostOptions
+): Promise<void> => {
+  const trimmedId = docId.trim();
+  const trimmedToken = syncToken.trim();
+  if (!trimmedId) throw new Error('QBO document ID is required for a PrivateNote update.');
+  if (!trimmedToken) throw new Error(`QBO document ${trimmedId} is missing SyncToken.`);
+
+  const apiPath = (
+    { SalesReceipt: 'salesreceipt', JournalEntry: 'journalentry', Deposit: 'deposit' } as const
+  )[entity];
+  const url = `${buildQboUrl(apiPath)}?operation=update`;
+  const context = await createRequestContext(options);
+
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      sparse: true,
+      Id: trimmedId,
+      SyncToken: trimmedToken,
+      PrivateNote: privateNote,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to update QBO ${entity} ${trimmedId} PrivateNote (status ${response.status}): ${errorText ?? response.statusText}`
+    );
+  }
+};
+
 export const ensureCustomer = async (
   customerName: string,
   email?: string,
@@ -4396,5 +4441,6 @@ export default {
   ensureReference,
   getQuickBooksCustomerById,
   updateQuickBooksCustomerSalesforceId,
+  updateQboDocPrivateNote,
   query,
 };
