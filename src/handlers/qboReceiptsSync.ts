@@ -9,6 +9,7 @@ import {
   normalizeComparableDate,
   normalizeFieldName,
   normalizeReceiptClassRef,
+  patchQboSalesReceiptFields,
   query as qboQuery,
 } from '../services/qboSvc';
 import {
@@ -114,6 +115,7 @@ type HandlerOptions = {
   startPosition: number;
   maxResults: number;
   qboIds: string[];
+  resyncFromSalesforce: boolean;
 };
 
 type SalesforceConnection = Awaited<ReturnType<SalesforceService['authenticate']>>;
@@ -151,6 +153,7 @@ type Dependencies = {
   createSalesforceSvc: (connection: SalesforceConnection) => ReturnType<typeof createSalesforceSvc>;
   qboQuery: typeof qboQuery;
   getQuickBooksCustomerById: typeof getQuickBooksCustomerById;
+  patchQboSalesReceiptFields: typeof patchQboSalesReceiptFields;
 };
 
 const DEFAULT_QBO_PAGE_SIZE = 200;
@@ -359,6 +362,71 @@ const fetchExistingQboDocIds = async (
 type ReceiptSelection = {
   receipts: QboSalesReceipt[];
   missingQboIds: string[];
+};
+
+type SalesforceTransactionForPatch = {
+  Id?: string;
+  QBO_Doc_Id__c?: string | null;
+  Memo__c?: string | null;
+  Reference_Number__c?: string | null;
+  Transaction_Type__c?: string | null;
+};
+
+type SalesReceiptPatchFields = {
+  privateNote: string | null;
+  paymentMethodName: string | null;
+  paymentReferenceNumber: string | null;
+  hasChanges: boolean;
+};
+
+const fetchSalesforceTransactionsForQboDocIds = async (
+  connection: SalesforceConnection,
+  qboDocIds: string[]
+): Promise<Map<string, SalesforceTransactionForPatch>> => {
+  const map = new Map<string, SalesforceTransactionForPatch>();
+  if (!qboDocIds.length) {
+    return map;
+  }
+
+  for (const chunk of chunkArray(qboDocIds, SOQL_IN_CHUNK_SIZE)) {
+    const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
+    const records = toRecords(
+      await connection.query<SalesforceTransactionForPatch>(
+        'SELECT Id, QBO_Doc_Id__c, Memo__c, Reference_Number__c, Transaction_Type__c ' +
+          `FROM Transaction__c WHERE QBO_Doc_Id__c IN (${inClause}) ` +
+          'ORDER BY LastModifiedDate DESC'
+      )
+    );
+
+    for (const record of records) {
+      const qboDocId = toTrimmed(record.QBO_Doc_Id__c);
+      if (!qboDocId || map.has(qboDocId)) {
+        continue;
+      }
+      map.set(qboDocId, record);
+    }
+  }
+
+  return map;
+};
+
+const getSalesforceTransactionType = (transaction: SalesforceTransactionForPatch): string | null =>
+  toTrimmed(transaction.Transaction_Type__c)?.toLowerCase() ?? null;
+
+const buildSalesReceiptPatchFields = (
+  transaction: SalesforceTransactionForPatch
+): SalesReceiptPatchFields => {
+  const privateNote = toTrimmed(transaction.Memo__c);
+  const paymentReferenceNumber = toTrimmed(transaction.Reference_Number__c);
+  const paymentMethodName = getSalesforceTransactionType(transaction) === 'check' ? 'Check' : null;
+
+  return {
+    privateNote,
+    paymentMethodName,
+    paymentReferenceNumber,
+    hasChanges:
+      privateNote !== null || paymentMethodName !== null || paymentReferenceNumber !== null,
+  };
 };
 
 const fetchCampaignIdByName = async (
@@ -853,6 +921,7 @@ const createDefaultDependencies = (): Dependencies => ({
   createSalesforceSvc: (connection) => createSalesforceSvc({ connection }),
   qboQuery,
   getQuickBooksCustomerById,
+  patchQboSalesReceiptFields,
 });
 
 const resolveDependencies = (): Dependencies => ({
@@ -881,6 +950,7 @@ const readHandlerOptions = (request: HttpRequest): HandlerOptions => ({
   startPosition: readIntQuery(request, 'start_position') ?? 1,
   maxResults: readIntQuery(request, 'max_results') ?? DEFAULT_QBO_PAGE_SIZE,
   qboIds: readListQuery(request, 'qboIds'),
+  resyncFromSalesforce: readBooleanQuery(request, 'resyncFromSalesforce', false),
 });
 
 const createQboDebugLogger = (
@@ -1592,8 +1662,134 @@ const executePlannedCreates = async (
   });
 };
 
+const runSalesforceBackfillToQboWorkflow = async (
+  options: HandlerOptions,
+  summary: HandlerSummary,
+  dependencies: Dependencies,
+  qboQueryWithDebug: typeof qboQuery,
+  connection: SalesforceConnection,
+  context: InvocationContext
+): Promise<void> => {
+  const { receipts, missingQboIds } = await fetchReceiptsForProcessing(
+    qboQueryWithDebug,
+    options,
+    context
+  );
+  const qboDocIds = collectQboDocIds(receipts);
+  const salesforceByQboDocId = await fetchSalesforceTransactionsForQboDocIds(connection, qboDocIds);
+
+  for (const receipt of receipts) {
+    summary.processedCount += 1;
+    const result = createReceiptResult(receipt);
+    summary.results.push(result);
+
+    const receiptId = normalizeQboId(receipt.Id);
+    if (!receiptId) {
+      markReceiptStatus(
+        summary,
+        result,
+        'skipped',
+        'skippedCount',
+        'Receipt is missing a QuickBooks Id.'
+      );
+      continue;
+    }
+
+    const transaction = salesforceByQboDocId.get(receiptId) ?? null;
+    if (!transaction) {
+      markReceiptStatus(
+        summary,
+        result,
+        'no_salesforce_record',
+        'noSalesforceRecordCount',
+        `No Salesforce Transaction__c was found for QBO_Doc_Id__c ${receiptId}.`
+      );
+      continue;
+    }
+
+    result.salesforceId = toTrimmed(transaction.Id);
+    const patchFields = buildSalesReceiptPatchFields(transaction);
+    if (!patchFields.hasChanges) {
+      markReceiptStatus(
+        summary,
+        result,
+        'skipped',
+        'skippedCount',
+        `Salesforce Transaction__c ${result.salesforceId ?? '(unknown)'} has no patchable fields for QBO SalesReceipt ${receiptId}.`
+      );
+      continue;
+    }
+
+    markReceiptStatus(
+      summary,
+      result,
+      'planned',
+      'plannedCount',
+      options.dryRun
+        ? `Would patch QBO SalesReceipt ${receiptId} from Salesforce Transaction__c ${result.salesforceId ?? '(unknown)'}.`
+        : `Will patch QBO SalesReceipt ${receiptId} from Salesforce Transaction__c ${result.salesforceId ?? '(unknown)'}.`
+    );
+
+    if (options.dryRun) {
+      continue;
+    }
+
+    try {
+      const changed = await dependencies.patchQboSalesReceiptFields(
+        receiptId,
+        {
+          privateNote: patchFields.privateNote,
+          paymentMethodName: patchFields.paymentMethodName,
+          paymentReferenceNumber: patchFields.paymentReferenceNumber,
+        },
+        options.debug
+          ? {
+              debugLogger: (event) => {
+                context.log('[qboReceiptsSync][debug][qbo-patch]', event);
+              },
+            }
+          : undefined
+      );
+
+      if (!changed) {
+        markReceiptStatus(
+          summary,
+          result,
+          'skipped',
+          'skippedCount',
+          `No QBO field changes were required for SalesReceipt ${receiptId}.`
+        );
+        continue;
+      }
+
+      markReceiptStatus(
+        summary,
+        result,
+        'synced',
+        'syncedCount',
+        `Patched QBO SalesReceipt ${receiptId} from Salesforce Transaction__c ${result.salesforceId ?? '(unknown)'}.`
+      );
+    } catch (error) {
+      markReceiptStatus(
+        summary,
+        result,
+        'error',
+        'errorCount',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  for (const missingQboId of missingQboIds) {
+    summary.processedCount += 1;
+    summary.skippedCount += 1;
+    summary.results.push(createMissingReceiptResult(missingQboId));
+  }
+};
+
 const buildCompletionLogData = (options: HandlerOptions, summary: HandlerSummary) => ({
   dryRun: options.dryRun,
+  resyncFromSalesforce: options.resyncFromSalesforce,
   processedCount: summary.processedCount,
   plannedCount: summary.plannedCount,
   syncedCount: summary.syncedCount,
@@ -1610,6 +1806,7 @@ const buildHandlerResponseBody = (
 ): Record<string, unknown> => ({
   dryRun: options.dryRun,
   debug: options.debug,
+  resyncFromSalesforce: options.resyncFromSalesforce,
   limit: options.limit,
   startDate: options.startDate,
   endDate: options.endDate,
@@ -1651,6 +1848,18 @@ const runReceiptSyncWorkflow = async (
 ): Promise<void> => {
   const { dependencies, qboDebugLogger, qboQueryWithDebug, connection, salesforceSvc } =
     await initializeReceiptSyncRuntime(options, context);
+  if (options.resyncFromSalesforce && options.qboIds.length > 0) {
+    await runSalesforceBackfillToQboWorkflow(
+      options,
+      summary,
+      dependencies,
+      qboQueryWithDebug,
+      connection,
+      context
+    );
+    return;
+  }
+
   const { receipts, customerCache, missingQboIds } = await fetchReceiptsAndCustomerCache(
     dependencies,
     qboQueryWithDebug,

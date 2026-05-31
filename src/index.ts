@@ -263,6 +263,7 @@ const QboReceiptsSyncQuerySchema = z
     debug: BoolLikeQuerySchema.optional(),
     limit: PositiveIntLikeSchema.optional(),
     qboIds: z.string().optional(),
+    resyncFromSalesforce: BoolLikeQuerySchema.optional(),
     start_date: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -1562,7 +1563,8 @@ registerFunction('qboReceiptsSync', 'Sync QuickBooks sales receipts to Salesforc
     'Pages through QuickBooks Online sales receipts (all or up to a limit), resolves each customer ' +
     'to a Salesforce Contact or Account via the customer "Salesforce ID" custom field, and imports ' +
     'unsynced receipts as Salesforce Transaction__c records. Supports dry-run mode and explicit qboIds ' +
-    'for targeted resyncs of one or more SalesReceipt records.',
+    'for targeted resyncs of one or more SalesReceipt records. Set resyncFromSalesforce=true with qboIds ' +
+    'to patch existing QBO SalesReceipts from matching Salesforce Transaction__c records (QBO_Doc_Id__c).',
   tags: ['QBO', 'Salesforce'],
   operationId: 'qboReceiptsSync',
   methods: ['GET', 'POST'],

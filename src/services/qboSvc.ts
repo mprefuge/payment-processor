@@ -4310,6 +4310,100 @@ export const updateQboDocPrivateNote = async (
 };
 
 /**
+ * Sparse-updates selected top-level SalesReceipt fields on an existing QBO document.
+ *
+ * This is used by Salesforce-driven resync flows to correct metadata on already-posted
+ * receipts (for example Check payment method, memo/private note, and payment reference number).
+ */
+export const patchQboSalesReceiptFields = async (
+  docId: string,
+  fields: {
+    privateNote?: string | null;
+    paymentMethodName?: string | null;
+    paymentReferenceNumber?: string | null;
+  },
+  options?: PostOptions
+): Promise<boolean> => {
+  const trimmedId = docId.trim();
+  if (!trimmedId) throw new Error('QBO SalesReceipt ID is required for patch updates.');
+
+  const document = await fetchQboDocument('SalesReceipt', trimmedId, options);
+  if (!document) {
+    throw new Error(`QBO SalesReceipt ${trimmedId} was not found.`);
+  }
+
+  const syncTokenRaw = document.SyncToken;
+  const syncToken =
+    typeof syncTokenRaw === 'number'
+      ? String(syncTokenRaw)
+      : typeof syncTokenRaw === 'string'
+        ? syncTokenRaw.trim()
+        : null;
+  if (!syncToken) throw new Error(`QBO SalesReceipt ${trimmedId} is missing SyncToken.`);
+
+  const payload: Record<string, unknown> = {
+    sparse: true,
+    Id: trimmedId,
+    SyncToken: syncToken,
+  };
+
+  let changed = false;
+
+  const privateNote = truncate(fields.privateNote ?? null, 4000);
+  if (privateNote !== null) {
+    payload.PrivateNote = privateNote;
+    changed = true;
+  }
+
+  const paymentReferenceNumber = truncate(fields.paymentReferenceNumber ?? null, 21);
+  if (paymentReferenceNumber !== null) {
+    payload.PaymentRefNum = paymentReferenceNumber;
+    changed = true;
+  }
+
+  const paymentMethodName = truncate(fields.paymentMethodName ?? null, 100);
+  if (paymentMethodName !== null) {
+    const paymentMethodRef = await queryReference('PaymentMethod', paymentMethodName, options);
+    if (paymentMethodRef) {
+      payload.PaymentMethodRef = {
+        value: paymentMethodRef.value,
+        ...(paymentMethodRef.name ? { name: paymentMethodRef.name } : {}),
+      };
+      changed = true;
+    } else {
+      logger.warn(
+        '[QBO] Payment method not found during SalesReceipt patch; skipping PaymentMethodRef update',
+        {
+          docId: trimmedId,
+          paymentMethodName,
+        }
+      );
+    }
+  }
+
+  if (!changed) {
+    return false;
+  }
+
+  const context = await createRequestContext(options);
+  const url = `${buildQboUrl('salesreceipt')}?operation=update`;
+  const response = await context.request(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => undefined);
+    throw new Error(
+      `Failed to patch QBO SalesReceipt ${trimmedId} (status ${response.status}): ${errorText ?? response.statusText}`
+    );
+  }
+
+  return true;
+};
+
+/**
  * Fetches a QBO document by entity type and ID, returning the raw parsed response
  * body (the entity object itself, not the outer QueryResponse wrapper).
  * Returns null if the document does not exist (404 or QBO "not found" fault).
@@ -5046,6 +5140,7 @@ export default {
   getQuickBooksCustomerById,
   updateQuickBooksCustomerSalesforceId,
   updateQboDocPrivateNote,
+  patchQboSalesReceiptFields,
   fetchQboDocument,
   patchQboDocClassRef,
   postManualEntryAsJournalEntry,
