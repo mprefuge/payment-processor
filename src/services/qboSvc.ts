@@ -131,6 +131,7 @@ export interface QuickBooksSalesReceipt {
   TxnDate: string;
   PrivateNote?: string;
   DepositToAccountRef: QuickBooksReference;
+  PaymentMethodRef?: QuickBooksReference;
   CustomerRef?: QuickBooksReference;
   BillEmail?: QuickBooksEmailAddress;
   CustomerMemo?: { value: string };
@@ -3633,6 +3634,7 @@ export const postManualEntryAsSalesReceipt = async (input: {
   customerName?: string | null;
   customerEmail?: string | null;
   classRef?: string | null;
+  paymentMethodName?: string | null;
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
@@ -3704,6 +3706,35 @@ export const postManualEntryAsSalesReceipt = async (input: {
     }
   }
 
+  // Resolve payment method by name when provided (for example, "Check").
+  let resolvedPaymentMethodRef: QuickBooksReference | null = null;
+  if (input.paymentMethodName?.trim()) {
+    try {
+      resolvedPaymentMethodRef = await queryReference(
+        'PaymentMethod',
+        input.paymentMethodName.trim(),
+        input.options
+      );
+      if (!resolvedPaymentMethodRef) {
+        logger.warn(
+          '[QBOSvc] postManualEntryAsSalesReceipt: payment method not found; posting without PaymentMethodRef',
+          {
+            paymentMethodName: input.paymentMethodName,
+          }
+        );
+      }
+    } catch (paymentMethodErr) {
+      logger.warn(
+        '[QBOSvc] postManualEntryAsSalesReceipt: payment method resolution failed; posting without PaymentMethodRef',
+        {
+          paymentMethodName: input.paymentMethodName,
+          error:
+            paymentMethodErr instanceof Error ? paymentMethodErr.message : String(paymentMethodErr),
+        }
+      );
+    }
+  }
+
   // Build Sales Receipt with Undeposited Funds as deposit destination
   const salesReceipt: QuickBooksSalesReceipt = {
     DocNumber: docNumber,
@@ -3713,6 +3744,12 @@ export const postManualEntryAsSalesReceipt = async (input: {
       name: undepositedFundsRef.name,
       value: undepositedFundsRef.value,
     },
+    PaymentMethodRef: resolvedPaymentMethodRef
+      ? {
+          value: resolvedPaymentMethodRef.value,
+          name: resolvedPaymentMethodRef.name ?? undefined,
+        }
+      : undefined,
     CustomerRef: resolvedEntityRef
       ? {
           value: resolvedEntityRef.value,

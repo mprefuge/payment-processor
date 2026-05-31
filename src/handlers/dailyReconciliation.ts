@@ -1581,6 +1581,8 @@ const repairMissingSfToQbo = async (
     const chargeId = sfRow.Stripe_Charge_Id__c?.trim() ?? null;
     const piId = sfRow.Stripe_Payment_Intent_Id__c?.trim() ?? null;
     const stripeId = chargeId || piId;
+    const transactionType = sfRow.transaction_type__c?.trim().toLowerCase() ?? null;
+    const paymentMethodName = transactionType === 'check' ? 'Check' : null;
 
     try {
       let result: { qboId: string; type: string };
@@ -1652,6 +1654,7 @@ const repairMissingSfToQbo = async (
             customerName,
             customerEmail,
             classRef: classRefStr,
+            paymentMethodName,
           });
           context.log(
             '[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt (Stripe fallback)',
@@ -1671,6 +1674,7 @@ const repairMissingSfToQbo = async (
           customerName,
           customerEmail,
           classRef: classRefStr,
+          paymentMethodName,
         });
         context.log('[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt', {
           sfId,
