@@ -371,6 +371,10 @@ type SalesforceTransactionForPatch = {
   Memo__c?: string | null;
   description__c?: string | null;
   Description__c?: string | null;
+  received_at__c?: string | null;
+  Received_At__c?: string | null;
+  product_service_qbo__c?: string | null;
+  Product_Service_QBO__c?: string | null;
   Reference_Number__c?: string | null;
   transaction_type__c?: string | null;
   Transaction_Type__c?: string | null;
@@ -380,8 +384,11 @@ type SalesforceTransactionForPatch = {
 
 type SalesReceiptPatchFields = {
   privateNote: string | null;
+  customerMemo: string | null;
   paymentMethodName: string | null;
   paymentReferenceNumber: string | null;
+  serviceDate: string | null;
+  productServiceName: string | null;
   hasChanges: boolean;
 };
 
@@ -398,8 +405,8 @@ const fetchSalesforceTransactionsForQboDocIds = async (
     const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
     const records = toRecords(
       await connection.query<SalesforceTransactionForPatch>(
-        'SELECT Id, QBO_Doc_Id__c, Memo__c, Description__c, Reference_Number__c, ' +
-          'transaction_type__c, payment_method__c ' +
+        'SELECT Id, QBO_Doc_Id__c, Memo__c, Description__c, Received_At__c, Product_Service_QBO__c, ' +
+          'Reference_Number__c, transaction_type__c, payment_method__c ' +
           `FROM Transaction__c WHERE QBO_Doc_Id__c IN (${inClause}) ` +
           'ORDER BY LastModifiedDate DESC'
       )
@@ -427,17 +434,33 @@ const getSalesforcePaymentMethod = (transaction: SalesforceTransactionForPatch):
     toTrimmed(transaction.payment_method__c) ?? toTrimmed(transaction.Payment_Method__c)
   )?.toLowerCase() ?? null;
 
-const getSalesforceMemo = (transaction: SalesforceTransactionForPatch): string | null =>
+const getSalesforcePrivateNote = (transaction: SalesforceTransactionForPatch): string | null =>
   toTrimmed(transaction.Memo__c) ??
   toTrimmed(transaction.memo__c) ??
   toTrimmed(transaction.Description__c) ??
   toTrimmed(transaction.description__c);
 
+const getSalesforceStatementMessage = (transaction: SalesforceTransactionForPatch): string | null =>
+  toTrimmed(transaction.Description__c) ?? toTrimmed(transaction.description__c);
+
+const getSalesforceServiceDate = (transaction: SalesforceTransactionForPatch): string | null => {
+  const raw = toTrimmed(transaction.Received_At__c) ?? toTrimmed(transaction.received_at__c);
+  return raw && raw.length >= 10 ? raw.slice(0, 10) : null;
+};
+
+const getSalesforceProductServiceName = (
+  transaction: SalesforceTransactionForPatch
+): string | null =>
+  toTrimmed(transaction.Product_Service_QBO__c) ?? toTrimmed(transaction.product_service_qbo__c);
+
 const buildSalesReceiptPatchFields = (
   transaction: SalesforceTransactionForPatch
 ): SalesReceiptPatchFields => {
-  const privateNote = getSalesforceMemo(transaction);
+  const privateNote = getSalesforcePrivateNote(transaction);
+  const customerMemo = getSalesforceStatementMessage(transaction);
   const paymentReferenceNumber = toTrimmed(transaction.Reference_Number__c);
+  const serviceDate = getSalesforceServiceDate(transaction);
+  const productServiceName = getSalesforceProductServiceName(transaction);
   const transactionType = getSalesforceTransactionType(transaction);
   const paymentMethod = getSalesforcePaymentMethod(transaction);
   const paymentMethodName =
@@ -447,10 +470,18 @@ const buildSalesReceiptPatchFields = (
 
   return {
     privateNote,
+    customerMemo,
     paymentMethodName,
     paymentReferenceNumber,
+    serviceDate,
+    productServiceName,
     hasChanges:
-      privateNote !== null || paymentMethodName !== null || paymentReferenceNumber !== null,
+      privateNote !== null ||
+      customerMemo !== null ||
+      paymentMethodName !== null ||
+      paymentReferenceNumber !== null ||
+      serviceDate !== null ||
+      productServiceName !== null,
   };
 };
 
@@ -1764,8 +1795,11 @@ const runSalesforceBackfillToQboWorkflow = async (
         receiptId,
         {
           privateNote: patchFields.privateNote,
+          customerMemo: patchFields.customerMemo,
           paymentMethodName: patchFields.paymentMethodName,
           paymentReferenceNumber: patchFields.paymentReferenceNumber,
+          serviceDate: patchFields.serviceDate,
+          productServiceName: patchFields.productServiceName,
         },
         options.debug
           ? {

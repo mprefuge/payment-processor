@@ -4319,8 +4319,11 @@ export const patchQboSalesReceiptFields = async (
   docId: string,
   fields: {
     privateNote?: string | null;
+    customerMemo?: string | null;
     paymentMethodName?: string | null;
     paymentReferenceNumber?: string | null;
+    serviceDate?: string | null;
+    productServiceName?: string | null;
   },
   options?: PostOptions
 ): Promise<boolean> => {
@@ -4341,17 +4344,98 @@ export const patchQboSalesReceiptFields = async (
         : null;
   if (!syncToken) throw new Error(`QBO SalesReceipt ${trimmedId} is missing SyncToken.`);
 
-  const payload: Record<string, unknown> = {
-    sparse: true,
-    Id: trimmedId,
-    SyncToken: syncToken,
-  };
+  const productServiceName = toTrimmed(fields.productServiceName ?? null);
+  const serviceDate = toTrimmed(fields.serviceDate ?? null);
+  const requiresLinePatch = productServiceName !== null || serviceDate !== null;
+
+  const payload: Record<string, unknown> = requiresLinePatch
+    ? {
+        ...document,
+        Id: trimmedId,
+        SyncToken: syncToken,
+      }
+    : {
+        sparse: true,
+        Id: trimmedId,
+        SyncToken: syncToken,
+      };
 
   let changed = false;
+
+  if (requiresLinePatch) {
+    const rawLines = Array.isArray(document.Line)
+      ? (document.Line as Array<Record<string, unknown>>)
+      : [];
+
+    if (rawLines.length === 0) {
+      throw new Error(`QBO SalesReceipt ${trimmedId} has no line items to patch.`);
+    }
+
+    let resolvedItemRef: QuickBooksReference | null = null;
+    if (productServiceName !== null) {
+      const requestContext = await createRequestContext(options);
+      resolvedItemRef = await resolveRevenueItemReference(productServiceName, requestContext);
+    }
+
+    const normalizedServiceDate = serviceDate !== null ? normalizeDate(serviceDate) : null;
+    let patchedSalesLine = false;
+    const patchedLines = rawLines.map((line) => {
+      if (patchedSalesLine || line.DetailType !== 'SalesItemLineDetail') {
+        return line;
+      }
+
+      const detail =
+        line.SalesItemLineDetail && typeof line.SalesItemLineDetail === 'object'
+          ? (line.SalesItemLineDetail as Record<string, unknown>)
+          : null;
+      if (!detail) {
+        return line;
+      }
+
+      const nextDetail: Record<string, unknown> = { ...detail };
+      let lineChanged = false;
+
+      if (resolvedItemRef) {
+        nextDetail.ItemRef = {
+          value: resolvedItemRef.value,
+          ...(resolvedItemRef.name ? { name: resolvedItemRef.name } : {}),
+        };
+        lineChanged = true;
+      }
+
+      if (normalizedServiceDate !== null) {
+        nextDetail.ServiceDate = normalizedServiceDate;
+        lineChanged = true;
+      }
+
+      if (!lineChanged) {
+        return line;
+      }
+
+      patchedSalesLine = true;
+      changed = true;
+      return {
+        ...line,
+        SalesItemLineDetail: nextDetail,
+      };
+    });
+
+    if (!patchedSalesLine) {
+      throw new Error(`QBO SalesReceipt ${trimmedId} has no sales item line to patch.`);
+    }
+
+    payload.Line = patchedLines;
+  }
 
   const privateNote = truncate(fields.privateNote ?? null, 4000);
   if (privateNote !== null) {
     payload.PrivateNote = privateNote;
+    changed = true;
+  }
+
+  const customerMemo = truncate(fields.customerMemo ?? null, 1000);
+  if (customerMemo !== null) {
+    payload.CustomerMemo = { value: customerMemo };
     changed = true;
   }
 

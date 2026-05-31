@@ -580,10 +580,11 @@ describe('qboReceiptsSync', () => {
     });
 
     const patchQboSalesReceiptFields = vi.fn(async () => true);
+    const upsertTransactionByExternalId = vi.fn();
 
     internals.setDependencies({
       getSalesforceConnection: async () => connection as any,
-      createSalesforceSvc: () => ({ upsertTransactionByExternalId: vi.fn() }) as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId }) as any,
       qboQuery: vi.fn(async (query: string) => {
         if (query.includes("FROM SalesReceipt WHERE Id IN ('911')")) {
           return [makeReceipt('911', '100')];
@@ -625,8 +626,12 @@ describe('qboReceiptsSync', () => {
     ];
     expect(docId).toBe('911');
     expect(patchFields.privateNote).toBe('Updated memo from Salesforce');
+    expect(patchFields.customerMemo).toBeNull();
     expect(patchFields.paymentMethodName).toBe('Check');
     expect(patchFields.paymentReferenceNumber).toBe('CHK-911');
+    expect(patchFields.serviceDate).toBeNull();
+    expect(patchFields.productServiceName).toBeNull();
+    expect(upsertTransactionByExternalId).not.toHaveBeenCalled();
   });
 
   it('uses lower-case Salesforce transaction fields and Description__c fallback for memo patches', async () => {
@@ -649,10 +654,11 @@ describe('qboReceiptsSync', () => {
     });
 
     const patchQboSalesReceiptFields = vi.fn(async () => true);
+    const upsertTransactionByExternalId = vi.fn();
 
     internals.setDependencies({
       getSalesforceConnection: async () => connection as any,
-      createSalesforceSvc: () => ({ upsertTransactionByExternalId: vi.fn() }) as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId }) as any,
       qboQuery: vi.fn(async (query: string) => {
         if (query.includes("FROM SalesReceipt WHERE Id IN ('912')")) {
           return [makeReceipt('912', '100')];
@@ -695,8 +701,94 @@ describe('qboReceiptsSync', () => {
 
     expect(docId).toBe('912');
     expect(patchFields.privateNote).toBe('Memo from description fallback');
+    expect(patchFields.customerMemo).toBe('Memo from description fallback');
     expect(patchFields.paymentMethodName).toBe('Check');
     expect(patchFields.paymentReferenceNumber).toBe('CHK-912');
+    expect(upsertTransactionByExternalId).not.toHaveBeenCalled();
+  });
+
+  it('passes service date and product service through Salesforce-to-QBO resync patches', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return {
+          records: [
+            {
+              Id: 'a1aTXN4',
+              QBO_Doc_Id__c: '11068',
+              Memo__c: 'March Donation',
+              Description__c: 'March Donation',
+              Received_At__c: '2026-03-30T20:00:00Z',
+              Product_Service_QBO__c: 'Church Partners',
+              Reference_Number__c: '014323',
+              transaction_type__c: 'check',
+            },
+          ],
+        };
+      }
+      return { records: [] };
+    });
+
+    const patchQboSalesReceiptFields = vi.fn(async () => true);
+    const upsertTransactionByExternalId = vi.fn();
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes("FROM SalesReceipt WHERE Id IN ('11068')")) {
+          return [makeReceipt('11068', '100')];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async () => {
+        throw new Error('should not be called in Salesforce resync mode');
+      }),
+      patchQboSalesReceiptFields,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false&qboIds=11068&resyncFromSalesforce=true',
+          query: new URLSearchParams({
+            dryRun: 'false',
+            qboIds: '11068',
+            resyncFromSalesforce: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.processedCount).toBe(1);
+    expect(body.summary.syncedCount).toBe(1);
+    expect(body.summary.results[0].status).toBe('synced');
+    expect(patchQboSalesReceiptFields).toHaveBeenCalledOnce();
+
+    const [docId, patchFields] = patchQboSalesReceiptFields.mock.calls[0] as [
+      string,
+      {
+        privateNote?: string;
+        customerMemo?: string;
+        paymentMethodName?: string;
+        paymentReferenceNumber?: string;
+        serviceDate?: string;
+        productServiceName?: string;
+      },
+    ];
+
+    expect(docId).toBe('11068');
+    expect(patchFields.privateNote).toBe('March Donation');
+    expect(patchFields.customerMemo).toBe('March Donation');
+    expect(patchFields.paymentMethodName).toBe('Check');
+    expect(patchFields.paymentReferenceNumber).toBe('014323');
+    expect(patchFields.serviceDate).toBe('2026-03-30');
+    expect(patchFields.productServiceName).toBe('Church Partners');
+    expect(upsertTransactionByExternalId).not.toHaveBeenCalled();
   });
 
   it('marks receipt as skipped when it has no customer reference', async () => {
