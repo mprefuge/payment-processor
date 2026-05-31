@@ -411,6 +411,12 @@ type SfTransactionRow = {
   Name?: string | null;
   /** User-supplied memo field — preferred over Name when building QBO memo */
   Memo__c?: string | null;
+  /** Secondary memo/description field from Salesforce Transaction__c */
+  Description__c?: string | null;
+  /** QBO product/service mapping stored on the Salesforce transaction */
+  Product_Service_QBO__c?: string | null;
+  /** Check/reference number for manually-entered non-Stripe transactions */
+  Reference_Number__c?: string | null;
   /** ISO datetime string — used as posting date fallback when Received_At__c is null */
   CreatedDate?: string | null;
   /** Related Contact — used for QBO memo display name */
@@ -447,7 +453,7 @@ const queryTransactionsForRange = async (
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
-    `Amount_Gross__c, Amount_Net__c, Received_At__c, transaction_type__c, Memo__c, CreatedDate, ` +
+    `Amount_Gross__c, Amount_Net__c, Received_At__c, transaction_type__c, Memo__c, Description__c, Product_Service_QBO__c, Reference_Number__c, CreatedDate, ` +
     `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name${includeCampaignClass ? ', Campaign__r.Class__c' : ''}, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
@@ -1554,8 +1560,11 @@ const repairMissingSfToQbo = async (
     const accountName = sfRow.Account__r?.Name?.trim() || null;
     const customerName = contactName || accountName || sfRow.Name?.trim() || null;
 
+    const memoParts = [sfRow.Memo__c?.trim(), sfRow.Description__c?.trim()].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0
+    );
     const memoDisplayName =
-      sfRow.Memo__c?.trim() || contactName || accountName || sfRow.Name?.trim() || null;
+      memoParts[0] || contactName || accountName || sfRow.Name?.trim() || null;
     const campaign = sfRow.Campaign__r?.Name?.trim() ?? null;
     // Base memo (donor/account name + campaign)
     const baseMemo = memoDisplayName
@@ -1565,7 +1574,8 @@ const repairMissingSfToQbo = async (
       : `SF:${sfId}`;
     // Append SF record name for cross-reference (e.g. TRX-260505-5594)
     const sfName = sfRow.Name?.trim() ?? null;
-    const memo = sfName ? `${baseMemo} (${sfName})` : baseMemo;
+    const memoBaseText = memoParts.length > 0 ? memoParts.join(' — ') : baseMemo;
+    const memo = sfName ? `${memoBaseText} (${sfName})` : memoBaseText;
 
     // Customer email for QBO customer lookup (billing email preferred over contact email)
     const customerEmail = sfRow.Billing_Email__c?.trim() || sfRow.Contact__r?.Email?.trim() || null;
@@ -1583,6 +1593,8 @@ const repairMissingSfToQbo = async (
     const stripeId = chargeId || piId;
     const transactionType = sfRow.transaction_type__c?.trim().toLowerCase() ?? null;
     const paymentMethodName = transactionType === 'check' ? 'Check' : null;
+    const paymentReferenceNumber = sfRow.Reference_Number__c?.trim() || null;
+    const productServiceName = sfRow.Product_Service_QBO__c?.trim() || null;
 
     try {
       let result: { qboId: string; type: string };
@@ -1654,7 +1666,9 @@ const repairMissingSfToQbo = async (
             customerName,
             customerEmail,
             classRef: classRefStr,
+            productServiceName,
             paymentMethodName,
+            paymentReferenceNumber,
           });
           context.log(
             '[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt (Stripe fallback)',
@@ -1674,7 +1688,9 @@ const repairMissingSfToQbo = async (
           customerName,
           customerEmail,
           classRef: classRefStr,
+          productServiceName,
           paymentMethodName,
+          paymentReferenceNumber,
         });
         context.log('[DailyReconciliation] Posted manual SF entry to QBO as Sales Receipt', {
           sfId,

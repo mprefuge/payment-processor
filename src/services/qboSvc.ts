@@ -132,6 +132,7 @@ export interface QuickBooksSalesReceipt {
   PrivateNote?: string;
   DepositToAccountRef: QuickBooksReference;
   PaymentMethodRef?: QuickBooksReference;
+  PaymentRefNum?: string;
   CustomerRef?: QuickBooksReference;
   BillEmail?: QuickBooksEmailAddress;
   CustomerMemo?: { value: string };
@@ -3634,7 +3635,9 @@ export const postManualEntryAsSalesReceipt = async (input: {
   customerName?: string | null;
   customerEmail?: string | null;
   classRef?: string | null;
+  productServiceName?: string | null;
   paymentMethodName?: string | null;
+  paymentReferenceNumber?: string | null;
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
@@ -3654,12 +3657,17 @@ export const postManualEntryAsSalesReceipt = async (input: {
 
   // Resolve revenue item (same as Stripe sales receipts use)
   let revenueItemReference: QuickBooksReference;
+  const requestedProductServiceName = input.productServiceName?.trim() || null;
   try {
-    revenueItemReference = await resolveRevenueItemReference('Manual Donation', context);
+    revenueItemReference = await resolveRevenueItemReference(
+      requestedProductServiceName || 'Manual Donation',
+      context
+    );
   } catch (error) {
     logger.warn(
       '[QBOSvc] postManualEntryAsSalesReceipt: failed to resolve revenue item; using default',
       {
+        productServiceName: requestedProductServiceName,
         error: error instanceof Error ? error.message : String(error),
       }
     );
@@ -3750,6 +3758,7 @@ export const postManualEntryAsSalesReceipt = async (input: {
           name: resolvedPaymentMethodRef.name ?? undefined,
         }
       : undefined,
+    PaymentRefNum: truncate(input.paymentReferenceNumber ?? null, 21) ?? undefined,
     CustomerRef: resolvedEntityRef
       ? {
           value: resolvedEntityRef.value,

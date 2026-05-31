@@ -398,6 +398,107 @@ describe('qboReceiptsSync', () => {
     expect(body.summary.results[0].status).toBe('already_synced');
   });
 
+  it('resyncs an explicitly selected receipt even when Salesforce already has the QBO doc id', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003CONTACT'")) {
+        return { records: [{ Id: '003CONTACT', FirstName: 'Alice', LastName: 'Smith' }] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
+      return { records: [] };
+    });
+
+    const upsert = vi.fn(async () => ({ success: true, id: 'a01RESYNC', created: false }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: upsert }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes("FROM SalesReceipt WHERE Id IN ('505')")) {
+          return [makeReceipt('505', '500')];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async (id: string) => {
+        if (id === '500') return makeCustomer('500', '003CONTACT');
+        throw new Error(`Unexpected customer ${id}`);
+      }),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false&qboIds=505',
+          query: new URLSearchParams({ dryRun: 'false', qboIds: '505' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.qboIds).toEqual(['505']);
+    expect(body.summary.processedCount).toBe(1);
+    expect(body.summary.plannedCount).toBe(1);
+    expect(body.summary.syncedCount).toBe(1);
+    expect(body.summary.results[0].status).toBe('synced');
+    expect(body.summary.results[0].message).toMatch(/Resynced Salesforce Transaction__c/);
+    expect(upsert).toHaveBeenCalledOnce();
+  });
+
+  it('reports missing explicit QBO IDs in the summary', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003CONTACT'")) {
+        return { records: [{ Id: '003CONTACT' }] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
+      return { records: [] };
+    });
+
+    const upsert = vi.fn(async () => ({ success: true, id: 'a01RESYNC', created: false }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: upsert }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes("FROM SalesReceipt WHERE Id IN ('601', '999')")) {
+          return [makeReceipt('601', '500')];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async (id: string) => {
+        if (id === '500') return makeCustomer('500', '003CONTACT');
+        throw new Error(`Unexpected customer ${id}`);
+      }),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=true&qboIds=601,999',
+          query: new URLSearchParams({ dryRun: 'true', qboIds: '601,999' }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.processedCount).toBe(2);
+    expect(body.summary.plannedCount).toBe(1);
+    expect(body.summary.skippedCount).toBe(1);
+    expect(body.summary.results.map((result: any) => result.receiptId)).toEqual(['601', '999']);
+    expect(body.summary.results[1].message).toMatch(/was not found/);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
   it('marks receipt as skipped when it has no customer reference', async () => {
     const connection = createConnection(async () => ({ records: [] }));
 

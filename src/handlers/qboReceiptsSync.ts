@@ -113,6 +113,7 @@ type HandlerOptions = {
   endDate: string | null;
   startPosition: number;
   maxResults: number;
+  qboIds: string[];
 };
 
 type SalesforceConnection = Awaited<ReturnType<SalesforceService['authenticate']>>;
@@ -184,6 +185,29 @@ const readStringQuery = (request: HttpRequest, key: string): string | null => {
       : (request.query as unknown as Record<string, unknown> | undefined)?.[key];
 
   return toTrimmed(raw);
+};
+
+const readListQuery = (request: HttpRequest, key: string): string[] => {
+  const query = request.query as
+    | (URLSearchParams & Record<string, unknown>)
+    | (Record<string, unknown> & { getAll?: (name: string) => string[] })
+    | undefined;
+
+  const rawValues =
+    typeof query?.getAll === 'function'
+      ? query.getAll(key)
+      : (() => {
+          const value = query ? query[key] : null;
+          if (Array.isArray(value)) return value;
+          return value !== null && value !== undefined ? [value] : [];
+        })();
+
+  const values = rawValues
+    .flatMap((value) => (typeof value === 'string' ? value.split(',') : []))
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  return [...new Set(values)];
 };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -330,6 +354,11 @@ const fetchExistingQboDocIds = async (
   }
 
   return existing;
+};
+
+type ReceiptSelection = {
+  receipts: QboSalesReceipt[];
+  missingQboIds: string[];
 };
 
 const fetchCampaignIdByName = async (
@@ -851,6 +880,7 @@ const readHandlerOptions = (request: HttpRequest): HandlerOptions => ({
   endDate: readStringQuery(request, 'end_date'),
   startPosition: readIntQuery(request, 'start_position') ?? 1,
   maxResults: readIntQuery(request, 'max_results') ?? DEFAULT_QBO_PAGE_SIZE,
+  qboIds: readListQuery(request, 'qboIds'),
 });
 
 const createQboDebugLogger = (
@@ -899,6 +929,14 @@ const buildReceiptQuery = ({ startPosition, maxResults }: HandlerOptions): strin
   'SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote, MetaData, CurrencyRef, CustomerRef, ClassRef, Line ' +
   `FROM SalesReceipt STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
 
+const buildReceiptQueryByIds = (qboIds: string[]): string => {
+  const inClause = qboIds.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
+  return (
+    'SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote, MetaData, CurrencyRef, CustomerRef, ClassRef, Line ' +
+    `FROM SalesReceipt WHERE Id IN (${inClause})`
+  );
+};
+
 const fetchReceiptPage = async (
   qboQueryWithDebug: typeof qboQuery,
   options: HandlerOptions,
@@ -924,11 +962,57 @@ const fetchReceiptPage = async (
   return allReceipts;
 };
 
-const filterReceiptsForProcessing = (
-  allReceipts: QboSalesReceipt[],
+const fetchReceiptsByIds = async (
+  qboQueryWithDebug: typeof qboQuery,
+  qboIds: string[],
+  context: InvocationContext
+): Promise<ReceiptSelection> => {
+  const receiptsById = new Map<string, QboSalesReceipt>();
+
+  context.log('[qboReceiptsSync] Fetching targeted QBO receipts', {
+    qboIds,
+  });
+
+  for (const qboIdChunk of chunkArray(qboIds, SOQL_IN_CHUNK_SIZE)) {
+    const chunkReceipts = await qboQueryWithDebug<QboSalesReceipt[]>(
+      buildReceiptQueryByIds(qboIdChunk)
+    );
+    const receipts = Array.isArray(chunkReceipts) ? chunkReceipts : [];
+
+    for (const receipt of receipts) {
+      const receiptId = normalizeQboId(receipt.Id);
+      if (receiptId) {
+        receiptsById.set(receiptId, receipt);
+      }
+    }
+  }
+
+  const foundIds = new Set(receiptsById.keys());
+  const missingQboIds = qboIds.filter((qboId) => !foundIds.has(qboId));
+  const receipts = qboIds
+    .map((qboId) => receiptsById.get(qboId))
+    .filter((receipt): receipt is QboSalesReceipt => receipt !== undefined);
+
+  context.log('[qboReceiptsSync] Fetched targeted QBO receipts', {
+    requestedCount: qboIds.length,
+    foundCount: receipts.length,
+    missingCount: missingQboIds.length,
+  });
+
+  return { receipts, missingQboIds };
+};
+
+const fetchReceiptsForProcessing = async (
+  qboQueryWithDebug: typeof qboQuery,
   options: HandlerOptions,
   context: InvocationContext
-): QboSalesReceipt[] => {
+): Promise<ReceiptSelection> => {
+  if (options.qboIds.length > 0) {
+    return await fetchReceiptsByIds(qboQueryWithDebug, options.qboIds, context);
+  }
+
+  const allReceipts = await fetchReceiptPage(qboQueryWithDebug, options, context);
+
   let receipts =
     isValidDate(options.startDate) || isValidDate(options.endDate)
       ? allReceipts.filter((receipt) =>
@@ -954,7 +1038,7 @@ const filterReceiptsForProcessing = (
   }
 
   context.log('[qboReceiptsSync] Receipts to process', { count: receipts.length });
-  return receipts;
+  return { receipts, missingQboIds: [] };
 };
 
 const collectUniqueCustomerIds = (receipts: QboSalesReceipt[]): string[] => [
@@ -1034,9 +1118,13 @@ const fetchReceiptsAndCustomerCache = async (
 ): Promise<{
   receipts: QboSalesReceipt[];
   customerCache: Map<string, QboCustomer | null>;
+  missingQboIds: string[];
 }> => {
-  const allReceipts = await fetchReceiptPage(qboQueryWithDebug, options, context);
-  const receipts = filterReceiptsForProcessing(allReceipts, options, context);
+  const { receipts, missingQboIds } = await fetchReceiptsForProcessing(
+    qboQueryWithDebug,
+    options,
+    context
+  );
   const uniqueCustomerIds = collectUniqueCustomerIds(receipts);
   const customerCache = await fetchCustomerCache(
     uniqueCustomerIds,
@@ -1049,6 +1137,7 @@ const fetchReceiptsAndCustomerCache = async (
   return {
     receipts,
     customerCache,
+    missingQboIds,
   };
 };
 
@@ -1141,6 +1230,7 @@ const prepareSalesforceReceiptSyncData = async (
   receipts: QboSalesReceipt[],
   customerCache: Map<string, QboCustomer | null>,
   options: HandlerOptions,
+  forceResync: boolean,
   context: InvocationContext
 ): Promise<{
   existingQboDocIds: Set<string>;
@@ -1149,11 +1239,9 @@ const prepareSalesforceReceiptSyncData = async (
   potentialChargeMatchIndex: Map<string, string[]>;
 }> => {
   const allQboDocIds = collectQboDocIds(receipts);
-  const existingQboDocIds = await fetchExistingQboDocIdsWithLogging(
-    connection,
-    allQboDocIds,
-    context
-  );
+  const existingQboDocIds = forceResync
+    ? new Set<string>()
+    : await fetchExistingQboDocIdsWithLogging(connection, allQboDocIds, context);
   const uniqueSalesforceIds = collectUniqueSalesforceIds(customerCache);
   const sfRecordCache = await fetchSalesforceRecordCache(
     connection,
@@ -1162,14 +1250,16 @@ const prepareSalesforceReceiptSyncData = async (
     context
   );
   const generalGivingCampaignId = await fetchGeneralGivingCampaignId(connection, context);
-  const potentialChargeMatchIndex = await buildPotentialExistingChargeMatchIndex(
-    connection,
-    receipts,
-    customerCache,
-    sfRecordCache,
-    existingQboDocIds,
-    context
-  );
+  const potentialChargeMatchIndex = forceResync
+    ? new Map<string, string[]>()
+    : await buildPotentialExistingChargeMatchIndex(
+        connection,
+        receipts,
+        customerCache,
+        sfRecordCache,
+        existingQboDocIds,
+        context
+      );
 
   return {
     existingQboDocIds,
@@ -1190,6 +1280,19 @@ const createReceiptResult = (receipt: QboSalesReceipt): ReceiptResult => ({
   salesforceObjectType: null,
   status: 'skipped',
   message: null,
+});
+
+const createMissingReceiptResult = (receiptId: string): ReceiptResult => ({
+  receiptId,
+  docNumber: null,
+  txnDate: null,
+  totalAmt: null,
+  qboCustomerId: null,
+  qboCustomerName: null,
+  salesforceId: null,
+  salesforceObjectType: null,
+  status: 'skipped',
+  message: `QBO SalesReceipt ${receiptId} was not found.`,
 });
 
 const getReceiptLabel = (receiptId: string | null, docNumber: string | null): string =>
@@ -1222,18 +1325,26 @@ const markReceiptCreateError = (
   message: string
 ): void => markReceiptStatus(summary, result, 'error', 'errorCount', message);
 
-const markReceiptCreated = (summary: HandlerSummary, result: ReceiptResult, label: string): void =>
+const markReceiptSynced = (
+  summary: HandlerSummary,
+  result: ReceiptResult,
+  label: string,
+  forceResync: boolean
+): void =>
   markReceiptStatus(
     summary,
     result,
     'synced',
     'syncedCount',
-    `Created Salesforce Transaction__c for QBO SalesReceipt ${label}.`
+    forceResync
+      ? `Resynced Salesforce Transaction__c for QBO SalesReceipt ${label}.`
+      : `Created Salesforce Transaction__c for QBO SalesReceipt ${label}.`
   );
 
 const evaluateReceiptForSync = async (
   receipt: QboSalesReceipt,
   dryRun: boolean,
+  forceResync: boolean,
   customerCache: Map<string, QboCustomer | null>,
   sfRecordCache: Map<string, ResolvedSalesforceRecord | null>,
   existingQboDocIds: Set<string>,
@@ -1308,7 +1419,7 @@ const evaluateReceiptForSync = async (
 
   result.salesforceObjectType = resolvedRecord.objectType;
 
-  if (receiptId && existingQboDocIds.has(receiptId)) {
+  if (!forceResync && receiptId && existingQboDocIds.has(receiptId)) {
     markReceiptStatus(
       summary,
       result,
@@ -1319,22 +1430,24 @@ const evaluateReceiptForSync = async (
     return null;
   }
 
-  const potentialMatches = getPotentialExistingChargeMatches(
-    potentialChargeMatchIndex,
-    resolvedRecord,
-    receipt
-  );
-  if (potentialMatches.length > 0) {
-    markReceiptStatus(
-      summary,
-      result,
-      'skipped',
-      'skippedCount',
-      potentialMatches.length === 1
-        ? `Receipt ${getReceiptLabel(receiptId, result.docNumber)} may already exist as Salesforce transaction ${potentialMatches[0]} with the same amount and date; review before import.`
-        : `Receipt ${getReceiptLabel(receiptId, result.docNumber)} matches multiple Salesforce charge transactions by amount and date; review before import.`
+  if (!forceResync) {
+    const potentialMatches = getPotentialExistingChargeMatches(
+      potentialChargeMatchIndex,
+      resolvedRecord,
+      receipt
     );
-    return null;
+    if (potentialMatches.length > 0) {
+      markReceiptStatus(
+        summary,
+        result,
+        'skipped',
+        'skippedCount',
+        potentialMatches.length === 1
+          ? `Receipt ${getReceiptLabel(receiptId, result.docNumber)} may already exist as Salesforce transaction ${potentialMatches[0]} with the same amount and date; review before import.`
+          : `Receipt ${getReceiptLabel(receiptId, result.docNumber)} matches multiple Salesforce charge transactions by amount and date; review before import.`
+      );
+      return null;
+    }
   }
 
   const associationResolution = await resolveReceiptAssociationsForReceipt(
@@ -1361,8 +1474,8 @@ const evaluateReceiptForSync = async (
     'planned',
     'plannedCount',
     dryRun
-      ? `Would create a Salesforce Transaction__c from QBO SalesReceipt ${label}.`
-      : `Will create a Salesforce Transaction__c from QBO SalesReceipt ${label}.`
+      ? `Would ${forceResync ? 'resync' : 'create'} a Salesforce Transaction__c from QBO SalesReceipt ${label}.`
+      : `Will ${forceResync ? 'resync' : 'create'} a Salesforce Transaction__c from QBO SalesReceipt ${label}.`
   );
 
   return {
@@ -1380,6 +1493,7 @@ const planReceiptCreates = async (
   connection: SalesforceConnection,
   receipts: QboSalesReceipt[],
   dryRun: boolean,
+  forceResync: boolean,
   customerCache: Map<string, QboCustomer | null>,
   sfRecordCache: Map<string, ResolvedSalesforceRecord | null>,
   existingQboDocIds: Set<string>,
@@ -1394,6 +1508,7 @@ const planReceiptCreates = async (
     const plannedCreate = await evaluateReceiptForSync(
       receipt,
       dryRun,
+      forceResync,
       customerCache,
       sfRecordCache,
       existingQboDocIds,
@@ -1416,6 +1531,7 @@ const syncPlannedReceiptCreate = async (
   planned: PlannedCreate,
   salesforceSvc: ReturnType<typeof createSalesforceSvc>,
   summary: HandlerSummary,
+  forceResync: boolean,
   context: InvocationContext
 ): Promise<void> => {
   const { receipt, resolvedRecord, customer, campaignId, fund, designation, resultIndex } = planned;
@@ -1445,7 +1561,7 @@ const syncPlannedReceiptCreate = async (
 
     await salesforceSvc.upsertTransactionByExternalId(transactionDto, 'qbo_doc_id__c');
 
-    markReceiptCreated(summary, result, label);
+    markReceiptSynced(summary, result, label, forceResync);
 
     context.log('[qboReceiptsSync] Synced receipt to Salesforce', {
       receiptId,
@@ -1468,10 +1584,11 @@ const executePlannedCreates = async (
   plannedCreates: PlannedCreate[],
   salesforceSvc: ReturnType<typeof createSalesforceSvc>,
   summary: HandlerSummary,
+  forceResync: boolean,
   context: InvocationContext
 ): Promise<void> => {
   await mapWithConcurrency(plannedCreates, SALESFORCE_CREATE_CONCURRENCY, async (planned) => {
-    await syncPlannedReceiptCreate(planned, salesforceSvc, summary, context);
+    await syncPlannedReceiptCreate(planned, salesforceSvc, summary, forceResync, context);
   });
 };
 
@@ -1498,6 +1615,7 @@ const buildHandlerResponseBody = (
   endDate: options.endDate,
   startPosition: options.startPosition,
   maxResults: options.maxResults,
+  qboIds: options.qboIds,
   summary,
 });
 
@@ -1533,19 +1651,28 @@ const runReceiptSyncWorkflow = async (
 ): Promise<void> => {
   const { dependencies, qboDebugLogger, qboQueryWithDebug, connection, salesforceSvc } =
     await initializeReceiptSyncRuntime(options, context);
-  const { receipts, customerCache } = await fetchReceiptsAndCustomerCache(
+  const { receipts, customerCache, missingQboIds } = await fetchReceiptsAndCustomerCache(
     dependencies,
     qboQueryWithDebug,
     options,
     qboDebugLogger,
     context
   );
+  const forceResync = options.qboIds.length > 0;
   const { existingQboDocIds, sfRecordCache, generalGivingCampaignId, potentialChargeMatchIndex } =
-    await prepareSalesforceReceiptSyncData(connection, receipts, customerCache, options, context);
+    await prepareSalesforceReceiptSyncData(
+      connection,
+      receipts,
+      customerCache,
+      options,
+      forceResync,
+      context
+    );
   const plannedCreates = await planReceiptCreates(
     connection,
     receipts,
     options.dryRun,
+    forceResync,
     customerCache,
     sfRecordCache,
     existingQboDocIds,
@@ -1555,7 +1682,13 @@ const runReceiptSyncWorkflow = async (
   );
 
   if (!options.dryRun) {
-    await executePlannedCreates(plannedCreates, salesforceSvc, summary, context);
+    await executePlannedCreates(plannedCreates, salesforceSvc, summary, forceResync, context);
+  }
+
+  for (const missingQboId of missingQboIds) {
+    summary.processedCount += 1;
+    summary.skippedCount += 1;
+    summary.results.push(createMissingReceiptResult(missingQboId));
   }
 };
 
