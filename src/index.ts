@@ -1779,6 +1779,7 @@ const DailyReconciliationQuerySchema = z
     mode: ModeQuerySchema.optional(),
     systems: z.string().optional(),
     limit: PositiveIntLikeSchema.optional(),
+    syncIds: z.string().optional(),
   })
   .passthrough();
 
@@ -1810,6 +1811,7 @@ const reconCleanResponse = {
   counts: reconBaseCounts,
   discrepancies: reconEmptyDiscrepancies,
   summary: { totalDiscrepancies: 0, categories: {} },
+  syncSelection: { requestedIds: [], matchedIds: [], unmatchedIds: [] },
   errors: [],
   triggeredAt: '2026-05-29T09:00:00.000Z',
   triggeredBy: 'http',
@@ -1834,6 +1836,17 @@ const reconStripeMissingSfResponse = {
         stripeId: 'ch_3PfABC',
         amount: 250.0,
         date: '2026-05-28',
+        relatedIds: ['ch_3PfABC', 'pi_3PfPI', 'bt_3PfBT'],
+        details: {
+          sourceSystem: 'stripe',
+          missingIn: 'salesforce',
+          recordType: 'charge',
+          paymentIntentId: 'pi_3PfPI',
+          balanceTransactionId: 'bt_3PfBT',
+          currency: 'usd',
+          status: 'succeeded',
+          livemode: false,
+        },
       },
     ],
   },
@@ -2015,6 +2028,10 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
     '`systems=salesforce,qbo` to skip Stripe. Useful when one system is slow or rate-limited.\n\n' +
     '5. **Limit record volume** — add `limit=50` to cap records per entity. Good for fast ' +
     'spot-checks during high-traffic days.\n\n' +
+    '6. **Targeted sync** — when `dryRun=false`, add `syncIds=id1,id2,...` to repair only selected missing ' +
+    'records. IDs can be Salesforce IDs, Stripe IDs (`ch_`, `pi_`, `re_`, `po_`, `bt_`), or QBO doc IDs. ' +
+    'The response includes `syncSelection.matchedIds` and `syncSelection.unmatchedIds` to confirm exactly ' +
+    'what was targeted.\n\n' +
     '**What the discrepancy categories mean**\n\n' +
     '- `stripeMissingSalesforce` — Stripe charges/refunds/payouts with no `Transaction__c` row. ' +
     'Fix with `/api/stripe/true-up`.\n' +

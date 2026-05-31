@@ -54,6 +54,8 @@ interface ReconciliationOptions {
   dryRun: boolean;
   systems: ('stripe' | 'salesforce' | 'qbo')[];
   limit: number | null;
+  /** Optional explicit subset of discrepancy IDs to repair when dryRun=false */
+  syncIds: string[];
 }
 
 interface SystemCounts {
@@ -70,6 +72,10 @@ interface DiscrepancyItem {
   stripeId?: string | null;
   amount?: number | null;
   date?: string | null;
+  /** Other IDs that identify the same logical transaction across systems */
+  relatedIds?: string[];
+  /** Extra context for operators performing manual reconciliation */
+  details?: Record<string, unknown>;
 }
 
 interface RepairSummary {
@@ -90,6 +96,12 @@ interface RepairSummary {
     qboType: string;
     stripeId: string | null;
   }>;
+  /** Sync IDs supplied by the operator for targeted repair runs */
+  syncIdsRequested: string[];
+  /** IDs from syncIds that matched at least one discrepancy item */
+  matchedSyncIds: string[];
+  /** IDs from syncIds that did not match any discrepancy item in this run */
+  unmatchedSyncIds: string[];
   errors: string[];
 }
 
@@ -131,6 +143,11 @@ interface ReconciliationReport {
   summary: {
     totalDiscrepancies: number;
     categories: Record<string, number>;
+  };
+  syncSelection: {
+    requestedIds: string[];
+    matchedIds: string[];
+    unmatchedIds: string[];
   };
   /** Present only when dryRun=false; null otherwise */
   repairs: RepairSummary | null;
@@ -199,17 +216,71 @@ const isValidDateString = (value: string): boolean =>
 // Parse request options
 // ---------------------------------------------------------------------------
 
+type DailyReconciliationRequestBody = {
+  syncIds?: unknown;
+  ids?: unknown;
+  transactionIds?: unknown;
+  startDate?: unknown;
+  endDate?: unknown;
+  date?: unknown;
+  dryRun?: unknown;
+  systems?: unknown;
+  mode?: unknown;
+  limit?: unknown;
+};
+
+const normalizeIdentifier = (value: string): string => value.trim().toLowerCase();
+
+const parseSyncIds = (...inputs: Array<string | string[] | null | undefined>): string[] => {
+  const values = inputs
+    .flatMap((value) => {
+      if (Array.isArray(value)) {
+        return value;
+      }
+      if (typeof value === 'string') {
+        return value
+          .split(',')
+          .map((part) => part.trim())
+          .filter(Boolean);
+      }
+      return [];
+    })
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+  return [...new Set(values)];
+};
+
+const safeBodyString = (value: unknown): string | null =>
+  typeof value === 'string' ? value : null;
+
+const safeBodyStringList = (value: unknown): string[] | null => {
+  if (!Array.isArray(value)) return null;
+  const strings = value.filter((entry): entry is string => typeof entry === 'string');
+  return strings.length > 0 ? strings : null;
+};
+
 const parseOptions = (
   request: HttpRequest | null,
-  timerDate?: string
+  timerDate?: string,
+  requestBody?: DailyReconciliationRequestBody | null
 ): ReconciliationOptions | { error: string } => {
   // Determine date range
   let startDate: string;
   let endDate: string;
 
   if (request) {
-    const rawDate = request.query.get('date') ?? request.query.get('startDate') ?? null;
-    const rawEnd = request.query.get('endDate') ?? null;
+    const bodyDate = safeBodyString(requestBody?.date);
+    const bodyStartDate = safeBodyString(requestBody?.startDate);
+    const bodyEndDate = safeBodyString(requestBody?.endDate);
+
+    const rawDate =
+      request.query.get('date') ??
+      request.query.get('startDate') ??
+      bodyDate ??
+      bodyStartDate ??
+      null;
+    const rawEnd = request.query.get('endDate') ?? bodyEndDate ?? null;
 
     if (rawDate) {
       if (!isValidDateString(rawDate)) {
@@ -233,11 +304,16 @@ const parseOptions = (
 
   // Parse dryRun (HTTP: query param; timer: defaults to false so it actually fixes things)
   const dryRun = request
-    ? readBooleanQuery(request, 'dryRun', true)
+    ? readBooleanQuery(
+        request,
+        'dryRun',
+        typeof requestBody?.dryRun === 'boolean' ? requestBody.dryRun : true
+      )
     : parseBoolean(process.env.DAILY_RECONCILIATION_DRY_RUN, false);
 
   // Parse mode
-  const rawMode = request?.query.get('mode') ?? null;
+  const bodyMode = safeBodyString(requestBody?.mode);
+  const rawMode = request?.query.get('mode') ?? bodyMode ?? null;
   const liveMode =
     rawMode === 'live'
       ? true
@@ -246,7 +322,8 @@ const parseOptions = (
         : process.env.NODE_ENV !== 'test' && process.env.STRIPE_LIVEMODE === 'true';
 
   // Systems to check
-  const rawSystems = request?.query.get('systems') ?? null;
+  const bodySystems = safeBodyString(requestBody?.systems);
+  const rawSystems = request?.query.get('systems') ?? bodySystems ?? null;
   const validSystems = new Set(['stripe', 'salesforce', 'qbo']);
   const systems: ('stripe' | 'salesforce' | 'qbo')[] = rawSystems
     ? (rawSystems
@@ -256,11 +333,35 @@ const parseOptions = (
     : ['stripe', 'salesforce', 'qbo'];
 
   // Max records per system (safety guard)
-  const rawLimit = request?.query.get('limit') ?? null;
+  const bodyLimit =
+    typeof requestBody?.limit === 'number'
+      ? String(requestBody.limit)
+      : safeBodyString(requestBody?.limit);
+  const rawLimit = request?.query.get('limit') ?? bodyLimit ?? null;
   const limit = rawLimit && /^\d+$/.test(rawLimit) ? parseInt(rawLimit, 10) : null;
 
-  return { startDate, endDate, liveMode, dryRun, systems, limit };
+  const syncIds = parseSyncIds(
+    request?.query.get('syncIds') ?? null,
+    safeBodyString(requestBody?.syncIds),
+    safeBodyStringList(requestBody?.syncIds),
+    safeBodyString(requestBody?.ids),
+    safeBodyStringList(requestBody?.ids),
+    safeBodyString(requestBody?.transactionIds),
+    safeBodyStringList(requestBody?.transactionIds)
+  );
+
+  return { startDate, endDate, liveMode, dryRun, systems, limit, syncIds };
 };
+
+const getDiscrepancyIdentifiers = (item: DiscrepancyItem): string[] => {
+  const ids = [item.id, item.stripeId ?? null, ...(item.relatedIds ?? [])]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim());
+  return [...new Set(ids)];
+};
+
+const matchesSyncSelection = (item: DiscrepancyItem, selectedIds: Set<string>): boolean =>
+  getDiscrepancyIdentifiers(item).some((id) => selectedIds.has(normalizeIdentifier(id)));
 
 // ---------------------------------------------------------------------------
 // Stripe client factory (mirrors stripeTrueUp pattern)
@@ -495,6 +596,19 @@ const findChargesMissingSalesforce = (
         stripeId: charge.id,
         amount: charge.amount != null ? charge.amount / 100 : null,
         date: charge.created ? new Date(charge.created * 1000).toISOString().slice(0, 10) : null,
+        relatedIds: [charge.id, piId, btId].filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0
+        ),
+        details: {
+          sourceSystem: 'stripe',
+          missingIn: 'salesforce',
+          recordType: 'charge',
+          paymentIntentId: piId,
+          balanceTransactionId: btId,
+          currency: charge.currency ?? null,
+          status: charge.status,
+          livemode: charge.livemode,
+        },
       });
     }
   }
@@ -518,6 +632,17 @@ const findRefundsMissingSalesforce = (
       stripeId: r.id,
       amount: r.amount != null ? r.amount / 100 : null,
       date: r.created ? new Date(r.created * 1000).toISOString().slice(0, 10) : null,
+      relatedIds: [r.id, typeof r.charge === 'string' ? r.charge : null].filter(
+        (value): value is string => typeof value === 'string' && value.trim().length > 0
+      ),
+      details: {
+        sourceSystem: 'stripe',
+        missingIn: 'salesforce',
+        recordType: 'refund',
+        chargeId: typeof r.charge === 'string' ? r.charge : null,
+        currency: r.currency ?? null,
+        status: r.status ?? null,
+      },
     }));
 
 /**
@@ -541,6 +666,14 @@ const findPayoutsMissingSalesforce = (
       stripeId: p.id,
       amount: p.amount != null ? p.amount / 100 : null,
       date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString().slice(0, 10) : null,
+      relatedIds: [p.id],
+      details: {
+        sourceSystem: 'stripe',
+        missingIn: 'salesforce',
+        recordType: 'payout',
+        currency: p.currency ?? null,
+        status: p.status,
+      },
     }));
 
 // ── Stripe → QBO ─────────────────────────────────────────────────────────
@@ -579,6 +712,18 @@ const findChargesMissingQbo = (
       stripeId: c.id,
       amount: c.amount != null ? c.amount / 100 : null,
       date: c.created ? new Date(c.created * 1000).toISOString().slice(0, 10) : null,
+      relatedIds: [
+        c.id,
+        typeof c.payment_intent === 'string' ? c.payment_intent : (c.payment_intent as any)?.id,
+      ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+      details: {
+        sourceSystem: 'stripe',
+        missingIn: 'qbo',
+        recordType: 'charge',
+        expectedQboTypes: ['SalesReceipt', 'JournalEntry'],
+        currency: c.currency ?? null,
+        status: c.status,
+      },
     }));
 
 /**
@@ -599,6 +744,17 @@ const findRefundsMissingQbo = (
       stripeId: r.id,
       amount: r.amount != null ? r.amount / 100 : null,
       date: r.created ? new Date(r.created * 1000).toISOString().slice(0, 10) : null,
+      relatedIds: [r.id, typeof r.charge === 'string' ? r.charge : null].filter(
+        (value): value is string => typeof value === 'string' && value.trim().length > 0
+      ),
+      details: {
+        sourceSystem: 'stripe',
+        missingIn: 'qbo',
+        recordType: 'refund',
+        expectedQboTypes: ['JournalEntry'],
+        currency: r.currency ?? null,
+        status: r.status ?? null,
+      },
     }));
 
 /**
@@ -619,6 +775,15 @@ const findPayoutsMissingQbo = (
       stripeId: p.id,
       amount: p.amount != null ? p.amount / 100 : null,
       date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString().slice(0, 10) : null,
+      relatedIds: [p.id],
+      details: {
+        sourceSystem: 'stripe',
+        missingIn: 'qbo',
+        recordType: 'payout',
+        expectedQboTypes: ['Transfer', 'Deposit'],
+        currency: p.currency ?? null,
+        status: p.status,
+      },
     }));
 
 // ── Salesforce internal ───────────────────────────────────────────────────
@@ -666,6 +831,21 @@ const findSalesforceMissingQbo = (
       stripeId,
       amount: row.Amount_Gross__c ?? null,
       date: row.Received_At__c ? row.Received_At__c.slice(0, 10) : null,
+      relatedIds: [
+        row.Id,
+        stripeId,
+        row.Stripe_Balance_Transaction_Id__c ?? null,
+        row.Stripe_Dispute_Id__c ?? null,
+        row.QBO_Doc_Id__c ?? null,
+      ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+      details: {
+        sourceSystem: 'salesforce',
+        missingIn: 'qbo',
+        postedToQbo: row.Posted_to_QBO__c ?? null,
+        qboDocId: row.QBO_Doc_Id__c ?? null,
+        qboDocType: row.QBO_Doc_Type__c ?? null,
+        transactionType: row.transaction_type__c ?? null,
+      },
     });
   }
   return items;
@@ -766,6 +946,17 @@ const findSalesforceMissingStripe = (sfRows: SfTransactionRow[]): DiscrepancyIte
       stripeId: null,
       amount: row.Amount_Gross__c ?? null,
       date: row.Received_At__c ? row.Received_At__c.slice(0, 10) : null,
+      relatedIds: [row.Id, row.QBO_Doc_Id__c ?? null].filter(
+        (value): value is string => typeof value === 'string' && value.trim().length > 0
+      ),
+      details: {
+        sourceSystem: 'salesforce',
+        missingIn: 'stripe',
+        postedToQbo: row.Posted_to_QBO__c ?? null,
+        qboDocId: row.QBO_Doc_Id__c ?? null,
+        qboDocType: row.QBO_Doc_Type__c ?? null,
+        transactionType: row.transaction_type__c ?? null,
+      },
     }));
 
 // ── QBO → Salesforce ─────────────────────────────────────────────────────
@@ -797,6 +988,15 @@ const findQboMissingSalesforce = (
         stripeId: missingIds[0],
         amount: doc.TotalAmt ?? null,
         date: doc.TxnDate ?? null,
+        relatedIds: [String(doc.Id ?? ''), ...missingIds],
+        details: {
+          sourceSystem: 'qbo',
+          missingIn: 'salesforce',
+          qboEntity: entity,
+          qboDocNumber: doc.DocNumber ?? null,
+          qboPrivateNote: doc.PrivateNote ?? null,
+          missingStripeIds: missingIds,
+        },
       });
     }
   }
@@ -1515,6 +1715,7 @@ const repairCrossSystemLinks = async (
   stripePayouts: Stripe.Payout[],
   stripeClient: Stripe,
   salesforceSvc: ReturnType<typeof createSalesforceSvc>,
+  selectedSyncIds: Set<string>,
   context: InvocationContext
 ): Promise<{ linked: number; errors: string[] }> => {
   // ── Salesforce lookup maps ────────────────────────────────────────────────
@@ -1572,6 +1773,24 @@ const repairCrossSystemLinks = async (
 
       const sfId = sfRow.Id;
       const existingQboDocId = sfRow.QBO_Doc_Id__c?.trim() ?? '';
+      if (
+        selectedSyncIds.size > 0 &&
+        ![
+          stripeId,
+          sfId,
+          qboDocId,
+          existingQboDocId,
+          sfRow.Stripe_Charge_Id__c ?? null,
+          sfRow.Stripe_Payment_Intent_Id__c ?? null,
+          sfRow.Stripe_Balance_Transaction_Id__c ?? null,
+          sfRow.Stripe_Refund_Id__c ?? null,
+          sfRow.Stripe_Payout_Id__c ?? null,
+        ]
+          .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+          .some((value) => selectedSyncIds.has(normalizeIdentifier(value)))
+      ) {
+        continue;
+      }
 
       try {
         // 1. Update Salesforce: set QBO_Doc_Id__c + Posted_to_QBO__c
@@ -1687,7 +1906,7 @@ export const runReconciliation = async (
   triggeredBy: 'http' | 'timer',
   context: InvocationContext
 ): Promise<ReconciliationReport> => {
-  const { startDate, endDate, liveMode, dryRun, systems, limit } = options;
+  const { startDate, endDate, liveMode, dryRun, systems, limit, syncIds } = options;
   const errors: string[] = [];
 
   const counts: SystemCounts = {
@@ -1987,6 +2206,30 @@ export const runReconciliation = async (
     );
   }
 
+  const selectedSyncIds = new Set(syncIds.map((id) => normalizeIdentifier(id)));
+  const targetedDiscrepancies = [
+    ...discrepancies.stripeMissingSalesforce,
+    ...discrepancies.stripeMissingQbo,
+    ...discrepancies.salesforceMissingQbo,
+    ...discrepancies.qboMissingSalesforce,
+  ];
+  const matchedSyncIds = syncIds.filter((requestedId) => {
+    const normalizedRequested = normalizeIdentifier(requestedId);
+    return targetedDiscrepancies.some((item) =>
+      getDiscrepancyIdentifiers(item).some(
+        (candidateId) => normalizeIdentifier(candidateId) === normalizedRequested
+      )
+    );
+  });
+  const unmatchedSyncIds = syncIds.filter((requestedId) => !matchedSyncIds.includes(requestedId));
+
+  const filterRepairItems = (items: DiscrepancyItem[]): DiscrepancyItem[] => {
+    if (selectedSyncIds.size === 0) {
+      return items;
+    }
+    return items.filter((item) => matchesSyncSelection(item, selectedSyncIds));
+  };
+
   // -------------------------------------------------------------------------
   // 6. Repair phase (non-dry-run only)
   // -------------------------------------------------------------------------
@@ -2020,8 +2263,8 @@ export const runReconciliation = async (
     const sfRowById = new Map(sfRows.map((r) => [r.Id, r]));
     const staleClearedForReposting: DiscrepancyItem[] = [];
     if (systems.includes('salesforce') && systems.includes('qbo')) {
-      const staleItems = discrepancies.salesforceMissingQbo.filter(
-        (i) => i.type === 'sf_qbo_doc_deleted'
+      const staleItems = filterRepairItems(
+        discrepancies.salesforceMissingQbo.filter((i) => i.type === 'sf_qbo_doc_deleted')
       );
       for (const item of staleItems) {
         const sfRow = sfRowById.get(item.id);
@@ -2102,10 +2345,10 @@ export const runReconciliation = async (
     // When a `limit` is specified the repair is capped at that count so a caller
     // can safely test with limit=1 without accidentally bulk-posting everything.
     if (systems.includes('salesforce') && systems.includes('qbo')) {
-      const allSfMissingQboItems = [
+      const allSfMissingQboItems = filterRepairItems([
         ...discrepancies.salesforceMissingQbo.filter((i) => i.type === 'sf_missing_qbo'),
         ...staleClearedForReposting,
-      ];
+      ]);
       const sfMissingQboItems =
         limit && limit > 0 ? allSfMissingQboItems.slice(0, limit) : allSfMissingQboItems;
       if (sfMissingQboItems.length > 0) {
@@ -2150,9 +2393,9 @@ export const runReconciliation = async (
       const allChargeItems = discrepancies.stripeMissingSalesforce.filter(
         (i) => i.type === 'stripe_only_charge'
       );
-      const chargeItems = limit && limit > 0 ? allChargeItems.slice(0, limit) : allChargeItems;
+      const filteredChargeItems = filterRepairItems(allChargeItems);
       const repairResult = await repairMissingCharges(
-        chargeItems,
+        limit && limit > 0 ? filteredChargeItems.slice(0, limit) : filteredChargeItems,
         stripeCharges,
         salesforceSvc,
         context
@@ -2177,6 +2420,7 @@ export const runReconciliation = async (
         stripePayouts,
         stripeClient,
         salesforceSvc,
+        selectedSyncIds,
         context
       );
       linkedRecords += linkResult.linked;
@@ -2191,6 +2435,9 @@ export const runReconciliation = async (
       sfPostedToQbo,
       classRefPatched,
       sfPostedToQboItems,
+      syncIdsRequested: syncIds,
+      matchedSyncIds,
+      unmatchedSyncIds,
       errors: repairErrors,
     };
 
@@ -2224,6 +2471,11 @@ export const runReconciliation = async (
     counts,
     discrepancies,
     summary: { totalDiscrepancies, categories },
+    syncSelection: {
+      requestedIds: syncIds,
+      matchedIds: matchedSyncIds,
+      unmatchedIds: unmatchedSyncIds,
+    },
     repairs,
     errors,
     triggeredAt: new Date().toISOString(),
@@ -2250,7 +2502,16 @@ const dailyReconciliationHttp = async (
   request: HttpRequest,
   context: InvocationContext
 ): Promise<{ status: number; headers: Record<string, string>; jsonBody: unknown }> => {
-  const parsed = parseOptions(request, undefined);
+  let requestBody: DailyReconciliationRequestBody | null = null;
+  if (request.method === 'POST') {
+    try {
+      requestBody = (await request.json()) as DailyReconciliationRequestBody;
+    } catch {
+      requestBody = null;
+    }
+  }
+
+  const parsed = parseOptions(request, undefined, requestBody);
 
   if ('error' in parsed) {
     return {
