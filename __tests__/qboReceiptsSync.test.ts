@@ -499,6 +499,206 @@ describe('qboReceiptsSync', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
+  it('plans Salesforce-to-QBO SalesReceipt patches when resyncFromSalesforce=true', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return {
+          records: [
+            {
+              Id: 'a1aTXN1',
+              QBO_Doc_Id__c: '910',
+              Memo__c: 'Check memo from Salesforce',
+              Reference_Number__c: 'CHK-910',
+              Transaction_Type__c: 'check',
+            },
+          ],
+        };
+      }
+      return { records: [] };
+    });
+
+    const patchQboSalesReceiptFields = vi.fn(async () => true);
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes("FROM SalesReceipt WHERE Id IN ('910')")) {
+          return [makeReceipt('910', '100')];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async () => {
+        throw new Error('should not be called in Salesforce resync mode');
+      }),
+      patchQboSalesReceiptFields,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=true&qboIds=910&resyncFromSalesforce=true',
+          query: new URLSearchParams({
+            dryRun: 'true',
+            qboIds: '910',
+            resyncFromSalesforce: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.resyncFromSalesforce).toBe(true);
+    expect(body.summary.processedCount).toBe(1);
+    expect(body.summary.plannedCount).toBe(1);
+    expect(body.summary.syncedCount).toBe(0);
+    expect(body.summary.results[0].status).toBe('planned');
+    expect(body.summary.results[0].salesforceId).toBe('a1aTXN1');
+    expect(patchQboSalesReceiptFields).not.toHaveBeenCalled();
+  });
+
+  it('patches existing QBO SalesReceipts from Salesforce when resyncFromSalesforce=true and dryRun=false', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return {
+          records: [
+            {
+              Id: 'a1aTXN2',
+              QBO_Doc_Id__c: '911',
+              Memo__c: 'Updated memo from Salesforce',
+              Reference_Number__c: 'CHK-911',
+              Transaction_Type__c: 'check',
+            },
+          ],
+        };
+      }
+      return { records: [] };
+    });
+
+    const patchQboSalesReceiptFields = vi.fn(async () => true);
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes("FROM SalesReceipt WHERE Id IN ('911')")) {
+          return [makeReceipt('911', '100')];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async () => {
+        throw new Error('should not be called in Salesforce resync mode');
+      }),
+      patchQboSalesReceiptFields,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false&qboIds=911&resyncFromSalesforce=true',
+          query: new URLSearchParams({
+            dryRun: 'false',
+            qboIds: '911',
+            resyncFromSalesforce: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.processedCount).toBe(1);
+    expect(body.summary.plannedCount).toBe(1);
+    expect(body.summary.syncedCount).toBe(1);
+    expect(body.summary.results[0].status).toBe('synced');
+    expect(patchQboSalesReceiptFields).toHaveBeenCalledOnce();
+    const [docId, patchFields] = patchQboSalesReceiptFields.mock.calls[0] as [
+      string,
+      { privateNote?: string; paymentMethodName?: string; paymentReferenceNumber?: string },
+    ];
+    expect(docId).toBe('911');
+    expect(patchFields.privateNote).toBe('Updated memo from Salesforce');
+    expect(patchFields.paymentMethodName).toBe('Check');
+    expect(patchFields.paymentReferenceNumber).toBe('CHK-911');
+  });
+
+  it('uses lower-case Salesforce transaction fields and Description__c fallback for memo patches', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return {
+          records: [
+            {
+              Id: 'a1aTXN3',
+              QBO_Doc_Id__c: '912',
+              Memo__c: '   ',
+              Description__c: 'Memo from description fallback',
+              transaction_type__c: 'check',
+              Reference_Number__c: 'CHK-912',
+            },
+          ],
+        };
+      }
+      return { records: [] };
+    });
+
+    const patchQboSalesReceiptFields = vi.fn(async () => true);
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes("FROM SalesReceipt WHERE Id IN ('912')")) {
+          return [makeReceipt('912', '100')];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async () => {
+        throw new Error('should not be called in Salesforce resync mode');
+      }),
+      patchQboSalesReceiptFields,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false&qboIds=912&resyncFromSalesforce=true',
+          query: new URLSearchParams({
+            dryRun: 'false',
+            qboIds: '912',
+            resyncFromSalesforce: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    expect(body.summary.processedCount).toBe(1);
+    expect(body.summary.syncedCount).toBe(1);
+    expect(body.summary.results[0].status).toBe('synced');
+    expect(patchQboSalesReceiptFields).toHaveBeenCalledOnce();
+
+    const [docId, patchFields] = patchQboSalesReceiptFields.mock.calls[0] as [
+      string,
+      { privateNote?: string; paymentMethodName?: string; paymentReferenceNumber?: string },
+    ];
+
+    expect(docId).toBe('912');
+    expect(patchFields.privateNote).toBe('Memo from description fallback');
+    expect(patchFields.paymentMethodName).toBe('Check');
+    expect(patchFields.paymentReferenceNumber).toBe('CHK-912');
+  });
+
   it('marks receipt as skipped when it has no customer reference', async () => {
     const connection = createConnection(async () => ({ records: [] }));
 

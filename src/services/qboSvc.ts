@@ -4363,7 +4363,27 @@ export const patchQboSalesReceiptFields = async (
 
   const paymentMethodName = truncate(fields.paymentMethodName ?? null, 100);
   if (paymentMethodName !== null) {
-    const paymentMethodRef = await queryReference('PaymentMethod', paymentMethodName, options);
+    let paymentMethodRef = await queryReference('PaymentMethod', paymentMethodName, options);
+    if (!paymentMethodRef) {
+      try {
+        paymentMethodRef = await ensureReference(
+          'PaymentMethod',
+          paymentMethodName,
+          {
+            Name: paymentMethodName,
+            Type: 'NON_CREDIT_CARD',
+          },
+          options
+        );
+      } catch (error) {
+        logger.warn('[QBO] Failed to create payment method during SalesReceipt patch', {
+          docId: trimmedId,
+          paymentMethodName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     if (paymentMethodRef) {
       payload.PaymentMethodRef = {
         value: paymentMethodRef.value,

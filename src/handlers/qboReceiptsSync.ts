@@ -367,9 +367,15 @@ type ReceiptSelection = {
 type SalesforceTransactionForPatch = {
   Id?: string;
   QBO_Doc_Id__c?: string | null;
+  memo__c?: string | null;
   Memo__c?: string | null;
+  description__c?: string | null;
+  Description__c?: string | null;
   Reference_Number__c?: string | null;
+  transaction_type__c?: string | null;
   Transaction_Type__c?: string | null;
+  payment_method__c?: string | null;
+  Payment_Method__c?: string | null;
 };
 
 type SalesReceiptPatchFields = {
@@ -392,7 +398,8 @@ const fetchSalesforceTransactionsForQboDocIds = async (
     const inClause = chunk.map((id) => `'${escapeSoqlLiteral(id)}'`).join(', ');
     const records = toRecords(
       await connection.query<SalesforceTransactionForPatch>(
-        'SELECT Id, QBO_Doc_Id__c, Memo__c, Reference_Number__c, Transaction_Type__c ' +
+        'SELECT Id, QBO_Doc_Id__c, Memo__c, Description__c, Reference_Number__c, ' +
+          'transaction_type__c, payment_method__c ' +
           `FROM Transaction__c WHERE QBO_Doc_Id__c IN (${inClause}) ` +
           'ORDER BY LastModifiedDate DESC'
       )
@@ -411,14 +418,32 @@ const fetchSalesforceTransactionsForQboDocIds = async (
 };
 
 const getSalesforceTransactionType = (transaction: SalesforceTransactionForPatch): string | null =>
-  toTrimmed(transaction.Transaction_Type__c)?.toLowerCase() ?? null;
+  (
+    toTrimmed(transaction.transaction_type__c) ?? toTrimmed(transaction.Transaction_Type__c)
+  )?.toLowerCase() ?? null;
+
+const getSalesforcePaymentMethod = (transaction: SalesforceTransactionForPatch): string | null =>
+  (
+    toTrimmed(transaction.payment_method__c) ?? toTrimmed(transaction.Payment_Method__c)
+  )?.toLowerCase() ?? null;
+
+const getSalesforceMemo = (transaction: SalesforceTransactionForPatch): string | null =>
+  toTrimmed(transaction.Memo__c) ??
+  toTrimmed(transaction.memo__c) ??
+  toTrimmed(transaction.Description__c) ??
+  toTrimmed(transaction.description__c);
 
 const buildSalesReceiptPatchFields = (
   transaction: SalesforceTransactionForPatch
 ): SalesReceiptPatchFields => {
-  const privateNote = toTrimmed(transaction.Memo__c);
+  const privateNote = getSalesforceMemo(transaction);
   const paymentReferenceNumber = toTrimmed(transaction.Reference_Number__c);
-  const paymentMethodName = getSalesforceTransactionType(transaction) === 'check' ? 'Check' : null;
+  const transactionType = getSalesforceTransactionType(transaction);
+  const paymentMethod = getSalesforcePaymentMethod(transaction);
+  const paymentMethodName =
+    transactionType === 'check' || paymentMethod === 'check' || paymentMethod === 'cheque'
+      ? 'Check'
+      : null;
 
   return {
     privateNote,
