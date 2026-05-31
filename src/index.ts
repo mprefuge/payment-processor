@@ -1958,6 +1958,34 @@ const reconMultiDiscrepancyResponse = {
   },
 };
 
+// 11. Dry-run scoped to provided syncIds only
+const reconTargetedDryRunResponse = {
+  ...reconCleanResponse,
+  discrepancies: {
+    ...reconEmptyDiscrepancies,
+    salesforceMissingQbo: [
+      {
+        system: 'salesforce',
+        type: 'sf_missing_qbo',
+        id: 'a1aUQ00000DDDDDYAA',
+        description: 'Salesforce Transaction__c has no QuickBooks document link',
+        stripeId: 'ch_3PfOLD',
+        amount: 100.0,
+        date: '2026-05-27',
+      },
+    ],
+  },
+  summary: {
+    totalDiscrepancies: 1,
+    categories: { salesforceMissingQbo: 1 },
+  },
+  syncSelection: {
+    requestedIds: ['a1aUQ00000DDDDDYAA', 'ch_not_found'],
+    matchedIds: ['a1aUQ00000DDDDDYAA'],
+    unmatchedIds: ['ch_not_found'],
+  },
+};
+
 // 7. One system failed to respond (partial error, returns HTTP 207)
 const reconPartialErrorResponse = {
   ...reconCleanResponse,
@@ -2028,10 +2056,11 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
     '`systems=salesforce,qbo` to skip Stripe. Useful when one system is slow or rate-limited.\n\n' +
     '5. **Limit record volume** — add `limit=50` to cap records per entity. Good for fast ' +
     'spot-checks during high-traffic days.\n\n' +
-    '6. **Targeted sync** — when `dryRun=false`, add `syncIds=id1,id2,...` to repair only selected missing ' +
-    'records. IDs can be Salesforce IDs, Stripe IDs (`ch_`, `pi_`, `re_`, `po_`, `bt_`), or QBO doc IDs. ' +
-    'The response includes `syncSelection.matchedIds` and `syncSelection.unmatchedIds` to confirm exactly ' +
-    'what was targeted.\n\n' +
+    '6. **Targeted sync preview** — add `syncIds=id1,id2,...` with `dryRun=true` to return only sync-targeted ' +
+    'discrepancies for the specified IDs, so you can verify the exact update list before writing changes. ' +
+    'Then run the same request with `dryRun=false` to apply only that targeted set. IDs can be Salesforce IDs, ' +
+    'Stripe IDs (`ch_`, `pi_`, `re_`, `po_`, `bt_`), or QBO doc IDs. The response includes ' +
+    '`syncSelection.matchedIds` and `syncSelection.unmatchedIds`.\n\n' +
     '**What the discrepancy categories mean**\n\n' +
     '- `stripeMissingSalesforce` — Stripe charges/refunds/payouts with no `Transaction__c` row. ' +
     'Fix with `/api/stripe/true-up`.\n' +
@@ -2040,7 +2069,7 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
     '- `salesforceMissingQbo` — `Transaction__c` rows where `Posted_to_QBO__c` is false or ' +
     '`QBO_Doc_Id__c` is blank. Fix with `/api/qbo/salesforce-record-sync`.\n' +
     '- `salesforceMissingStripe` — `Transaction__c` rows with no Stripe ID at all (QBO-origin ' +
-    'imports or manual entries; may be expected).\n' +
+    'imports/manual entries are excluded; only Stripe-origin types are checked).\n' +
     '- `qboMissingSalesforce` — QBO documents whose DocNumber or PrivateNote Stripe ID is not in ' +
     'Salesforce. Fix with `/api/qbo/receipts-salesforce-sync`.\n' +
     '- `duplicatesInSalesforce` — multiple `Transaction__c` rows sharing one Stripe ID. Fix with ' +
@@ -2139,8 +2168,22 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
               'salesforceMissingQbo contains one entry: Transaction__c a1aUQ00000AAAAAYAA has ' +
                 'Posted_to_QBO__c = false. Fix: run /api/qbo/salesforce-record-sync?salesforceId=a1aUQ00000AAAAAYAA.'
             ),
+            targetedDryRunBySyncIds: asNamedExample(
+              '8. Dry-run targeted by syncIds',
+              {
+                request: {
+                  date: '2026-05-28',
+                  dryRun: 'true',
+                  syncIds: 'a1aUQ00000DDDDDYAA,ch_not_found',
+                },
+                response: reconTargetedDryRunResponse,
+              },
+              'When syncIds are provided in dry-run mode, the response discrepancy list is scoped to ' +
+                'sync-targeted categories for matching IDs only. Use syncSelection.matchedIds and ' +
+                'syncSelection.unmatchedIds to confirm the exact repair set before rerunning with dryRun=false.'
+            ),
             foundQboOrphan: asNamedExample(
-              '8. Finding: QBO receipt has no Salesforce match',
+              '9. Finding: QBO receipt has no Salesforce match',
               {
                 request: { date: '2026-05-28', dryRun: 'true' },
                 response: reconQboOrphanResponse,
@@ -2150,7 +2193,7 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
                 'Fix: run /api/qbo/receipts-salesforce-sync?start_date=2026-05-28&end_date=2026-05-28.'
             ),
             foundSalesforceDuplicates: asNamedExample(
-              '9. Finding: duplicate Transaction__c rows for same charge',
+              '10. Finding: duplicate Transaction__c rows for same charge',
               {
                 request: { date: '2026-05-28', dryRun: 'true' },
                 response: reconSfDuplicatesResponse,
@@ -2160,7 +2203,7 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
                 'Fix: run /api/ops/stripe-duplicate-check?startDate=2026-05-28&deleteDuplicates=true&dryRun=false.'
             ),
             foundMultipleDiscrepancies: asNamedExample(
-              '10. Finding: multiple discrepancy types at once',
+              '11. Finding: multiple discrepancy types at once',
               {
                 request: { date: '2026-05-28', mode: 'test', dryRun: 'true' },
                 response: reconMultiDiscrepancyResponse,

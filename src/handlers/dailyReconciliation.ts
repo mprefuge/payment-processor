@@ -923,14 +923,23 @@ const removeFalsePositiveStaleSfQboDiscrepancies = async (
   );
 };
 
+const STRIPE_MANAGED_TRANSACTION_TYPES = new Set(['charge', 'refund', 'payout', 'dispute']);
+
+const normalizeTransactionType = (value: string | null | undefined): string =>
+  typeof value === 'string' ? value.trim().toLowerCase() : '';
+
+const isStripeManagedTransactionType = (value: string | null | undefined): boolean =>
+  STRIPE_MANAGED_TRANSACTION_TYPES.has(normalizeTransactionType(value));
+
 /**
- * Salesforce rows that have no Stripe ID at all (QBO-origin imports or manual entries).
- * These may be legitimate; flag for awareness.
+ * Salesforce Stripe-origin rows that have no Stripe ID at all.
+ * Non-Stripe transaction types (for example checks/manual/QBO-origin rows) are excluded.
  */
 const findSalesforceMissingStripe = (sfRows: SfTransactionRow[]): DiscrepancyItem[] =>
   sfRows
     .filter(
       (row) =>
+        isStripeManagedTransactionType(row.transaction_type__c) &&
         !row.Stripe_Charge_Id__c &&
         !row.Stripe_Payment_Intent_Id__c &&
         !row.Stripe_Balance_Transaction_Id__c &&
@@ -941,8 +950,7 @@ const findSalesforceMissingStripe = (sfRows: SfTransactionRow[]): DiscrepancyIte
       system: 'salesforce',
       type: 'sf_missing_stripe',
       id: row.Id,
-      description:
-        'Salesforce Transaction__c has no Stripe ID reference (QBO-origin or manual entry)',
+      description: 'Stripe-origin Salesforce Transaction__c has no Stripe ID reference',
       stripeId: null,
       amount: row.Amount_Gross__c ?? null,
       date: row.Received_At__c ? row.Received_At__c.slice(0, 10) : null,
@@ -2230,6 +2238,22 @@ export const runReconciliation = async (
     return items.filter((item) => matchesSyncSelection(item, selectedSyncIds));
   };
 
+  const discrepanciesForResponse: ReconciliationReport['discrepancies'] =
+    dryRun && selectedSyncIds.size > 0
+      ? {
+          ...discrepancies,
+          // Targeted dry-run previews should show only the discrepancies that can be repaired
+          // by sync workflows for the specified ID list.
+          stripeMissingSalesforce: filterRepairItems(discrepancies.stripeMissingSalesforce),
+          stripeMissingQbo: filterRepairItems(discrepancies.stripeMissingQbo),
+          salesforceMissingQbo: filterRepairItems(discrepancies.salesforceMissingQbo),
+          qboMissingSalesforce: filterRepairItems(discrepancies.qboMissingSalesforce),
+          salesforceMissingStripe: [],
+          duplicatesInSalesforce: [],
+          duplicatesInQbo: [],
+        }
+      : discrepancies;
+
   // -------------------------------------------------------------------------
   // 6. Repair phase (non-dry-run only)
   // -------------------------------------------------------------------------
@@ -2455,7 +2479,7 @@ export const runReconciliation = async (
   }
 
   const categories: Record<string, number> = {};
-  for (const [key, items] of Object.entries(discrepancies)) {
+  for (const [key, items] of Object.entries(discrepanciesForResponse)) {
     if (items.length > 0) {
       categories[key] = items.length;
     }
@@ -2469,7 +2493,7 @@ export const runReconciliation = async (
     range: { startDate, endDate },
     systemsChecked: systems,
     counts,
-    discrepancies,
+    discrepancies: discrepanciesForResponse,
     summary: { totalDiscrepancies, categories },
     syncSelection: {
       requestedIds: syncIds,
