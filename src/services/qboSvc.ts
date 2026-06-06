@@ -3000,19 +3000,31 @@ const checkForDuplicate = async (
 
     logger.debug('[QBO] Checking for duplicate', { entity, docNumber, queryString });
 
-    const result = await query<{
-      QueryResponse: { [key: string]: Array<{ Id: string }> };
-    }>(queryString, options);
+    const result = await query<unknown>(queryString, options);
 
-    const items = result?.QueryResponse?.[entityName];
+    const items = Array.isArray(result)
+      ? (result as Array<{ Id?: string | number }>)
+      : (((result as { QueryResponse?: Record<string, Array<{ Id?: string | number }>> })
+          ?.QueryResponse?.[entityName] as Array<{ Id?: string | number }> | undefined) ?? []);
     if (items && items.length > 0) {
+      const existingIdRaw = items[0]?.Id;
+      const existingId =
+        typeof existingIdRaw === 'number'
+          ? existingIdRaw.toString()
+          : typeof existingIdRaw === 'string'
+            ? existingIdRaw
+            : null;
+      if (!existingId) {
+        return null;
+      }
+
       logger.info('[QBO] Duplicate document found', {
         entity,
         docNumber,
-        existingId: items[0].Id,
+        existingId,
         count: items.length,
       });
-      return items[0].Id;
+      return existingId;
     }
 
     logger.debug('[QBO] No duplicate found', { entity, docNumber });
@@ -3028,6 +3040,19 @@ const checkForDuplicate = async (
     });
     return null;
   }
+};
+
+const privateNoteMatchesPayoutId = (privateNote: unknown, payoutId: string): boolean => {
+  if (typeof privateNote !== 'string') {
+    return false;
+  }
+
+  const normalizedPayoutId = payoutId.trim().toLowerCase();
+  if (!normalizedPayoutId) {
+    return false;
+  }
+
+  return privateNote.toLowerCase().includes(normalizedPayoutId);
 };
 
 /**
@@ -3047,23 +3072,61 @@ const checkForPayoutMovement = async (
   const amountDollars = centsToDollars(amount);
 
   try {
-    const transferQuery = `SELECT Id, TxnDate, Amount FROM Transfer WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
-    const transferResult = await query<{
-      QueryResponse: {
-        Transfer?: Array<{ Id: string; TxnDate?: string; Amount?: number }>;
-      };
-    }>(transferQuery, options);
-    const transfers = transferResult?.QueryResponse?.Transfer;
+    const transferQuery = `SELECT Id, TxnDate, Amount, PrivateNote FROM Transfer WHERE TxnDate = '${formattedDate}' MAXRESULTS 500`;
+    const transferResult = await query<unknown>(transferQuery, options);
+    const transfers = Array.isArray(transferResult)
+      ? (transferResult as Array<{
+          Id?: string | number;
+          TxnDate?: string;
+          Amount?: number;
+          PrivateNote?: string;
+        }>)
+      : (((transferResult as { QueryResponse?: { Transfer?: Array<any> } })?.QueryResponse
+          ?.Transfer as
+          | Array<{
+              Id?: string | number;
+              TxnDate?: string;
+              Amount?: number;
+              PrivateNote?: string;
+            }>
+          | undefined) ?? []);
     if (transfers && transfers.length > 0) {
+      const payoutIdMatch = transfers.find((transfer) =>
+        privateNoteMatchesPayoutId(transfer.PrivateNote, payoutId)
+      );
+      const payoutIdMatchIdRaw = payoutIdMatch?.Id;
+      const payoutIdMatchId =
+        typeof payoutIdMatchIdRaw === 'number'
+          ? payoutIdMatchIdRaw.toString()
+          : typeof payoutIdMatchIdRaw === 'string'
+            ? payoutIdMatchIdRaw
+            : null;
+      if (payoutIdMatchId) {
+        logger.info('[QBO] Found existing transfer for payout by payoutId marker', {
+          payoutId,
+          existingId: payoutIdMatchId,
+          date: payoutIdMatch.TxnDate,
+          amount: payoutIdMatch.Amount,
+        });
+        return { id: payoutIdMatchId, type: 'transfer' };
+      }
+
       const matchingTransfer = transfers.find((transfer) => transfer.Amount === amountDollars);
-      if (matchingTransfer?.Id) {
+      const matchingTransferIdRaw = matchingTransfer?.Id;
+      const matchingTransferId =
+        typeof matchingTransferIdRaw === 'number'
+          ? matchingTransferIdRaw.toString()
+          : typeof matchingTransferIdRaw === 'string'
+            ? matchingTransferIdRaw
+            : null;
+      if (matchingTransferId) {
         logger.info('[QBO] Found existing transfer for payout by date and amount check', {
           payoutId,
-          existingId: matchingTransfer.Id,
+          existingId: matchingTransferId,
           date: matchingTransfer.TxnDate,
           amount: matchingTransfer.Amount,
         });
-        return { id: matchingTransfer.Id, type: 'transfer' };
+        return { id: matchingTransferId, type: 'transfer' };
       }
     }
   } catch (error) {
@@ -3074,7 +3137,7 @@ const checkForPayoutMovement = async (
   }
 
   try {
-    const depositQuery = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
+    const depositQuery = `SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 500`;
 
     logger.debug('[QBO] Checking for existing payout deposit by date', {
       payoutId,
@@ -3082,24 +3145,65 @@ const checkForPayoutMovement = async (
       amount: amountDollars,
     });
 
-    const depositResult = await query<{
-      QueryResponse: {
-        Deposit?: Array<{ Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number }>;
-      };
-    }>(depositQuery, options);
+    const depositResult = await query<unknown>(depositQuery, options);
 
-    const deposits = depositResult?.QueryResponse?.Deposit;
+    const deposits = Array.isArray(depositResult)
+      ? (depositResult as Array<{
+          Id?: string | number;
+          DocNumber?: string;
+          TxnDate?: string;
+          TotalAmt?: number;
+          PrivateNote?: string;
+        }>)
+      : (((depositResult as { QueryResponse?: { Deposit?: Array<any> } })?.QueryResponse
+          ?.Deposit as
+          | Array<{
+              Id?: string | number;
+              DocNumber?: string;
+              TxnDate?: string;
+              TotalAmt?: number;
+              PrivateNote?: string;
+            }>
+          | undefined) ?? []);
     if (deposits && deposits.length > 0) {
+      const payoutIdMatch = deposits.find((deposit) =>
+        privateNoteMatchesPayoutId(deposit.PrivateNote, payoutId)
+      );
+      const payoutIdMatchIdRaw = payoutIdMatch?.Id;
+      const payoutIdMatchId =
+        typeof payoutIdMatchIdRaw === 'number'
+          ? payoutIdMatchIdRaw.toString()
+          : typeof payoutIdMatchIdRaw === 'string'
+            ? payoutIdMatchIdRaw
+            : null;
+      if (payoutIdMatchId) {
+        logger.info('[QBO] Found existing deposit for payout by payoutId marker', {
+          payoutId,
+          existingId: payoutIdMatchId,
+          docNumber: payoutIdMatch.DocNumber,
+          date: payoutIdMatch.TxnDate,
+          amount: payoutIdMatch.TotalAmt,
+        });
+        return { id: payoutIdMatchId, type: 'bank-deposit' };
+      }
+
       const matchingDeposit = deposits.find((deposit) => deposit.TotalAmt === amountDollars);
-      if (matchingDeposit?.Id) {
+      const matchingDepositIdRaw = matchingDeposit?.Id;
+      const matchingDepositId =
+        typeof matchingDepositIdRaw === 'number'
+          ? matchingDepositIdRaw.toString()
+          : typeof matchingDepositIdRaw === 'string'
+            ? matchingDepositIdRaw
+            : null;
+      if (matchingDepositId) {
         logger.info('[QBO] Found existing deposit for payout by date and amount check', {
           payoutId,
-          existingId: matchingDeposit.Id,
+          existingId: matchingDepositId,
           docNumber: matchingDeposit.DocNumber,
           date: matchingDeposit.TxnDate,
           amount: matchingDeposit.TotalAmt,
         });
-        return { id: matchingDeposit.Id, type: 'bank-deposit' };
+        return { id: matchingDepositId, type: 'bank-deposit' };
       }
     }
 

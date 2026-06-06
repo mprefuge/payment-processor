@@ -1719,6 +1719,41 @@ describe('postRefundToQbo', () => {
 });
 
 describe('postPayoutToQbo', () => {
+  it('reuses existing transfer when payout id is present in private note', async () => {
+    const { fetcher, requests } = createFetchMock({
+      QueryResponse: {
+        Transfer: [
+          {
+            Id: 'transfer-wrong-amount-match',
+            TxnDate: '2024-03-04',
+            Amount: 150,
+            PrivateNote: 'Stripe payout po_other',
+          },
+          {
+            Id: 'transfer-existing',
+            TxnDate: '2024-03-04',
+            Amount: 999,
+            PrivateNote: 'Stripe payout po_test123',
+          },
+        ],
+      },
+    });
+    const { postPayoutToQbo } = await importQboSvc();
+
+    const result = await postPayoutToQbo({
+      amount: 15_000,
+      memo: 'Stripe payout po_test123',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'transfer-existing', type: 'transfer' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(requests[0].url).toContain('SELECT%20Id%2C%20TxnDate%2C%20Amount%2C%20PrivateNote');
+    expect(requests[0].url).toContain('MAXRESULTS%20500');
+  });
+
   it('creates transfer moving funds from clearing to operating bank', async () => {
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} },
