@@ -17,10 +17,17 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     steps:
+      - name: Debug GitHub context (build)
+        run: echo '${{ toJson(github) }}'
+
+      - name: Debug env (build)
+        run: |
+          echo "Actor: $GITHUB_ACTOR"
+          echo "Ref: $GITHUB_REF"
+          echo "SHA: $GITHUB_SHA"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -58,11 +65,17 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: build
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
+      - name: Debug GitHub context (deploy)
+        run: echo '${{ toJson(github) }}'
+
+      - name: Debug env (deploy)
+        run: |
+          echo "Actor: $GITHUB_ACTOR"
+          echo "Ref: $GITHUB_REF"
+          echo "SHA: $GITHUB_SHA"
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
