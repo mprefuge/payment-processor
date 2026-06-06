@@ -3105,8 +3105,8 @@ const checkForPayoutMovement = async (
         logger.info('[QBO] Found existing transfer for payout by payoutId marker', {
           payoutId,
           existingId: payoutIdMatchId,
-          date: payoutIdMatch.TxnDate,
-          amount: payoutIdMatch.Amount,
+          date: payoutIdMatch?.TxnDate,
+          amount: payoutIdMatch?.Amount,
         });
         return { id: payoutIdMatchId, type: 'transfer' };
       }
@@ -3123,8 +3123,8 @@ const checkForPayoutMovement = async (
         logger.info('[QBO] Found existing transfer for payout by date and amount check', {
           payoutId,
           existingId: matchingTransferId,
-          date: matchingTransfer.TxnDate,
-          amount: matchingTransfer.Amount,
+          date: matchingTransfer?.TxnDate,
+          amount: matchingTransfer?.Amount,
         });
         return { id: matchingTransferId, type: 'transfer' };
       }
@@ -3180,9 +3180,9 @@ const checkForPayoutMovement = async (
         logger.info('[QBO] Found existing deposit for payout by payoutId marker', {
           payoutId,
           existingId: payoutIdMatchId,
-          docNumber: payoutIdMatch.DocNumber,
-          date: payoutIdMatch.TxnDate,
-          amount: payoutIdMatch.TotalAmt,
+          docNumber: payoutIdMatch?.DocNumber,
+          date: payoutIdMatch?.TxnDate,
+          amount: payoutIdMatch?.TotalAmt,
         });
         return { id: payoutIdMatchId, type: 'bank-deposit' };
       }
@@ -3199,9 +3199,9 @@ const checkForPayoutMovement = async (
         logger.info('[QBO] Found existing deposit for payout by date and amount check', {
           payoutId,
           existingId: matchingDepositId,
-          docNumber: matchingDeposit.DocNumber,
-          date: matchingDeposit.TxnDate,
-          amount: matchingDeposit.TotalAmt,
+          docNumber: matchingDeposit?.DocNumber,
+          date: matchingDeposit?.TxnDate,
+          amount: matchingDeposit?.TotalAmt,
         });
         return { id: matchingDepositId, type: 'bank-deposit' };
       }
