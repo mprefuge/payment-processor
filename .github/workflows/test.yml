@@ -1,6 +1,9 @@
-name: Azure Function Action Test
+name: Actions Test
 
 on:
+  push:
+    branches:
+      - "**"
   workflow_dispatch:
 
 jobs:
