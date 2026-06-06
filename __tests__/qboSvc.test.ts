@@ -1719,6 +1719,66 @@ describe('postRefundToQbo', () => {
 });
 
 describe('postPayoutToQbo', () => {
+  it('returns existing payout transfer instead of creating a duplicate on replay', async () => {
+    const { fetcher, requests } = createFetchMock({
+      QueryResponse: {
+        Transfer: [
+          {
+            Id: 'transfer-existing',
+            TxnDate: '2024-03-04',
+            Amount: 150,
+            PrivateNote: 'Stripe payout po_test123',
+          },
+        ],
+      },
+    });
+    const { postPayoutToQbo } = await importQboSvc();
+
+    const result = await postPayoutToQbo({
+      amount: 15_000,
+      memo: 'Stripe payout po_test123',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'transfer-existing', type: 'transfer' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toContain('Transfer');
+  });
+
+  it('returns existing legacy payout deposit instead of creating a transfer duplicate', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      {
+        QueryResponse: {
+          Deposit: [
+            {
+              Id: 'deposit-existing',
+              DocNumber: 'payout_po_test123',
+              TxnDate: '2024-03-04',
+              TotalAmt: 150,
+              PrivateNote: 'payout_po_test123',
+            },
+          ],
+        },
+      }
+    );
+    const { postPayoutToQbo } = await importQboSvc();
+
+    const result = await postPayoutToQbo({
+      amount: 15_000,
+      memo: 'Stripe payout po_test123',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'deposit-existing', type: 'bank-deposit' });
+    expect(requests).toHaveLength(2);
+    expect(requests[1].url).toContain('Deposit');
+  });
+
   it('creates transfer moving funds from clearing to operating bank', async () => {
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} },

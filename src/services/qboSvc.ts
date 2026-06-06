@@ -3043,22 +3043,36 @@ const checkForPayoutMovement = async (
   amount: number,
   options?: PostOptions
 ): Promise<{ id: string; type: 'transfer' | 'bank-deposit' } | null> => {
+  const normalizedPayoutId = toTrimmed(payoutId);
+  if (!normalizedPayoutId) {
+    return null;
+  }
+
   const formattedDate = normalizeDate(date);
   const amountDollars = centsToDollars(amount);
+  const context = await createRequestContext(options);
+  const hasPayoutId = (value: unknown): boolean =>
+    typeof value === 'string' && value.includes(normalizedPayoutId);
+  const amountMatches = (value: unknown): boolean =>
+    typeof value === 'number' && Math.abs(value - amountDollars) < 0.005;
 
   try {
-    const transferQuery = `SELECT Id, TxnDate, Amount FROM Transfer WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
-    const transferResult = await query<{
-      QueryResponse: {
-        Transfer?: Array<{ Id: string; TxnDate?: string; Amount?: number }>;
-      };
-    }>(transferQuery, options);
-    const transfers = transferResult?.QueryResponse?.Transfer;
+    const transferQuery =
+      `SELECT Id, TxnDate, Amount, PrivateNote FROM Transfer ` +
+      `WHERE TxnDate = '${formattedDate}' MAXRESULTS 100`;
+    const transfers = await queryQuickBooks<{
+      Id?: string;
+      TxnDate?: string;
+      Amount?: number;
+      PrivateNote?: string;
+    }>(transferQuery, context);
     if (transfers && transfers.length > 0) {
-      const matchingTransfer = transfers.find((transfer) => transfer.Amount === amountDollars);
+      const matchingTransfer = transfers.find(
+        (transfer) => amountMatches(transfer.Amount) && hasPayoutId(transfer.PrivateNote)
+      );
       if (matchingTransfer?.Id) {
-        logger.info('[QBO] Found existing transfer for payout by date and amount check', {
-          payoutId,
+        logger.info('[QBO] Found existing transfer for payout by payout ID check', {
+          payoutId: normalizedPayoutId,
           existingId: matchingTransfer.Id,
           date: matchingTransfer.TxnDate,
           amount: matchingTransfer.Amount,
@@ -3074,26 +3088,32 @@ const checkForPayoutMovement = async (
   }
 
   try {
-    const depositQuery = `SELECT Id, DocNumber, TxnDate, TotalAmt FROM Deposit WHERE TxnDate = '${formattedDate}' MAXRESULTS 10`;
+    const depositQuery =
+      `SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote FROM Deposit ` +
+      `WHERE TxnDate = '${formattedDate}' MAXRESULTS 100`;
 
-    logger.debug('[QBO] Checking for existing payout deposit by date', {
-      payoutId,
+    logger.debug('[QBO] Checking for existing payout movement by payout ID', {
+      payoutId: normalizedPayoutId,
       date: formattedDate,
       amount: amountDollars,
     });
 
-    const depositResult = await query<{
-      QueryResponse: {
-        Deposit?: Array<{ Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number }>;
-      };
-    }>(depositQuery, options);
-
-    const deposits = depositResult?.QueryResponse?.Deposit;
+    const deposits = await queryQuickBooks<{
+      Id?: string;
+      DocNumber?: string;
+      TxnDate?: string;
+      TotalAmt?: number;
+      PrivateNote?: string;
+    }>(depositQuery, context);
     if (deposits && deposits.length > 0) {
-      const matchingDeposit = deposits.find((deposit) => deposit.TotalAmt === amountDollars);
+      const matchingDeposit = deposits.find(
+        (deposit) =>
+          amountMatches(deposit.TotalAmt) &&
+          (hasPayoutId(deposit.PrivateNote) || hasPayoutId(deposit.DocNumber))
+      );
       if (matchingDeposit?.Id) {
-        logger.info('[QBO] Found existing deposit for payout by date and amount check', {
-          payoutId,
+        logger.info('[QBO] Found existing deposit for payout by payout ID check', {
+          payoutId: normalizedPayoutId,
           existingId: matchingDeposit.Id,
           docNumber: matchingDeposit.DocNumber,
           date: matchingDeposit.TxnDate,
@@ -3103,8 +3123,8 @@ const checkForPayoutMovement = async (
       }
     }
 
-    logger.debug('[QBO] No existing payout movement found by date and amount check', {
-      payoutId,
+    logger.debug('[QBO] No existing payout movement found by payout ID check', {
+      payoutId: normalizedPayoutId,
       date: formattedDate,
       amount: amountDollars,
     });
