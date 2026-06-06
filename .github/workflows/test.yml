@@ -9,9 +9,5 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Test Azure Functions Action
-        uses: Azure/functions-action@v2
+      - uses: Azure/functions-action@v1.5.2
