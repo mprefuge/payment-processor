@@ -174,6 +174,29 @@ describe('handleDisputeClosed — won disputes (P0-6)', () => {
     );
   });
 
+  it('does not double-count when the original withdrawal BT is still present alongside the reversal', async () => {
+    const balanceTxns = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_reversal_1', 10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_fee_withdrawal_1', -1500, 'stripe_fee', 'chargeback_fee'),
+      makeBalanceTransaction('bt_fee_refund_1', 1500, 'stripe_fee', 'chargeback_fee'),
+    ];
+    const { event } = makeDisputeEvent('won', balanceTxns);
+    const deps = makeDeps(balanceTxns);
+    const context = makeContext();
+
+    await handleDisputeClosed(context, event, deps);
+
+    expect(postDisputeReversalToQbo).toHaveBeenCalledOnce();
+    expect(postDisputeReversalToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lossAmount: 10000,
+        feeAmount: 1500,
+        disputeId: 'dp_test001',
+      })
+    );
+  });
+
   it('does NOT call postDisputeToQbo for won disputes', async () => {
     const balanceTxns = [makeBalanceTransaction('bt_rev', 10000, 'adjustment', 'chargeback')];
     const { event } = makeDisputeEvent('won', balanceTxns);

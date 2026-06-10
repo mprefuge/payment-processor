@@ -2,6 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
 import type Stripe from 'stripe';
 
+vi.mock('../src/config/env', () => ({
+  default: {
+    accounting: {
+      syncEnabled: true,
+    },
+  },
+}));
+
 import { handleCreditNoteEvent } from '../src/stripe/handlers/creditNotes';
 import type { StripeWebhookDependencies } from '../src/stripe/types';
 

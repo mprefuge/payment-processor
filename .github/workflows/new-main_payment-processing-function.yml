@@ -15,7 +15,7 @@ env:
   NODE_VERSION: '22.x'
   APP_NAME: 'payment-processing-function'
   ACTIONS_STEP_DEBUG: true
-  
+
 jobs:
   build:
     runs-on: ubuntu-latest

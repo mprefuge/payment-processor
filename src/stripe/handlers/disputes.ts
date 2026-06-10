@@ -59,11 +59,17 @@ const handleDisputeWon = async (
   const balanceTransactions = await resolveDisputeBalanceTransactions(stripe, dispute);
 
   // For a won dispute Stripe posts positive adjustments crediting funds back.
+  // dispute.balance_transactions can also still contain the original negative
+  // withdrawal from when the dispute was created — only count the positive
+  // (reinstated) amounts, otherwise the reversal is double the real credit.
   const recoveryTransactions = balanceTransactions.filter(
-    (bt) => bt.reporting_category === 'chargeback' || bt.type === 'adjustment'
+    (bt) =>
+      (bt.reporting_category === 'chargeback' || bt.type === 'adjustment') && (bt.amount ?? 0) > 0
   );
   const feeTransactions = balanceTransactions.filter(
-    (bt) => bt.reporting_category === 'chargeback_fee' || bt.type === 'stripe_fee'
+    (bt) =>
+      (bt.reporting_category === 'chargeback_fee' || bt.type === 'stripe_fee') &&
+      (bt.amount ?? 0) > 0
   );
 
   const recoveryAmountCents = recoveryTransactions.reduce(

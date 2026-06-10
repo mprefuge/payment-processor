@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 
+import env from '../../config/env';
 import {
   centsToMajorUnits,
   centsToPositiveMajorUnits,
@@ -437,6 +438,10 @@ export const handleCreditNoteEvent = async (
         });
       }
     });
+    return;
+  }
+
+  if (!env.accounting.syncEnabled) {
     return;
   }
 

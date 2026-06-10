@@ -272,6 +272,7 @@ afterEach(() => {
 describe('postChargeToQbo', () => {
   it(
     'posts sales receipt to clearing account and creates fee journal entry when using sales receipt strategy',
+    { timeout: 20000 },
     async () => {
       baseEnv.accounting.postingStrategy = 'sales-receipt';
       const { fetcher, requests } = createFetchMock(
@@ -370,8 +371,7 @@ describe('postChargeToQbo', () => {
       expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 3.25');
       expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 96.75');
       expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
-    },
-    { timeout: 20000 }
+    }
   );
 
   it('uses payment intent description and fills qty/rate defaults when overrides are absent', async () => {
@@ -676,6 +676,7 @@ describe('postChargeToQbo', () => {
 
   it(
     'reads cover fees from paymentIntent/charge metadata when session unavailable',
+    { timeout: 20000 },
     async () => {
       baseEnv.accounting.postingStrategy = 'sales-receipt';
       const { fetcher, requests } = createFetchMock(
@@ -721,8 +722,7 @@ describe('postChargeToQbo', () => {
       // should have two lines: base + cover-fee line
       expect(salesReceiptBody.Line.length).toBe(2);
       expect(salesReceiptBody.Line[1].Amount).toBe(3.0);
-    },
-    { timeout: 20000 }
+    }
   );
 
   // directly exercise getCoverFeesInfo to verify metadata aggregation
@@ -765,6 +765,7 @@ describe('postChargeToQbo', () => {
 
   it(
     'includes invoice and subscription details in CustomerMemo when available',
+    { timeout: 20000 },
     async () => {
       baseEnv.accounting.postingStrategy = 'sales-receipt';
       const { fetcher, requests } = createFetchMock(
@@ -813,8 +814,7 @@ describe('postChargeToQbo', () => {
       expect(salesReceiptBody.CustomerMemo.value).toContain(
         'Stripe Subscription ID: sub_1SZx7kBJf9YYVP9mCJ3HXqDy'
       );
-    },
-    { timeout: 20000 }
+    }
   );
 
   it('uses default sales item when checkout metadata is missing', async () => {

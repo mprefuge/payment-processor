@@ -1004,7 +1004,7 @@ const readHandlerOptions = (request: HttpRequest): HandlerOptions => ({
   startDate: readStringQuery(request, 'start_date'),
   endDate: readStringQuery(request, 'end_date'),
   startPosition: readIntQuery(request, 'start_position') ?? 1,
-  maxResults: readIntQuery(request, 'max_results') ?? DEFAULT_QBO_PAGE_SIZE,
+  maxResults: Math.min(readIntQuery(request, 'max_results') ?? DEFAULT_QBO_PAGE_SIZE, 1000),
   qboIds: readListQuery(request, 'qboIds'),
   resyncFromSalesforce: readBooleanQuery(request, 'resyncFromSalesforce', false),
 });

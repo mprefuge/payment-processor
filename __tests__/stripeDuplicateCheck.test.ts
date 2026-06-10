@@ -56,9 +56,9 @@ describe('stripeDuplicateCheck', () => {
     // Mock salesforceService
     vi.doMock('../src/services/salesforceService', () => ({
       buildSalesforceConfig: vi.fn().mockReturnValue({}),
-      SalesforceService: vi.fn().mockImplementation(() => ({
-        authenticate: vi.fn().mockResolvedValue(mockSfConnection),
-      })),
+      SalesforceService: vi.fn().mockImplementation(function () {
+        return { authenticate: vi.fn().mockResolvedValue(mockSfConnection) };
+      }),
       parseBoolean: (value: unknown, defaultValue: boolean) => {
         if (value === null || value === undefined) return defaultValue;
         if (typeof value === 'boolean') return value;
@@ -989,9 +989,9 @@ describe('stripeDuplicateCheck', () => {
 
     it('returns 500 when Salesforce authenticate throws', async () => {
       const { SalesforceService } = await import('../src/services/salesforceService');
-      (SalesforceService as any).mockImplementation(() => ({
-        authenticate: vi.fn().mockRejectedValue(new Error('SF auth failed')),
-      }));
+      (SalesforceService as any).mockImplementation(function () {
+        return { authenticate: vi.fn().mockRejectedValue(new Error('SF auth failed')) };
+      });
 
       const { context } = createContext();
       const req = createRequest({ system: 'salesforce' });

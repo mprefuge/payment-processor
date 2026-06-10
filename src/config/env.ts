@@ -194,6 +194,7 @@ function loadEnv(): EnvConfig {
     }),
     clientId: resolveEnv('QBO_CLIENT_ID'),
     clientSecret: resolveEnv('QBO_CLIENT_SECRET'),
+    redirectUri: resolveEnv('QBO_REDIRECT_URI'),
     refreshToken: resolveEnv('QBO_REFRESH_TOKEN'),
     accounts: {
       stripeClearing:

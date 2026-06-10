@@ -785,7 +785,11 @@ const processRefund = async (
   const salesforce = await deps.getSalesforceSvc();
   const stripeContext = await loadStripeContext(context, stripe, refund, chargeHint ?? null);
 
-  const balanceTransaction = await resolveBalanceTransaction(stripe, stripeContext.charge, refund);
+  // Only resolve the refund's own balance transaction here. Falling back to the
+  // charge's BT would record the refund with a positive gross, the charge's fee,
+  // and the wrong BT id; buildRefundTransaction already falls back to
+  // -|refund.amount| when no refund BT exists yet (e.g. pending refunds).
+  const balanceTransaction = await resolveBalanceTransaction(stripe, null, refund);
 
   const { upsertResult, parentId } = await upsertSalesforceTransaction(
     context,

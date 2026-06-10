@@ -6,5 +6,8 @@ export default defineConfig({
     environment: 'node',
     restoreMocks: true,
     setupFiles: ['__tests__/setup.ts'],
+    // Some suites load compiled dist bundles or run full integration flows;
+    // under parallel full-suite load these regularly exceed vitest's 5s default.
+    testTimeout: 20000,
   },
 });

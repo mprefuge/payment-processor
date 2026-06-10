@@ -531,7 +531,7 @@ const queryQboDocumentsForRange = async (
   endDate: string,
   limit: number | null
 ): Promise<QboDocRow[]> => {
-  const maxResults = limit && limit > 0 ? limit : 1000;
+  const maxResults = limit && limit > 0 ? Math.min(limit, 1000) : 1000;
   // Extend QBO window by 1 day on each side to absorb timezone/date-drift: a Stripe
   // charge at 11:59 PM UTC on day N may be posted to QBO as day N+1 (or N-1 for earlier
   // timezones). We over-fetch and rely on Stripe ID matching — not TxnDate — for correctness.

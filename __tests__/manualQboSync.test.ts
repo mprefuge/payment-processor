@@ -72,42 +72,38 @@ describe('manualQboSync', () => {
     delete process.env.QBO_ENVIRONMENT;
   });
 
-  it(
-    'successfully syncs a sales receipt',
-    async () => {
-      // Note: In test environment, QBO calls will fail due to invalid credentials
-      // This tests that the handler properly handles the request and calls the right function
-      const { context } = createContext();
-      const req = {
-        json: vi.fn().mockResolvedValue({
-          type: 'sales-receipt',
-          data: {
-            TxnDate: '2024-01-01',
-            DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
-            ClassRef: { name: 'Test Class' }, // Will be resolved automatically
-            Line: [
-              {
-                Amount: 100.0,
-                DetailType: 'SalesItemLineDetail',
-                SalesItemLineDetail: {
-                  ItemRef: { name: 'Service' }, // Will be resolved automatically
-                  ItemAccountRef: { name: 'Income' }, // Will be resolved automatically
-                },
+  it('successfully syncs a sales receipt', { timeout: 20000 }, async () => {
+    // Note: In test environment, QBO calls will fail due to invalid credentials
+    // This tests that the handler properly handles the request and calls the right function
+    const { context } = createContext();
+    const req = {
+      json: vi.fn().mockResolvedValue({
+        type: 'sales-receipt',
+        data: {
+          TxnDate: '2024-01-01',
+          DepositToAccountRef: { name: 'Checking' }, // Will be resolved automatically
+          ClassRef: { name: 'Test Class' }, // Will be resolved automatically
+          Line: [
+            {
+              Amount: 100.0,
+              DetailType: 'SalesItemLineDetail',
+              SalesItemLineDetail: {
+                ItemRef: { name: 'Service' }, // Will be resolved automatically
+                ItemAccountRef: { name: 'Income' }, // Will be resolved automatically
               },
-            ],
-          },
-        }),
-      };
+            },
+          ],
+        },
+      }),
+    };
 
-      const response = await handler.default(req, context);
+    const response = await handler.default(req, context);
 
-      // Expect 500 due to QBO auth failure in test environment
-      expect(response.status).toBe(500);
-      expect(response.jsonBody.success).toBe(false);
-      expect(response.jsonBody.error).toContain('QuickBooks');
-    },
-    { timeout: 20000 }
-  );
+    // Expect 500 due to QBO auth failure in test environment
+    expect(response.status).toBe(500);
+    expect(response.jsonBody.success).toBe(false);
+    expect(response.jsonBody.error).toContain('QuickBooks');
+  });
 
   it('defaults DepositToAccountRef for sales receipt when not provided', async () => {
     // Note: In test environment, QBO calls will fail due to invalid credentials
