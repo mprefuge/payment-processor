@@ -60,9 +60,13 @@ Guidance:
   Proposed action: Keep only scripts that have an owner, a documented purpose, and a current runbook reference.
   Reason: some scripts may still be valid operator tools even if they are not wired into CI.
 
-- [ ] Review implementation-summary and incident-specific docs in [docs](/c:/Projects/payment-processor/docs)
-  Proposed action: Keep docs that describe current behavior; archive stale summaries and superseded notes.
-  Reason: the docs directory likely mixes evergreen references with historical writeups.
+- [x] Review implementation-summary and incident-specific docs in [docs](/c:/Projects/payment-processor/docs)
+  Action taken: moved superseded audits and historical implementation summaries to
+  [docs/archive/](/c:/Projects/payment-processor/docs/archive) (PRODUCTION_READINESS_AUDIT,
+  DEEP_SYSTEMS_AUDIT, PAYOUT_IMPLEMENTATION_SUMMARY, RESUBMIT_IMPLEMENTATION_SUMMARY,
+  VARIABLE_CORRECTIONS). Evergreen references (ARCHITECTURE, OPERATIONS, ENVIRONMENT_VARIABLES)
+  and docs still linked from README/active references were kept in place.
+  Completed: 2026-06-23.
 
 ## Packaging Hygiene
 
