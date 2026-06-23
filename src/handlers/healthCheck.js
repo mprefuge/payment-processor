@@ -3,7 +3,7 @@ require('../preflight');
 const Stripe = require('stripe');
 const { Client: SendGridClient } = require('@sendgrid/client');
 const AccountingSyncConfig = require('../services/payoutRecon/accountingSyncConfig');
-const AccountingProviderFactory = require('../services/qbo/accountingProviderFactory');
+const qboService = require('../services/qboSvc');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const {
   createPersistentStorageClients,
@@ -14,7 +14,7 @@ const defaultDependencies = {
   stripeFactory: (secretKey, options) => new Stripe(secretKey, options),
   sendGridClientFactory: () => new SendGridClient(),
   accountingSyncConfigFactory: () => new AccountingSyncConfig(),
-  accountingProviderFactory: AccountingProviderFactory,
+  qboService,
   crmFactory: CrmFactory,
   persistentStorageFactory: createPersistentStorageClients,
 };
@@ -282,15 +282,11 @@ const checkAccountingConnection = async () => {
   }
 
   try {
-    const providerConfig = config.getProviderConfig();
-    const provider = dependencies.accountingProviderFactory.createProvider(
-      providerName,
-      providerConfig
-    );
+    const provider = dependencies.qboService;
 
     let providerHealth = null;
-    if (typeof provider.healthCheck === 'function') {
-      providerHealth = await provider.healthCheck();
+    if (typeof provider.checkConnection === 'function') {
+      providerHealth = await provider.checkConnection();
     }
 
     let tokenExchangeResult = null;
@@ -298,10 +294,11 @@ const checkAccountingConnection = async () => {
 
     if (
       providerName.toLowerCase() === 'quickbooks' &&
-      typeof provider.refreshTokens === 'function'
+      typeof provider.verifyTokenRefresh === 'function'
     ) {
       try {
-        tokenExchangeResult = await provider.refreshTokens();
+        await provider.verifyTokenRefresh();
+        tokenExchangeResult = true;
       } catch (error) {
         tokenExchangeError = error;
       }

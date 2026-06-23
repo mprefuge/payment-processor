@@ -2352,6 +2352,69 @@ const createRequestContext = async (options?: PostOptions): Promise<QuickBooksRe
   return { request, log: logger.warn };
 };
 
+export interface QboConnectionHealth {
+  healthy: boolean;
+  message: string;
+  details: Record<string, unknown>;
+}
+
+/**
+ * Lightweight QBO connectivity probe used by the health endpoint. Issues a
+ * CompanyInfo read through the standard authenticated request path, which
+ * transparently refreshes an expired access token and retries once on a 401.
+ */
+export const checkConnection = async (options?: PostOptions): Promise<QboConnectionHealth> => {
+  const environment = env.quickBooks.environment;
+  try {
+    const realmId = getRealmId();
+    const ctx = await createRequestContext(options);
+    const base = QBO_BASE_URL[environment];
+    const url = `${base}/${encodeURIComponent(realmId)}/companyinfo/${encodeURIComponent(
+      realmId
+    )}?minorversion=75`;
+
+    const response = await ctx.request(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      return {
+        healthy: false,
+        message: `QBO CompanyInfo request failed: HTTP ${response.status}`,
+        details: { environment, realmId, status: response.status, body: body.slice(0, 200) },
+      };
+    }
+
+    const data = (await response.json().catch(() => ({}))) as {
+      CompanyInfo?: { CompanyName?: string; LegalName?: string };
+    };
+    const companyName = data?.CompanyInfo?.CompanyName ?? data?.CompanyInfo?.LegalName ?? null;
+
+    return {
+      healthy: true,
+      message: 'QBO connection healthy',
+      details: { environment, realmId, companyName },
+    };
+  } catch (error) {
+    return {
+      healthy: false,
+      message: `QBO connection failed: ${error instanceof Error ? error.message : String(error)}`,
+      details: { environment },
+    };
+  }
+};
+
+/**
+ * Forces a QBO OAuth token refresh to confirm the refresh token is valid and
+ * persisted. Throws if the refresh fails. Used by the health endpoint.
+ */
+export const verifyTokenRefresh = async (options?: PostOptions): Promise<void> => {
+  const fetcher = getFetcher(options);
+  await tokenManager.refreshTokens(fetcher);
+};
+
 const escapeQueryValue = (value: string): string => {
   return value.replace(/'/g, "''");
 };

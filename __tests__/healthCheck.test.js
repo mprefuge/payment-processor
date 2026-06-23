@@ -78,14 +78,10 @@ describe('healthCheck', () => {
       message: 'QBO connection healthy',
       details: { provider: 'quickbooks' },
     });
-    const providerTokenExchange = vi
-      .fn()
-      .mockResolvedValue({ accessToken: 'new', refreshToken: 'next' });
-    const accountingProviderFactory = {
-      createProvider: vi.fn(() => ({
-        healthCheck: providerHealthCheck,
-        refreshTokens: providerTokenExchange,
-      })),
+    const providerTokenExchange = vi.fn().mockResolvedValue(undefined);
+    const qboService = {
+      checkConnection: providerHealthCheck,
+      verifyTokenRefresh: providerTokenExchange,
     };
 
     const accountingSyncConfig = {
@@ -102,7 +98,7 @@ describe('healthCheck', () => {
         request: sendGridRequest,
       }),
       crmFactory,
-      accountingProviderFactory,
+      qboService,
       accountingSyncConfigFactory: () => accountingSyncConfig,
       persistentStorageFactory: () => ({ syncLedgerStore: storageClient }),
     });
@@ -134,7 +130,6 @@ describe('healthCheck', () => {
     expect(crmFactory.validateConfig).toHaveBeenCalled();
     expect(crmFactory.createCrmService).toHaveBeenCalled();
     expect(crmHealthCheck).toHaveBeenCalled();
-    expect(accountingProviderFactory.createProvider).toHaveBeenCalled();
     expect(providerHealthCheck).toHaveBeenCalled();
     expect(providerTokenExchange).toHaveBeenCalledWith();
 
