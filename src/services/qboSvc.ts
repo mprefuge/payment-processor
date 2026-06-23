@@ -3018,15 +3018,20 @@ const checkForDuplicate = async (
     logger.debug('[QBO] No duplicate found', { entity, docNumber });
     return null;
   } catch (error) {
-    // If query fails, log the error but don't block the operation
-    // Better to risk a duplicate than to fail the transaction
+    // A query failure is NOT the same as "no duplicate found". Proceeding to
+    // POST here risks creating a duplicate accounting entry whenever QBO is
+    // briefly unavailable. Instead, surface the failure so the caller (which
+    // holds an idempotency lock) aborts and lets Stripe retry the webhook —
+    // the retry re-runs the duplicate check under the same lock.
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.warn('[QBO] Duplicate check failed, proceeding with post', {
+    logger.error('[QBO] Duplicate check failed, aborting post to avoid duplicate', {
       entity,
       docNumber,
       error: errorMessage,
     });
-    return null;
+    throw new Error(
+      `QBO duplicate check failed for ${entity} DocNumber "${docNumber}": ${errorMessage}`
+    );
   }
 };
 

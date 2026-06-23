@@ -507,8 +507,10 @@ module.exports = async function healthCheck(request, context) {
 
   context.log('Health check connection statuses', safeConnections);
 
+  const httpStatus = responseBody.status === 'degraded' ? 503 : 200;
+
   return {
-    status: 200,
+    status: httpStatus,
     headers: {
       'Content-Type': 'application/json',
     },

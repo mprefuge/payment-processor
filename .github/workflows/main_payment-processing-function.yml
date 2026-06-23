@@ -13,7 +13,7 @@ concurrency:
 
 env:
   AZURE_FUNCTIONAPP_NAME: payment-processing-function
-  NODE_VERSION: '20.x'
+  NODE_VERSION: '22.x'
 
 jobs:
   build:

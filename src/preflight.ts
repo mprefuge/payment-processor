@@ -72,4 +72,19 @@ tokenManager
       );
     });
   })
-  .catch(() => undefined);
+  .catch((err) => {
+    const error = err instanceof Error ? err : new Error(String(err));
+    const { logger } = require('./lib/logger');
+    logger.error('QBO token manager initialization failed: ' + error.message, error);
+
+    // Best-effort: surface to App Insights as an exception if a client is reachable.
+    try {
+      const appInsights = require('applicationinsights');
+      const client = appInsights.defaultClient;
+      if (client && typeof client.trackException === 'function') {
+        client.trackException({ exception: error });
+      }
+    } catch {
+      // Telemetry is optional; never let it mask the original failure.
+    }
+  });

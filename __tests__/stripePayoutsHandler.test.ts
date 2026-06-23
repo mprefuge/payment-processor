@@ -340,7 +340,7 @@ describe('handlePayoutEvent', () => {
       source: 're_456',
     });
 
-    const { deps, upsertDeposit } = createDeps({
+    const { deps, upsertDeposit, salesforce } = createDeps({
       transactionPages: [
         [chargeTxn, feeTxn],
         [chargeTxn, feeTxn, refundTxn],
@@ -365,12 +365,23 @@ describe('handlePayoutEvent', () => {
     await handlePayoutEvent(context, paidEvent, deps);
     await handlePayoutEvent(context, reconEvent, deps);
 
-    expect(upsertDeposit).toHaveBeenCalledTimes(2);
-    const firstCall = upsertDeposit.mock.calls[0][0] as UpsertPayoutDepositInput;
-    expect(firstCall.lines).toHaveLength(2);
-    const secondCall = upsertDeposit.mock.calls[1][0] as UpsertPayoutDepositInput;
-    expect(secondCall.lines).toHaveLength(3);
-    expect(secondCall.lines.some((line) => line.type === 'refund')).toBe(true);
+    // The initial payout.paid arrives before the refund balance transaction lands, so its
+    // line items (charge 10_000c + fee -300c = 9_700c) do not sum to the payout amount
+    // (9_200c). The totals guard refuses to post that unbalanced deposit and routes it to
+    // review instead. Only the reconciliation event — which includes the refund and
+    // balances to 9_200c — is posted, with the updated three-line set.
+    expect(upsertDeposit).toHaveBeenCalledTimes(1);
+    const postedCall = upsertDeposit.mock.calls[0][0] as UpsertPayoutDepositInput;
+    expect(postedCall.lines).toHaveLength(3);
+    expect(postedCall.lines.some((line) => line.type === 'refund')).toBe(true);
+
+    // The unbalanced interim payout is surfaced for manual review with a posting error.
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        posting_error__c: expect.stringContaining('Payout totals mismatch'),
+      }),
+      'stripe_payout_id__c'
+    );
   });
 
   it('preserves totals on event replays', async () => {

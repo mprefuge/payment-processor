@@ -654,15 +654,68 @@ const postSuccessfulPaymentIntentToAccounting = async (
     return;
   }
 
-  await deps.idempotencyStore.withLock(`bt_${balanceTransaction.id}`, async () => {
+  // Defensive guard: gross and fee MUST originate from the same resolved balance
+  // transaction. Reading them off two different BT objects would post a journal
+  // entry with mismatched amounts. We capture a single reference here and read
+  // both values from it so the assertion below is meaningful even if upstream
+  // code is later refactored to pass amounts separately.
+  const resolvedBt = balanceTransaction;
+  if (
+    typeof resolvedBt.amount !== 'number' ||
+    !Number.isFinite(resolvedBt.amount) ||
+    typeof resolvedBt.fee !== 'number' ||
+    !Number.isFinite(resolvedBt.fee)
+  ) {
+    const message = `Refusing to post charge: balance transaction ${resolvedBt.id} is missing finite amount/fee (amount=${String(
+      resolvedBt.amount
+    )}, fee=${String(resolvedBt.fee)})`;
+    context.log('[StripeWebhook] ' + message, {
+      paymentIntentId: paymentIntent.id,
+      balanceTransactionId: resolvedBt.id,
+    });
+    try {
+      await salesforce.upsertTransactionByExternalId(
+        {
+          stripe_payment_intent_id__c: paymentIntent.id,
+          transaction_type__c: 'charge',
+          status__c: 'paid',
+          posting_error__c: message.slice(0, 255),
+        },
+        'stripe_payment_intent_id__c'
+      );
+    } catch (storeError) {
+      context.log('[StripeWebhook] Failed to store accounting guard error in Salesforce', {
+        paymentIntentId: paymentIntent.id,
+        error: storeError instanceof Error ? storeError.message : String(storeError),
+      });
+    }
+    return;
+  }
+
+  const btKey = `bt_${resolvedBt.id}`;
+
+  await deps.idempotencyStore.withLock(btKey, async () => {
+    // Short-circuit replays that arrive after a prior lock's TTL expired: if the
+    // balance transaction was already posted, do not post again. This mirrors the
+    // isProcessed/markProcessed pattern used by the refunds path.
+    const alreadyPosted = await deps.idempotencyStore.isProcessed(btKey);
+    if (alreadyPosted) {
+      context.log(
+        '[StripeWebhook] Charge already posted to QBO, skipping duplicate accounting sync',
+        {
+          paymentIntentId: paymentIntent.id,
+          balanceTransactionId: resolvedBt.id,
+        }
+      );
+      return;
+    }
+
     try {
       const posting = await deps.accounting.postChargeToQbo({
-        gross: Math.abs(balanceTransaction.amount ?? 0),
-        fee: Math.abs(balanceTransaction.fee ?? 0),
+        gross: Math.abs(resolvedBt.amount),
+        fee: Math.abs(resolvedBt.fee),
         memo: `Stripe charge ${charge?.id || paymentIntent.id}`,
-        date: timestampToDate(
-          balanceTransaction.created ?? balanceTransaction.available_on ?? null
-        ),
+        date: timestampToDate(resolvedBt.created ?? resolvedBt.available_on ?? null),
         stripe: {
           charge: charge ?? undefined,
           paymentIntent,
@@ -672,6 +725,9 @@ const postSuccessfulPaymentIntentToAccounting = async (
       });
 
       await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
+      // Record the post as durable BEFORE the lock is released so a racing
+      // instance (e.g. after a TTL expiry) sees it via the isProcessed check.
+      await deps.idempotencyStore.markProcessed(btKey);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       context.log('[StripeWebhook] Failed to post charge to accounting or update Salesforce', {

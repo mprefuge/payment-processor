@@ -14,22 +14,12 @@ permissions:
 env:
   NODE_VERSION: '22.x'
   APP_NAME: 'payment-processing-function'
-  ACTIONS_STEP_DEBUG: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Debug GitHub context (build)
-        run: echo '${{ toJson(github) }}'
-
-      - name: Debug env (build)
-        run: |
-          echo "Actor: $GITHUB_ACTOR"
-          echo "Ref: $GITHUB_REF"
-          echo "SHA: $GITHUB_SHA"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -42,16 +32,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build --if-present
+      - name: Verify (lint + build + test)
+        run: |
+          rm -rf dist release.zip package
+          npm run verify
 
-      - name: Test
-        run: npm test --if-present
+      - name: Ensure build output exists
+        run: |
+          set -euo pipefail
+          if [ ! -d dist ] || [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "::error::dist directory is missing or empty after build; refusing to package an empty deployment." >&2
+            exit 1
+          fi
 
       - name: Prepare deployment package
         run: |
+          set -euo pipefail
           mkdir package
-          cp -r dist package/ 2>/dev/null || true
+          cp -r dist package/
           cp -r node_modules package/
           cp host.json package/
           cp package.json package/
@@ -69,15 +67,6 @@ jobs:
     needs: build
 
     steps:
-      - name: Debug GitHub context (deploy)
-        run: echo '${{ toJson(github) }}'
-
-      - name: Debug env (deploy)
-        run: |
-          echo "Actor: $GITHUB_ACTOR"
-          echo "Ref: $GITHUB_REF"
-          echo "SHA: $GITHUB_SHA"
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:

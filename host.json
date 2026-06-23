@@ -9,6 +9,12 @@
       }
     }
   },
+  "extensions": {
+    "http": {
+      "maxConcurrentRequests": 25,
+      "maxOutstandingRequests": 200
+    }
+  },
   "extensionBundle": {
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[4.*, 5.0.0)"

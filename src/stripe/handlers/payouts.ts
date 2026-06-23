@@ -764,6 +764,42 @@ export const handlePayoutEvent = async (
       return;
     }
 
+    // Totals guard: the deposit's line items must sum to the payout header
+    // amount. When they do not (differenceCents !== 0), posting would create an
+    // unbalanced QBO deposit. Route the payout to manual review instead: do NOT
+    // post; surface the mismatch on the Salesforce payout transaction (already
+    // upserted above), and emit an actionable alert. Resubmit via stripeTrueUp
+    // once the discrepancy is resolved.
+    if (depositInput.summary.differenceCents !== 0) {
+      const reviewMessage = `Payout totals mismatch: payout=${depositInput.summary.payoutAmountCents}c calculated=${depositInput.summary.calculatedAmountCents}c difference=${depositInput.summary.differenceCents}c`;
+      context.log('[StripeWebhook] Payout deposit unbalanced — routing to review, not posting', {
+        payoutId: payout.id,
+        eventType,
+        alert: 'payout_totals_mismatch',
+        payoutAmountCents: depositInput.summary.payoutAmountCents,
+        calculatedAmountCents: depositInput.summary.calculatedAmountCents,
+        differenceCents: depositInput.summary.differenceCents,
+        lineCount: depositInput.lines.length,
+      });
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          {
+            stripe_payout_id__c: payout.id,
+            transaction_type__c: 'payout',
+            status__c: 'paid',
+            posting_error__c: reviewMessage.slice(0, 255),
+          },
+          'stripe_payout_id__c'
+        );
+      } catch (storeError) {
+        context.log('[StripeWebhook] Failed to store payout totals-mismatch error in Salesforce', {
+          payoutId: payout.id,
+          error: storeError instanceof Error ? storeError.message : String(storeError),
+        });
+      }
+      return;
+    }
+
     let qboDocId: string | null = null;
     let qboDocType: string | null = null;
     try {

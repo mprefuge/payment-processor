@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
 import * as appInsights from 'applicationinsights';
 import type { TelemetryClient } from 'applicationinsights';
+import { redactSecrets } from './secretRedactor';
 
 export interface Logger {
   log: (...args: unknown[]) => void;
@@ -74,10 +75,14 @@ function initializeTelemetry(): TelemetryClient | undefined {
     appInsights
       .setup(key)
       .setAutoCollectConsole(false)
-      .setAutoCollectDependencies(false)
+      // Enable request/dependency auto-collection so the `requests` and
+      // `dependencies` tables are populated for documented Kusto alerts
+      // (webhook 503 rate, lock p99). The Azure Functions Node.js v4 worker does
+      // not auto-instrument these tables itself, so there is no double-counting risk.
+      .setAutoCollectDependencies(true)
       .setAutoCollectExceptions(true)
       .setAutoCollectPerformance(false, false)
-      .setAutoCollectRequests(false)
+      .setAutoCollectRequests(true)
       .setUseDiskRetryCaching(true)
       .setSendLiveMetrics(false)
       .start();
@@ -288,13 +293,30 @@ function invokeConsole(level: LogLevel, args: unknown[]): void {
   method.apply(baseConsole, args as []);
 }
 
+function safeRedact<T>(value: T): T {
+  // Redaction must never break logging. If the redactor isn't initialized yet
+  // (pre-preflight) or throws, fall back to the original value.
+  try {
+    return redactSecrets(value);
+  } catch {
+    return value;
+  }
+}
+
 function writeLog(level: LogLevel, args: unknown[], context?: Record<string, unknown>): void {
+  // Correlation id is derived before redaction so Stripe ids used purely for
+  // correlation aren't lost (they are not registered as secrets).
   const correlationId = ensureCorrelationId(args, context);
   const contextPayload = { correlationId, ...(context ?? {}) };
-  const outputArgs = [...args, contextPayload];
+
+  // Scrub registered secret values from log args and context at the sink so
+  // tokens / connection strings / Stripe keys never reach stdout or telemetry.
+  const redactedArgs = safeRedact(args);
+  const redactedContext = safeRedact(contextPayload);
+  const outputArgs = [...redactedArgs, redactedContext];
 
   invokeConsole(level, outputArgs);
-  sendToTelemetry(level, args, contextPayload);
+  sendToTelemetry(level, redactedArgs, redactedContext);
 }
 
 export function withCorrelationId<T>(correlationId: string, fn: () => T): T {

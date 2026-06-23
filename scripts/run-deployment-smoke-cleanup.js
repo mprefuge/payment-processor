@@ -59,6 +59,28 @@ const buildTaggedPayload = (rawPayload, tag) => {
   };
 };
 
+const assertHealthResponse = (response, body) => {
+  const unhealthy = Array.isArray(body?.connections)
+    ? body.connections
+        .filter((connection) => connection?.status === 'unhealthy')
+        .map((connection) => connection.name || connection.type || 'unknown')
+    : [];
+
+  if (!response.ok) {
+    const detail = unhealthy.length > 0 ? ` Unhealthy connection(s): ${unhealthy.join(', ')}.` : '';
+    throw new Error(
+      `Health check returned non-2xx status ${response.status} (reported status: ${body?.status ?? 'unknown'}).${detail}`
+    );
+  }
+
+  if (body?.status !== 'ok') {
+    const detail = unhealthy.length > 0 ? ` Unhealthy connection(s): ${unhealthy.join(', ')}.` : '';
+    throw new Error(
+      `Health check reported status "${body?.status ?? 'unknown'}", expected "ok".${detail}`
+    );
+  }
+};
+
 const assertTransactionResponse = (body) => {
   const hasSessionIndicator =
     typeof body?.checkoutUrl === 'string' ||
@@ -173,14 +195,15 @@ const main = async () => {
 
   console.log(`Running deployment smoke flow against ${baseUrl} with tag ${tag}`);
 
-  const healthBody = await request(
-    healthUrl,
-    { method: 'GET', headers: commonHeaders },
-    'Health check'
-  );
+  // The health endpoint returns 503 (not 2xx) when degraded, so we fetch it
+  // directly rather than via request(), which throws on non-2xx before we can
+  // inspect the body to surface which connection(s) are unhealthy.
+  const healthResponse = await fetch(healthUrl, { method: 'GET', headers: commonHeaders });
+  const healthBody = await parseJson(healthResponse, 'Health check');
   if (healthBody == null || typeof healthBody !== 'object') {
     throw new Error('Health check did not return a JSON object.');
   }
+  assertHealthResponse(healthResponse, healthBody);
 
   // Once the transaction request is dispatched, real data may exist in Stripe/Salesforce/QBO.
   // Cleanup must run in the finally block regardless of whether subsequent assertions pass.

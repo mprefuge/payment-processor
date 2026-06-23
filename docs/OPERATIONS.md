@@ -8,7 +8,7 @@ This document covers deployment procedures, environment configuration, monitorin
 
 ### Standard Deployment (CI/CD)
 
-1. Push to `main` — GitHub Actions workflow triggers automatically
+1. Push to `New-Main` — the active deploy workflow (`.github/workflows/new-main_payment-processing-function.yml`) triggers on pushes to `New-Main` (or via manual `workflow_dispatch`). Note: a second workflow (`main_payment-processing-function.yml`) exists but triggers only on `prod`/`Test`; **no workflow currently triggers on `main`**. Consolidating these workflows onto a single canonical branch is a pending decision — confirm the active branch before deploying.
 2. Build: `npm ci && npm run build` (TypeScript → `dist/`)
 3. Package: `dist/` + `host.json` + `package*.json`
 4. Deploy via `Azure/functions-action@v1` (`scm-do-build-during-deployment: false`)
@@ -45,16 +45,16 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for the complete refere
 
 | Variable | Required | Notes |
 |---|---|---|
-| `AZURE_TABLES_CONNECTION_STRING` | ✅ Required | Idempotency store for webhook deduplication |
+| `AZURE_TABLES_CONNECTION_STRING` | Conditional (validated lazily) | Idempotency store for webhook deduplication. Not validated at boot by `src/config/env.ts`; the Azure Tables store reads it on first use (fallback: `AZURE_STORAGE_CONNECTION_STRING`). Required unless `DISABLE_AZURE_TABLES=1`. |
 | `DISABLE_AZURE_TABLES` | ❌ Must NOT be `1` in Azure | Blocked at startup when `WEBSITE_INSTANCE_ID` is present |
 | `STRIPE_SECRET` or `STRIPE_LIVE_SECRET_KEY` | ✅ Required | Live mode Stripe API key |
 | `STRIPE_TEST_SECRET_KEY` | ✅ Required | Test mode Stripe API key |
 | `STRIPE_WEBHOOK_SECRET` | ✅ Required | Webhook signing secret (live endpoint) |
 | `STRIPE_WEBHOOK_SECRET_TEST` | Optional | Webhook signing secret (test endpoint) |
-| `SF_INSTANCE_URL` | ✅ Required | `https://yourorg.my.salesforce.com` |
-| `SF_CLIENT_ID` | ✅ Required | Salesforce connected app client ID |
-| `SF_CLIENT_SECRET` | ✅ Required | Salesforce connected app client secret |
-| `SF_AUTH_MODE` | ✅ Required | Must be `client-credentials` |
+| `SF_LOGIN_URL` | Optional | Salesforce OAuth login/token host (e.g. `https://login.salesforce.com`). Defaults to `https://login.salesforce.com` in `src/config/env.ts`. (There is no `SF_INSTANCE_URL` variable.) |
+| `SF_CLIENT_ID` | Conditional | Salesforce connected app client ID. Required when auth mode resolves to `client-credentials`. |
+| `SF_CLIENT_SECRET` | Conditional | Salesforce connected app client secret. Required when auth mode resolves to `client-credentials`. |
+| `SF_AUTH_MODE` | Optional | `disabled` or `client-credentials`. Defaults to `disabled`; if left unset, `env.ts` auto-enables `client-credentials` when both `SF_CLIENT_ID` and `SF_CLIENT_SECRET` are present. |
 | `QBO_CLIENT_ID` | ✅ Required | QuickBooks connected app client ID |
 | `QBO_CLIENT_SECRET` | ✅ Required | QuickBooks connected app client secret |
 | `QBO_REFRESH_TOKEN` | ✅ Required | Valid QBO refresh token (see [QBO Token Refresh](#qbo-token-refresh) below) |
@@ -69,9 +69,26 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for the complete refere
 Run immediately after every deployment. Expected completion: < 5 minutes.
 
 ```bash
-# 1. Health check — all integrations must show "ok"
-curl https://<function-app>.azurewebsites.net/api/health
-# Expected: {"status":"healthy","integrations":{"stripe":"ok","salesforce":"ok","quickbooks":"ok"}}
+# 1. Health check — top-level status must be "ok"
+curl -i https://<function-app>.azurewebsites.net/api/health
+# Real shape (see src/handlers/healthCheck.js buildHealthResponseBody):
+# {
+#   "status": "ok",                 // "ok" when healthy, "degraded" when any connection is unhealthy
+#   "timestamp": "...", "uptime": 12.3, "version": null,
+#   "connections": [
+#     { "name": "stripe_live", "type": "stripe", "healthy": true, "status": "healthy", "message": "..." },
+#     { "name": "crm_salesforce", "type": "crm", "healthy": true, "status": "healthy", ... },
+#     { "name": "accounting_quickbooks", "type": "accounting", "healthy": true, "status": "healthy", ... }
+#     // ...also sendgrid, persistent_storage, environment
+#   ],
+#   "components": [ { "component": "stripe_live", "status": "healthy", "healthy": true }, ... ]
+# }
+# Per-connection status is one of: healthy | unhealthy | disabled | not_configured (plus
+# unsupported / configuration_error for misconfig). A "disabled"/"not_configured" item still
+# reports health:true, so check top-level "status" for overall health.
+#
+# NOTE: the endpoint is being updated to return HTTP 503 when status is "degraded" (it currently
+# always returns 200). Probes/monitors should check BOTH the HTTP status code AND status === "ok".
 
 # 2. Trigger a test webhook
 stripe trigger payment_intent.succeeded
@@ -86,7 +103,7 @@ stripe trigger payment_intent.succeeded
 
 ### Post-Deployment Checklist
 
-- [ ] Health check returns `healthy`
+- [ ] Health check returns top-level `"status":"ok"` (HTTP 200; once the 503 change ships, a non-200 means degraded)
 - [ ] No elevated 503 rate (Application Insights → `requests` table, filter on webhook route)
 - [ ] `posting_error__c` count in Salesforce not increasing
 - [ ] QBO token manager not emitting refresh errors (within 24h)
@@ -215,8 +232,8 @@ curl -X POST "https://<function-app>.azurewebsites.net/api/stripe/true-up?code=<
 **Symptoms:** Donor received Stripe email confirmation; no Transaction\_\_c in Salesforce; no `posting_error__c`
 
 **Steps:**
-1. Check health endpoint — Salesforce must show `"ok"`
-2. If SF is down: verify `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `SF_INSTANCE_URL` in Azure settings; restart function app
+1. Check health endpoint — the `crm_salesforce` connection must show `"status":"healthy"` (and top-level `"status":"ok"`)
+2. If SF is down: verify `SF_CLIENT_ID`, `SF_CLIENT_SECRET`, `SF_LOGIN_URL` (and `CRM_PROVIDER=salesforce`) in Azure settings; restart function app
 3. Check Application Insights:
    ```kusto
    traces
@@ -238,7 +255,7 @@ curl -X POST "https://<function-app>.azurewebsites.net/api/stripe/true-up?code=<
 **Steps:**
 1. Check Application Insights for `[QBOTokenManager] Token refresh failed` or `invalid_grant`
 2. If token expired: follow the [QBO Token Refresh](#qbo-token-refresh) procedure below
-3. If account mapping error: verify QBO item/account codes in `src/services/accounting/` config
+3. If account mapping error: verify QBO item/account codes via the `QBO_ACCOUNT_*` / `QBO_DEFAULT_SALES_ITEM` env vars (resolved in `src/config/env.ts`); the QBO provider/posting logic lives in `src/services/qbo/` (there is no `src/services/accounting/` directory)
 4. Run `stripeTrueUp` (dry run first, then apply):
    ```bash
    curl -X POST "https://<func>.azurewebsites.net/api/stripe/true-up?code=<key>" \
@@ -322,7 +339,10 @@ The `QBOTokenManager` (`src/services/qbo/qboTokenManager.ts`) handles refresh au
 ```bash
 # Check health endpoint
 curl https://<function-app>.azurewebsites.net/api/health
-# Look for: "quickbooks": "error"
+# Look in connections[] for the accounting entry, e.g.:
+#   { "name": "accounting_quickbooks", "status": "unhealthy", "healthy": false,
+#     "message": "... | Token refresh failed: ..." }
+# A healthy QBO connection shows "status":"healthy" (overall top-level "status":"ok").
 ```
 
 ```kusto
@@ -349,7 +369,7 @@ Usually just restart the function app:
 az functionapp restart --resource-group <rg> --name <function-app>
 ```
 
-Wait 30 seconds, then check the health endpoint. If QBO shows `"ok"`, recovery is complete.
+Wait 30 seconds, then check the health endpoint. If the `accounting_quickbooks` connection shows `"status":"healthy"`, recovery is complete.
 
 ### Recovery: Refresh Token Expired (> 100 days)
 
@@ -367,7 +387,7 @@ Re-authorization is required through the QBO OAuth consent flow.
 4. Copy `QBO_REFRESH_TOKEN` from the token file
 5. Update `QBO_REFRESH_TOKEN` in Azure Portal → Function App → Settings → Environment variables
 6. Restart the function app
-7. Verify: `curl https://<function-app>.azurewebsites.net/api/health` → `"quickbooks": "ok"`
+7. Verify: `curl https://<function-app>.azurewebsites.net/api/health` → `accounting_quickbooks` connection shows `"status":"healthy"`
 
 ---
 
