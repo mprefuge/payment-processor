@@ -448,13 +448,41 @@ const processTransactionResponseExample = {
 };
 
 const healthCheckResponseExample = {
-  status: 'healthy',
+  status: 'ok',
   timestamp: '2026-04-05T15:20:00.000Z',
-  integrations: {
-    stripe: { ok: true },
-    salesforce: { ok: true },
-    quickbooks: { ok: true },
-  },
+  uptime: 3600.42,
+  version: '1.0.0',
+  connections: [
+    {
+      name: 'stripe_live',
+      type: 'stripe',
+      healthy: true,
+      status: 'healthy',
+      message: 'Stripe live connection healthy',
+      details: {},
+    },
+    {
+      name: 'crm_salesforce',
+      type: 'crm',
+      healthy: true,
+      status: 'healthy',
+      message: 'Salesforce connection healthy',
+      details: {},
+    },
+    {
+      name: 'accounting_quickbooks',
+      type: 'accounting',
+      healthy: true,
+      status: 'healthy',
+      message: 'quickbooks health check completed | Token refresh confirmed (tokens persisted)',
+      details: {},
+    },
+  ],
+  components: [
+    { component: 'stripe_live', status: 'healthy', healthy: true },
+    { component: 'crm_salesforce', status: 'healthy', healthy: true },
+    { component: 'accounting_quickbooks', status: 'healthy', healthy: true },
+  ],
 };
 
 const payoutSyncResponseExample = {
