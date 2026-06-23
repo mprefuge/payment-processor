@@ -22,7 +22,6 @@ import {
   getFrequencyFromSubscription,
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
-import { loadConfig, normalizeTransactionCategory } from '../../config/contactMatching';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const emailService = require('../../services/payoutRecon/emailService') as {
