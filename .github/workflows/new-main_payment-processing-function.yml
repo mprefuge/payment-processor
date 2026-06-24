@@ -13,7 +13,7 @@ permissions:
 
 env:
   NODE_VERSION: '22.x'
-  APP_NAME: 'payment-processing-function'
+  APP_NAME: 'ri-pp'
 
 jobs:
   build:
