@@ -24,6 +24,57 @@ type CreateDepositParams = {
   env?: 'prod' | 'sandbox';
 };
 
+/**
+ * Look for a bank deposit that already links the given sales receipt, so we
+ * never create a second deposit for a receipt that has already been deposited.
+ *
+ * QBO SQL cannot filter on LinkedTxn, so we scope the query by the deposit's
+ * TxnDate (as checkForPayoutMovement does) and match the linked SalesReceipt in
+ * memory. A same-request retry reuses the same TxnDate, so an accidental
+ * double-post is caught. (A retry that supplies a different TxnDate is not
+ * covered by this date-scoped check.)
+ */
+async function findExistingDepositForSalesReceipt(params: {
+  base: string;
+  realmId: string;
+  accessToken: string;
+  salesReceiptId: string;
+  txnDateISO: string;
+}): Promise<Record<string, any> | null> {
+  const { base, realmId, accessToken, salesReceiptId, txnDateISO } = params;
+
+  const queryString = `SELECT * FROM Deposit WHERE TxnDate = '${txnDateISO}'`;
+  const url = `${base}/v3/company/${realmId}/query?query=${encodeURIComponent(queryString)}&minorversion=75`;
+
+  const res = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    validateStatus: () => true,
+  });
+
+  if (res.status >= 400) {
+    // Fail closed: if we cannot verify, abort rather than risk a duplicate deposit.
+    throw new Error(
+      `QBO deposit duplicate check failed ${res.status}: ${
+        typeof res.data === 'string' ? res.data : JSON.stringify(res.data)
+      }`
+    );
+  }
+
+  const deposits: Array<Record<string, any>> = res.data?.QueryResponse?.Deposit ?? [];
+  const match = deposits.find((deposit) =>
+    (deposit.Line ?? []).some((line: any) =>
+      (line?.DepositLineDetail?.LinkedTxn ?? []).some(
+        (txn: any) => String(txn?.TxnId) === String(salesReceiptId)
+      )
+    )
+  );
+
+  return match ?? null;
+}
+
 export async function createQboDeposit({
   realmId,
   accessToken,
@@ -73,6 +124,24 @@ export async function createQboDeposit({
     throw new Error(
       'BUG: payload is a JSON string. Pass an object to axios.post, not a pre-stringified string.'
     );
+  }
+
+  // Duplicate guard: the manual-sync endpoint can be invoked more than once for
+  // the same sales receipt. Never create a second deposit for one that has
+  // already been deposited.
+  const existingDeposit = await findExistingDepositForSalesReceipt({
+    base,
+    realmId,
+    accessToken,
+    salesReceiptId: String(salesReceiptId),
+    txnDateISO,
+  });
+  if (existingDeposit) {
+    logger.info('[createQboDeposit] Deposit already exists for sales receipt; skipping duplicate', {
+      salesReceiptId,
+      existingDepositId: existingDeposit.Id,
+    });
+    return { Deposit: existingDeposit };
   }
 
   const res = await axios.post(url, bodyToSend, {
