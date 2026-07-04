@@ -1986,3 +1986,103 @@ describe('postDisputeToQbo', () => {
     expect(salesReceiptBody.PrivateNote).toContain('[source_test_tag:deploy-smoke-123]');
   });
 });
+
+describe('postToQbo duplicate suppression (dedup safety net)', () => {
+  const baseArgs = {
+    gross: 10_000,
+    fee: 325,
+    memo: 'Charge memo',
+    date: new Date('2024-03-01'),
+  };
+
+  // EXPECTED-FAILING (T2.6): the DocNumber pre-check in checkForDuplicate is
+  // broken. query() (qboSvc.ts:5082) returns the already-unwrapped array of rows,
+  // but checkForDuplicate (qboSvc.ts:3070) reads `result.QueryResponse[entityName]`
+  // on that array, which is always undefined — so the pre-check never detects an
+  // existing document and always proceeds to create. Today dedup only works
+  // because QBO itself rejects the duplicate DocNumber on create (covered by the
+  // next test); if that server-side warning is disabled for an entity, this gap
+  // becomes a real double-post. `it.fails` keeps CI green now and flips RED when
+  // checkForDuplicate is fixed — the signal to convert this to a normal `it()`.
+  it.fails(
+    'returns the existing document and issues no create when the DocNumber already exists',
+    async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: {} }, // customer email lookup
+        { QueryResponse: {} }, // customer name lookup
+        { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } }, // customer create
+        { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } }, // item lookup
+        { QueryResponse: { SalesReceipt: [{ Id: 'sr-existing' }] } }, // duplicate check -> existing doc
+        { SalesReceipt: { Id: 'sr-created-duplicate' } } // create (must NOT be reached once the pre-check works)
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo({
+        ...baseArgs,
+        stripe: buildStripeContext(),
+        options: { fetcher, accessToken: 'token' },
+      });
+
+      // The pre-existing receipt should be returned instead of creating a duplicate.
+      expect(result).toEqual({ qboId: 'sr-existing', type: 'sales-receipt' });
+      // No SalesReceipt create POST should be issued.
+      const createRequest = requests.find(
+        (r) => r.url.includes('/salesreceipt') && (r.init?.method ?? 'GET') === 'POST'
+      );
+      expect(createRequest).toBeUndefined();
+    }
+  );
+
+  it('recovers the existing id from a QuickBooks duplicate-DocNumber error instead of failing', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // duplicate check -> miss
+      {
+        ok: false,
+        status: 400,
+        text: async () =>
+          'Duplicate Document Number Error : DocNumber=CHG-1 is assigned to TxnType=Sales Receipt with TxnId=777',
+      } // create -> QBO rejects as duplicate, carries the existing TxnId
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      ...baseArgs,
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: '777', type: 'sales-receipt' });
+  });
+
+  it('fails closed (throws) when the duplicate-check query errors, rather than risk a double post', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { ok: false, status: 500, statusText: 'Server Error', text: async () => 'qbo unavailable' } // duplicate check -> error
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await expect(
+      postChargeToQbo({
+        ...baseArgs,
+        stripe: buildStripeContext(),
+        options: { fetcher, accessToken: 'token' },
+      })
+    ).rejects.toThrow(/duplicate check failed/i);
+
+    // Must not have created a SalesReceipt after the failed duplicate check.
+    const createRequest = requests.find(
+      (r) => r.url.includes('/salesreceipt') && (r.init?.method ?? 'GET') === 'POST'
+    );
+    expect(createRequest).toBeUndefined();
+  });
+});
