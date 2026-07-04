@@ -175,7 +175,7 @@ describe('AzureIdempotencyStore', () => {
       expect(stored).toBeUndefined(); // released
     });
 
-    it('logs a warning when renewal returns null (ETag mismatch — lock stolen)', async () => {
+    it('fails closed (throws + logs) when renewal returns null (ETag mismatch — lock stolen)', async () => {
       vi.useFakeTimers();
       const warnSpy = vi.fn();
       const errorSpy = vi.fn();
@@ -201,10 +201,17 @@ describe('AzureIdempotencyStore', () => {
         },
       });
 
-      await store.withLock('stolen_test', async () => {
-        await vi.advanceTimersByTimeAsync(4500);
-      });
+      // The critical section still completes, but because the lease was stolen
+      // mid-run withLock must fail closed rather than report success.
+      let bodyRan = false;
+      await expect(
+        store.withLock('stolen_test', async () => {
+          await vi.advanceTimersByTimeAsync(4500);
+          bodyRan = true;
+        })
+      ).rejects.toThrow(/stolen mid-execution/i);
 
+      expect(bodyRan).toBe(true);
       expect(errorSpy).toHaveBeenCalledWith(
         '[IdempotencyStore] Lock stolen \u2014 another instance took over',
         expect.objectContaining({ key: 'stolen_test', alert: 'lock_stolen' })
