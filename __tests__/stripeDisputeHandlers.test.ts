@@ -318,20 +318,13 @@ describe('handleDisputeClosed — other statuses', () => {
   });
 });
 
-// ── redelivery dedup gap (T2.3) ───────────────────────────────────────────────
+// ── redelivery dedup (T2.3) ───────────────────────────────────────────────────
 //
-// handleDisputeWon wraps the QBO reversal in withLock() but never calls
-// isProcessed/markProcessed (see disputes.ts). withLock only serialises
-// *concurrent* processing; it does not survive a sequential redelivery once the
-// short lock TTL expires. So Stripe re-delivering the same won-dispute event
-// re-posts the reversal journal entry — a double credit.
-//
-// The spec below asserts the DESIRED behaviour (post once across redeliveries)
-// against a stateful idempotency store. It is expected to FAIL until T2.3 adds a
-// durable isProcessed/markProcessed guard, so it is marked `it.fails`: it stays
-// green now and will flip RED the moment T2.3 fixes the handler — the signal to
-// convert it into a normal `it()`.
-describe('handleDisputeClosed — redelivery dedup (T2.3, expected-failing until fixed)', () => {
+// handleDisputeWon wraps the QBO reversal in withLock(), which only serialises
+// *concurrent* processing. A durable isProcessed/markProcessed marker (added in
+// T2.3, mirroring refunds.ts) guards against a sequential redelivery re-posting
+// the reversal once the short lock TTL has expired.
+describe('handleDisputeClosed — redelivery dedup (T2.3)', () => {
   const makeStatefulIdempotencyStore = () => {
     const processed = new Set<string>();
     return {
@@ -343,7 +336,7 @@ describe('handleDisputeClosed — redelivery dedup (T2.3, expected-failing until
     };
   };
 
-  it.fails('posts the won-dispute reversal only once across two redeliveries', async () => {
+  it('posts the won-dispute reversal only once across two redeliveries', async () => {
     const postDisputeReversalToQbo = vi
       .fn()
       .mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' });

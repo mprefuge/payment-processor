@@ -116,8 +116,19 @@ const handleDisputeWon = async (
   }
 
   const lockId = primaryBalanceTransaction?.id || `dispute_won_${dispute.id}`;
+  const reversalDedupKey = `stripe_dispute_reversal_qbo_${dispute.id}`;
 
   await deps.idempotencyStore.withLock(`bt_${lockId}`, async () => {
+    // The lock only serialises concurrent processing; a durable marker guards
+    // against a sequential redelivery re-posting the reversal after the lock's
+    // short TTL has expired.
+    if (await deps.idempotencyStore.isProcessed(reversalDedupKey)) {
+      context.log('[StripeWebhook] Won dispute reversal already posted to QBO, skipping', {
+        disputeId: dispute.id,
+      });
+      return;
+    }
+
     const posting = await deps.accounting.postDisputeReversalToQbo({
       lossAmount: recoveryAmountCents,
       feeAmount: feeAmountCents,
@@ -132,6 +143,7 @@ const handleDisputeWon = async (
     });
 
     await markPosted(salesforce, upsertResult, posting);
+    await deps.idempotencyStore.markProcessed(reversalDedupKey);
 
     context.log('[StripeWebhook] Won dispute QBO reversal posted successfully', {
       alert: 'dispute_won_reversal',
@@ -273,8 +285,19 @@ export const handleDisputeClosed = async (
   }
 
   const lockId = primaryBalanceTransaction?.id || `dispute_${dispute.id}`;
+  const disputeDedupKey = `stripe_dispute_qbo_${dispute.id}`;
 
   await deps.idempotencyStore.withLock(`bt_${lockId}`, async () => {
+    // The lock only serialises concurrent processing; a durable marker guards
+    // against a sequential redelivery re-posting the loss after the lock's short
+    // TTL has expired.
+    if (await deps.idempotencyStore.isProcessed(disputeDedupKey)) {
+      context.log('[StripeWebhook] Dispute loss already posted to QBO, skipping', {
+        disputeId: dispute.id,
+      });
+      return;
+    }
+
     const posting = await deps.accounting.postDisputeToQbo({
       lossAmount: lossAmountCents,
       feeAmount: feeAmountCents,
@@ -289,5 +312,6 @@ export const handleDisputeClosed = async (
     });
 
     await markPosted(salesforce, upsertResult, posting);
+    await deps.idempotencyStore.markProcessed(disputeDedupKey);
   });
 };
