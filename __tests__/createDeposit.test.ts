@@ -3,6 +3,7 @@ import axios from 'axios';
 
 vi.mock('axios');
 const axiosPost = vi.mocked(axios.post);
+const axiosGet = vi.mocked(axios.get);
 
 // Import after mocking
 import { createQboDeposit } from '../src/services/qbo/createDeposit';
@@ -19,6 +20,8 @@ describe('createQboDeposit', () => {
 
   beforeEach(() => {
     axiosPost.mockResolvedValue({ status: 200, data: { Deposit: { Id: 'dep_1' } } });
+    // Default: no existing deposit for the sales receipt (duplicate check passes).
+    axiosGet.mockResolvedValue({ status: 200, data: { QueryResponse: {} } });
   });
 
   afterEach(() => {
@@ -125,6 +128,52 @@ describe('createQboDeposit', () => {
 
       const result = await createQboDeposit(baseParams);
       expect(result.Deposit.Id).toBe('dep_999');
+    });
+  });
+
+  describe('duplicate guard', () => {
+    const existingDepositResponse = (linkedTxnId: string) => ({
+      status: 200,
+      data: {
+        QueryResponse: {
+          Deposit: [
+            {
+              Id: 'dep_existing',
+              Line: [
+                {
+                  DepositLineDetail: {
+                    LinkedTxn: [{ TxnId: linkedTxnId, TxnType: 'SalesReceipt' }],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    it('skips the create and returns the existing deposit when the sales receipt is already deposited', async () => {
+      axiosGet.mockResolvedValue(existingDepositResponse('1822'));
+
+      const result = await createQboDeposit(baseParams);
+
+      expect(result.Deposit.Id).toBe('dep_existing');
+      expect(axiosPost).not.toHaveBeenCalled();
+    });
+
+    it('still creates when existing deposits on the date link a different sales receipt', async () => {
+      axiosGet.mockResolvedValue(existingDepositResponse('9999'));
+
+      await createQboDeposit(baseParams);
+
+      expect(axiosPost).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails closed (throws) and does not post when the duplicate-check query errors', async () => {
+      axiosGet.mockResolvedValue({ status: 500, data: 'server error' });
+
+      await expect(createQboDeposit(baseParams)).rejects.toThrow(/duplicate check failed/i);
+      expect(axiosPost).not.toHaveBeenCalled();
     });
   });
 });
