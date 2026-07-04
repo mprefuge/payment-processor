@@ -33,31 +33,3 @@ export const isRequestLimitExceeded = (error: unknown): boolean => {
     msg.includes('REQUEST_LIMIT_EXCEEDED') || msg.toLowerCase().includes('request limit exceeded')
   );
 };
-
-export const isSalesforceTransient = (error: unknown): boolean => {
-  const code = getErrorCode(error);
-  const transientCodes: ReadonlySet<string> = new Set([
-    SalesforceErrorCode.UNABLE_TO_LOCK_ROW,
-    SalesforceErrorCode.QUERY_TIMEOUT,
-    SalesforceErrorCode.SERVER_UNAVAILABLE,
-  ]);
-  if (code && transientCodes.has(code)) return true;
-  const msg = getErrorMessage(error);
-  return (
-    msg.includes('UNABLE_TO_LOCK_ROW') ||
-    msg.includes('QUERY_TIMEOUT') ||
-    msg.includes('SERVER_UNAVAILABLE')
-  );
-};
-
-export const isSalesforcePermanent = (error: unknown): boolean => {
-  const code = getErrorCode(error);
-  if (!code) return false;
-  const permanentCodes: ReadonlySet<string> = new Set([
-    SalesforceErrorCode.REQUIRED_FIELD_MISSING,
-    SalesforceErrorCode.FIELD_CUSTOM_VALIDATION_EXCEPTION,
-    SalesforceErrorCode.INVALID_FIELD,
-    SalesforceErrorCode.INVALID_TYPE,
-  ]);
-  return permanentCodes.has(code);
-};

@@ -6,7 +6,7 @@ import {
   type TransactionUpsertDTO,
   SF_RECORD_TYPE_STRIPE_TRANSACTION,
 } from '../../domain/transactions';
-import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
+import type { SalesforceSvc } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { HttpContext, StripeWebhookDependencies } from '../types';
 import {

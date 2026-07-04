@@ -339,8 +339,6 @@ export function createLogger(context: Record<string, unknown> = {}): Logger {
   };
 }
 
-export const createContextLogger = createLogger;
-
 export const logger: Logger = createLogger();
 
 export default logger;
