@@ -281,6 +281,7 @@ export class AzureIdempotencyStore implements IdempotencyStore {
     // replacement lock held by another instance after a TTL expiry.
     let currentEtag = lockEtag;
     let released = false;
+    let lockStolen = false;
     const release = async () => {
       if (released) return;
       released = true;
@@ -298,10 +299,16 @@ export class AzureIdempotencyStore implements IdempotencyStore {
         void this.renewLease(normalizedKey, etag)
           .then((newEtag) => {
             if (newEtag === null) {
+              lockStolen = true;
               this.logger.error('[IdempotencyStore] Lock stolen — another instance took over', {
                 key: normalizedKey,
                 alert: 'lock_stolen',
               });
+              // Stop trying to renew a lease we no longer hold.
+              if (renewalInterval !== undefined) {
+                clearInterval(renewalInterval);
+                renewalInterval = undefined;
+              }
             } else {
               currentEtag = newEtag;
               this.logger.debug('[IdempotencyStore] Lock renewed', {
@@ -319,6 +326,16 @@ export class AzureIdempotencyStore implements IdempotencyStore {
 
     try {
       const result = await fn();
+      if (lockStolen) {
+        // Another instance took the lease mid-execution, so this critical section
+        // ran without exclusivity. Fail closed rather than report success: the
+        // caller surfaces the error and retries under a fresh lock, and the
+        // downstream DocNumber dedup collapses any duplicate that slipped through.
+        throw new Error(
+          `[IdempotencyStore] Lock for "${normalizedKey}" was stolen mid-execution; aborting ` +
+            `instead of reporting success on a possibly double-processed operation.`
+        );
+      }
       return result;
     } finally {
       if (renewalInterval !== undefined) {
