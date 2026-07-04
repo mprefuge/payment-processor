@@ -1,7 +1,17 @@
 import { z } from 'zod';
 
+import {
+  DEFAULT_SALESFORCE_LOGIN_URL,
+  EnvConfigError,
+  normalizeQboEnvironment,
+  parseBoolean,
+  resolveEnv,
+  type QuickBooksEnvironment,
+} from './env/resolve';
+
+export { DEFAULT_SALESFORCE_LOGIN_URL } from './env/resolve';
+
 type SalesforceAuthMode = 'disabled' | 'client-credentials';
-type QuickBooksEnvironment = 'sandbox' | 'production';
 type AccountingPostingStrategy = 'je-transfer' | 'sales-receipt';
 
 export interface EnvConfig {
@@ -31,9 +41,6 @@ export interface EnvConfig {
       refunds: string;
       disputeLosses: string;
     };
-    items?: {
-      revenue?: string;
-    };
   };
   accounting: {
     postingStrategy: AccountingPostingStrategy;
@@ -51,81 +58,36 @@ export interface EnvConfig {
       };
     };
   };
-  appInsights?: {
-    instrumentationKey: string;
-  };
 }
 
-class EnvConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'EnvConfigError';
-  }
+// Shared accumulator: each loader records missing/invalid vars so the composer
+// can throw once, reporting every problem together (not just the first).
+interface LoadContext {
+  missing: string[];
+  errors: string[];
 }
 
-type ResolveOptions = {
-  fallbackNames?: string[];
-  defaultValue?: string;
-  trim?: boolean;
-};
-
-export const DEFAULT_SALESFORCE_LOGIN_URL = 'https://login.salesforce.com';
-
-function resolveEnv(name: string, options: ResolveOptions = {}): string | undefined {
-  const { fallbackNames = [], defaultValue, trim = true } = options;
-  const candidates = [name, ...fallbackNames];
-
-  for (const candidate of candidates) {
-    const raw = process.env[candidate];
-    if (typeof raw === 'string') {
-      const value = trim ? raw.trim() : raw;
-      if (value.length > 0) {
-        return value;
-      }
-    }
-  }
-
-  return defaultValue;
-}
-
-function parseBoolean(name: string, value: string | undefined, defaultValue: boolean): boolean {
-  if (typeof value === 'undefined') {
-    return defaultValue;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'true') {
-    return true;
-  }
-  if (normalized === 'false') {
-    return false;
-  }
-
-  throw new EnvConfigError(
-    `Invalid boolean value for ${name}: ${value}. Expected "true" or "false".`
-  );
-}
-
-function loadEnv(): EnvConfig {
-  const missing: string[] = [];
-  const errors: string[] = [];
-
-  const stripeSecret = resolveEnv('STRIPE_SECRET', {
+function loadStripe(ctx: LoadContext): EnvConfig['stripe'] {
+  const secret = resolveEnv('STRIPE_SECRET', {
     fallbackNames: ['STRIPE_LIVE_SECRET_KEY', 'STRIPE_TEST_SECRET_KEY'],
   });
-  if (!stripeSecret) {
-    missing.push('STRIPE_SECRET (or STRIPE_LIVE_SECRET_KEY / STRIPE_TEST_SECRET_KEY)');
+  if (!secret) {
+    ctx.missing.push('STRIPE_SECRET (or STRIPE_LIVE_SECRET_KEY / STRIPE_TEST_SECRET_KEY)');
   }
 
-  const stripeWebhookSecret = resolveEnv('STRIPE_WEBHOOK_SECRET', {
+  const webhookSecret = resolveEnv('STRIPE_WEBHOOK_SECRET', {
     fallbackNames: ['STRIPE_WEBHOOK_SECRET_LIVE', 'STRIPE_WEBHOOK_SECRET_TEST'],
   });
-  if (!stripeWebhookSecret) {
-    missing.push(
+  if (!webhookSecret) {
+    ctx.missing.push(
       'STRIPE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET_LIVE / STRIPE_WEBHOOK_SECRET_TEST)'
     );
   }
 
+  return { secret: secret ?? '', webhookSecret: webhookSecret ?? '' };
+}
+
+function loadSalesforce(ctx: LoadContext): EnvConfig['salesforce'] {
   const authModeEnvValue = resolveEnv('SF_AUTH_MODE', {
     fallbackNames: ['SALESFORCE_AUTH_MODE'],
     defaultValue: 'disabled',
@@ -133,36 +95,15 @@ function loadEnv(): EnvConfig {
   const authModeExplicitlySet = Boolean(
     process.env.SF_AUTH_MODE ?? process.env.SALESFORCE_AUTH_MODE
   );
-  const salesforceClientId = resolveEnv('SF_CLIENT_ID', {
-    fallbackNames: ['SALESFORCE_CLIENT_ID'],
-  });
-  const salesforceClientSecret = resolveEnv('SF_CLIENT_SECRET', {
+  const clientId = resolveEnv('SF_CLIENT_ID', { fallbackNames: ['SALESFORCE_CLIENT_ID'] });
+  const clientSecret = resolveEnv('SF_CLIENT_SECRET', {
     fallbackNames: ['SALESFORCE_CLIENT_SECRET'],
   });
 
-  let resolvedSalesforceAuthMode: SalesforceAuthMode = (
-    authModeEnvValue ?? 'disabled'
-  ).toLowerCase() as SalesforceAuthMode;
-
-  if (
-    !authModeExplicitlySet &&
-    resolvedSalesforceAuthMode === 'disabled' &&
-    salesforceClientId &&
-    salesforceClientSecret
-  ) {
-    resolvedSalesforceAuthMode = 'client-credentials';
+  let authMode = authModeEnvValue.toLowerCase() as SalesforceAuthMode;
+  if (!authModeExplicitlySet && authMode === 'disabled' && clientId && clientSecret) {
+    authMode = 'client-credentials';
   }
-
-  const salesforceRaw = {
-    authMode: resolvedSalesforceAuthMode,
-    clientId: salesforceClientId,
-    clientSecret: salesforceClientSecret,
-    loginUrl:
-      resolveEnv('SF_LOGIN_URL', {
-        fallbackNames: ['SALESFORCE_LOGIN_URL'],
-        defaultValue: DEFAULT_SALESFORCE_LOGIN_URL,
-      }) ?? DEFAULT_SALESFORCE_LOGIN_URL,
-  };
 
   const salesforceSchema = z.object({
     authMode: z.enum(['disabled', 'client-credentials'] as const),
@@ -171,67 +112,37 @@ function loadEnv(): EnvConfig {
     loginUrl: z.string().url(),
   });
 
-  const salesforce = salesforceSchema.parse(salesforceRaw);
+  const salesforce = salesforceSchema.parse({
+    authMode,
+    clientId,
+    clientSecret,
+    loginUrl: resolveEnv('SF_LOGIN_URL', {
+      fallbackNames: ['SALESFORCE_LOGIN_URL'],
+      defaultValue: DEFAULT_SALESFORCE_LOGIN_URL,
+    }),
+  });
 
   if (salesforce.authMode === 'client-credentials') {
     if (!salesforce.clientId) {
-      missing.push('SF_CLIENT_ID (or SALESFORCE_CLIENT_ID)');
+      ctx.missing.push('SF_CLIENT_ID (or SALESFORCE_CLIENT_ID)');
     }
     if (!salesforce.clientSecret) {
-      missing.push('SF_CLIENT_SECRET (or SALESFORCE_CLIENT_SECRET)');
+      ctx.missing.push('SF_CLIENT_SECRET (or SALESFORCE_CLIENT_SECRET)');
     }
   }
 
-  const quickBooksRaw = {
-    environment: (
-      resolveEnv('QBO_ENV', {
-        fallbackNames: ['QBO_ENVIRONMENT'],
-        defaultValue: 'sandbox',
-      }) ?? 'sandbox'
-    ).toLowerCase(),
-    realmId: resolveEnv('QBO_REALM_ID', {
-      fallbackNames: ['QBO_COMPANY_ID'],
-    }),
-    clientId: resolveEnv('QBO_CLIENT_ID'),
-    clientSecret: resolveEnv('QBO_CLIENT_SECRET'),
-    redirectUri: resolveEnv('QBO_REDIRECT_URI'),
-    refreshToken: resolveEnv('QBO_REFRESH_TOKEN'),
-    accounts: {
-      stripeClearing:
-        resolveEnv('QBO_ACCOUNT_STRIPE_CLEARING', {
-          fallbackNames: ['ACCOUNTING_STRIPE_CLEARING_ACCOUNT'],
-          defaultValue: 'Stripe Clearing',
-        }) ?? 'Stripe Clearing',
-      operatingBank:
-        resolveEnv('QBO_ACCOUNT_OPERATING_BANK', {
-          fallbackNames: ['ACCOUNTING_OPERATING_BANK_ACCOUNT'],
-          defaultValue: 'Operating Bank',
-        }) ?? 'Operating Bank',
-      revenue:
-        resolveEnv('QBO_ACCOUNT_REVENUE', {
-          fallbackNames: ['ACCOUNTING_REVENUE_ACCOUNT'],
-          defaultValue: 'Revenue',
-        }) ?? 'Revenue',
-      fees:
-        resolveEnv('QBO_ACCOUNT_FEES', {
-          fallbackNames: ['ACCOUNTING_STRIPE_FEE_ACCOUNT'],
-          defaultValue: 'Stripe Fees',
-        }) ?? 'Stripe Fees',
-      refunds:
-        resolveEnv('QBO_ACCOUNT_REFUNDS', {
-          fallbackNames: ['ACCOUNTING_REFUNDS_ACCOUNT'],
-          defaultValue: 'Refunds',
-        }) ?? 'Refunds',
-      disputeLosses:
-        resolveEnv('QBO_ACCOUNT_DISPUTES', {
-          fallbackNames: ['ACCOUNTING_DISPUTE_LOSS_ACCOUNT'],
-          defaultValue: 'Dispute Losses',
-        }) ?? 'Dispute Losses',
-    },
-  };
+  return salesforce;
+}
+
+function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
+  const environment = normalizeQboEnvironment(
+    resolveEnv('QBO_ENV', { fallbackNames: ['QBO_ENVIRONMENT'], defaultValue: 'sandbox' })
+  );
+  if (!environment) {
+    ctx.errors.push('QBO_ENV (or QBO_ENVIRONMENT) must be one of: "sandbox", "production".');
+  }
 
   const quickBooksSchema = z.object({
-    environment: z.enum(['sandbox', 'production'] as const),
     realmId: z.string().min(1).optional(),
     clientId: z.string().min(1).optional(),
     clientSecret: z.string().min(1).optional(),
@@ -247,168 +158,163 @@ function loadEnv(): EnvConfig {
     }),
   });
 
-  const quickBooks = quickBooksSchema.parse(quickBooksRaw);
-
-  const postingStrategyRaw = resolveEnv('ACCOUNTING_POSTING_STRATEGY', {
-    defaultValue: 'je-transfer',
+  const parsed = quickBooksSchema.parse({
+    realmId: resolveEnv('QBO_REALM_ID', { fallbackNames: ['QBO_COMPANY_ID'] }),
+    clientId: resolveEnv('QBO_CLIENT_ID'),
+    clientSecret: resolveEnv('QBO_CLIENT_SECRET'),
+    redirectUri: resolveEnv('QBO_REDIRECT_URI'),
+    refreshToken: resolveEnv('QBO_REFRESH_TOKEN'),
+    accounts: {
+      stripeClearing: resolveEnv('QBO_ACCOUNT_STRIPE_CLEARING', {
+        fallbackNames: ['ACCOUNTING_STRIPE_CLEARING_ACCOUNT'],
+        defaultValue: 'Stripe Clearing',
+      }),
+      operatingBank: resolveEnv('QBO_ACCOUNT_OPERATING_BANK', {
+        fallbackNames: ['ACCOUNTING_OPERATING_BANK_ACCOUNT'],
+        defaultValue: 'Operating Bank',
+      }),
+      revenue: resolveEnv('QBO_ACCOUNT_REVENUE', {
+        fallbackNames: ['ACCOUNTING_REVENUE_ACCOUNT'],
+        defaultValue: 'Revenue',
+      }),
+      fees: resolveEnv('QBO_ACCOUNT_FEES', {
+        fallbackNames: ['ACCOUNTING_STRIPE_FEE_ACCOUNT'],
+        defaultValue: 'Stripe Fees',
+      }),
+      refunds: resolveEnv('QBO_ACCOUNT_REFUNDS', {
+        fallbackNames: ['ACCOUNTING_REFUNDS_ACCOUNT'],
+        defaultValue: 'Refunds',
+      }),
+      disputeLosses: resolveEnv('QBO_ACCOUNT_DISPUTES', {
+        fallbackNames: ['ACCOUNTING_DISPUTE_LOSS_ACCOUNT'],
+        defaultValue: 'Dispute Losses',
+      }),
+    },
   });
-  const postingStrategySchema = z.enum(['je-transfer', 'sales-receipt'] as const);
 
+  return { environment: environment ?? 'sandbox', ...parsed };
+}
+
+function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
+  const postingStrategySchema = z.enum(['je-transfer', 'sales-receipt'] as const);
   const postingStrategy = postingStrategySchema.safeParse(
-    (postingStrategyRaw ?? 'je-transfer').toLowerCase()
+    resolveEnv('ACCOUNTING_POSTING_STRATEGY', { defaultValue: 'je-transfer' }).toLowerCase()
   );
   if (!postingStrategy.success) {
-    errors.push('ACCOUNTING_POSTING_STRATEGY must be one of: "je-transfer", "sales-receipt".');
+    ctx.errors.push('ACCOUNTING_POSTING_STRATEGY must be one of: "je-transfer", "sales-receipt".');
   }
 
-  const accountingSyncEnabledRaw = resolveEnv('ACCOUNTING_SYNC_ENABLED', {
-    defaultValue: 'false',
-  });
-  const syncEnabled = parseBoolean('ACCOUNTING_SYNC_ENABLED', accountingSyncEnabledRaw, false);
-
-  const defaultSalesItem =
-    resolveEnv('QBO_DEFAULT_SALES_ITEM', {
-      fallbackNames: ['ACCOUNTING_DEFAULT_SALES_ITEM'],
-      defaultValue: 'Stripe Transaction',
-    }) ?? 'Stripe Transaction';
-
-  const autoCreateAccountsRaw = resolveEnv('ACCOUNTING_AUTOCREATE_ACCOUNTS', {
-    defaultValue: 'false',
-  });
-  const autoCreateAccounts = parseBoolean(
-    'ACCOUNTING_AUTOCREATE_ACCOUNTS',
-    autoCreateAccountsRaw,
+  const syncEnabled = parseBoolean(
+    'ACCOUNTING_SYNC_ENABLED',
+    resolveEnv('ACCOUNTING_SYNC_ENABLED', { defaultValue: 'false' }),
     false
   );
 
-  // Account type configurations
-  const accountTypes = {
+  const defaultSalesItem = resolveEnv('QBO_DEFAULT_SALES_ITEM', {
+    fallbackNames: ['ACCOUNTING_DEFAULT_SALES_ITEM'],
+    defaultValue: 'Stripe Transaction',
+  });
+
+  const autoCreate = parseBoolean(
+    'ACCOUNTING_AUTOCREATE_ACCOUNTS',
+    resolveEnv('ACCOUNTING_AUTOCREATE_ACCOUNTS', { defaultValue: 'false' }),
+    false
+  );
+
+  const types = {
     stripeClearing: {
-      accountType:
-        resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_TYPE', {
-          defaultValue: 'Bank',
-        }) ?? 'Bank',
-      accountSubType:
-        resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_SUBTYPE', {
-          defaultValue: 'CashOnHand',
-        }) ?? 'CashOnHand',
+      accountType: resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_TYPE', { defaultValue: 'Bank' }),
+      accountSubType: resolveEnv('ACCOUNTING_STRIPE_CLEARING_ACCOUNT_SUBTYPE', {
+        defaultValue: 'CashOnHand',
+      }),
     },
     operatingBank: {
-      accountType:
-        resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_TYPE', {
-          defaultValue: 'Bank',
-        }) ?? 'Bank',
-      accountSubType:
-        resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_SUBTYPE', {
-          defaultValue: 'Checking',
-        }) ?? 'Checking',
+      accountType: resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_TYPE', { defaultValue: 'Bank' }),
+      accountSubType: resolveEnv('ACCOUNTING_OPERATING_BANK_ACCOUNT_SUBTYPE', {
+        defaultValue: 'Checking',
+      }),
     },
     revenue: {
-      accountType:
-        resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_TYPE', {
-          defaultValue: 'Income',
-        }) ?? 'Income',
-      accountSubType:
-        resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_SUBTYPE', {
-          defaultValue: 'ServiceFeeIncome',
-        }) ?? 'ServiceFeeIncome',
+      accountType: resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_TYPE', { defaultValue: 'Income' }),
+      accountSubType: resolveEnv('ACCOUNTING_REVENUE_ACCOUNT_SUBTYPE', {
+        defaultValue: 'ServiceFeeIncome',
+      }),
     },
     fees: {
-      accountType:
-        resolveEnv('ACCOUNTING_FEES_ACCOUNT_TYPE', {
-          defaultValue: 'Expense',
-        }) ?? 'Expense',
-      accountSubType:
-        resolveEnv('ACCOUNTING_FEES_ACCOUNT_SUBTYPE', {
-          defaultValue: 'OtherMiscellaneousExpense',
-        }) ?? 'OtherMiscellaneousExpense',
+      accountType: resolveEnv('ACCOUNTING_FEES_ACCOUNT_TYPE', { defaultValue: 'Expense' }),
+      accountSubType: resolveEnv('ACCOUNTING_FEES_ACCOUNT_SUBTYPE', {
+        defaultValue: 'OtherMiscellaneousExpense',
+      }),
     },
     refunds: {
-      accountType:
-        resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_TYPE', {
-          defaultValue: 'Expense',
-        }) ?? 'Expense',
-      accountSubType:
-        resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_SUBTYPE', {
-          defaultValue: 'OtherMiscellaneousExpense',
-        }) ?? 'OtherMiscellaneousExpense',
+      accountType: resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_TYPE', { defaultValue: 'Expense' }),
+      accountSubType: resolveEnv('ACCOUNTING_REFUNDS_ACCOUNT_SUBTYPE', {
+        defaultValue: 'OtherMiscellaneousExpense',
+      }),
     },
     disputeLosses: {
-      accountType:
-        resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_TYPE', {
-          defaultValue: 'Expense',
-        }) ?? 'Expense',
-      accountSubType:
-        resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_SUBTYPE', {
-          defaultValue: 'OtherMiscellaneousExpense',
-        }) ?? 'OtherMiscellaneousExpense',
+      accountType: resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_TYPE', {
+        defaultValue: 'Expense',
+      }),
+      accountSubType: resolveEnv('ACCOUNTING_DISPUTE_LOSSES_ACCOUNT_SUBTYPE', {
+        defaultValue: 'OtherMiscellaneousExpense',
+      }),
     },
   };
 
-  if (syncEnabled) {
+  return {
+    postingStrategy: (postingStrategy.success
+      ? postingStrategy.data
+      : 'je-transfer') as AccountingPostingStrategy,
+    syncEnabled,
+    defaultSalesItem,
+    accounts: {
+      autoCreate,
+      types,
+    },
+  };
+}
+
+function loadEnv(): EnvConfig {
+  const ctx: LoadContext = { missing: [], errors: [] };
+
+  const stripe = loadStripe(ctx);
+  const salesforce = loadSalesforce(ctx);
+  const quickBooks = loadQuickBooks(ctx);
+  const accounting = loadAccounting(ctx);
+  const testMode = parseBoolean(
+    'TEST_MODE',
+    resolveEnv('TEST_MODE', { defaultValue: 'false' }),
+    false
+  );
+
+  // QBO credentials are required only when accounting sync is enabled.
+  if (accounting.syncEnabled) {
     if (!quickBooks.realmId) {
-      missing.push('QBO_REALM_ID');
+      ctx.missing.push('QBO_REALM_ID');
     }
     if (!quickBooks.clientId) {
-      missing.push('QBO_CLIENT_ID');
+      ctx.missing.push('QBO_CLIENT_ID');
     }
     if (!quickBooks.clientSecret) {
-      missing.push('QBO_CLIENT_SECRET');
+      ctx.missing.push('QBO_CLIENT_SECRET');
     }
   }
 
-  const appInsightsInstrumentationKey = resolveEnv('APPINSIGHTS_INSTRUMENTATIONKEY', {
-    fallbackNames: ['APPINSIGHTS_INSTRUMENTATION_KEY'],
-  });
-
-  const testModeRaw = resolveEnv('TEST_MODE', {
-    defaultValue: 'false',
-  });
-  const testMode = parseBoolean('TEST_MODE', testModeRaw, false);
-
-  if (missing.length > 0) {
-    throw new EnvConfigError(`Missing required environment variables: ${missing.join(', ')}`);
+  if (ctx.missing.length > 0) {
+    throw new EnvConfigError(`Missing required environment variables: ${ctx.missing.join(', ')}`);
   }
 
-  if (errors.length > 0) {
-    throw new EnvConfigError(errors.join(' '));
+  if (ctx.errors.length > 0) {
+    throw new EnvConfigError(ctx.errors.join(' '));
   }
 
   return {
-    stripe: {
-      secret: stripeSecret!,
-      webhookSecret: stripeWebhookSecret!,
-    },
+    stripe,
     testMode,
-    salesforce: {
-      authMode: salesforce.authMode,
-      clientId: salesforce.clientId,
-      clientSecret: salesforce.clientSecret,
-      loginUrl: salesforce.loginUrl,
-    },
-    quickBooks: {
-      environment: quickBooks.environment,
-      realmId: quickBooks.realmId,
-      clientId: quickBooks.clientId,
-      clientSecret: quickBooks.clientSecret,
-      redirectUri: quickBooks.redirectUri,
-      refreshToken: quickBooks.refreshToken,
-      accounts: quickBooks.accounts,
-    },
-    accounting: {
-      postingStrategy: (postingStrategy.success
-        ? postingStrategy.data
-        : 'je-transfer') as AccountingPostingStrategy,
-      syncEnabled,
-      defaultSalesItem,
-      accounts: {
-        autoCreate: autoCreateAccounts,
-        types: accountTypes,
-      },
-    },
-    appInsights: appInsightsInstrumentationKey
-      ? { instrumentationKey: appInsightsInstrumentationKey }
-      : undefined,
+    salesforce,
+    quickBooks,
+    accounting,
   };
 }
 

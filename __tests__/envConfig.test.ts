@@ -121,20 +121,24 @@ describe('env config', () => {
       expect(env.testMode).toBe(false);
     });
 
-    it('sets appInsights when instrumentationKey is provided', async () => {
+    it('normalizes the QBO_ENVIRONMENT alias "prod" to canonical "production"', async () => {
       const { env } = await loadEnvWith({
         ...MINIMAL_ENV,
-        APPINSIGHTS_INSTRUMENTATIONKEY: 'abc-123-key',
+        QBO_ENV: undefined,
+        QBO_ENVIRONMENT: 'prod',
       });
-      expect(env.appInsights?.instrumentationKey).toBe('abc-123-key');
+      expect(env.quickBooks.environment).toBe('production');
     });
 
-    it('appInsights is undefined when not provided', async () => {
-      const { env } = await loadEnvWith({
-        ...MINIMAL_ENV,
-        APPINSIGHTS_INSTRUMENTATIONKEY: undefined,
-      });
-      expect(env.appInsights).toBeUndefined();
+    it('normalizes a mixed-case QBO environment to canonical sandbox', async () => {
+      const { env } = await loadEnvWith({ ...MINIMAL_ENV, QBO_ENV: 'SANDBOX' });
+      expect(env.quickBooks.environment).toBe('sandbox');
+    });
+
+    it('rejects an unrecognized QBO environment value', async () => {
+      await expect(loadEnvWith({ ...MINIMAL_ENV, QBO_ENV: 'staging' })).rejects.toThrow(
+        /sandbox.*production/i
+      );
     });
 
     it('accepts sales-receipt posting strategy', async () => {
