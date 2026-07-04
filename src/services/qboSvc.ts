@@ -3063,12 +3063,10 @@ const checkForDuplicate = async (
 
     logger.debug('[QBO] Checking for duplicate', { entity, docNumber, queryString });
 
-    const result = await query<{
-      QueryResponse: { [key: string]: Array<{ Id: string }> };
-    }>(queryString, options);
-
-    const items = result?.QueryResponse?.[entityName];
-    if (items && items.length > 0) {
+    // `query` returns the unwrapped array of matching rows (or [] when none),
+    // not the raw `{ QueryResponse: ... }` envelope — so use the result directly.
+    const items = await query<Array<{ Id: string }>>(queryString, options);
+    if (Array.isArray(items) && items.length > 0) {
       logger.info('[QBO] Duplicate document found', {
         entity,
         docNumber,

@@ -1995,44 +1995,36 @@ describe('postToQbo duplicate suppression (dedup safety net)', () => {
     date: new Date('2024-03-01'),
   };
 
-  // EXPECTED-FAILING (T2.6): the DocNumber pre-check in checkForDuplicate is
-  // broken. query() (qboSvc.ts:5082) returns the already-unwrapped array of rows,
-  // but checkForDuplicate (qboSvc.ts:3070) reads `result.QueryResponse[entityName]`
-  // on that array, which is always undefined — so the pre-check never detects an
-  // existing document and always proceeds to create. Today dedup only works
-  // because QBO itself rejects the duplicate DocNumber on create (covered by the
-  // next test); if that server-side warning is disabled for an entity, this gap
-  // becomes a real double-post. `it.fails` keeps CI green now and flips RED when
-  // checkForDuplicate is fixed — the signal to convert this to a normal `it()`.
-  it.fails(
-    'returns the existing document and issues no create when the DocNumber already exists',
-    async () => {
-      baseEnv.accounting.postingStrategy = 'sales-receipt';
-      const { fetcher, requests } = createFetchMock(
-        { QueryResponse: {} }, // customer email lookup
-        { QueryResponse: {} }, // customer name lookup
-        { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } }, // customer create
-        { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } }, // item lookup
-        { QueryResponse: { SalesReceipt: [{ Id: 'sr-existing' }] } }, // duplicate check -> existing doc
-        { SalesReceipt: { Id: 'sr-created-duplicate' } } // create (must NOT be reached once the pre-check works)
-      );
-      const { postChargeToQbo } = await importQboSvc();
+  // The DocNumber pre-check in checkForDuplicate returns the existing document
+  // and suppresses the create. (Previously broken — it read
+  // `result.QueryResponse[entityName]` on query()'s already-unwrapped array; see
+  // T2.6.) Dedup no longer depends solely on QBO rejecting the duplicate on create.
+  it('returns the existing document and issues no create when the DocNumber already exists', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // customer email lookup
+      { QueryResponse: {} }, // customer name lookup
+      { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } }, // customer create
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } }, // item lookup
+      { QueryResponse: { SalesReceipt: [{ Id: 'sr-existing' }] } }, // duplicate check -> existing doc
+      { SalesReceipt: { Id: 'sr-created-duplicate' } } // create (must NOT be reached: pre-check short-circuits)
+    );
+    const { postChargeToQbo } = await importQboSvc();
 
-      const result = await postChargeToQbo({
-        ...baseArgs,
-        stripe: buildStripeContext(),
-        options: { fetcher, accessToken: 'token' },
-      });
+    const result = await postChargeToQbo({
+      ...baseArgs,
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
 
-      // The pre-existing receipt should be returned instead of creating a duplicate.
-      expect(result).toEqual({ qboId: 'sr-existing', type: 'sales-receipt' });
-      // No SalesReceipt create POST should be issued.
-      const createRequest = requests.find(
-        (r) => r.url.includes('/salesreceipt') && (r.init?.method ?? 'GET') === 'POST'
-      );
-      expect(createRequest).toBeUndefined();
-    }
-  );
+    // The pre-existing receipt is returned instead of creating a duplicate.
+    expect(result).toEqual({ qboId: 'sr-existing', type: 'sales-receipt' });
+    // No SalesReceipt create POST was issued.
+    const createRequest = requests.find(
+      (r) => r.url.includes('/salesreceipt') && (r.init?.method ?? 'GET') === 'POST'
+    );
+    expect(createRequest).toBeUndefined();
+  });
 
   it('recovers the existing id from a QuickBooks duplicate-DocNumber error instead of failing', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
