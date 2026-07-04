@@ -8,9 +8,7 @@ try {
 } catch (error) {
   createSalesforceSvc = null;
 }
-const {
-  createPersistentStorageClients,
-} = require('../services/idempotency/storage/persistentStoreFactory');
+const { AzureIdempotencyStore } = require('../services/idempotencyStore');
 
 const STRIPE_API_VERSION = '2023-10-16';
 const DEFAULT_LOOKBACK_DAYS = 10;
@@ -164,28 +162,33 @@ const parseModeToggle = (value) => {
   return { isValid: false, message: 'mode must be either "test" or "live".' };
 };
 
-const createProcessedStore = (namespace) => {
-  const { idempotencyStore } = createPersistentStorageClients(namespace);
-
-  if (!idempotencyStore || typeof idempotencyStore.set !== 'function') {
-    throw new Error('Idempotency store is not configured correctly.');
-  }
-
+// In-memory fallback for tests (DISABLE_AZURE_TABLES=1). Production uses the
+// distributed Azure Tables store so payout dedup state — and the lock that
+// guards the check-then-act — are shared across all Function instances, instead
+// of the previous per-instance file store (which let two instances both mark a
+// payout unprocessed and post it).
+const createInMemoryProcessedStore = () => {
+  const processed = new Set();
   return {
     async isProcessed(key) {
-      if (typeof idempotencyStore.has === 'function') {
-        return idempotencyStore.has(key);
-      }
-      const value = await idempotencyStore.get(key);
-      return Boolean(value);
+      return processed.has(key);
     },
     async markProcessed(key) {
-      await idempotencyStore.set(key, {
-        processedAt: new Date().toISOString(),
-      });
+      processed.add(key);
+    },
+    async withLock(_key, fn) {
+      return fn();
     },
   };
 };
+
+const createProcessedStore = () =>
+  process.env.DISABLE_AZURE_TABLES === '1'
+    ? createInMemoryProcessedStore()
+    : new AzureIdempotencyStore({
+        tableName: process.env.PAYOUT_IDEMPOTENCY_TABLE || 'PayoutIdempotency',
+        processedPartitionKey: 'payouts',
+      });
 
 const createSalesforceGetter = () => {
   let cachedPromise = null;
@@ -214,9 +217,7 @@ const createDefaultDependencies = () => {
   }
 
   const stripe = new Stripe(stripeSecret, { apiVersion: STRIPE_API_VERSION });
-  const processedStore = createProcessedStore(
-    process.env.PERSISTENT_STORAGE_NAMESPACE || 'default'
-  );
+  const processedStore = createProcessedStore();
 
   const qbo = require('../services/qboSvc');
 
@@ -363,6 +364,12 @@ const createDocNumber = (payoutId) => {
   return memo.length > 21 ? memo.slice(0, 21) : memo;
 };
 
+// Run the payout's check-then-act critical section under the store's distributed
+// lock when available, so a concurrent invocation or another Function instance
+// cannot post the same payout twice. Test stores that omit withLock run directly.
+const runExclusively = (store, key, fn) =>
+  typeof store.withLock === 'function' ? store.withLock(key, fn) : fn();
+
 const processPayout = async ({ payout, deps, salesforce, context }) => {
   const { accounting, processedStore, stripe } = deps;
 
@@ -387,81 +394,87 @@ const processPayout = async ({ payout, deps, salesforce, context }) => {
 
   const payoutKey = `po_${payout.id}`;
 
-  if (await processedStore.isProcessed(payoutKey)) {
-    return { status: 'skipped', payoutId: payout.id };
-  }
-
-  const transactions = await fetchBalanceTransactionsForPayout(stripe, payout.id);
-
-  // Validate and filter balance transactions
-  const { validTransactions, invalidTransactions } = filterValidTransactions(transactions);
-
-  if (invalidTransactions.length > 0) {
-    logger.warn('[payoutSyncTrigger] Found invalid balance transactions for payout', {
-      payoutId: payout.id,
-      validCount: validTransactions.length,
-      invalidCount: invalidTransactions.length,
-      invalidTransactions,
-    });
-  }
-
-  const memo = `payout_${payout.id}`;
-  const amountCents = safeAmount(payout.amount);
-  const date = toDateFromStripeTimestamp(payout.arrival_date || payout.created);
-
-  // Hygiene check: skip processing if required fields are missing
-  if (!payout.arrival_date || typeof payout.arrival_date !== 'number' || payout.arrival_date <= 0) {
-    logger.warn('[payoutSyncTrigger] Skipping payout with missing or invalid arrival_date', {
-      payoutId: payout.id,
-      arrival_date: payout.arrival_date,
-    });
-    return { status: 'skipped', payoutId: payout.id, reason: 'missing_arrival_date' };
-  }
-
-  if (amountCents === 0) {
-    logger.warn('[payoutSyncTrigger] Skipping payout with zero amount', {
-      payoutId: payout.id,
-      amount: payout.amount,
-    });
-    return { status: 'skipped', payoutId: payout.id, reason: 'zero_amount' };
-  }
-
-  if (!payout.status || typeof payout.status !== 'string' || payout.status.trim() === '') {
-    logger.warn('[payoutSyncTrigger] Skipping payout with blank status', {
-      payoutId: payout.id,
-      status: payout.status,
-    });
-    return { status: 'skipped', payoutId: payout.id, reason: 'blank_status' };
-  }
-
-  const qboResult = await accounting.postPayoutToQbo({
-    amount: amountCents,
-    memo,
-    date,
-    payoutId: payout.id,
-  });
-
-  if (salesforce && typeof salesforce.linkPayoutOnTransactions === 'function') {
-    const balanceTransactionIds = uniqueIds(validTransactions);
-    if (balanceTransactionIds.length > 0) {
-      await salesforce.linkPayoutOnTransactions(payout.id, balanceTransactionIds);
+  return runExclusively(processedStore, payoutKey, async () => {
+    if (await processedStore.isProcessed(payoutKey)) {
+      return { status: 'skipped', payoutId: payout.id };
     }
-  }
 
-  await processedStore.markProcessed(payoutKey);
+    const transactions = await fetchBalanceTransactionsForPayout(stripe, payout.id);
 
-  logger.info('[payoutSyncTrigger] Processed payout', {
-    payoutId: payout.id,
-    bankDepositId: qboResult?.qboId || null,
-    balanceTransactionCount: validTransactions.length,
-    invalidTransactionCount: invalidTransactions.length,
+    // Validate and filter balance transactions
+    const { validTransactions, invalidTransactions } = filterValidTransactions(transactions);
+
+    if (invalidTransactions.length > 0) {
+      logger.warn('[payoutSyncTrigger] Found invalid balance transactions for payout', {
+        payoutId: payout.id,
+        validCount: validTransactions.length,
+        invalidCount: invalidTransactions.length,
+        invalidTransactions,
+      });
+    }
+
+    const memo = `payout_${payout.id}`;
+    const amountCents = safeAmount(payout.amount);
+    const date = toDateFromStripeTimestamp(payout.arrival_date || payout.created);
+
+    // Hygiene check: skip processing if required fields are missing
+    if (
+      !payout.arrival_date ||
+      typeof payout.arrival_date !== 'number' ||
+      payout.arrival_date <= 0
+    ) {
+      logger.warn('[payoutSyncTrigger] Skipping payout with missing or invalid arrival_date', {
+        payoutId: payout.id,
+        arrival_date: payout.arrival_date,
+      });
+      return { status: 'skipped', payoutId: payout.id, reason: 'missing_arrival_date' };
+    }
+
+    if (amountCents === 0) {
+      logger.warn('[payoutSyncTrigger] Skipping payout with zero amount', {
+        payoutId: payout.id,
+        amount: payout.amount,
+      });
+      return { status: 'skipped', payoutId: payout.id, reason: 'zero_amount' };
+    }
+
+    if (!payout.status || typeof payout.status !== 'string' || payout.status.trim() === '') {
+      logger.warn('[payoutSyncTrigger] Skipping payout with blank status', {
+        payoutId: payout.id,
+        status: payout.status,
+      });
+      return { status: 'skipped', payoutId: payout.id, reason: 'blank_status' };
+    }
+
+    const qboResult = await accounting.postPayoutToQbo({
+      amount: amountCents,
+      memo,
+      date,
+      payoutId: payout.id,
+    });
+
+    if (salesforce && typeof salesforce.linkPayoutOnTransactions === 'function') {
+      const balanceTransactionIds = uniqueIds(validTransactions);
+      if (balanceTransactionIds.length > 0) {
+        await salesforce.linkPayoutOnTransactions(payout.id, balanceTransactionIds);
+      }
+    }
+
+    await processedStore.markProcessed(payoutKey);
+
+    logger.info('[payoutSyncTrigger] Processed payout', {
+      payoutId: payout.id,
+      bankDepositId: qboResult?.qboId || null,
+      balanceTransactionCount: validTransactions.length,
+      invalidTransactionCount: invalidTransactions.length,
+    });
+
+    return {
+      status: 'processed',
+      payoutId: payout.id,
+      bankDepositId: qboResult?.qboId || null,
+    };
   });
-
-  return {
-    status: 'processed',
-    payoutId: payout.id,
-    bankDepositId: qboResult?.qboId || null,
-  };
 };
 
 const handler = async (request, context) => {

@@ -110,6 +110,58 @@ describe('payoutSyncTrigger', () => {
     ]);
   });
 
+  it('runs the check-then-act under the store lock (withLock) when one is provided', async () => {
+    const payout = {
+      id: 'po_123',
+      amount: 2500,
+      status: 'paid',
+      arrival_date: Math.floor(Date.now() / 1000),
+    };
+
+    const payoutsList = vi.fn().mockResolvedValue({ data: [payout], has_more: false });
+    const balanceTransactionsList = vi.fn().mockResolvedValue({
+      data: [{ id: 'bt_1', amount: 2500, currency: 'usd', type: 'charge', status: 'available' }],
+      has_more: false,
+    });
+    const postPayoutToQbo = vi.fn().mockResolvedValue({ qboId: 'tr_1', type: 'transfer' });
+
+    const lockOrder = [];
+    const processedStore = {
+      isProcessed: vi.fn().mockResolvedValue(false),
+      markProcessed: vi.fn().mockResolvedValue(undefined),
+      withLock: vi.fn(async (key, fn) => {
+        lockOrder.push(`lock:${key}`);
+        const out = await fn();
+        lockOrder.push(`unlock:${key}`);
+        return out;
+      }),
+    };
+
+    internals.setDependencies({
+      stripe: {
+        payouts: { list: payoutsList },
+        balanceTransactions: { list: balanceTransactionsList },
+      },
+      accounting: { postPayoutToQbo },
+      salesforce: { linkPayoutOnTransactions: vi.fn().mockResolvedValue([]) },
+      processedStore,
+      lookbackDays: 8,
+      now: () => Date.now(),
+    });
+
+    const { context } = createContext();
+    const req = { method: 'POST', url: 'http://localhost/api/payout-sync' };
+
+    await handler(req, context);
+
+    // The whole check-then-act ran under the distributed lock, keyed by payout.
+    expect(processedStore.withLock).toHaveBeenCalledWith('po_po_123', expect.any(Function));
+    expect(lockOrder).toEqual(['lock:po_po_123', 'unlock:po_po_123']);
+    // The post happened inside the lock and the payout was marked processed.
+    expect(postPayoutToQbo).toHaveBeenCalledTimes(1);
+    expect(processedStore.markProcessed).toHaveBeenCalledWith('po_po_123');
+  });
+
   it('skips payouts that were already processed', async () => {
     const payout = {
       id: 'po_999',
