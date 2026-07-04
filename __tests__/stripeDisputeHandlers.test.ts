@@ -317,3 +317,62 @@ describe('handleDisputeClosed — other statuses', () => {
     expect(postDisputeReversalToQbo).not.toHaveBeenCalled();
   });
 });
+
+// ── redelivery dedup gap (T2.3) ───────────────────────────────────────────────
+//
+// handleDisputeWon wraps the QBO reversal in withLock() but never calls
+// isProcessed/markProcessed (see disputes.ts). withLock only serialises
+// *concurrent* processing; it does not survive a sequential redelivery once the
+// short lock TTL expires. So Stripe re-delivering the same won-dispute event
+// re-posts the reversal journal entry — a double credit.
+//
+// The spec below asserts the DESIRED behaviour (post once across redeliveries)
+// against a stateful idempotency store. It is expected to FAIL until T2.3 adds a
+// durable isProcessed/markProcessed guard, so it is marked `it.fails`: it stays
+// green now and will flip RED the moment T2.3 fixes the handler — the signal to
+// convert it into a normal `it()`.
+describe('handleDisputeClosed — redelivery dedup (T2.3, expected-failing until fixed)', () => {
+  const makeStatefulIdempotencyStore = () => {
+    const processed = new Set<string>();
+    return {
+      withLock: vi.fn(async (_key: string, fn: () => Promise<unknown>) => fn()),
+      isProcessed: vi.fn(async (key: string) => processed.has(key)),
+      markProcessed: vi.fn(async (key: string) => {
+        processed.add(key);
+      }),
+    };
+  };
+
+  it.fails('posts the won-dispute reversal only once across two redeliveries', async () => {
+    const postDisputeReversalToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' });
+    const balanceTxns = [
+      makeBalanceTransaction('bt_reversal_1', 10000, 'adjustment', 'chargeback'),
+    ];
+    const { event } = makeDisputeEvent('won', balanceTxns);
+
+    const deps: StripeWebhookDependencies = {
+      stripe: {
+        verifyEvent: vi.fn(),
+        getClient: vi.fn(() => makeStripeClient(balanceTxns) as unknown as Stripe),
+      },
+      idempotencyStore: makeStatefulIdempotencyStore(),
+      getSalesforceSvc: vi.fn().mockResolvedValue(makeSalesforceSvc()),
+      getCrmSvc: vi.fn().mockResolvedValue({}),
+      accounting: {
+        postChargeToQbo: vi.fn(),
+        postRefundToQbo: vi.fn(),
+        postDisputeToQbo: vi.fn(),
+        postDisputeReversalToQbo,
+      },
+    };
+    const context = makeContext();
+
+    // Stripe re-delivers the same event twice.
+    await handleDisputeClosed(context, event, deps);
+    await handleDisputeClosed(context, event, deps);
+
+    expect(postDisputeReversalToQbo).toHaveBeenCalledTimes(1);
+  });
+});
