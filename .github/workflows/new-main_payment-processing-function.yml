@@ -52,8 +52,24 @@ jobs:
           cp -r dist package/
           cp -r node_modules package/
           cp host.json package/
-          cp package.json package/
           cp package-lock.json package/
+
+          # Ship a package.json whose `build` is a no-op — see the equivalent step in
+          # main_payment-processing-function.yml for the full rationale. In short: this
+          # artifact is already built, but if Azure/functions-action fails to patch
+          # SCM_DO_BUILD_DURING_DEPLOYMENT=false (a Kudu call that can fail), Oryx runs
+          # a server-side `npm run build`, which cannot succeed because form-builder-ui/
+          # is not shipped. Making it a no-op keeps the deploy from depending on that.
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.scripts = {
+              ...pkg.scripts,
+              build: 'echo \"Prebuilt by CI - skipping build during deployment.\"',
+            };
+            fs.writeFileSync('package/package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
           cd package && zip -r ../release.zip .
 
       - name: Upload artifact

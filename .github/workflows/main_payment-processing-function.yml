@@ -37,12 +37,42 @@ jobs:
 
       - name: Bundle deployment package
         run: |
+          set -euo pipefail
           mkdir -p deployment-package
           cp -r dist deployment-package/
           cp -r node_modules deployment-package/
           cp host.json deployment-package/
-          cp package.json deployment-package/
           cp package-lock.json deployment-package/
+
+          # Ship a package.json whose `build` is a no-op.
+          #
+          # This artifact is already built: `dist` and `node_modules` are in the zip.
+          # zipdeploy is supposed to treat it as ready-to-run, and Azure/functions-action
+          # normally guarantees that by patching SCM_DO_BUILD_DURING_DEPLOYMENT=false at
+          # deploy time. That patch is a Kudu API call and it can fail — when it does
+          # (run 30354402103), Oryx runs a server-side build anyway and executes
+          # `npm run build` against the extracted package. That build cannot succeed
+          # here: it runs `npm --prefix form-builder-ui ci`, and form-builder-ui/ is
+          # deliberately not shipped. The deploy then fails after the artifact was
+          # already verified green in CI.
+          #
+          # Neutering the script makes an unintended remote build a no-op instead of a
+          # hard failure, so the deploy no longer depends on that patch succeeding.
+          # The durable companion fix is Azure-side: set SCM_DO_BUILD_DURING_DEPLOYMENT
+          # to false persistently on the app (false is zipdeploy's own default).
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.scripts = {
+              ...pkg.scripts,
+              build: 'echo \"Prebuilt by CI - skipping build during deployment.\"',
+            };
+            fs.writeFileSync(
+              'deployment-package/package.json',
+              JSON.stringify(pkg, null, 2) + '\n'
+            );
+          "
+
           cd deployment-package && zip -r ../release.zip .
           cd .. && rm -rf deployment-package
 
