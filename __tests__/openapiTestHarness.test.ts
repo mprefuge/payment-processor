@@ -121,6 +121,8 @@ describe('OpenAPI document — staged test harness', () => {
       ['/api/qbo/customers-salesforce-sync', 'post', ['dryRun']],
       ['/api/ops/daily-reconciliation', 'post', ['dryRun']],
       ['/api/ops/stripe-duplicate-check', 'get', ['dryRun']],
+      // Anonymous and record-creating: the mode selector must never be blank.
+      ['/api/transaction', 'post', ['mode', 'livemode']],
     ];
 
     for (const [path, method, expected] of cases) {
@@ -143,6 +145,9 @@ describe('OpenAPI document — staged test harness', () => {
       // Duplicate check can delete ledger documents outright.
       ['/api/ops/stripe-duplicate-check', 'get', 'deleteDuplicates', 'false'],
       ['/api/stripe/true-up', 'post', 'dryRun', 'true'],
+      // Anonymous endpoint that creates Stripe and Salesforce records.
+      ['/api/transaction', 'post', 'mode', 'test'],
+      ['/api/transaction', 'post', 'livemode', 'false'],
     ];
 
     for (const [path, method, name, expected] of safeDefaults) {

@@ -1450,8 +1450,20 @@ registerFunction('processTransaction', 'Process a payment transaction', {
   request: {
     query: z
       .object({
-        mode: ModeQuerySchema.optional(),
-        livemode: BoolLikeQuerySchema.optional(),
+        // Prefilled to test deliberately. This endpoint is anonymous and creates real
+        // records — a Stripe customer and Checkout session, plus a Salesforce Contact
+        // and Transaction__c. Leaving the selector blank in Swagger means an operator
+        // validating the deployment can omit it and silently inherit whichever mode the
+        // server defaults to.
+        mode: ModeQuerySchema.optional().openapi({
+          example: 'test',
+          description:
+            'Selects the Stripe key used for this request. Keep `test` for validation runs; `live` moves real money.',
+        }),
+        livemode: BoolLikeQuerySchema.optional().openapi({
+          example: 'false',
+          description: 'Alternative to `mode`. Keep false for validation runs.',
+        }),
       })
       .passthrough(),
     body: {
