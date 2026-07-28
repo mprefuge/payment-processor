@@ -302,14 +302,17 @@ const parseOptions = (
     endDate = timerDate ?? yesterdayUtc();
   }
 
-  // Parse dryRun (HTTP: query param; timer: defaults to false so it actually fixes things)
+  // Parse dryRun. Both paths default to true: this handler issues live DML against
+  // Salesforce and the QuickBooks general ledger, so write mode must be an explicit
+  // opt-in rather than something a deployment inherits by forgetting to set a variable.
+  // Set DAILY_RECONCILIATION_DRY_RUN=false to let the timer actually repair records.
   const dryRun = request
     ? readBooleanQuery(
         request,
         'dryRun',
         typeof requestBody?.dryRun === 'boolean' ? requestBody.dryRun : true
       )
-    : parseBoolean(process.env.DAILY_RECONCILIATION_DRY_RUN, false);
+    : parseBoolean(process.env.DAILY_RECONCILIATION_DRY_RUN, true);
 
   // Parse mode
   const bodyMode = safeBodyString(requestBody?.mode);

@@ -299,3 +299,120 @@ describe('buildDocNumber — tested via postRefundToQbo / postDisputeToQbo', () 
     expect((capturedPayloads.at(-1) as any)?.DocNumber).toMatch(/^DSP-/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Long-prefix DocNumbers (regression: CHG-MANUAL collapsed to 1 char of entropy)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildDocNumber — long prefixes must not collapse the unique suffix', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /**
+   * 'CHG-MANUAL' is 10 characters. With the 8-character date and two separators it
+   * reserved 20 of the 21-character budget, leaving a SINGLE character of the
+   * Salesforce record Id. Same-day manual entries then collided, and a collision
+   * silently returned an unrelated existing document instead of creating one.
+   */
+  // Deliberately all ending in the SAME character. Salesforce Ids differ mostly in
+  // their middle; the trailing characters are a case-safe checksum with a small
+  // alphabet, so ids sharing a final character are ordinary, not contrived. Under the
+  // old 1-character slice every one of these produced the identical DocNumber.
+  const SF_IDS = [
+    'a0X5f000001AbCdEAK',
+    'a0X5f000001XyZwQAK',
+    'a0X5f000001PqRsTAK',
+    'a0X5f000001LmNoPAK',
+    'a0X5f000001HiJkLAK',
+    'a0X5f000001BcDeFAK',
+    'a0X5f000001GhIjKAK',
+    'a0X5f000001TuVwXAK',
+  ];
+
+  /**
+   * The manual sales-receipt path resolves 'Undeposited Funds' by name, so this
+   * fetcher answers QBO query URLs as well as capturing posted payloads.
+   */
+  const createManualFetcher = (capturedPayloads: unknown[]): typeof fetch =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      const href = typeof url === 'string' ? url : url.toString();
+
+      if ((init?.method ?? 'GET') === 'GET' && href.includes('/query')) {
+        const decoded = decodeURIComponent(href);
+        // Resolve account lookups; every other query (notably the DocNumber
+        // duplicate pre-check) must come back empty so posts actually happen.
+        const queryResponse = /FROM\s+Account/i.test(decoded)
+          ? { Account: [{ Id: 'UNDEP_1', Name: 'Undeposited Funds' }] }
+          : {};
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ QueryResponse: queryResponse }),
+          text: async () => '',
+        } as Response;
+      }
+
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      capturedPayloads.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          SalesReceipt: { Id: '999', DocNumber: body?.DocNumber ?? '' },
+          time: new Date().toISOString(),
+        }),
+        text: async () => '',
+      } as Response;
+    }) as unknown as typeof fetch;
+
+  const postManual = async (uniqueId: string, date = new Date('2026-07-27')) => {
+    const { svc } = await importQboSvc();
+    const capturedPayloads: unknown[] = [];
+    await svc.postManualEntryAsSalesReceipt({
+      grossAmountCents: 50_000,
+      date,
+      memo: 'Check donation',
+      uniqueId,
+      options: makeOpts(createManualFetcher(capturedPayloads)),
+    });
+    return (capturedPayloads.at(-1) as any)?.DocNumber as string;
+  };
+
+  it('produces a DISTINCT DocNumber for every same-day manual entry', async () => {
+    const docNumbers: string[] = [];
+    for (const sfId of SF_IDS) {
+      docNumbers.push(await postManual(sfId));
+    }
+
+    expect(new Set(docNumbers).size).toBe(SF_IDS.length);
+  });
+
+  it('keeps the CHG-MANUAL DocNumber within the 21-character limit', async () => {
+    const doc = await postManual(SF_IDS[0]);
+    expect(doc.length).toBeLessThanOrEqual(DOC_NUMBER_MAX_LENGTH);
+    expect(doc).toMatch(/^CHG-MANUAL-/);
+  });
+
+  it('is deterministic — the same record re-posted yields the same DocNumber', async () => {
+    const first = await postManual(SF_IDS[0]);
+    const second = await postManual(SF_IDS[0]);
+    expect(second).toBe(first);
+  });
+
+  it('does not fall back to the date layout that leaves one character of entropy', async () => {
+    const doc = await postManual(SF_IDS[0]);
+    // The broken layout was `CHG-MANUAL-YYYYMMDD-X`.
+    expect(doc).not.toMatch(/^CHG-MANUAL-\d{8}-.$/);
+    expect(doc.slice('CHG-MANUAL-'.length).length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('short prefixes keep the readable date layout', async () => {
+    const { svc, capturedPayloads, fakeFetcher } = await importQboSvc();
+    await svc.postRefundToQbo({
+      amount: 5000,
+      date: new Date('2024-01-01'),
+      refundId: 're_TEST01',
+      options: makeOpts(fakeFetcher),
+    });
+    expect((capturedPayloads.at(-1) as any)?.DocNumber).toMatch(/^REF-20240101-/);
+  });
+});

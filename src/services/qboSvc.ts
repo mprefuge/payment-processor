@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 
 import type Stripe from 'stripe';
 
@@ -18,6 +19,19 @@ const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
 };
 
 const DOC_NUMBER_MAX_LENGTH = 21;
+
+/**
+ * Minimum number of uniqueId characters a DocNumber must carry for the id to actually
+ * provide uniqueness. Below this, buildDocNumber switches to a hashed layout — see the
+ * uniqueId branch there for why.
+ */
+const MIN_UNIQUE_SUFFIX_LENGTH = 4;
+
+/**
+ * Half-width, in days, of the TxnDate window used to look for an already-posted payout
+ * movement. Covers the spread between a payout's `created` and `arrival_date`.
+ */
+const PAYOUT_DEDUP_WINDOW_DAYS = 7;
 
 type QuickBooksDocType = 'sales-receipt' | 'journal-entry' | 'bank-deposit' | 'transfer';
 
@@ -1817,6 +1831,24 @@ const resolveRevenueItemReference = async (
   return await ensureSalesReceiptItem(lookupName, context);
 };
 
+/**
+ * Deterministic, collision-resistant base36 digest of `value`, truncated to `width`
+ * characters. Uses SHA-256 so the output is uniformly distributed across the alphabet
+ * regardless of how similar the inputs are — consecutive Salesforce record Ids differ
+ * in only their last characters, which a cheap rolling hash would map to adjacent
+ * outputs. `width` characters of base36 give roughly `width * 5.17` bits.
+ */
+const hashToBase36 = (value: string, width: number): string => {
+  const digest = createHash('sha256').update(value).digest('hex');
+  // Consume the digest in 12-hex-digit (48-bit) chunks; each stays inside the exact
+  // integer range of a JS number, so BigInt is unnecessary.
+  let out = '';
+  for (let offset = 0; out.length < width && offset + 12 <= digest.length; offset += 12) {
+    out += Number.parseInt(digest.slice(offset, offset + 12), 16).toString(36);
+  }
+  return out.slice(0, width).toUpperCase();
+};
+
 const buildDocNumber = (
   prefix: string,
   date: string | Date,
@@ -1841,6 +1873,27 @@ const buildDocNumber = (
     const formattedDate = normalizeDate(date).replace(/-/g, '');
     const reservedLength = prefix.length + formattedDate.length + 2;
     const availableIdLength = Math.max(1, DOC_NUMBER_MAX_LENGTH - reservedLength);
+
+    // `prefix-YYYYMMDD-<id tail>` only carries the id's uniqueness when enough of the
+    // id survives the slice. A long prefix eats the budget: 'CHG-MANUAL' (10) plus the
+    // 8-char date plus two separators reserves 20 of 21 characters, leaving a SINGLE
+    // character of the Salesforce record Id. Every manual entry posted on the same day
+    // then competes for ~32 DocNumbers, and a collision silently returns an unrelated
+    // existing document instead of creating one. When the layout cannot carry enough of
+    // the id, drop the date (TxnDate still records it) and spend the whole budget on a
+    // deterministic hash of the full id instead.
+    if (uniqueIdPart.length > availableIdLength && availableIdLength < MIN_UNIQUE_SUFFIX_LENGTH) {
+      const hashWidth = Math.max(1, DOC_NUMBER_MAX_LENGTH - (prefix.length + 1));
+      const hashedSuffix = hashToBase36(uniqueId, hashWidth);
+      logger.info('[QBOSvc] buildDocNumber: prefix too long for date layout, using hashed id', {
+        prefix,
+        date: normalizeDate(date),
+        uniqueId,
+        availableIdLength,
+      });
+      return `${prefix}-${hashedSuffix}`.slice(0, DOC_NUMBER_MAX_LENGTH);
+    }
+
     const uniqueSuffix = uniqueIdPart.slice(-availableIdLength);
     logger.info('[QBOSvc] buildDocNumber: using uniqueId path', {
       prefix,
@@ -3115,6 +3168,18 @@ const checkForPayoutMovement = async (
   }
 
   const formattedDate = normalizeDate(date);
+  // A payout's QBO document may have been written under either payout.arrival_date or
+  // payout.created depending on which code path posted it, and those differ by ~2
+  // business days (more for the first payout on an account). Scoping the duplicate
+  // query to one exact TxnDate makes the check miss the document it is looking for and
+  // double-post. Search a window wide enough to cover that spread instead.
+  const windowStart = normalizeDate(
+    new Date(date.getTime() - PAYOUT_DEDUP_WINDOW_DAYS * 24 * 60 * 60 * 1000)
+  );
+  const windowEnd = normalizeDate(
+    new Date(date.getTime() + PAYOUT_DEDUP_WINDOW_DAYS * 24 * 60 * 60 * 1000)
+  );
+  const dateClause = `TxnDate >= '${windowStart}' AND TxnDate <= '${windowEnd}'`;
   const amountDollars = centsToDollars(amount);
   const context = await createRequestContext(options);
   const hasPayoutId = (value: unknown): boolean =>
@@ -3122,87 +3187,79 @@ const checkForPayoutMovement = async (
   const amountMatches = (value: unknown): boolean =>
     typeof value === 'number' && Math.abs(value - amountDollars) < 0.005;
 
-  try {
-    const transferQuery =
-      `SELECT Id, TxnDate, Amount, PrivateNote FROM Transfer ` +
-      `WHERE TxnDate = '${formattedDate}' MAXRESULTS 100`;
-    const transfers = await queryQuickBooks<{
-      Id?: string;
-      TxnDate?: string;
-      Amount?: number;
-      PrivateNote?: string;
-    }>(transferQuery, context);
-    if (transfers && transfers.length > 0) {
-      const matchingTransfer = transfers.find(
-        (transfer) => amountMatches(transfer.Amount) && hasPayoutId(transfer.PrivateNote)
-      );
-      if (matchingTransfer?.Id) {
-        logger.info('[QBO] Found existing transfer for payout by payout ID check', {
-          payoutId: normalizedPayoutId,
-          existingId: matchingTransfer.Id,
-          date: matchingTransfer.TxnDate,
-          amount: matchingTransfer.Amount,
-        });
-        return { id: matchingTransfer.Id, type: 'transfer' };
-      }
+  // Both queries below deliberately let errors propagate. A failed query is not the
+  // same as "no duplicate found" — swallowing it here would fail open and post a
+  // second Transfer for a payout that is already in the ledger. Callers run under an
+  // idempotency lock and abort, matching checkForDuplicate's behaviour.
+  const transferQuery =
+    `SELECT Id, TxnDate, Amount, PrivateNote FROM Transfer ` +
+    `WHERE ${dateClause} MAXRESULTS 1000`;
+  const transfers = await queryQuickBooks<{
+    Id?: string;
+    TxnDate?: string;
+    Amount?: number;
+    PrivateNote?: string;
+  }>(transferQuery, context);
+  if (transfers && transfers.length > 0) {
+    const matchingTransfer = transfers.find(
+      (transfer) => amountMatches(transfer.Amount) && hasPayoutId(transfer.PrivateNote)
+    );
+    if (matchingTransfer?.Id) {
+      logger.info('[QBO] Found existing transfer for payout by payout ID check', {
+        payoutId: normalizedPayoutId,
+        existingId: matchingTransfer.Id,
+        date: matchingTransfer.TxnDate,
+        amount: matchingTransfer.Amount,
+      });
+      return { id: matchingTransfer.Id, type: 'transfer' };
     }
-  } catch (error) {
-    logger.warn('[QBO] Payout transfer check failed', {
-      payoutId,
-      error: error instanceof Error ? error.message : String(error),
-    });
   }
 
-  try {
-    const depositQuery =
-      `SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote FROM Deposit ` +
-      `WHERE TxnDate = '${formattedDate}' MAXRESULTS 100`;
+  const depositQuery =
+    `SELECT Id, DocNumber, TxnDate, TotalAmt, PrivateNote FROM Deposit ` +
+    `WHERE ${dateClause} MAXRESULTS 1000`;
 
-    logger.debug('[QBO] Checking for existing payout movement by payout ID', {
-      payoutId: normalizedPayoutId,
-      date: formattedDate,
-      amount: amountDollars,
-    });
+  logger.debug('[QBO] Checking for existing payout movement by payout ID', {
+    payoutId: normalizedPayoutId,
+    date: formattedDate,
+    windowStart,
+    windowEnd,
+    amount: amountDollars,
+  });
 
-    const deposits = await queryQuickBooks<{
-      Id?: string;
-      DocNumber?: string;
-      TxnDate?: string;
-      TotalAmt?: number;
-      PrivateNote?: string;
-    }>(depositQuery, context);
-    if (deposits && deposits.length > 0) {
-      const matchingDeposit = deposits.find(
-        (deposit) =>
-          amountMatches(deposit.TotalAmt) &&
-          (hasPayoutId(deposit.PrivateNote) || hasPayoutId(deposit.DocNumber))
-      );
-      if (matchingDeposit?.Id) {
-        logger.info('[QBO] Found existing deposit for payout by payout ID check', {
-          payoutId: normalizedPayoutId,
-          existingId: matchingDeposit.Id,
-          docNumber: matchingDeposit.DocNumber,
-          date: matchingDeposit.TxnDate,
-          amount: matchingDeposit.TotalAmt,
-        });
-        return { id: matchingDeposit.Id, type: 'bank-deposit' };
-      }
+  const deposits = await queryQuickBooks<{
+    Id?: string;
+    DocNumber?: string;
+    TxnDate?: string;
+    TotalAmt?: number;
+    PrivateNote?: string;
+  }>(depositQuery, context);
+  if (deposits && deposits.length > 0) {
+    const matchingDeposit = deposits.find(
+      (deposit) =>
+        amountMatches(deposit.TotalAmt) &&
+        (hasPayoutId(deposit.PrivateNote) || hasPayoutId(deposit.DocNumber))
+    );
+    if (matchingDeposit?.Id) {
+      logger.info('[QBO] Found existing deposit for payout by payout ID check', {
+        payoutId: normalizedPayoutId,
+        existingId: matchingDeposit.Id,
+        docNumber: matchingDeposit.DocNumber,
+        date: matchingDeposit.TxnDate,
+        amount: matchingDeposit.TotalAmt,
+      });
+      return { id: matchingDeposit.Id, type: 'bank-deposit' };
     }
-
-    logger.debug('[QBO] No existing payout movement found by payout ID check', {
-      payoutId: normalizedPayoutId,
-      date: formattedDate,
-      amount: amountDollars,
-    });
-    return null;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.warn('[QBO] Payout deposit check failed', {
-      payoutId,
-      error: errorMessage,
-    });
-    return null;
   }
+
+  logger.debug('[QBO] No existing payout movement found by payout ID check', {
+    payoutId: normalizedPayoutId,
+    date: formattedDate,
+    windowStart,
+    windowEnd,
+    amount: amountDollars,
+  });
+  return null;
 };
 
 const postToQbo = async <T extends QuickBooksDocType>(
@@ -3734,6 +3791,9 @@ export const postManualEntryAsSalesReceipt = async (input: {
     null,
     input.uniqueId ?? null
   );
+  const effectiveOptions = input.uniqueId
+    ? { ...input.options, strictDocNumber: true }
+    : input.options;
   const context = await createRequestContext(input.options);
 
   // Resolve accounts and item
@@ -3877,7 +3937,11 @@ export const postManualEntryAsSalesReceipt = async (input: {
     ],
   };
 
-  const result = await postSalesReceipt(salesReceipt, input.options);
+  // When the DocNumber encodes a globally-unique id, a collision means this exact
+  // record was already posted — not that we should adopt an unrelated document. Escalate
+  // instead of returning a stranger's QBO id, which the caller would otherwise stamp
+  // onto the Salesforce record as a successful post and never retry.
+  const result = await postSalesReceipt(salesReceipt, effectiveOptions);
   return { qboId: result.id, type: 'sales-receipt' };
 };
 
@@ -3922,6 +3986,11 @@ export const postManualEntryAsJournalEntry = async (input: {
     null,
     input.uniqueId ?? null
   );
+  // See postManualEntryAsSalesReceipt: a uniqueId-derived DocNumber is expected to be
+  // globally unique, so a collision is an unexpected re-post rather than a document to adopt.
+  const effectiveOptions = input.uniqueId
+    ? { ...input.options, strictDocNumber: true }
+    : input.options;
   const context = await createRequestContext(input.options);
 
   const clearingAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
@@ -3990,7 +4059,7 @@ export const postManualEntryAsJournalEntry = async (input: {
     entityRef: resolvedEntityRef,
   });
 
-  const result = await postJournalEntry(journalEntry, input.options);
+  const result = await postJournalEntry(journalEntry, effectiveOptions);
   return { qboId: result.id, type: 'journal-entry' };
 };
 

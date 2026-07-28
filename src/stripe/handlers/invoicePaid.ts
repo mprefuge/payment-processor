@@ -36,7 +36,11 @@ const buildInvoiceTransaction = (
     stripe_subscription_id__c: normalizeStripeId(invoice.subscription),
     stripe_customer_id__c: normalizeStripeId(invoice.customer),
     amount_gross__c: amountPaid,
-    amount_net__c: centsToMajorUnits(invoice.total ?? null) ?? amountPaid,
+    // Both derive from amount_paid. `invoice.total` is the invoice's face value before
+    // payment, not a net-of-fees figure, so using it here produced net > gross whenever
+    // an invoice was discounted or partially paid. No balance transaction is available
+    // on this path, so the processing fee is unknown and net equals gross.
+    amount_net__c: amountPaid,
     currency_iso_code__c: invoice.currency ? invoice.currency.toUpperCase() : null,
     billing_email__c: invoice.customer_email ?? null,
     received_at__c: receivedAt,
@@ -158,7 +162,10 @@ export const handleInvoicePaidNoPI = async (
     return;
   }
 
-  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_subscription_id__c');
+  // Key on the invoice id, not the subscription id. An invoice is one-per-billing-period;
+  // a subscription id is shared by every invoice in the series, so keying on it made each
+  // renewal overwrite the previous period's Transaction__c instead of creating its own.
+  await salesforce.upsertTransactionByExternalId(transaction, 'stripe_invoice_id__c');
 };
 
 export const handleInvoicePaid = async (

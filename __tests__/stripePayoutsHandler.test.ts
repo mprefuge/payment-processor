@@ -91,14 +91,22 @@ const createDeps = ({
 
   const withLock = vi.fn(async (_: string, fn: () => Promise<unknown>) => fn()) as any;
 
+  // Stateful, so replay tests actually exercise the dedup path. A stub that always
+  // reports "not processed" would let a double-post regression pass silently.
+  const processedKeys = new Set<string>();
+  const isProcessed = vi.fn(async (key: string) => processedKeys.has(key));
+  const markProcessed = vi.fn(async (key: string) => {
+    processedKeys.add(key);
+  });
+
   const deps: StripeWebhookDependencies = {
     stripe: {
       verifyEvent: vi.fn(),
       getClient: vi.fn(() => stripeClient),
     },
     idempotencyStore: {
-      isProcessed: vi.fn(),
-      markProcessed: vi.fn(),
+      isProcessed,
+      markProcessed,
       withLock,
       flush: vi.fn(),
     },
@@ -416,13 +424,62 @@ describe('handlePayoutEvent', () => {
     await handlePayoutEvent(context, event, deps);
     await handlePayoutEvent(context, event, deps);
 
-    expect(upsertDeposit).toHaveBeenCalledTimes(2);
-    for (const call of upsertDeposit.mock.calls) {
-      const input = call[0] as UpsertPayoutDepositInput;
-      expect(input.summary.payoutAmountCents).toBe(9_700);
-      expect(input.summary.calculatedAmountCents).toBe(9_700);
-    }
-    expect(withLock).toHaveBeenCalledWith('stripe_evt_evt_repeat', expect.any(Function));
+    // The replay must NOT reach the accounting adapter a second time. The durable
+    // `payout_<id>` marker is what stripeTrueUp's backfill also gates on, so a
+    // regression here re-opens the payout double-post path.
+    expect(upsertDeposit).toHaveBeenCalledTimes(1);
+    const input = upsertDeposit.mock.calls[0][0] as UpsertPayoutDepositInput;
+    expect(input.summary.payoutAmountCents).toBe(9_700);
+    expect(input.summary.calculatedAmountCents).toBe(9_700);
+
+    // Payout-scoped, not event-scoped: payout.paid and payout.reconciliation_completed
+    // are different events that post the same payout and must serialize against
+    // each other.
+    expect(withLock).toHaveBeenCalledWith('payout_po_123', expect.any(Function));
+  });
+
+  it('does not re-post a payout that a different event type already posted', async () => {
+    const context = createContext();
+    const payout = createPayout({ amount: 9_700 });
+    const chargeTxn = createTransaction({
+      id: 'txn_charge',
+      amount: 10_000,
+      type: 'charge',
+      source: 'ch_123',
+    });
+    const feeTxn = createTransaction({
+      id: 'txn_fee',
+      amount: -300,
+      type: 'stripe_fee',
+      source: 'fee_1',
+    });
+
+    const { deps, upsertDeposit } = createDeps({
+      transactionPages: [
+        [chargeTxn, feeTxn],
+        [chargeTxn, feeTxn],
+      ],
+      charges: {
+        ch_123: createCharge({ id: 'ch_123', payment_intent: 'pi_321' }),
+      },
+    });
+
+    await handlePayoutEvent(
+      context,
+      { id: 'evt_paid', type: 'payout.paid', data: { object: payout } } as Stripe.Event,
+      deps
+    );
+    await handlePayoutEvent(
+      context,
+      {
+        id: 'evt_recon',
+        type: 'payout.reconciliation_completed',
+        data: { object: payout },
+      } as Stripe.Event,
+      deps
+    );
+
+    expect(upsertDeposit).toHaveBeenCalledTimes(1);
   });
 
   it('marks payout for review when canceled or failed', async () => {

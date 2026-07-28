@@ -555,6 +555,15 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     // they reference an existing charge.
     if (dto.transaction_type__c === 'charge') {
       for (const field of TRANSACTION_EXTERNAL_ID_FIELDS) {
+        // A subscription id identifies a recurring SERIES, not a transaction: every
+        // monthly gift in a subscription carries the same one. Probing it here made
+        // month 2 resolve to month 1's Transaction__c and overwrite it, collapsing a
+        // donor's entire giving history into a single row. It stays in
+        // TRANSACTION_EXTERNAL_ID_FIELDS because callers may still target it
+        // explicitly via `key`, but it must never be used for opportunistic merging.
+        if (field === 'stripe_subscription_id__c') {
+          continue;
+        }
         if (!fields.includes(field)) {
           fields.push(field);
         }

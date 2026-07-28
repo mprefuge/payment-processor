@@ -302,7 +302,7 @@ describe('stripeWebhook', () => {
     });
   });
 
-  it('locates pending subscription transactions by subscription id when available', async () => {
+  it('records the subscription id without merging a renewal onto the prior period record', async () => {
     const store = mockIdempotencyStore();
     const stripeEvent = createStripeEvent();
     (stripeEvent.data.object as any).invoice = 'in_test';
@@ -373,10 +373,15 @@ describe('stripeWebhook', () => {
     await handler(req, context);
 
     expect(stripeClient.invoices.retrieve).toHaveBeenCalledWith('in_test');
-    expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
+
+    // The subscription id is recorded on the transaction for reporting, but it must
+    // NEVER be used to locate an existing Transaction__c: every renewal in a recurring
+    // series carries the same subscription id, so matching on it made month 2 resolve
+    // to month 1's record and overwrite it, collapsing the donor's giving history.
+    expect(salesforce.findTransactionIdByExternalId).not.toHaveBeenCalledWith(
       'stripe_subscription_id__c',
-      'sub_123',
-      'Stripe Transaction'
+      expect.anything(),
+      expect.anything()
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -384,7 +389,7 @@ describe('stripeWebhook', () => {
         stripe_subscription_id__c: 'sub_123',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_subscription' }
+      undefined
     );
   });
 
@@ -514,10 +519,19 @@ describe('stripeWebhook', () => {
     const result = await handler(req, context);
 
     expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledWith('pi_invoice');
+
+    // Identity comes from the charge and payment intent, which are unique per billing
+    // period. The subscription id is recorded on the record but must not be used to
+    // find one, or each renewal would overwrite the previous period's transaction.
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
-      'stripe_subscription_id__c',
-      'sub_999',
+      'stripe_charge_id__c',
+      'ch_invoice',
       'Stripe Transaction'
+    );
+    expect(salesforce.findTransactionIdByExternalId).not.toHaveBeenCalledWith(
+      'stripe_subscription_id__c',
+      expect.anything(),
+      expect.anything()
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -526,7 +540,7 @@ describe('stripeWebhook', () => {
         stripe_subscription_id__c: 'sub_999',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_pending_sub' }
+      undefined
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
     expect(stripeClient.invoices.retrieve).toHaveBeenCalledWith('in_456');
@@ -641,6 +655,8 @@ describe('stripeWebhook', () => {
     await handler(req, context);
 
     expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledWith('pi_paid');
+    // No overrideId: the subscription id must not resolve this renewal onto the
+    // previous period's Transaction__c. See findExistingTransactionId.
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
         stripe_payment_intent_id__c: 'pi_paid',
@@ -648,7 +664,7 @@ describe('stripeWebhook', () => {
         stripe_subscription_id__c: 'sub_paid',
       }),
       'stripe_payment_intent_id__c',
-      { overrideId: 'sf_sub' }
+      undefined
     );
     expect(accounting.postChargeToQbo).toHaveBeenCalled();
     expect(store.markProcessed).toHaveBeenCalledWith('evt_invoice_paid');

@@ -2109,7 +2109,11 @@ const processPayouts = async (
           const posting = await dependencies.accounting.postPayoutToQbo({
             amount: payoutAmount,
             memo: `Stripe payout ${payout.id}`,
-            date: timestampToDate(payout.created ?? payout.arrival_date ?? null),
+            // Must match the webhook path's precedence (src/stripe/handlers/payouts.ts).
+            // checkForPayoutMovement dedups on TxnDate, so posting the same payout on a
+            // different date than the webhook used defeats the duplicate check entirely —
+            // arrival_date and created are typically ~2 business days apart.
+            date: timestampToDate(payout.arrival_date ?? payout.created ?? null),
             payoutId: payout.id,
           });
           summary.qboPosts += 1;

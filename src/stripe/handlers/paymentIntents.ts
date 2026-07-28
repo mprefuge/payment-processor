@@ -275,8 +275,7 @@ const findExistingTransactionId = async (
   salesforce: SalesforceSvc,
   paymentIntentId: string,
   chargeId: string | null,
-  checkoutSessionId: string | null,
-  subscriptionId: string | null
+  checkoutSessionId: string | null
 ): Promise<string | null> => {
   const transactionLookupPlan = [
     {
@@ -306,15 +305,11 @@ const findExistingTransactionId = async (
       noMatchLog: '[StripeWebhook] No existing transaction found by payment intent ID',
       identifierKey: 'paymentIntentId',
     },
-    {
-      enabled: !!subscriptionId,
-      fieldName: 'stripe_subscription_id__c',
-      externalValue: subscriptionId,
-      successLog: '[StripeWebhook] Found existing transaction by subscription ID',
-      failureLog: '[StripeWebhook] Failed to locate transaction by subscription ID',
-      noMatchLog: null,
-      identifierKey: 'subscriptionId',
-    },
+    // Deliberately NOT a lookup step: stripe_subscription_id__c. A subscription id is
+    // shared by every gift in a recurring series, so matching on it made each renewal
+    // resolve to the previous month's Transaction__c and overwrite it. The steps above
+    // (checkout session, charge, payment intent) are all one-per-transaction; when they
+    // all miss, this really is a new transaction and must get its own row.
   ] as const;
 
   for (const lookupStep of transactionLookupPlan) {
@@ -615,7 +610,6 @@ const resolveSuccessfulPaymentIntentOverrideId = async (
   paymentIntent: Stripe.PaymentIntent,
   charge: Stripe.Charge | null,
   checkoutSession: Stripe.Checkout.Session | null,
-  subscriptionId: string | null,
   transaction: TransactionUpsertDTO
 ): Promise<string | null> => {
   context.log('[StripeWebhook] Starting transaction search for payment intent', {
@@ -633,8 +627,7 @@ const resolveSuccessfulPaymentIntentOverrideId = async (
     salesforce,
     paymentIntent.id,
     charge?.id ?? null,
-    checkoutSession?.id ?? null,
-    subscriptionId ?? null
+    checkoutSession?.id ?? null
   );
 };
 
@@ -829,7 +822,6 @@ const processSuccessfulPaymentIntent = async ({
     paymentIntent,
     charge,
     checkoutSession,
-    subscriptionId,
     transaction
   );
 

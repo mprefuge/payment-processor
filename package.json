@@ -7,7 +7,7 @@
     "dev": "npm run start",
     "build": "tsc && npm --prefix form-builder-ui ci --prefer-offline && npm --prefix form-builder-ui run build",
     "start": "func start",
-    "test": "vitest run",
+    "test": "tsc && vitest run",
     "test:watch": "vitest watch",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck && npm run format:check",
@@ -36,7 +36,6 @@
     "applicationinsights": "^3.15.0",
     "azure-functions-openapi": "^1.2.1",
     "jsforce": "^3.10.7",
-    "node-quickbooks": "^2.0.46",
     "stripe": "^14.25.0",
     "zod": "^3.23.8"
   },

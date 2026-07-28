@@ -1133,3 +1133,87 @@ describe('createSalesforceSvc', () => {
     );
   });
 });
+
+describe('createSalesforceSvc — recurring subscription series must not collapse', () => {
+  /**
+   * Regression: `stripe_subscription_id__c` was in the opportunistic cross-identifier
+   * probe list used for `transaction_type__c === 'charge'`. Every renewal in a
+   * recurring series carries the SAME subscription id, so month 2's payment intent /
+   * charge / balance-transaction probes all missed, fell through to the subscription
+   * id, matched month 1's Transaction__c, and upserted over it by Id. A donor giving
+   * $500/month for a year showed up as a single $500 transaction.
+   */
+  const buildRenewalDto = (): TransactionUpsertDTO =>
+    ({
+      transaction_type__c: 'charge',
+      status__c: 'paid',
+      // Fresh identifiers for this month's gift — none of these exist in Salesforce yet.
+      stripe_payment_intent_id__c: 'pi_month_2',
+      stripe_charge_id__c: 'ch_month_2',
+      stripe_balance_transaction_id__c: 'bt_month_2',
+      // Shared across the entire series.
+      stripe_subscription_id__c: 'sub_shared',
+      amount_gross__c: 500,
+      received_at__c: '2026-02-01T00:00:00.000Z',
+    }) as unknown as TransactionUpsertDTO;
+
+  /**
+   * Query mock where ONLY a lookup by Stripe_Subscription_Id__c would find a record —
+   * i.e. last month's transaction. Everything else returns empty.
+   */
+  const createSeriesConnection = () => {
+    const attemptedLookups: string[] = [];
+    const upsert = vi.fn().mockResolvedValue([{ success: true, id: 'sf_month_2', errors: [] }]);
+    const query = vi.fn().mockImplementation((soql: string) => {
+      if (soql.includes('FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes('FROM Transaction__c')) {
+        attemptedLookups.push(soql);
+        if (soql.includes('Stripe_Subscription_Id__c')) {
+          return Promise.resolve({ records: [{ Id: 'sf_month_1' }] });
+        }
+      }
+      return Promise.resolve({ records: [] });
+    });
+    return { upsert, query, sobject: vi.fn(), attemptedLookups };
+  };
+
+  it('never probes Transaction__c by subscription id for a charge', async () => {
+    const { upsert, query, sobject, attemptedLookups } = createSeriesConnection();
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, sobject, query } as unknown as Connection,
+    });
+
+    await service.upsertTransactionByExternalId(buildRenewalDto(), 'stripe_payment_intent_id__c');
+
+    expect(attemptedLookups.length).toBeGreaterThan(0);
+    expect(attemptedLookups.some((soql) => soql.includes('Stripe_Subscription_Id__c'))).toBe(false);
+  });
+
+  it('does not overwrite the previous period record when only the subscription id matches', async () => {
+    const { upsert, query, sobject } = createSeriesConnection();
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, sobject, query } as unknown as Connection,
+    });
+
+    await service.upsertTransactionByExternalId(buildRenewalDto(), 'stripe_payment_intent_id__c');
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [, records] = upsert.mock.calls[0];
+    // Resolving to sf_month_1 would put that Id on the record and overwrite last
+    // month's gift. The renewal must be upserted on its own external id instead.
+    expect(records[0].Id).toBeUndefined();
+  });
+
+  it('still honours an explicit subscription-id key when the caller asks for one', async () => {
+    const { upsert, query, sobject, attemptedLookups } = createSeriesConnection();
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, sobject, query } as unknown as Connection,
+    });
+
+    await service.upsertTransactionByExternalId(buildRenewalDto(), 'stripe_subscription_id__c');
+
+    expect(attemptedLookups.some((soql) => soql.includes('Stripe_Subscription_Id__c'))).toBe(true);
+  });
+});

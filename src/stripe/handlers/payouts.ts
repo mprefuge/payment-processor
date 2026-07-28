@@ -802,14 +802,38 @@ export const handlePayoutEvent = async (
 
     let qboDocId: string | null = null;
     let qboDocType: string | null = null;
+    let alreadyPosted = false;
+    // Durable, payout-scoped marker shared with stripeTrueUp's payout backfill, which
+    // gates on isProcessed(`payout_<id>`). Without it the backfill has no way to learn
+    // that the webhook already posted this payout: a QBO Transfer carries no DocNumber,
+    // so postToQbo's DocNumber pre-check never runs, and checkForPayoutMovement only
+    // looks at a single TxnDate. The lock is payout-scoped rather than event-scoped
+    // because payout.paid and payout.reconciliation_completed are distinct events that
+    // both post the same payout.
+    const payoutPostedKey = `payout_${payout.id}`;
     try {
-      await deps.idempotencyStore.withLock(`stripe_evt_${event.id}`, async () => {
+      await deps.idempotencyStore.withLock(payoutPostedKey, async () => {
+        if (await deps.idempotencyStore.isProcessed(payoutPostedKey)) {
+          alreadyPosted = true;
+          return;
+        }
+
         const result = await adapter.upsertDeposit(depositInput);
         if (result && typeof result === 'object' && 'id' in result && 'type' in result) {
           qboDocId = (result as { id: string; type: string }).id;
           qboDocType = (result as { id: string; type: string }).type;
         }
+
+        await deps.idempotencyStore.markProcessed(payoutPostedKey);
       });
+
+      if (alreadyPosted) {
+        context.log('[StripeWebhook] Payout already posted to QBO, skipping deposit', {
+          payoutId: payout.id,
+          eventType,
+        });
+        return;
+      }
 
       if (qboDocId && qboDocType) {
         const payoutTxnId = await salesforce.findTransactionIdByExternalId(
