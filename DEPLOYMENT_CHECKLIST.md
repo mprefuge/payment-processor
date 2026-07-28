@@ -38,8 +38,9 @@ Complete these items before calling a deployment production-ready:
 
 ### Azure Configuration
 
-- [ ] Create Azure Function App (Node.js 20.x runtime)
+- [ ] Create Azure Function App (Node.js 22.x runtime — matches `NODE_VERSION` in the deploy workflow)
 - [ ] Configure App Settings from `local.settings.json.template`
+- [ ] Set `SCM_DO_BUILD_DURING_DEPLOYMENT=false` and `ENABLE_ORYX_BUILD=false` on the function app (see below)
 - [ ] Enable Application Insights
 - [ ] Configure deployment credentials
 - [ ] Set up deployment slots (staging/production)
@@ -49,6 +50,45 @@ Complete these items before calling a deployment production-ready:
 - [ ] Add GitHub Actions secrets `AZURE_FUNCTIONAPP_STAGING_FUNCTION_KEY` and `AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY` for smoke tests against function-auth endpoints
 - [ ] Add GitHub Actions secrets `AZURE_FUNCTIONAPP_STAGING_SMOKE_TRANSACTION_PAYLOAD` and `AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD` for deploy-time test transactions
 - [ ] Add GitHub Actions variables `AZURE_FUNCTIONAPP_STAGING_URL` and `AZURE_FUNCTIONAPP_PRODUCTION_URL` if the default slot URLs are not used
+
+#### Disable the server-side (Oryx) build
+
+CI ships a fully built artifact: `dist/` and `node_modules/` are inside `release.zip`.
+The function app should therefore never rebuild it on the server.
+
+`Azure/functions-action` tries to guarantee that per-deploy by patching
+`SCM_DO_BUILD_DURING_DEPLOYMENT=false` through the Kudu `POST /api/settings` API.
+On this app that call fails on every run — it is logged as a warning, not an error:
+
+```
+Setting SCM_DO_BUILD_DURING_DEPLOYMENT in Kudu container to false
+##[warning]Patch Temporary Application Settings: Failed to change app settings.
+  Error: When [POST] <scm-site>/api/settings, error: Failed to update app settings via kudu
+```
+
+When the patch fails, the app's own settings win. They are currently
+`SCM_DO_BUILD_DURING_DEPLOYMENT=true` / `ENABLE_ORYX_BUILD=true` (the action prints
+`Restoring ... to true` at the end of the deploy, which is the pre-existing value it
+read from the app), so Kudu runs an Oryx build on every production deploy: it reruns
+`npm install` and `npm run build` against the extracted package. That build is not the
+artifact CI verified, and it used to fail the deploy outright (run 30354402103) because
+`npm run build` recurses into `form-builder-ui/`, which is not shipped. The deploy
+workflow now ships a package whose `build` script is a no-op so a stray remote build
+cannot break the deploy, but the remote build still runs and still wastes deploy time.
+
+Set both settings to `false` on the function app to stop it at the source:
+
+```bash
+az functionapp config appsettings set \
+  --name payment-processing-function \
+  --resource-group <resource-group> \
+  --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
+```
+
+The Kudu warnings themselves are inherent to publish-profile (SCM) authentication —
+the action reads and rewrites Kudu settings only on that path. Switching the production
+deploy to OIDC/RBAC auth (`azure/login`, as `new-main_payment-processing-function.yml`
+already does) skips those Kudu calls entirely.
 
 ### Stripe Integration
 

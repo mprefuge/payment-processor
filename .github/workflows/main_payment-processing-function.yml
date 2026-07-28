@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -49,17 +49,22 @@ jobs:
           # This artifact is already built: `dist` and `node_modules` are in the zip.
           # zipdeploy is supposed to treat it as ready-to-run, and Azure/functions-action
           # normally guarantees that by patching SCM_DO_BUILD_DURING_DEPLOYMENT=false at
-          # deploy time. That patch is a Kudu API call and it can fail — when it does
-          # (run 30354402103), Oryx runs a server-side build anyway and executes
-          # `npm run build` against the extracted package. That build cannot succeed
-          # here: it runs `npm --prefix form-builder-ui ci`, and form-builder-ui/ is
-          # deliberately not shipped. The deploy then fails after the artifact was
-          # already verified green in CI.
+          # deploy time. That patch is a Kudu API call (POST /api/settings) and on this
+          # app it fails on every run — the action logs it as a warning and carries on.
+          # The app's own settings then decide, and they are currently
+          # SCM_DO_BUILD_DURING_DEPLOYMENT=true / ENABLE_ORYX_BUILD=true (you can read
+          # them off the action's own "Restoring ... to true" lines), so Oryx runs a
+          # server-side build on every deploy and executes `npm run build` against the
+          # extracted package. That build cannot succeed here: it runs
+          # `npm --prefix form-builder-ui ci`, and form-builder-ui/ is deliberately not
+          # shipped. The deploy then fails after the artifact was already verified green
+          # in CI (run 30354402103).
           #
           # Neutering the script makes an unintended remote build a no-op instead of a
           # hard failure, so the deploy no longer depends on that patch succeeding.
           # The durable companion fix is Azure-side: set SCM_DO_BUILD_DURING_DEPLOYMENT
-          # to false persistently on the app (false is zipdeploy's own default).
+          # and ENABLE_ORYX_BUILD to false persistently on the app (false is zipdeploy's
+          # own default) so the remote build never starts. See DEPLOYMENT_CHECKLIST.md.
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -93,7 +98,7 @@ jobs:
         with:
           name: function-package
 
-      - uses: Azure/functions-action@v1.5.2
+      - uses: Azure/functions-action@v1.5.6
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: release.zip
@@ -107,9 +112,9 @@ jobs:
       url: https://payment-processing-function.azurewebsites.net
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
