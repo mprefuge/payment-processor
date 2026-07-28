@@ -31,12 +31,30 @@ async function loadEnvWith(vars: Record<string, string | undefined>) {
   }
 }
 
-const MINIMAL_ENV: Record<string, string> = {
+// These tests assert loadEnv's DEFAULTS, so the fixture has to describe the whole
+// environment — anything left unset is inherited from the ambient process. CI injects
+// the real deployment configuration as repository secrets (see the `env:` block in
+// .github/workflows/ci.yml), so a default-assertion that does not explicitly clear its
+// variable passes locally and fails on the runner against a value it never chose.
+// `loadEnvWith` treats `undefined` as "delete this variable".
+const MINIMAL_ENV: Record<string, string | undefined> = {
   STRIPE_SECRET: 'sk_test_minimalkey1234567890',
   STRIPE_WEBHOOK_SECRET: 'whsec_minimalwebhook',
   SF_AUTH_MODE: 'disabled',
   QBO_ENV: 'sandbox',
   ACCOUNTING_SYNC_ENABLED: 'false',
+
+  // Cleared so the "defaults …" cases below measure the code's defaults, not the runner's.
+  ACCOUNTING_POSTING_STRATEGY: undefined,
+  ACCOUNTING_PROVIDER: undefined,
+  CRM_PROVIDER: undefined,
+  TEST_MODE: undefined,
+  QBO_ACCOUNT_STRIPE_CLEARING: undefined,
+  QBO_ACCOUNT_OPERATING_BANK: undefined,
+  QBO_ACCOUNT_REVENUE: undefined,
+  QBO_ACCOUNT_FEES: undefined,
+  QBO_ACCOUNT_REFUNDS: undefined,
+  QBO_ACCOUNT_DISPUTE_LOSSES: undefined,
 };
 
 describe('env config', () => {
