@@ -2630,4 +2630,11 @@ export const dailyReconciliationTimer = async (
   }
 };
 
+/**
+ * Test seam. `parseOptions` decides, among other things, whether a run writes to
+ * Salesforce and the QuickBooks general ledger or only reports — which makes it the
+ * single most safety-critical function in this handler and worth pinning directly.
+ */
+export const __internals = { parseOptions };
+
 export default dailyReconciliationHttp;

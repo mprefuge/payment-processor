@@ -807,4 +807,107 @@ describe('stripeTrueUp handler overrides', () => {
 
     internals.resetDependencies();
   });
+  it('posts payouts dated by arrival_date, matching the webhook path', async () => {
+    // Regression: this used `created ?? arrival_date` while the webhook used
+    // `arrival_date ?? created`. checkForPayoutMovement dedups on TxnDate, so the two
+    // paths disagreeing by ~2 business days defeated the duplicate check entirely and
+    // the backfill re-posted every payout the webhook had already booked.
+    // beforeEach strips these; the payout path needs QBO configured to post at all.
+    process.env.QBO_CLIENT_ID = 'client';
+    process.env.QBO_CLIENT_SECRET = 'secret';
+    process.env.QBO_REALM_ID = 'realm';
+
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    const postPayoutToQbo = vi.fn().mockResolvedValue({ qboId: 'tr_1', type: 'transfer' });
+    const salesforce = {
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'a01_payout', success: true }),
+      linkPayoutOnTransactions: vi.fn().mockResolvedValue([]),
+      markPostedToQbo: vi.fn(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+      upsertCustomerByStripeId: vi.fn(),
+      findContactIdById: vi.fn().mockResolvedValue(null),
+    };
+
+    const CREATED = 1_700_000_000; // 2023-11-14
+    const ARRIVAL = 1_700_259_200; // ~3 days later — a different calendar day
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue({}) },
+      fetchers: {
+        payouts: vi.fn().mockResolvedValue([
+          {
+            id: 'po_trueup_1',
+            status: 'paid',
+            amount: 9_700,
+            currency: 'usd',
+            automatic: false,
+            created: CREATED,
+            arrival_date: ARRIVAL,
+          },
+        ]),
+        payoutBalance: vi.fn().mockResolvedValue([]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting: { postPayoutToQbo },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({ from: '2023-11-01T00:00:00Z', type: 'payouts' });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    expect(response.status).toBe(200);
+
+    expect(postPayoutToQbo).toHaveBeenCalledTimes(1);
+    const posted = postPayoutToQbo.mock.calls[0][0];
+    expect(posted.payoutId).toBe('po_trueup_1');
+    expect(posted.date.getTime()).toBe(ARRIVAL * 1000);
+    expect(posted.date.getTime()).not.toBe(CREATED * 1000);
+
+    internals.resetDependencies();
+  });
+
+  it('skips a payout the webhook already marked processed', async () => {
+    // The webhook writes markProcessed(`payout_<id>`) after a successful QBO post.
+    // This gate is the durable half of the double-post fix.
+    process.env.QBO_CLIENT_ID = 'client';
+    process.env.QBO_CLIENT_SECRET = 'secret';
+    process.env.QBO_REALM_ID = 'realm';
+
+    const internals = (stripeTrueUpHandler as any).__internals;
+    const store = createIdempotencyStore();
+    store.isProcessed.mockImplementation(async (key: string) => key === 'payout_po_already');
+    const postPayoutToQbo = vi.fn();
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue({}) },
+      fetchers: {
+        payouts: vi.fn().mockResolvedValue([
+          {
+            id: 'po_already',
+            status: 'paid',
+            amount: 5_000,
+            currency: 'usd',
+            automatic: true,
+            created: 1_700_000_000,
+            arrival_date: 1_700_259_200,
+          },
+        ]),
+        payoutBalance: vi.fn().mockResolvedValue([]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => ({}) as any,
+      accounting: { postPayoutToQbo },
+    });
+
+    const { context } = createContext();
+    const req = createQueryRequest({ from: '2023-11-01T00:00:00Z', type: 'payouts' });
+
+    const response = await (stripeTrueUpHandler as any)(req, context);
+    expect(response.status).toBe(200);
+    expect(postPayoutToQbo).not.toHaveBeenCalled();
+
+    internals.resetDependencies();
+  });
 });

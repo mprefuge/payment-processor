@@ -415,4 +415,97 @@ describe('buildDocNumber — long prefixes must not collapse the unique suffix',
     });
     expect((capturedPayloads.at(-1) as any)?.DocNumber).toMatch(/^REF-20240101-/);
   });
+
+  it('escalates on a DocNumber collision instead of adopting the existing document', async () => {
+    // postToQbo's non-strict branch returns the colliding document's id as if the post
+    // succeeded. The caller then stamps that id onto the Salesforce record as
+    // Posted_to_QBO__c = true and never retries, so a real donation silently vanishes
+    // from QuickBooks. A uniqueId-derived DocNumber is expected to be globally unique,
+    // so a collision must surface rather than resolve itself.
+    const { svc } = await importQboSvc();
+    const capturedPayloads: unknown[] = [];
+    const base = createManualFetcher(capturedPayloads);
+
+    const collidingFetcher: typeof fetch = (async (
+      url: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const href = typeof url === 'string' ? url : url.toString();
+      const decoded = decodeURIComponent(href);
+
+      if ((init?.method ?? 'GET') === 'GET' && /FROM\s+SalesReceipt/i.test(decoded)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            QueryResponse: { SalesReceipt: [{ Id: 'SOMEONE_ELSES_RECEIPT' }] },
+          }),
+          text: async () => '',
+        } as Response;
+      }
+
+      return base(url as never, init as never);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      svc.postManualEntryAsSalesReceipt({
+        grossAmountCents: 50_000,
+        date: new Date('2026-07-27'),
+        memo: 'Check donation',
+        uniqueId: SF_IDS[0],
+        options: makeOpts(collidingFetcher),
+      })
+    ).rejects.toThrow(/DocNumber collision/i);
+
+    // No sales receipt was created — the caller got an error rather than a stranger's id.
+    // (Other payloads may be posted while resolving the revenue item; only the receipt
+    // itself matters here.)
+    const postedReceipts = capturedPayloads.filter((payload) =>
+      String((payload as { DocNumber?: string } | null)?.DocNumber ?? '').startsWith('CHG-MANUAL-')
+    );
+    expect(postedReceipts).toEqual([]);
+  });
+
+  it('escalates a DocNumber collision on the manual journal-entry path too', async () => {
+    const { svc } = await importQboSvc();
+    const capturedPayloads: unknown[] = [];
+    const base = createManualFetcher(capturedPayloads);
+
+    const collidingFetcher: typeof fetch = (async (
+      url: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const href = typeof url === 'string' ? url : url.toString();
+      const decoded = decodeURIComponent(href);
+
+      if ((init?.method ?? 'GET') === 'GET' && /FROM\s+JournalEntry/i.test(decoded)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            QueryResponse: { JournalEntry: [{ Id: 'SOMEONE_ELSES_ENTRY' }] },
+          }),
+          text: async () => '',
+        } as Response;
+      }
+
+      return base(url as never, init as never);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      svc.postManualEntryAsJournalEntry({
+        grossAmountCents: 50_000,
+        feeAmountCents: 0,
+        date: new Date('2026-07-27'),
+        memo: 'Check donation',
+        uniqueId: SF_IDS[0],
+        options: makeOpts(collidingFetcher),
+      })
+    ).rejects.toThrow(/DocNumber collision/i);
+
+    const postedEntries = capturedPayloads.filter((payload) =>
+      String((payload as { DocNumber?: string } | null)?.DocNumber ?? '').startsWith('CHGJE-')
+    );
+    expect(postedEntries).toEqual([]);
+  });
 });

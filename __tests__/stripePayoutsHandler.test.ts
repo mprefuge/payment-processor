@@ -433,9 +433,14 @@ describe('handlePayoutEvent', () => {
     expect(input.summary.calculatedAmountCents).toBe(9_700);
 
     // Payout-scoped, not event-scoped: payout.paid and payout.reconciliation_completed
-    // are different events that post the same payout and must serialize against
-    // each other.
+    // are different events that post the same payout and must serialize against each
+    // other. An event-scoped lock lets both enter concurrently, both observe
+    // isProcessed === false, and both post.
     expect(withLock).toHaveBeenCalledWith('payout_po_123', expect.any(Function));
+    const lockKeys = withLock.mock.calls.map((call: unknown[]) => call[0] as string);
+    expect(lockKeys.length).toBeGreaterThan(0);
+    expect(lockKeys.filter((key) => key.startsWith('stripe_evt_'))).toEqual([]);
+    expect(lockKeys.every((key) => key === 'payout_po_123')).toBe(true);
   });
 
   it('does not re-post a payout that a different event type already posted', async () => {
