@@ -203,10 +203,11 @@ jobs:
           # Post a payload that populates every input the endpoint accepts, then read
           # the records back and assert each field landed where it belongs.
           SMOKE_FULL_FIELD_COVERAGE: 'true'
-          # Each run gets its own donor email. Reusing one matches the Contact a previous
-          # run left behind, and the matched-contact path only backfills a subset of the
-          # fields — which reads as a routing failure that isn't one.
-          SMOKE_UNIQUE_EMAIL: 'true'
+          # Each run gets its own donor email AND surname. searchContact ORs on name and
+          # phone, so a stable name matches a REAL person's Contact even with a fresh
+          # email — and cleanup then deletes Contacts by the Stripe customer id this run
+          # wrote, which would put that person's record in its path.
+          SMOKE_UNIQUE_DONOR: 'true'
           SMOKE_COVER_FEES: ${{ inputs.cover_fees }}
           SMOKE_VERIFY_ENABLED: ${{ inputs.verify_fields }}
           SMOKE_VERIFY_DELAY_MS: ${{ inputs.verify_delay_ms }}

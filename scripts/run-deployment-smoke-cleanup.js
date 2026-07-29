@@ -120,6 +120,8 @@ const buildFullCoverageTemplate = (organizationName, campaignName, coverFees = t
   },
 });
 
+const normalizeSuffix = (suffix) => suffix.replace(/[^A-Za-z0-9._-]/g, '-');
+
 /** Rewrites `local@domain` to `local+suffix@domain` so each run gets fresh records. */
 const uniquifyEmail = (email, suffix) => {
   const atIndex = email.lastIndexOf('@');
@@ -129,9 +131,28 @@ const uniquifyEmail = (email, suffix) => {
 
   const local = email.slice(0, atIndex);
   const domain = email.slice(atIndex + 1);
-  const normalizedSuffix = suffix.replace(/[^A-Za-z0-9._-]/g, '-');
 
-  return `${local.split('+')[0]}+${normalizedSuffix}@${domain}`;
+  return `${local.split('+')[0]}+${normalizeSuffix(suffix)}@${domain}`;
+};
+
+/** Salesforce LastName is 80 chars; stay well inside it. */
+const MAX_LAST_NAME_LENGTH = 60;
+
+/**
+ * A unique email is not enough on its own. `searchContact` ORs its predicates —
+ * Stripe id OR email OR phone OR (first name AND last name) — and then selects
+ * by exact name, so a stable name matches a real person's Contact even when the
+ * email is fresh. That takes the update path, which leaves `Stripe_Customer_ID__c`
+ * pointing at whichever customer the Contact was first linked to.
+ *
+ * Making the surname unique per run keeps the smoke donor from colliding with
+ * anyone real: no match, so a new Contact is created with the correct email and
+ * Stripe customer id — which is also what lets cleanup find and remove it again.
+ */
+const uniquifyLastName = (lastName, suffix) => {
+  const base =
+    typeof lastName === 'string' && lastName.trim().length > 0 ? lastName.trim() : 'Smoke';
+  return `${base}-${normalizeSuffix(suffix)}`.slice(0, MAX_LAST_NAME_LENGTH);
 };
 
 const buildTaggedPayload = (rawPayload, tag, options) => {
@@ -149,19 +170,25 @@ const buildTaggedPayload = (rawPayload, tag, options) => {
     metadata.memo__c = `Deployment smoke test | [source_test_tag:${tag}]`;
   }
 
-  const customer = isPlainObject(payload.customer) ? { ...payload.customer } : {};
+  const nested = isPlainObject(payload.customer);
+  const customer = nested ? { ...payload.customer } : {};
+  const target = nested ? customer : payload;
   const email = typeof customer.email === 'string' ? customer.email : payload.email;
 
-  // A run that reuses an email matches the Contact and Stripe customer a previous
-  // run left behind, and the matched-contact path only backfills a subset of
-  // fields — which reads as a routing failure that isn't one.
-  if (options.uniqueEmail && typeof email === 'string') {
-    const uniqueEmail = uniquifyEmail(email, tag);
-    if (isPlainObject(payload.customer)) {
-      customer.email = uniqueEmail;
-    } else {
-      payload.email = uniqueEmail;
+  // Give the donor an identity no real Contact shares. A reused one matches the
+  // Contact a previous run — or an actual person — left behind, and the
+  // matched-contact path only backfills a subset of fields, which reads as a
+  // routing failure that isn't one. Worse, cleanup deletes Contacts by the
+  // Stripe customer id the run wrote, so matching a real Contact and then
+  // stamping this run's id onto it puts that person's record in cleanup's path.
+  if (options.uniqueDonor) {
+    if (typeof email === 'string') {
+      target.email = uniquifyEmail(email, tag);
     }
+
+    // Whichever spelling the payload uses; the handler accepts both.
+    const lastNameKey = typeof target.lastName === 'string' ? 'lastName' : 'lastname';
+    target[lastNameKey] = uniquifyLastName(target[lastNameKey], tag);
   }
 
   return {
@@ -529,7 +556,7 @@ const main = async () => {
   );
   const verifyRequireOptional = parseBoolean(process.env.SMOKE_VERIFY_REQUIRE_OPTIONAL, false);
   const fullCoverage = parseBoolean(process.env.SMOKE_FULL_FIELD_COVERAGE, true);
-  const uniqueEmail = parseBoolean(process.env.SMOKE_UNIQUE_EMAIL, true);
+  const uniqueDonor = parseBoolean(process.env.SMOKE_UNIQUE_DONOR, true);
   const organizationName =
     process.env.SMOKE_ORGANIZATION_NAME?.trim() || 'Payment Processor Smoke Test Org';
   const campaignName = process.env.SMOKE_CAMPAIGN_NAME?.trim() || 'Deployment Smoke Test';
@@ -568,7 +595,7 @@ const main = async () => {
   try {
     const taggedPayload = buildTaggedPayload(payload, tag, {
       fullCoverage,
-      uniqueEmail,
+      uniqueDonor,
       coverFees,
       organizationName,
       campaignName,
@@ -663,6 +690,7 @@ module.exports = {
     mergeDeep,
     runVerification,
     uniquifyEmail,
+    uniquifyLastName,
   },
 };
 

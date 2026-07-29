@@ -150,7 +150,10 @@ jobs:
           # Post a fully-populated payload and read the records back, so a deploy that
           # breaks field routing fails here rather than silently shipping.
           SMOKE_FULL_FIELD_COVERAGE: 'true'
-          SMOKE_UNIQUE_EMAIL: 'true'
+          # Unique donor email and surname per run. A stable name matches a real
+          # person's Contact via searchContact's OR predicates, and cleanup deletes
+          # by the Stripe customer id the run wrote — so a collision is destructive.
+          SMOKE_UNIQUE_DONOR: 'true'
           # Set to 'false' if Transaction__c lacks Cover_Fees__c / Cover_Fees_Amount__c:
           # Salesforce rejects the entire upsert on an unknown column, so one missing
           # field means the transaction never reaches Salesforce at all.

@@ -195,7 +195,11 @@ Cross-system links are enforced, not just presence: the `Transaction__c` must ca
 
 Fields that depend on org configuration — the `Transaction__c` "Stripe Transaction" record type and the Contact `LeadSource` picklist — are warnings by default; set `require_optional_fields` (workflow input) or `SMOKE_VERIFY_REQUIRE_OPTIONAL=true` to make them failures. Fields the org does not define at all are reported as `not-applicable`.
 
-Each run uses its own donor email (`local+<tag>@domain`). Reusing one would match the Contact a previous run left behind, and that matched-contact path only backfills a subset of fields — which reads as a routing failure that isn't one. Set `SMOKE_UNIQUE_EMAIL=false` to opt out.
+Each run uses its own donor identity — email `local+<tag>@domain` **and** surname `<LastName>-<tag>`. A unique email alone is not enough: `searchContact` ORs its predicates (Stripe id OR email OR phone OR first+last name) and then selects by exact name, so a stable surname matches a **real person's** Contact even when the email is fresh. That takes the update path, which leaves `Stripe_Customer_ID__c` pointing at whichever customer the Contact was first linked to.
+
+> **This matters beyond a failing check.** Cleanup deletes Contacts by the Stripe customer id the run wrote. If a run matches a real donor's Contact and stamps its customer id onto it, that person's record lands in cleanup's path. A unique surname keeps the smoke donor from colliding with anyone real — no match, so a fresh Contact is created, correctly linked, and cleanly removable.
+
+Set `SMOKE_UNIQUE_DONOR=false` to opt out.
 
 One caveat on cleanup: the Salesforce Account and Campaign the run resolves to are created on first use and are **not** deleted afterwards. That is why `SMOKE_ORGANIZATION_NAME` and `SMOKE_CAMPAIGN_NAME` default to stable values — a per-run name would leak a new Account and Campaign every run. Point them at records that already exist if you would rather nothing new be created.
 
@@ -210,7 +214,7 @@ Relevant environment variables, all optional:
 | `SMOKE_VERIFY_RETRY_DELAY_MS`   | `20000`                            | Wait between attempts                                    |
 | `SMOKE_VERIFY_REQUIRE_OPTIONAL` | `false`                            | Fail on org-configuration-dependent fields               |
 | `SMOKE_FULL_FIELD_COVERAGE`     | `true`                             | Layer the stored payload over the full-coverage template |
-| `SMOKE_UNIQUE_EMAIL`            | `true`                             | Give each run its own donor email                        |
+| `SMOKE_UNIQUE_DONOR`            | `true`                             | Give each run its own donor email and surname            |
 | `SMOKE_COVER_FEES`              | `true`                             | Exercise the `Cover_Fees__c` fields — see below          |
 | `SMOKE_ORGANIZATION_NAME`       | `Payment Processor Smoke Test Org` | Resolves to a Salesforce Account                         |
 | `SMOKE_CAMPAIGN_NAME`           | `Deployment Smoke Test`            | Resolves to a Salesforce Campaign                        |

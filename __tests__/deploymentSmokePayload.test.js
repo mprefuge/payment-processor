@@ -12,6 +12,7 @@ const {
     mergeDeep,
     runVerification,
     uniquifyEmail,
+    uniquifyLastName,
   },
 } = require('../scripts/run-deployment-smoke-cleanup');
 
@@ -19,7 +20,7 @@ const TAG = 'e2e-production-123-1';
 
 const OPTIONS = {
   fullCoverage: true,
-  uniqueEmail: true,
+  uniqueDonor: true,
   coverFees: true,
   organizationName: 'Smoke Org',
   campaignName: 'Smoke Campaign',
@@ -86,11 +87,11 @@ describe('deployment smoke payload', () => {
     expect(payload.customer.email).toBe(`smoke+${TAG}@example.com`);
   });
 
-  it('leaves the email alone when uniquification is disabled', () => {
+  it('leaves the donor identity alone when uniquification is disabled', () => {
     const payload = buildTaggedPayload(
       JSON.stringify({ customer: { email: 'smoke@example.com' } }),
       TAG,
-      { ...OPTIONS, uniqueEmail: false }
+      { ...OPTIONS, uniqueDonor: false }
     );
 
     expect(payload.customer.email).toBe('smoke@example.com');
@@ -111,12 +112,48 @@ describe('deployment smoke payload', () => {
     expect(uniquifyEmail('smoke+old@example.com', TAG)).toBe(`smoke+${TAG}@example.com`);
   });
 
+  it('gives each run its own surname so no real Contact is matched by name', () => {
+    // A unique email is not enough: searchContact ORs on phone and on
+    // first+last name, then selects by exact name, so a stable surname matches
+    // a real person's Contact and takes the update path.
+    const payload = buildTaggedPayload('{}', TAG, OPTIONS);
+
+    expect(payload.customer.lastname).toBe(`Smoke-${TAG}`);
+  });
+
+  it('leaves the surname stable when uniquification is disabled', () => {
+    const payload = buildTaggedPayload('{}', TAG, { ...OPTIONS, uniqueDonor: false });
+
+    expect(payload.customer.lastname).toBe('Smoke');
+  });
+
+  it('uniquifies a legacy top-level surname, honouring the camelCase spelling', () => {
+    const payload = buildTaggedPayload(
+      JSON.stringify({ amount: 500, frequency: 'onetime', email: 'a@b.com', lastName: 'Legacy' }),
+      TAG,
+      { ...OPTIONS, fullCoverage: false }
+    );
+
+    expect(payload.lastName).toBe(`Legacy-${TAG}`);
+    expect(payload.lastname).toBeUndefined();
+  });
+
+  it('keeps the surname inside the Salesforce LastName limit', () => {
+    const longTag = 'x'.repeat(200);
+
+    expect(uniquifyLastName('Smoke', longTag).length).toBeLessThanOrEqual(60);
+  });
+
+  it('falls back to a surname when the payload has none', () => {
+    expect(uniquifyLastName(undefined, TAG)).toBe(`Smoke-${TAG}`);
+  });
+
   it('leaves the configured payload untouched when full coverage is off', () => {
     const configured = { amount: 500, frequency: 'month', customer: { email: 'a@b.com' } };
     const payload = buildTaggedPayload(JSON.stringify(configured), TAG, {
       ...OPTIONS,
       fullCoverage: false,
-      uniqueEmail: false,
+      uniqueDonor: false,
     });
 
     expect(payload.coverFee).toBeUndefined();
@@ -149,7 +186,7 @@ describe('deployment smoke payload', () => {
     });
 
     expect(expected['salesforce.Contact'].Email).toBe(payload.customer.email);
-    expect(expected['stripe.customer'].name).toBe('Deployment Smoke');
+    expect(expected['stripe.customer'].name).toBe(`Deployment Smoke-${TAG}`);
   });
 
   it('maps a subscription payload to subscription mode', () => {
@@ -161,7 +198,7 @@ describe('deployment smoke payload', () => {
     const payload = buildTaggedPayload(
       JSON.stringify({ amount: 500, frequency: 'onetime', customer: { email: 'a@b.com' } }),
       TAG,
-      { ...OPTIONS, fullCoverage: false, uniqueEmail: false }
+      { ...OPTIONS, fullCoverage: false, uniqueDonor: false }
     );
     const expected = buildExpectedFields(payload);
 
@@ -173,7 +210,7 @@ describe('deployment smoke payload', () => {
     const payload = buildTaggedPayload(
       JSON.stringify({ amount: 500, frequency: 'onetime', customer: { email: 'a@b.com' } }),
       TAG,
-      { ...OPTIONS, fullCoverage: false, uniqueEmail: false }
+      { ...OPTIONS, fullCoverage: false, uniqueDonor: false }
     );
     const optional = buildOptionalFields(payload);
 
