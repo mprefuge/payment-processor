@@ -1,0 +1,211 @@
+name: E2E flow test
+
+# On-demand version of the `smoke-test-production` job in
+# main_payment-processing-function.yml. That one only runs as the tail of a deploy;
+# this one can be triggered at any time, against either environment, without
+# shipping anything.
+#
+# It drives the same script (`scripts/run-deployment-smoke-cleanup.js`) against a
+# deployed function app:
+#
+#   1. GET  /api/health                     — Stripe, Salesforce, QuickBooks, SendGrid, storage
+#   2. POST /api/transaction?mode=test      — Stripe Checkout session + Salesforce Contact/Transaction__c
+#   3. POST /api/ops/test-artifact-cleanup  — removes exactly what step 2 created
+#
+# Everything step 2 creates is tagged `source_test_tag: <tag>`, and step 3 removes
+# records carrying that tag. Cleanup runs even when step 2 fails, so a failed run
+# still cleans up after itself. The tag is printed in the job summary either way —
+# if cleanup itself fails, that tag is how you find the leftovers.
+#
+# Not covered here, and still needing the Swagger harness at /api/swagger: the
+# QuickBooks accounting path (`POST /api/qbo/manual-sync` needs QuickBooks entity
+# IDs specific to the connected company) and webhook ingress (`POST
+# /api/stripe/webhook` verifies stripe-signature, so events must be replayed with
+# the Stripe CLI). See DEPLOYMENT_CHECKLIST.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployed environment to exercise
+        type: choice
+        options:
+          - production
+          - staging
+        default: production
+      base_url:
+        description: Base URL override (leave blank to use the environment's configured URL)
+        type: string
+        default: ''
+      transaction_path:
+        description: Transaction endpoint. Keep mode=test — mode=live moves real money.
+        type: string
+        default: /api/transaction?mode=test
+      systems:
+        description: Systems to clean up afterwards (comma-separated - stripe, salesforce, qbo)
+        type: string
+        default: stripe,salesforce,qbo
+      delete_salesforce_contacts:
+        description: Also delete the Salesforce Contacts the run created, not just the Transaction records
+        type: boolean
+        default: true
+      propagation_delay_ms:
+        description: Wait this long before cleanup so the Stripe and Salesforce search indexes catch up
+        type: string
+        default: '65000'
+
+concurrency:
+  # Two runs at once would create overlapping artifacts and race each other's cleanup.
+  # Never cancel a run in flight: cancellation kills the process before the cleanup
+  # step, stranding test records in Stripe, Salesforce and QuickBooks.
+  group: e2e-flow-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  e2e-flow:
+    runs-on: ubuntu-latest
+
+    # Resolves the environment's secrets, and applies its protection rules — this
+    # writes real (test-mode) records to production Stripe, Salesforce and QuickBooks,
+    # so an approval gate on `production` is the correct amount of friction.
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+
+      # No `npm ci`: the smoke script uses only Node builtins and global fetch.
+      # This mirrors the deploy workflow's smoke job, which also skips install.
+      - name: Resolve target
+        id: target
+        shell: bash
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          BASE_URL_OVERRIDE: ${{ inputs.base_url }}
+          PRODUCTION_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL }}
+          STAGING_URL: ${{ vars.AZURE_FUNCTIONAPP_STAGING_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$BASE_URL_OVERRIDE" ]; then
+            base_url="$BASE_URL_OVERRIDE"
+            source="the base_url input"
+          else
+            case "$TARGET_ENV" in
+              production)
+                base_url="${PRODUCTION_URL:-https://payment-processing-function.azurewebsites.net}"
+                source="vars.AZURE_FUNCTIONAPP_PRODUCTION_URL (or the built-in default)"
+                ;;
+              staging)
+                base_url="${STAGING_URL:-}"
+                source="vars.AZURE_FUNCTIONAPP_STAGING_URL"
+                ;;
+              *)
+                echo "::error::Unknown environment '$TARGET_ENV'." >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [ -z "$base_url" ]; then
+            echo "::error::No base URL for '$TARGET_ENV'. Set the repository variable AZURE_FUNCTIONAPP_STAGING_URL, or pass the base_url input." >&2
+            exit 1
+          fi
+
+          tag="e2e-${TARGET_ENV}-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          echo "base-url=$base_url" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Target: $base_url (from $source)"
+          echo "Test artifact tag: $tag"
+
+      - name: Run end-to-end flow
+        shell: bash
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          # Both environments' secrets are passed in and selected below, rather than
+          # picked with an `a && b || c` expression — that idiom silently falls
+          # through to the other environment's credentials when a secret is unset.
+          PRODUCTION_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
+          PRODUCTION_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
+          STAGING_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_STAGING_FUNCTION_KEY }}
+          STAGING_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_STAGING_SMOKE_TRANSACTION_PAYLOAD }}
+
+          SMOKE_BASE_URL: ${{ steps.target.outputs.base-url }}
+          SMOKE_TEST_TAG: ${{ steps.target.outputs.tag }}
+          SMOKE_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
+          SMOKE_TRANSACTION_PATH: ${{ inputs.transaction_path }}
+          SMOKE_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
+          SMOKE_SYSTEMS: ${{ inputs.systems }}
+          SMOKE_DELETE_SALESFORCE_CONTACTS: ${{ inputs.delete_salesforce_contacts }}
+          SMOKE_SEARCH_PROPAGATION_DELAY_MS: ${{ inputs.propagation_delay_ms }}
+          # Cleanup must run against the same Stripe mode the transaction was created
+          # in. The transaction path is test mode, so this stays false; it is not an
+          # input because pointing cleanup at live mode is never what you want here.
+          SMOKE_CLEANUP_LIVE_MODE: 'false'
+        run: |
+          set -euo pipefail
+
+          case "$TARGET_ENV" in
+            production)
+              export SMOKE_FUNCTION_KEY="$PRODUCTION_FUNCTION_KEY"
+              export SMOKE_TRANSACTION_PAYLOAD="$PRODUCTION_TRANSACTION_PAYLOAD"
+              key_secret=AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY
+              payload_secret=AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD
+              ;;
+            staging)
+              export SMOKE_FUNCTION_KEY="$STAGING_FUNCTION_KEY"
+              export SMOKE_TRANSACTION_PAYLOAD="$STAGING_TRANSACTION_PAYLOAD"
+              key_secret=AZURE_FUNCTIONAPP_STAGING_FUNCTION_KEY
+              payload_secret=AZURE_FUNCTIONAPP_STAGING_SMOKE_TRANSACTION_PAYLOAD
+              ;;
+            *)
+              echo "::error::Unknown environment '$TARGET_ENV'." >&2
+              exit 1
+              ;;
+          esac
+
+          [ -n "$SMOKE_FUNCTION_KEY" ] || { echo "::error::Missing secret $key_secret" >&2; exit 1; }
+          [ -n "$SMOKE_TRANSACTION_PAYLOAD" ] || { echo "::error::Missing secret $payload_secret" >&2; exit 1; }
+
+          npm run deployment:smoke
+
+      - name: Summarise run
+        if: always()
+        shell: bash
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          BASE_URL: ${{ steps.target.outputs.base-url }}
+          TAG: ${{ steps.target.outputs.tag }}
+          TRANSACTION_PATH: ${{ inputs.transaction_path }}
+          SYSTEMS: ${{ inputs.systems }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## E2E flow test — $OUTCOME"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Environment | \`$TARGET_ENV\` |"
+            echo "| Base URL | \`${BASE_URL:-unresolved}\` |"
+            echo "| Transaction path | \`$TRANSACTION_PATH\` |"
+            echo "| Cleanup systems | \`$SYSTEMS\` |"
+            echo "| Test artifact tag | \`${TAG:-unresolved}\` |"
+            echo
+            if [ "$OUTCOME" != "success" ]; then
+              echo "If the failure was in cleanup rather than the flow itself, records tagged"
+              echo "\`${TAG:-unresolved}\` may still exist. Remove them with:"
+              echo
+              echo '```'
+              echo "POST ${BASE_URL:-<base-url>}/api/ops/test-artifact-cleanup"
+              echo "{ \"tag\": \"${TAG:-<tag>}\", \"dryRun\": true, \"systems\": [\"stripe\", \"salesforce\", \"qbo\"] }"
+              echo '```'
+              echo
+              echo "Run with \`dryRun: true\` first to see what would be deleted."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

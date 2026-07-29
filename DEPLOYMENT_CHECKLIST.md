@@ -267,6 +267,44 @@ az functionapp config appsettings set \
 - [ ] Test refund processing
 - [ ] Test payout processing
 
+#### Running the flow on demand
+
+The deploy-time smoke test also exists as a manually triggered workflow —
+**Actions → E2E flow test → Run workflow** — so the flow can be exercised at any
+time without deploying. It runs `scripts/run-deployment-smoke-cleanup.js`, the same
+script the deploy uses:
+
+1. `GET /api/health` — Stripe, Salesforce, QuickBooks, SendGrid and storage
+2. `POST /api/transaction?mode=test` — Stripe Checkout session, Salesforce Contact and `Transaction__c`
+3. `POST /api/ops/test-artifact-cleanup` — removes exactly what step 2 created
+
+Inputs cover the target environment (`production` or `staging`), a base-URL
+override, the transaction path, which systems to clean up, whether Salesforce
+Contacts are deleted alongside the Transaction records, and the propagation delay
+before cleanup. Everything step 2 creates carries `source_test_tag: <tag>`, and
+cleanup runs even when step 2 fails — so a failed run still cleans up after itself.
+The tag is printed in the job summary either way; if cleanup is what failed, that
+tag is how you find the leftovers.
+
+Two things it does not cover, both of which still need the Swagger harness at
+`/api/swagger`:
+
+- **The accounting path.** Nothing here posts to QuickBooks — step 2 creates no
+  charge, so there is no QuickBooks document. `POST /api/qbo/manual-sync` is the
+  fastest way to test that path, but its payload needs QuickBooks entity IDs
+  (`CustomerRef`, `ItemRef`, `AccountRef`) that are specific to the connected
+  company, so it cannot be driven from a workflow without those IDs stored as a
+  secret. Give the payload a `PrivateNote` containing `[source_test_tag:<tag>]` and
+  the same cleanup call will remove the document.
+- **Webhook ingress.** `POST /api/stripe/webhook` verifies `stripe-signature`, so
+  events have to be replayed with the Stripe CLI (`stripe trigger`,
+  `stripe events resend`).
+
+Requires, per environment: the `AZURE_FUNCTIONAPP_{PRODUCTION,STAGING}_FUNCTION_KEY`
+and `AZURE_FUNCTIONAPP_{PRODUCTION,STAGING}_SMOKE_TRANSACTION_PAYLOAD` secrets, and
+for staging the `AZURE_FUNCTIONAPP_STAGING_URL` variable. The workflow names the
+exact missing secret and stops before calling anything if one is absent.
+
 ### Monitoring
 
 - [ ] Configure Application Insights alerts
