@@ -34,6 +34,11 @@ name: E2E flow test
 # name would leak a new Account and Campaign on every run. Point them at records
 # that already exist in the org if you would rather nothing new be created.
 #
+# Note on ordering: this workflow runs the branch's script against the *deployed*
+# app, so the endpoints it calls have to already be live. Step 4 fails with a 404
+# until this branch is deployed — run with `verify_fields: false` to exercise the
+# rest of the flow before then.
+#
 # Not covered here, and still needing the Swagger harness at /api/swagger: the
 # QuickBooks accounting path (`POST /api/qbo/manual-sync` needs QuickBooks entity
 # IDs specific to the connected company) and webhook ingress (`POST
@@ -59,7 +64,10 @@ on:
         type: string
         default: /api/transaction?mode=test
       verify_fields:
-        description: Read the created records back and check every field was populated as expected
+        description: >-
+          Read the created records back and check every field was populated as expected.
+          Needs /api/ops/test-artifact-verify on the DEPLOYED app — turn this off when
+          exercising a branch whose endpoint has not shipped yet.
         type: boolean
         default: true
       require_optional_fields:

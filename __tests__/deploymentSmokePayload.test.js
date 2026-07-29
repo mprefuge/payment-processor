@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -10,6 +10,7 @@ const {
     buildOptionalFields,
     buildTaggedPayload,
     mergeDeep,
+    runVerification,
     uniquifyEmail,
   },
 } = require('../scripts/run-deployment-smoke-cleanup');
@@ -194,5 +195,66 @@ describe('deployment smoke payload', () => {
 
   it('merges nested objects without dropping sibling keys', () => {
     expect(mergeDeep({ a: { b: 1, c: 2 } }, { a: { c: 3 } })).toEqual({ a: { b: 1, c: 3 } });
+  });
+});
+
+describe('runVerification', () => {
+  const VERIFY_URL = 'https://example.invalid/api/ops/test-artifact-verify';
+
+  const jsonResponse = (status, body) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: 'Not Found',
+    text: async () => JSON.stringify(body ?? {}),
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('explains a 404 as a missing endpoint rather than a failed check', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        text: async () => 'Not Found',
+      })
+    );
+
+    await expect(runVerification(VERIFY_URL, {}, { tag: 'e2e' }, 3, 0)).rejects.toThrow(
+      /does not expose it.*SMOKE_VERIFY_ENABLED=false/s
+    );
+    // A missing endpoint is not going to appear on a retry.
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a 422 while the writes are still settling, then succeeds', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(422, { ok: false, failures: ['a.b: not populated'] }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, counts: { checked: 1, ok: 1 } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await runVerification(VERIFY_URL, {}, { tag: 'e2e' }, 3, 0);
+
+    expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports the outstanding fields once the attempts are exhausted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(422, { ok: false, failures: ['salesforce.Contact.Phone: not populated'] })
+        )
+    );
+
+    await expect(runVerification(VERIFY_URL, {}, { tag: 'e2e' }, 2, 0)).rejects.toThrow(
+      /salesforce\.Contact\.Phone: not populated/
+    );
   });
 });

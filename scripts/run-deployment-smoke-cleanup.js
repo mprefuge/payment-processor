@@ -401,6 +401,17 @@ const runVerification = async (verifyUrl, commonHeaders, payload, attempts, retr
       body: JSON.stringify(body),
     });
 
+    // A 404 is not a verification result at all — the deployed app predates the
+    // endpoint. Say so, because "Verification failed (404): Not Found" reads like
+    // the records were checked and found wanting.
+    if (response.status === 404) {
+      throw new Error(
+        `Verification endpoint ${verifyUrl} returned 404. The deployed app does not expose it — ` +
+          'deploy this branch before running the flow against it, or set SMOKE_VERIFY_ENABLED=false ' +
+          '(workflow input `verify_fields: false`) to run the flow without field verification.'
+      );
+    }
+
     // 422 means the records were read and did not match — retryable while the
     // writes are still settling. Any other non-2xx is a real failure.
     if (!response.ok && response.status !== 422) {
@@ -629,6 +640,7 @@ module.exports = {
     buildOptionalFields,
     buildTaggedPayload,
     mergeDeep,
+    runVerification,
     uniquifyEmail,
   },
 };
