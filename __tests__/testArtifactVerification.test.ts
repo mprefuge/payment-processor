@@ -39,6 +39,7 @@ const buildCheckoutSession = (overrides: Record<string, unknown> = {}) => ({
   success_url: 'https://example.com/thankyou',
   cancel_url: 'https://example.com/donate',
   payment_intent: PAYMENT_INTENT_ID,
+  created: 1_800_000_000,
   metadata: {
     category: 'Deployment Smoke Test',
     frequency: 'onetime',
@@ -433,6 +434,48 @@ describe('executeTestArtifactVerification', () => {
     );
     expect(transaction?.matchedBy).toContain('Stripe_Checkout_Session_Id__c');
     expect(result.ok).toBe(true);
+  });
+
+  it('does not let the contact fallback reach back into the donor giving history', async () => {
+    // The Transaction__c that exists belongs to an earlier, real donation by the
+    // same Contact. Returning it would report a genuine past gift's values as
+    // this run's — the shape that produced `Status__c: expected "Pending", got
+    // "paid"` against production.
+    const connection = createConnectionMock(
+      buildContact(),
+      buildTransaction({ Stripe_Checkout_Session_Id__c: 'cs_test_an_older_session' })
+    );
+
+    const result = await run(
+      { tag: TAG, checkoutSessionId: SESSION_ID },
+      createStripeMock(),
+      connection
+    );
+
+    const contactLookups = connection.query.mock.calls
+      .map(([soql]: [string]) => soql)
+      .filter((soql: string) => soql.includes('Contact__c ='));
+
+    expect(contactLookups).toHaveLength(1);
+    expect(contactLookups[0]).toContain('CreatedDate >=');
+  });
+
+  it('omits the contact fallback entirely when the session has no creation time', async () => {
+    const connection = createConnectionMock(
+      buildContact(),
+      buildTransaction({ Stripe_Checkout_Session_Id__c: 'cs_test_an_older_session' })
+    );
+
+    const result = await run(
+      { tag: TAG, checkoutSessionId: SESSION_ID },
+      createStripeMock(buildStripeCustomer(), buildCheckoutSession({ created: undefined })),
+      connection
+    );
+
+    const transaction = result.objects.find(
+      (object) => object.object === 'salesforce.Transaction__c'
+    );
+    expect(transaction?.searched?.some((entry) => entry.includes('Contact__c'))).toBe(false);
   });
 
   it('reports a missing record once, naming every link it searched', async () => {

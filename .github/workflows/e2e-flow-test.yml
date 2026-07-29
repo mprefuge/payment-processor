@@ -84,6 +84,13 @@ on:
         description: How many times to re-check fields that are still propagating
         type: string
         default: '4'
+      cover_fees:
+        description: >-
+          Send coverFee/feeAmount so the Cover_Fees__c fields are exercised. Turn OFF
+          if Transaction__c lacks Cover_Fees__c / Cover_Fees_Amount__c — Salesforce
+          rejects the whole upsert on an unknown column, so no record is written at all.
+        type: boolean
+        default: true
       organization_name:
         description: Organization on the payload. Resolves to a Salesforce Account, created if absent and never cleaned up — keep it stable.
         type: string
@@ -200,6 +207,7 @@ jobs:
           # run left behind, and the matched-contact path only backfills a subset of the
           # fields — which reads as a routing failure that isn't one.
           SMOKE_UNIQUE_EMAIL: 'true'
+          SMOKE_COVER_FEES: ${{ inputs.cover_fees }}
           SMOKE_VERIFY_ENABLED: ${{ inputs.verify_fields }}
           SMOKE_VERIFY_DELAY_MS: ${{ inputs.verify_delay_ms }}
           SMOKE_VERIFY_ATTEMPTS: ${{ inputs.verify_attempts }}

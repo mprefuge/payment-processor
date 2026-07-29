@@ -151,6 +151,10 @@ jobs:
           # breaks field routing fails here rather than silently shipping.
           SMOKE_FULL_FIELD_COVERAGE: 'true'
           SMOKE_UNIQUE_EMAIL: 'true'
+          # Set to 'false' if Transaction__c lacks Cover_Fees__c / Cover_Fees_Amount__c:
+          # Salesforce rejects the entire upsert on an unknown column, so one missing
+          # field means the transaction never reaches Salesforce at all.
+          SMOKE_COVER_FEES: 'true'
           SMOKE_VERIFY_ENABLED: 'true'
           SMOKE_VERIFY_DELAY_MS: '30000'
           SMOKE_VERIFY_ATTEMPTS: '4'

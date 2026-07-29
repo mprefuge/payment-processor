@@ -652,6 +652,14 @@ export const executeTestArtifactVerification = async (
   // Contact keeps pointing at whichever customer it was first linked to.
   const contactIdFromStripe = trimToNull(readPath(customer, 'metadata.salesforce_id'));
 
+  // Start of this run's window, from the checkout session's own creation time,
+  // with slack for clock skew between Stripe and Salesforce. Used to keep
+  // fallback lookups from reaching back into pre-existing records.
+  const sessionCreatedSeconds = typeof session?.created === 'number' ? session.created : null;
+  const runStartIso = sessionCreatedSeconds
+    ? new Date((sessionCreatedSeconds - 300) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+    : null;
+
   let contactRecord: Record<string, unknown> | null = null;
   let transactionRecord: Record<string, unknown> | null = null;
   let contactUnavailable = new Set<string>();
@@ -705,11 +713,16 @@ export const executeTestArtifactVerification = async (
                 },
               ]
             : []),
-          ...(resolvedContactId
+          // Scoped to this run's window. A donor Contact carries their whole
+          // giving history, so an unbounded Contact__c lookup happily returns a
+          // real past donation and reports its values as this run's — which is
+          // worse than finding nothing, because it reads as wrong data rather
+          // than as a record that was never written.
+          ...(resolvedContactId && runStartIso
             ? [
                 {
-                  label: `Contact__c = ${resolvedContactId} (most recent)`,
-                  where: `Contact__c = '${escapeSoqlLiteral(resolvedContactId)}'`,
+                  label: `Contact__c = ${resolvedContactId} created since ${runStartIso}`,
+                  where: `Contact__c = '${escapeSoqlLiteral(resolvedContactId)}' AND CreatedDate >= ${runStartIso}`,
                 },
               ]
             : []),

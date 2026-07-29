@@ -211,8 +211,19 @@ Relevant environment variables, all optional:
 | `SMOKE_VERIFY_REQUIRE_OPTIONAL` | `false`                            | Fail on org-configuration-dependent fields               |
 | `SMOKE_FULL_FIELD_COVERAGE`     | `true`                             | Layer the stored payload over the full-coverage template |
 | `SMOKE_UNIQUE_EMAIL`            | `true`                             | Give each run its own donor email                        |
+| `SMOKE_COVER_FEES`              | `true`                             | Exercise the `Cover_Fees__c` fields — see below          |
 | `SMOKE_ORGANIZATION_NAME`       | `Payment Processor Smoke Test Org` | Resolves to a Salesforce Account                         |
 | `SMOKE_CAMPAIGN_NAME`           | `Deployment Smoke Test`            | Resolves to a Salesforce Campaign                        |
+
+#### Required `Transaction__c` fields
+
+Salesforce rejects an entire `upsert` when it names a column the object does not have, so **one missing field means no `Transaction__c` is written at all** — not a record with that field blank. The transaction path writes `Cover_Fees__c` whenever `coverFee` is set and `Cover_Fees_Amount__c` whenever `feeAmount` is a number (independent of `coverFee`), so an org missing either field silently loses every cover-fee donation:
+
+```
+Salesforce transaction upsert failed: No such column 'Cover_Fees__c' on sobject of type Transaction__c
+```
+
+Both fields are on the shipped `Transaction__c` page layout, so an org hitting this is behind on schema deployment. Either add the fields, or set `SMOKE_COVER_FEES=false` (workflow input `cover_fees: false`) to keep the smoke run off that path — the verification then treats the cover-fee fields as optional automatically.
 
 ### QBO Sales Receipt Override Schema (Metadata)
 

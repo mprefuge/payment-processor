@@ -82,7 +82,7 @@ const mergeDeep = (base, override) => {
  * forever after. Cleanup does not delete them, so a per-run name would leak a
  * new Account and Campaign on every single run.
  */
-const buildFullCoverageTemplate = (organizationName, campaignName) => ({
+const buildFullCoverageTemplate = (organizationName, campaignName, coverFees = true) => ({
   amount: 5000,
   // Keep `onetime`: payment-mode sessions carry amount_total and a payment intent
   // at creation, both of which the verification step checks. Subscription-mode
@@ -92,8 +92,14 @@ const buildFullCoverageTemplate = (organizationName, campaignName) => ({
   category: campaignName,
   transactionType: 'Deployment Smoke Test',
   paymentMethod: 'card',
-  coverFee: true,
-  feeAmount: 175,
+  // Both keys are omitted together when disabled: Cover_Fees_Amount__c is written
+  // whenever feeAmount is a number, regardless of coverFee, so leaving feeAmount
+  // behind would still target the field.
+  //
+  // Orgs whose Transaction__c lacks Cover_Fees__c / Cover_Fees_Amount__c must set
+  // SMOKE_COVER_FEES=false. Salesforce rejects the whole upsert on an unknown
+  // column, so one missing field means no Transaction__c is written at all.
+  ...(coverFees ? { coverFee: true, feeAmount: 175 } : {}),
   organization: organizationName,
   customer: {
     email: 'deployment.smoke@example.invalid',
@@ -130,7 +136,11 @@ const uniquifyEmail = (email, suffix) => {
 
 const buildTaggedPayload = (rawPayload, tag, options) => {
   const configured = JSON.parse(rawPayload);
-  const template = buildFullCoverageTemplate(options.organizationName, options.campaignName);
+  const template = buildFullCoverageTemplate(
+    options.organizationName,
+    options.campaignName,
+    options.coverFees
+  );
   const payload = options.fullCoverage ? mergeDeep(template, configured) : configured;
 
   const metadata = isPlainObject(payload.metadata) ? { ...payload.metadata } : {};
@@ -523,6 +533,7 @@ const main = async () => {
   const organizationName =
     process.env.SMOKE_ORGANIZATION_NAME?.trim() || 'Payment Processor Smoke Test Org';
   const campaignName = process.env.SMOKE_CAMPAIGN_NAME?.trim() || 'Deployment Smoke Test';
+  const coverFees = parseBoolean(process.env.SMOKE_COVER_FEES, true);
   const transactionLiveMode = /(?:\?|&)(?:mode=live|livemode=(?:true|1|yes|on))/i.test(
     transactionPath
   );
@@ -558,6 +569,7 @@ const main = async () => {
     const taggedPayload = buildTaggedPayload(payload, tag, {
       fullCoverage,
       uniqueEmail,
+      coverFees,
       organizationName,
       campaignName,
     });

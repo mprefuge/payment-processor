@@ -20,6 +20,7 @@ const TAG = 'e2e-production-123-1';
 const OPTIONS = {
   fullCoverage: true,
   uniqueEmail: true,
+  coverFees: true,
   organizationName: 'Smoke Org',
   campaignName: 'Smoke Campaign',
 };
@@ -191,6 +192,35 @@ describe('deployment smoke payload', () => {
     const optional = buildOptionalFields(buildTaggedPayload('{}', TAG, OPTIONS));
 
     expect(Object.values(optional).flat()).toEqual([]);
+  });
+
+  it('drops feeAmount alongside coverFee when cover fees are disabled', () => {
+    // Cover_Fees_Amount__c is written whenever feeAmount is a number, regardless
+    // of coverFee — leaving it behind would still target a field the org may not
+    // have, and Salesforce rejects the whole upsert on an unknown column.
+    const payload = buildTaggedPayload('{}', TAG, { ...OPTIONS, coverFees: false });
+
+    expect(payload.coverFee).toBeUndefined();
+    expect(payload.feeAmount).toBeUndefined();
+  });
+
+  it('expects no cover-fee values and marks those fields optional when disabled', () => {
+    const payload = buildTaggedPayload('{}', TAG, { ...OPTIONS, coverFees: false });
+    const expected = buildExpectedFields(payload);
+    const optional = buildOptionalFields(payload);
+    const template = buildFullCoverageTemplate('Smoke Org', 'Smoke Campaign', false);
+
+    // Gross amount is the bare amount once no fee is added on top.
+    expect(expected['salesforce.Transaction__c'].Amount_Gross__c).toBe(template.amount / 100);
+    expect(expected['salesforce.Transaction__c']).not.toHaveProperty('Cover_Fees__c');
+    expect(expected['stripe.checkout_session']).not.toHaveProperty('metadata.cover_fees');
+
+    expect(optional['salesforce.Transaction__c']).toEqual(
+      expect.arrayContaining(['Cover_Fees__c', 'Cover_Fees_Amount__c'])
+    );
+    expect(optional['stripe.checkout_session']).toEqual(
+      expect.arrayContaining(['metadata.cover_fees', 'metadata.cover_fees_amount'])
+    );
   });
 
   it('merges nested objects without dropping sibling keys', () => {
