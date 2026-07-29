@@ -14,6 +14,10 @@
   - `.gitattributes`: Proper line ending configuration for cross-platform development
 - **Total Test Coverage**: 20 test files, 104 passing tests, 7 skipped tests
 
+### Fixed
+
+- **Organization gifts no longer sync to QuickBooks as "Anonymous Donor"**: the Salesforce `QBO_Customer_Name__c` formula read only `Contact__r.Name`, so any `Transaction__c` linked to an `Account__c` instead of a `Contact__c` fell through to the anonymous default and posted against a single shared QuickBooks customer. The formula (and the five `QBO_Bill_Addr_*` formulas) now fall back to the Account's name and billing address, and `QBOManualSyncService` skips contact matching for Account-linked transactions so it no longer invents a Contact named after the organization. Applies to `scripts/deploy-salesforce-qbo-sync.ps1` and `docs/SALESFORCE_MANUAL_QBO_SYNC_SETUP.md`; existing orgs need the formula updated in Setup (or a redeploy) for the fix to take effect.
+
 ### Changed
 
 - **Code Formatting**: All source files formatted with Prettier for consistency
