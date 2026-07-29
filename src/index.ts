@@ -1016,12 +1016,15 @@ const manualQboSyncExamples = {
   ),
 };
 
+// Mirrors the handler's ManualSyncResponse: the id is returned at the top level, and the
+// resolved customer is echoed back so the caller can see who the document was attributed to.
 const manualQboSyncResponseExample = {
   success: true,
+  id: '987',
   type: 'sales-receipt',
-  result: {
-    id: '987',
-  },
+  docNumber: 'MAN-2026-0729114500',
+  customerId: '77',
+  customerName: 'Acme Foundation',
 };
 
 const cleanupExample = {

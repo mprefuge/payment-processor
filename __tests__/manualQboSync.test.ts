@@ -466,4 +466,70 @@ describe('manualQboSync', () => {
     // Verify line description was removed
     expect(calledPayload.Line[0].Description).toBeUndefined();
   });
+
+  const salesReceiptWithCustomer = (customerName: string) => ({
+    type: 'sales-receipt',
+    data: {
+      TxnDate: '2024-01-01',
+      DepositToAccountRef: { name: 'Checking' },
+      CustomerRef: { name: customerName },
+      Line: [
+        {
+          Amount: 100.0,
+          DetailType: 'SalesItemLineDetail',
+          SalesItemLineDetail: { ItemRef: { name: 'Service' } },
+        },
+      ],
+    },
+  });
+
+  it('refuses to post a sales receipt when the customer cannot be resolved', async () => {
+    const { context } = createContext();
+    // Reference resolution swallows its own failures, so an unresolvable customer would
+    // otherwise reach QuickBooks as a name-only ref and post with no donor attached.
+    mockEnsureCustomer.mockRejectedValue(new Error('QuickBooks customer lookup failed'));
+    mockPostSalesReceipt.mockResolvedValue({ id: 'SR-1', type: 'sales-receipt' });
+
+    const req = { json: vi.fn().mockResolvedValue(salesReceiptWithCustomer('Acme Foundation')) };
+    const response = await handler.default(req, context);
+
+    expect(response.status).toBe(500);
+    expect(response.jsonBody.success).toBe(false);
+    expect(response.jsonBody.error).toContain('Acme Foundation');
+    expect(response.jsonBody.error).toContain('could not be resolved');
+    expect(mockPostSalesReceipt).not.toHaveBeenCalled();
+  });
+
+  it('reports the customer the receipt was posted against', async () => {
+    const { context } = createContext();
+    mockEnsureCustomer.mockResolvedValue({ value: '77', name: 'Acme Foundation' });
+    mockPostSalesReceipt.mockResolvedValue({ id: 'SR-2', type: 'sales-receipt' });
+
+    const req = { json: vi.fn().mockResolvedValue(salesReceiptWithCustomer('Acme Foundation')) };
+    const response = await handler.default(req, context);
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody.success).toBe(true);
+    expect(response.jsonBody.customerId).toBe('77');
+    expect(response.jsonBody.customerName).toBe('Acme Foundation');
+    expect(response.jsonBody.warnings).toBeUndefined();
+  });
+
+  it('warns when a receipt posts against a placeholder customer', async () => {
+    const { context } = createContext();
+    // Genuinely anonymous gifts are legitimate, so the post still goes through — but the
+    // caller is told, because the same name also shows up when a donor record is unlinked.
+    mockEnsureCustomer.mockResolvedValue({ value: '99', name: 'Anonymous Donor' });
+    mockPostSalesReceipt.mockResolvedValue({ id: 'SR-3', type: 'sales-receipt' });
+
+    const req = { json: vi.fn().mockResolvedValue(salesReceiptWithCustomer('Anonymous Donor')) };
+    const response = await handler.default(req, context);
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody.success).toBe(true);
+    expect(response.jsonBody.customerId).toBe('99');
+    expect(mockPostSalesReceipt).toHaveBeenCalledTimes(1);
+    expect(response.jsonBody.warnings).toHaveLength(1);
+    expect(response.jsonBody.warnings[0]).toContain('placeholder customer');
+  });
 });
