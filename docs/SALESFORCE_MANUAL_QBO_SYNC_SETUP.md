@@ -106,6 +106,36 @@ This guide provides step-by-step instructions for configuring Salesforce to inte
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Two possible senders
+
+The rest of this guide documents the **Apex** sender (`QBOManualSyncService`), but an org
+may instead post the same payload from a **record-triggered Flow** — the production org
+uses one named **CreateSalesReceipt**. Only one of them runs. Before changing anything on
+the Salesforce side, confirm which one is actually sending, or you will fix an artifact
+that is not in the path.
+
+Whichever sends it, the customer name must fall back to the Account so organization gifts
+are attributed to the organization rather than to a shared anonymous customer. The Flow
+formula:
+
+```
+IF(
+    NOT(ISBLANK({!$Record.Contact__c})),
+    TRIM(
+        IF(ISBLANK({!$Record.Contact__r.FirstName}), "", {!$Record.Contact__r.FirstName} & " ") &
+        IF(ISBLANK({!$Record.Contact__r.LastName}), "", {!$Record.Contact__r.LastName})
+    ),
+    IF(
+        NOT(ISBLANK({!$Record.Account__c})),
+        {!$Record.Account__r.Name},
+        "Anonymous"
+    )
+)
+```
+
+Check the Flow for sibling formulas that read `Contact__r` — billing address and email
+resolve the same way, and each needs the same Contact-then-Account fallback.
+
 ### Quick Start Checklist
 
 Use this checklist to track your implementation progress:
@@ -2439,17 +2469,26 @@ Preferred Start Time: 2:00 AM
 - If contact was previously set, it won't be overridden
 - Manually clear Contact__c and trigger re-sync to test
 
-**Issue 8: Organization gifts post to QuickBooks as "Anonymous Donor"**
-- Cause: `QBO_Customer_Name__c` only reads `Contact__r.Name`. A transaction linked to
-  an Account instead of a Contact has no Contact name, so the formula falls through to
-  the anonymous default and every organization gift lands on one shared QuickBooks
-  customer.
-- Fix: update the formula to fall back to the Account name (Setup → Object Manager →
-  Transaction → Fields & Relationships → QBO Customer Name → Edit):
-  ```
-  IF(NOT(ISBLANK(Contact__c)), Contact__r.Name, IF(NOT(ISBLANK(Account__c)), Account__r.Name, "Anonymous Donor"))
-  ```
-  Apply the same Contact-then-Account fallback to the five `QBO_Bill_Addr_*` formulas.
+**Issue 8: Organization gifts post to QuickBooks as "Anonymous" / "Anonymous Donor"**
+- Cause: the customer name is derived from the Contact only. A transaction linked to an
+  Account instead of a Contact has no Contact name, so it falls through to the anonymous
+  default and every organization gift lands on one shared QuickBooks customer.
+- **First identify which sender is running** (see "Two possible senders" above) — the name
+  is built in a different place in each, and fixing the wrong one changes nothing:
+  - **Flow** (e.g. `CreateSalesReceipt`): the customer-name formula resource inside the
+    Flow. Setup → Flows → open the Flow → Manager → the formula. Corrected formula is in
+    "Two possible senders" above.
+  - **Apex** (`QBOManualSyncService`): the `QBO_Customer_Name__c` formula field. Setup →
+    Object Manager → Transaction → Fields & Relationships → QBO Customer Name → Edit:
+    ```
+    IF(NOT(ISBLANK(Contact__c)), Contact__r.Name, IF(NOT(ISBLANK(Account__c)), Account__r.Name, "Anonymous Donor"))
+    ```
+    Apply the same Contact-then-Account fallback to the five `QBO_Bill_Addr_*` formulas.
+- Either way, the Azure Function takes the name it is given — `POST /qbo/manual-sync`
+  resolves `CustomerRef` by display name and creates the customer if it does not exist, so
+  a placeholder name becomes a real QuickBooks customer. The response reports
+  `customerId`/`customerName` and returns a `warnings` entry when the name it posted
+  against is a placeholder; check the callout response before hunting further.
 - The formula is evaluated at read time, so the fix applies to existing transactions
   with no data migration.
 - Also confirm `QBOManualSyncService` skips contact matching when `Account__c` is
