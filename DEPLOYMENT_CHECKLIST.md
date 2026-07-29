@@ -254,6 +254,7 @@ az functionapp config appsettings set \
 - [ ] `/api/stripe/payout-sync` - Syncs payouts to QBO
 - [ ] `/api/qbo/manual-sync` - Manual QBO sync
 - [ ] `/api/stripe/true-up` - Stripe reconciliation
+- [ ] `/api/ops/test-artifact-verify` - Reads a tagged test run back and checks every field
 - [ ] `/api/ops/test-artifact-cleanup` - Tagged deploy-time artifact cleanup
 
 ### Integration Testing
@@ -276,15 +277,35 @@ script the deploy uses:
 
 1. `GET /api/health` — Stripe, Salesforce, QuickBooks, SendGrid and storage
 2. `POST /api/transaction?mode=test` — Stripe Checkout session, Salesforce Contact and `Transaction__c`
-3. `POST /api/ops/test-artifact-cleanup` — removes exactly what step 2 created
+3. …wait for propagation…
+4. `POST /api/ops/test-artifact-verify` — reads the records back and checks every field
+5. …wait for propagation…
+6. `POST /api/ops/test-artifact-cleanup` — removes exactly what step 2 created
+
+Step 2 posts a payload that fills in **every input** the transaction endpoint
+accepts, so every field the flow can populate downstream actually has a value to
+route. Step 4 then reads back the Stripe customer and Checkout session and the
+Salesforce Contact and `Transaction__c`, and fails the run if any field that should
+have been populated is empty or holds the wrong value. Cross-system links are
+enforced too: the `Transaction__c` must carry the session and customer ids and
+point at the synced Contact, and that Contact's id must come back on the Stripe
+customer as `metadata.salesforce_id`. Per-field results are printed in the step log.
 
 Inputs cover the target environment (`production` or `staging`), a base-URL
-override, the transaction path, which systems to clean up, whether Salesforce
-Contacts are deleted alongside the Transaction records, and the propagation delay
-before cleanup. Everything step 2 creates carries `source_test_tag: <tag>`, and
-cleanup runs even when step 2 fails — so a failed run still cleans up after itself.
-The tag is printed in the job summary either way; if cleanup is what failed, that
-tag is how you find the leftovers.
+override, the transaction path, whether to verify fields and how long to wait
+before doing so, whether org-configuration-dependent fields (record types,
+`LeadSource`) fail or merely warn, the organization and campaign names, which
+systems to clean up, whether Salesforce Contacts are deleted alongside the
+Transaction records, and the propagation delay before cleanup. Everything step 2
+creates carries `source_test_tag: <tag>`, and cleanup runs even when steps 2-4 fail
+— so a failed run still cleans up after itself. The tag is printed in the job
+summary either way; if cleanup is what failed, that tag is how you find the
+leftovers.
+
+One exception to "cleans up after itself": the Salesforce Account and Campaign the
+run resolves to are created on first use and are **not** deleted by cleanup. That
+is why `organization_name` and `campaign_name` default to stable values — a
+per-run name would leak a new Account and Campaign every run.
 
 Two things it does not cover, both of which still need the Swagger harness at
 `/api/swagger`:

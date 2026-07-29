@@ -47,6 +47,7 @@ const qboCustomersSync = loadHandler('./handlers/qboCustomersSync');
 const salesforceRecordQboSync = loadHandler('./handlers/salesforceRecordQboSync');
 const qboReceiptsSync = loadHandler('./handlers/qboReceiptsSync');
 const testArtifactCleanup = loadHandler('./handlers/testArtifactCleanup');
+const testArtifactVerify = loadHandler('./handlers/testArtifactVerify');
 const stripeDuplicateCheck = loadHandler('./handlers/stripeDuplicateCheck');
 const dailyReconciliation = loadHandler('./handlers/dailyReconciliation');
 const { dailyReconciliationTimer } = (() => {
@@ -88,7 +89,8 @@ const openAPIConfig: OpenAPIObjectConfig = {
       '4. **`POST /api/qbo/receipts-salesforce-sync`** and **`/api/qbo/customers-salesforce-sync`** — batch Salesforce → QuickBooks sync. Run with `dryRun=true` first.\n' +
       '5. **`POST /api/stripe/true-up`** — reconciliation and backfill over a date window, per object type (`payments`, `refunds`, `payouts`).\n' +
       '6. **`GET /api/ops/stripe-duplicate-check`** — confirms the stages above did not double-post.\n' +
-      '7. **`POST /api/ops/test-artifact-cleanup`** — removes everything the run created. **Run this last, and only once the records have been inspected and confirmed.**\n\n' +
+      '7. **`POST /api/ops/test-artifact-verify`** — reads back the records step 2 created and reports, field by field, whether each one was populated and linked correctly. Wait ~60s after step 2 so the Stripe and Salesforce search indexes catch up.\n' +
+      '8. **`POST /api/ops/test-artifact-cleanup`** — removes everything the run created. **Run this last, and only once the records have been inspected and confirmed.**\n\n' +
       '### Cleanup contract\n\n' +
       `Every example payload on this page is tagged \`source_test_tag: ${SWAGGER_TEST_TAG}\`. Passing that same tag to the cleanup endpoint removes exactly the records these examples created, across Stripe, Salesforce and QuickBooks. Records created with a different tag, or with none, are not reachable that way and must be removed by hand — so keep the tag in place when editing an example.\n\n` +
       'Run cleanup with `dryRun: true` first to see what would be deleted.\n\n' +
@@ -276,6 +278,25 @@ const TestArtifactCleanupRequestSchema = z
     deleteSalesforceContacts: z.boolean().optional(),
     maxStripeCustomers: z.number().int().positive().max(500).optional(),
     maxQboDocuments: z.number().int().positive().max(500).optional(),
+  })
+  .passthrough();
+
+const VerificationObjectKeySchema = z.enum([
+  'stripe.customer',
+  'stripe.checkout_session',
+  'salesforce.Contact',
+  'salesforce.Transaction__c',
+]);
+
+const TestArtifactVerifyRequestSchema = z
+  .object({
+    tag: z.string().min(1),
+    liveMode: z.boolean().optional(),
+    checkoutSessionId: z.string().min(1).optional(),
+    expected: z.record(VerificationObjectKeySchema, z.record(z.unknown())).optional(),
+    optionalFields: z.record(VerificationObjectKeySchema, z.array(z.string())).optional(),
+    requireOptional: z.boolean().optional(),
+    maxStripeCustomers: z.number().int().positive().max(500).optional(),
   })
   .passthrough();
 
@@ -1032,6 +1053,73 @@ const cleanupExamples = {
     cleanupLiveDeleteExample,
     'Actually removes tagged test artifacts after validation completes.'
   ),
+};
+
+const verifyExample = {
+  tag: 'deployment-smoke-20260405',
+  liveMode: false,
+  checkoutSessionId: 'cs_test_123',
+  expected: {
+    'salesforce.Transaction__c': {
+      Amount_Gross__c: 53.25,
+      Frequency__c: 'onetime',
+      Attribution__c: 'Annual Fund',
+      Currency_ISO_Code__c: 'USD',
+    },
+  },
+};
+
+const verifyStrictExample = {
+  ...verifyExample,
+  requireOptional: true,
+};
+
+const verifyExamples = {
+  standard: asNamedExample(
+    'Verify one flow',
+    verifyExample,
+    'Checks every field the transaction endpoint routes into Stripe and Salesforce. Fields that depend on org configuration are reported as warnings.'
+  ),
+  strict: asNamedExample(
+    'Verify strictly',
+    verifyStrictExample,
+    'Promotes org-configuration-dependent fields (record types, LeadSource) to hard failures.'
+  ),
+};
+
+const verifyResponseExample = {
+  tag: 'deployment-smoke-20260405',
+  marker: '[source_test_tag:deployment-smoke-20260405]',
+  liveMode: false,
+  ok: true,
+  requireOptional: false,
+  stripeCustomerId: 'cus_123',
+  checkoutSessionId: 'cs_test_123',
+  salesforceContactId: '0035f00000AbCdEAAV',
+  salesforceTransactionId: 'a0X5f000001AbCdEAK',
+  counts: { checked: 60, ok: 59, missing: 0, mismatched: 0, notApplicable: 1 },
+  failures: [],
+  warnings: [],
+  objects: [
+    {
+      object: 'salesforce.Transaction__c',
+      found: true,
+      recordId: 'a0X5f000001AbCdEAK',
+      counts: { checked: 18, ok: 17, missing: 0, mismatched: 0, notApplicable: 1 },
+      fields: [{ field: 'Amount_Gross__c', status: 'ok', required: true, actual: 53.25 }],
+    },
+  ],
+};
+
+const verifyFailureResponseExample = {
+  ...verifyResponseExample,
+  ok: false,
+  counts: { checked: 60, ok: 57, missing: 1, mismatched: 1, notApplicable: 1 },
+  failures: [
+    'salesforce.Transaction__c.Campaign__c: not populated',
+    'salesforce.Transaction__c.Amount_Gross__c: expected 53.25, got 50',
+  ],
+  warnings: ['salesforce.Contact.LeadSource: not populated'],
 };
 
 const cleanupResponseExample = {
@@ -1825,6 +1913,73 @@ registerFunction('testArtifactCleanup', 'Clean up tagged external test artifacts
         'application/json': {
           schema: GenericErrorResponseSchema,
           example: { error: 'internal_error', message: 'Cleanup execution failed.' },
+        },
+      },
+    },
+  },
+});
+
+registerFunction('testArtifactVerify', 'Verify field population for a tagged test run', {
+  handler: testArtifactVerify,
+  description:
+    'Reads back everything `POST /api/transaction` created for a tag — the Stripe customer and Checkout session, and the Salesforce Contact and Transaction__c — and reports, field by field, whether each one was populated and routed to the right place.\n\n' +
+    'Run this **after** the transaction and **before** cleanup. Give the search indexes a moment first: Stripe search lags by up to ~60s, so a verification issued immediately after the transaction can report records as missing that do exist.\n\n' +
+    'Pass `checkoutSessionId` (the `id` from the transaction response) whenever you have it — it pins verification to exactly the records that request produced, instead of resolving them by tag.\n\n' +
+    '### What is checked\n\n' +
+    'Cross-system links are derived server-side and always enforced: the Transaction__c must carry the session and customer ids, must point at the Contact that was synced, and the Stripe customer must carry that Contact id back in `metadata.salesforce_id`. Values you supply in `expected` are compared against what actually landed, so a field populated with the wrong value fails rather than passing as "populated".\n\n' +
+    'The field list assumes a payload that fills in every input the transaction endpoint accepts. If your payload omits an input — no phone, no organization, no cover fee — list the affected field paths in `optionalFields` so they are reported without failing the run.\n\n' +
+    'Fields that depend on org configuration (Transaction__c record type, Contact LeadSource) are warnings by default; set `requireOptional: true` to make them failures. Fields the org does not define at all are reported as `not-applicable`.\n\n' +
+    'Returns 200 when every required field checks out and 422 when the records were read but did not match — a 500 means the check itself could not run.',
+  tags: ['Ops', 'Stripe', 'Salesforce'],
+  operationId: 'testArtifactVerify',
+  methods: ['POST'],
+  ...withFunctionAuth({}),
+  route: 'ops/test-artifact-verify',
+  request: {
+    body: {
+      content: {
+        'application/json': {
+          schema: TestArtifactVerifyRequestSchema,
+          example: verifyExample,
+          examples: verifyExamples,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Every required field was populated as expected',
+      content: {
+        'application/json': {
+          schema: GenericObjectSchema,
+          example: verifyResponseExample,
+        },
+      },
+    },
+    400: {
+      description: 'Invalid verification request',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'bad_request', message: 'A verification tag is required.' },
+        },
+      },
+    },
+    422: {
+      description: 'Records were read but one or more required fields did not match',
+      content: {
+        'application/json': {
+          schema: GenericObjectSchema,
+          example: verifyFailureResponseExample,
+        },
+      },
+    },
+    500: {
+      description: 'Verification could not be executed',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'verification_failed', message: 'Missing Stripe test secret key.' },
         },
       },
     },
@@ -2679,6 +2834,7 @@ export {
   stripeTrueUp,
   manualQboSync,
   testArtifactCleanup,
+  testArtifactVerify,
   salesforcePaymentsSync,
   qboCustomersSync,
   salesforceRecordQboSync,

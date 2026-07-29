@@ -64,6 +64,7 @@ Azure Functions (Node.js/TypeScript) application that processes Stripe payments 
 | `qboReceiptsSync` | `POST /api/qbo/receipts-salesforce-sync` | Syncs unposted Salesforce transactions to QBO SalesReceipts |
 | `salesforceRecordQboSync` | `POST /api/qbo/salesforce-record-sync` | Reads QBO documents and writes doc IDs back to Salesforce |
 | `stripeDuplicateCheck` | `POST /api/ops/stripe-duplicate-check` | Checks for duplicate records in QBO and Salesforce |
+| `testArtifactVerify` | `POST /api/ops/test-artifact-verify` | Reads back a tagged test run and reports, field by field, whether every value was populated and linked correctly |
 | `testArtifactCleanup` | `POST /api/ops/test-artifact-cleanup` | Removes test records from Stripe, Salesforce, and QBO |
 
 ---

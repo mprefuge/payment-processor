@@ -4,6 +4,7 @@
 
 ### Added
 
+- **End-to-end field-population verification**: The smoke/E2E flow now posts a payload that fills in every input `/api/transaction` accepts, waits for propagation, reads the created records back via the new `POST /api/ops/test-artifact-verify` endpoint, and fails if any field the flow should have populated is empty or holds the wrong value — including the cross-system links between the Stripe customer, Checkout session, Salesforce `Contact` and `Transaction__c`. Cleanup then runs after a second delay, as before.
 - **Comprehensive README.md**: Complete project documentation including setup, configuration, API endpoints, and deployment instructions
 - **New Test Coverage**: Added unit tests for utility functions previously untested:
   - `__tests__/http.test.ts`: Tests for HTTP response utilities

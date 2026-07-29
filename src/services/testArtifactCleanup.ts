@@ -3,6 +3,7 @@ import type { Connection } from 'jsforce/lib/connection';
 
 import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral } from './salesforceService';
 import { buildTestArtifactMarker } from '../lib/testArtifactTagging';
+import { listStripeCustomersByTag } from './testArtifactStripeSearch';
 import {
   deleteQuickBooksDocument,
   findDocumentsByPrivateNoteTag,
@@ -66,7 +67,6 @@ interface TestArtifactCleanupDependencies {
   deleteQuickBooksDocument: (document: TaggedQuickBooksDocument) => Promise<void>;
 }
 
-type StripeCustomerRecord = Pick<Stripe.Customer, 'id' | 'email'>;
 type StripeSubscriptionRecord = Pick<Stripe.Subscription, 'id' | 'customer' | 'status'>;
 type StripeSessionRecord = Pick<Stripe.Checkout.Session, 'id' | 'status'>;
 
@@ -84,9 +84,6 @@ const normalizePositiveInt = (value: number | undefined, fallback: number, max: 
 
   return Math.max(1, Math.min(max, Math.trunc(value as number)));
 };
-
-const escapeStripeSearchValue = (value: string): string =>
-  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 const chooseStripeSecret = (liveMode: boolean): string => {
   const secret = liveMode
@@ -145,54 +142,6 @@ const pushResult = (
   }
 
   summary.counts.changed += 1;
-};
-
-// Stripe's search API is eventually consistent and may lag by up to ~60s after
-// a customer is created or updated. Retry with backoff so the cleanup finds the
-// customer that was just created by the smoke transaction.
-const STRIPE_SEARCH_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000];
-
-const listStripeCustomersByTag = async (
-  stripe: Stripe,
-  tag: string,
-  limit: number
-): Promise<StripeCustomerRecord[]> => {
-  const searchPage = async (): Promise<StripeCustomerRecord[]> => {
-    const customers: StripeCustomerRecord[] = [];
-    let page: string | undefined;
-
-    while (customers.length < limit) {
-      const response = await stripe.customers.search({
-        query: `metadata['source_test_tag']:'${escapeStripeSearchValue(tag)}'`,
-        limit: Math.min(100, limit - customers.length),
-        ...(page ? { page } : {}),
-      });
-
-      customers.push(
-        ...response.data.filter((customer): customer is Stripe.Customer => !('deleted' in customer))
-      );
-
-      if (!response.has_more || !response.next_page) {
-        break;
-      }
-
-      page = response.next_page;
-    }
-
-    return customers.map((customer) => ({ id: customer.id, email: customer.email }));
-  };
-
-  let results = await searchPage();
-
-  for (const delayMs of STRIPE_SEARCH_RETRY_DELAYS_MS) {
-    if (results.length > 0) {
-      break;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-    results = await searchPage();
-  }
-
-  return results;
 };
 
 const listStripeSubscriptionsForCustomer = async (

@@ -137,6 +137,7 @@ jobs:
           SMOKE_BASE_URL: ${{ vars.AZURE_FUNCTIONAPP_PRODUCTION_URL != '' && vars.AZURE_FUNCTIONAPP_PRODUCTION_URL || 'https://payment-processing-function.azurewebsites.net' }}
           SMOKE_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
           SMOKE_TRANSACTION_PATH: ${{ vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH != '' && vars.AZURE_FUNCTIONAPP_TRANSACTION_PATH || '/api/transaction?mode=test' }}
+          SMOKE_VERIFY_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_VERIFY_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_VERIFY_PATH || '/api/ops/test-artifact-verify' }}
           SMOKE_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
           SMOKE_FUNCTION_KEY: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_FUNCTION_KEY }}
           SMOKE_TRANSACTION_PAYLOAD: ${{ secrets.AZURE_FUNCTIONAPP_PRODUCTION_SMOKE_TRANSACTION_PAYLOAD }}
@@ -146,3 +147,16 @@ jobs:
           SMOKE_SYSTEMS: stripe,salesforce,qbo
           SMOKE_DELETE_SALESFORCE_CONTACTS: 'true'
           SMOKE_SEARCH_PROPAGATION_DELAY_MS: '65000'
+          # Post a fully-populated payload and read the records back, so a deploy that
+          # breaks field routing fails here rather than silently shipping.
+          SMOKE_FULL_FIELD_COVERAGE: 'true'
+          SMOKE_UNIQUE_EMAIL: 'true'
+          SMOKE_VERIFY_ENABLED: 'true'
+          SMOKE_VERIFY_DELAY_MS: '30000'
+          SMOKE_VERIFY_ATTEMPTS: '4'
+          SMOKE_VERIFY_RETRY_DELAY_MS: '20000'
+          # Record types and picklist configuration are org concerns, not deploy
+          # regressions — they warn here instead of blocking the pipeline.
+          SMOKE_VERIFY_REQUIRE_OPTIONAL: 'false'
+          SMOKE_ORGANIZATION_NAME: Payment Processor Smoke Test Org
+          SMOKE_CAMPAIGN_NAME: Deployment Smoke Test

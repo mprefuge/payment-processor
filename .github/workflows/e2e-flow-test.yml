@@ -10,12 +10,29 @@ name: E2E flow test
 #
 #   1. GET  /api/health                     — Stripe, Salesforce, QuickBooks, SendGrid, storage
 #   2. POST /api/transaction?mode=test      — Stripe Checkout session + Salesforce Contact/Transaction__c
-#   3. POST /api/ops/test-artifact-cleanup  — removes exactly what step 2 created
+#   3. …wait for propagation…
+#   4. POST /api/ops/test-artifact-verify   — reads the records back and checks every field
+#   5. …wait for propagation…
+#   6. POST /api/ops/test-artifact-cleanup  — removes exactly what step 2 created
 #
-# Everything step 2 creates is tagged `source_test_tag: <tag>`, and step 3 removes
-# records carrying that tag. Cleanup runs even when step 2 fails, so a failed run
+# Step 2 posts a payload that fills in every input the transaction endpoint accepts,
+# so every field the flow can populate downstream actually has a value to route.
+# Step 4 then reads back the Stripe customer and Checkout session and the Salesforce
+# Contact and Transaction__c, and fails the run if any field the flow should have
+# populated is empty or holds the wrong value. Cross-system links are enforced too:
+# the Transaction__c must carry the session and customer ids and point at the synced
+# Contact, and that Contact's id must come back on the Stripe customer.
+#
+# Everything step 2 creates is tagged `source_test_tag: <tag>`, and step 6 removes
+# records carrying that tag. Cleanup runs even when steps 2-4 fail, so a failed run
 # still cleans up after itself. The tag is printed in the job summary either way —
 # if cleanup itself fails, that tag is how you find the leftovers.
+#
+# One exception to "cleans up after itself": the Salesforce Account and Campaign the
+# run resolves to are created on first use and are NOT deleted by cleanup. That is
+# why `organization_name` and `campaign_name` default to stable values — a per-run
+# name would leak a new Account and Campaign on every run. Point them at records
+# that already exist in the org if you would rather nothing new be created.
 #
 # Not covered here, and still needing the Swagger harness at /api/swagger: the
 # QuickBooks accounting path (`POST /api/qbo/manual-sync` needs QuickBooks entity
@@ -41,6 +58,32 @@ on:
         description: Transaction endpoint. Keep mode=test — mode=live moves real money.
         type: string
         default: /api/transaction?mode=test
+      verify_fields:
+        description: Read the created records back and check every field was populated as expected
+        type: boolean
+        default: true
+      require_optional_fields:
+        description: >-
+          Fail (rather than warn) when org-configuration-dependent fields are empty —
+          the Transaction__c "Stripe Transaction" record type and the Contact LeadSource
+        type: boolean
+        default: false
+      verify_delay_ms:
+        description: Wait this long after the transaction before the first verification attempt
+        type: string
+        default: '30000'
+      verify_attempts:
+        description: How many times to re-check fields that are still propagating
+        type: string
+        default: '4'
+      organization_name:
+        description: Organization on the payload. Resolves to a Salesforce Account, created if absent and never cleaned up — keep it stable.
+        type: string
+        default: Payment Processor Smoke Test Org
+      campaign_name:
+        description: Campaign on the payload. Resolves to a Salesforce Campaign, created if absent and never cleaned up — keep it stable.
+        type: string
+        default: Deployment Smoke Test
       systems:
         description: Systems to clean up afterwards (comma-separated - stripe, salesforce, qbo)
         type: string
@@ -139,7 +182,24 @@ jobs:
           SMOKE_TEST_TAG: ${{ steps.target.outputs.tag }}
           SMOKE_HEALTH_PATH: ${{ vars.AZURE_FUNCTIONAPP_HEALTH_PATH != '' && vars.AZURE_FUNCTIONAPP_HEALTH_PATH || '/api/health' }}
           SMOKE_TRANSACTION_PATH: ${{ inputs.transaction_path }}
+          SMOKE_VERIFY_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_VERIFY_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_VERIFY_PATH || '/api/ops/test-artifact-verify' }}
           SMOKE_CLEANUP_PATH: ${{ vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH != '' && vars.AZURE_FUNCTIONAPP_TEST_ARTIFACT_CLEANUP_PATH || '/api/ops/test-artifact-cleanup' }}
+
+          # Post a payload that populates every input the endpoint accepts, then read
+          # the records back and assert each field landed where it belongs.
+          SMOKE_FULL_FIELD_COVERAGE: 'true'
+          # Each run gets its own donor email. Reusing one matches the Contact a previous
+          # run left behind, and the matched-contact path only backfills a subset of the
+          # fields — which reads as a routing failure that isn't one.
+          SMOKE_UNIQUE_EMAIL: 'true'
+          SMOKE_VERIFY_ENABLED: ${{ inputs.verify_fields }}
+          SMOKE_VERIFY_DELAY_MS: ${{ inputs.verify_delay_ms }}
+          SMOKE_VERIFY_ATTEMPTS: ${{ inputs.verify_attempts }}
+          SMOKE_VERIFY_RETRY_DELAY_MS: '20000'
+          SMOKE_VERIFY_REQUIRE_OPTIONAL: ${{ inputs.require_optional_fields }}
+          SMOKE_ORGANIZATION_NAME: ${{ inputs.organization_name }}
+          SMOKE_CAMPAIGN_NAME: ${{ inputs.campaign_name }}
+
           SMOKE_SYSTEMS: ${{ inputs.systems }}
           SMOKE_DELETE_SALESFORCE_CONTACTS: ${{ inputs.delete_salesforce_contacts }}
           SMOKE_SEARCH_PROPAGATION_DELAY_MS: ${{ inputs.propagation_delay_ms }}
@@ -183,6 +243,8 @@ jobs:
           TAG: ${{ steps.target.outputs.tag }}
           TRANSACTION_PATH: ${{ inputs.transaction_path }}
           SYSTEMS: ${{ inputs.systems }}
+          VERIFY_FIELDS: ${{ inputs.verify_fields }}
+          REQUIRE_OPTIONAL: ${{ inputs.require_optional_fields }}
           OUTCOME: ${{ job.status }}
         run: |
           set -euo pipefail
@@ -194,9 +256,15 @@ jobs:
             echo "| Environment | \`$TARGET_ENV\` |"
             echo "| Base URL | \`${BASE_URL:-unresolved}\` |"
             echo "| Transaction path | \`$TRANSACTION_PATH\` |"
+            echo "| Field verification | \`$VERIFY_FIELDS\` (strict: \`$REQUIRE_OPTIONAL\`) |"
             echo "| Cleanup systems | \`$SYSTEMS\` |"
             echo "| Test artifact tag | \`${TAG:-unresolved}\` |"
             echo
+            if [ "$VERIFY_FIELDS" = "true" ]; then
+              echo "Per-field results are in the \"Run end-to-end flow\" step log; every field"
+              echo "that was empty or held the wrong value is listed there by object and name."
+              echo
+            fi
             if [ "$OUTCOME" != "success" ]; then
               echo "If the failure was in cleanup rather than the flow itself, records tagged"
               echo "\`${TAG:-unresolved}\` may still exist. Remove them with:"

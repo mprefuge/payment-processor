@@ -173,10 +173,46 @@ Create a Stripe checkout session for payment processing.
 The production workflow now expects deploy-time smoke validation to create tagged test data and then remove it automatically.
 
 - The GitHub Actions deployment uses `scripts/run-deployment-smoke-cleanup.js` after staging deploy and again after production deploy.
-- The runner calls health, creates a tagged checkout session against `/api/transaction?mode=test`, and then calls `/api/ops/test-artifact-cleanup` with `dryRun=false`.
-- The workflow fails if the cleanup step reports any per-record errors or if it does not clean up the Stripe artifacts it just created.
+- The runner calls health, creates a tagged checkout session against `/api/transaction?mode=test`, waits for propagation, calls `/api/ops/test-artifact-verify` to read the records back, and then calls `/api/ops/test-artifact-cleanup` with `dryRun=false`.
+- The workflow fails if any field the flow should have populated is empty or holds the wrong value, if the cleanup step reports per-record errors, or if cleanup does not remove the Stripe artifacts it just created.
 
 The payload stored in `AZURE_FUNCTIONAPP_*_SMOKE_TRANSACTION_PAYLOAD` should be a valid transaction request body. The workflow injects the cleanup tag automatically, so the stored payload does not need to include `source_test_tag`.
+
+### Field-population verification
+
+The smoke run posts a payload that fills in **every input** `/api/transaction` accepts — name, phone, full address, organization, campaign, attribution, category, transaction type, cover fees — so that every field the flow can populate downstream actually has a value to route. It layers the stored payload on top of that template, so a minimal secret still gets full coverage while any value it does set still wins.
+
+After a propagation delay it reads the records back and checks each one:
+
+| Object                      | Checked                                                                                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stripe customer             | email, name, phone, full address, `source_test_tag`, `memo__c`, `campaign`, `salesforce_id`                                                                                                 |
+| Stripe checkout session     | url, customer, mode, currency, `amount_total`, success/cancel URLs, all metadata, payment intent                                                                                            |
+| Salesforce `Contact`        | name, email, phone, mailing address, `Stripe_Customer_ID__c`, record type, lead source                                                                                                      |
+| Salesforce `Transaction__c` | session/customer/payment-intent ids, `Contact__c`, `Account__c`, `Campaign__c`, type, status, payment method, gross amount, cover fees, currency, frequency, attribution, memo, record type |
+
+Cross-system links are enforced, not just presence: the `Transaction__c` must carry the session and customer ids and point at the Contact that was synced, and that Contact's id must come back on the Stripe customer as `metadata.salesforce_id`. Values are compared against what was actually sent, so a field populated with the _wrong_ value fails rather than passing as "populated".
+
+Fields that depend on org configuration — the `Transaction__c` "Stripe Transaction" record type and the Contact `LeadSource` picklist — are warnings by default; set `require_optional_fields` (workflow input) or `SMOKE_VERIFY_REQUIRE_OPTIONAL=true` to make them failures. Fields the org does not define at all are reported as `not-applicable`.
+
+Each run uses its own donor email (`local+<tag>@domain`). Reusing one would match the Contact a previous run left behind, and that matched-contact path only backfills a subset of fields — which reads as a routing failure that isn't one. Set `SMOKE_UNIQUE_EMAIL=false` to opt out.
+
+One caveat on cleanup: the Salesforce Account and Campaign the run resolves to are created on first use and are **not** deleted afterwards. That is why `SMOKE_ORGANIZATION_NAME` and `SMOKE_CAMPAIGN_NAME` default to stable values — a per-run name would leak a new Account and Campaign every run. Point them at records that already exist if you would rather nothing new be created.
+
+Relevant environment variables, all optional:
+
+| Variable                        | Default                            | Purpose                                                  |
+| ------------------------------- | ---------------------------------- | -------------------------------------------------------- |
+| `SMOKE_VERIFY_ENABLED`          | `true`                             | Run the verification step at all                         |
+| `SMOKE_VERIFY_PATH`             | `/api/ops/test-artifact-verify`    | Verification endpoint                                    |
+| `SMOKE_VERIFY_DELAY_MS`         | `30000`                            | Wait before the first verification attempt               |
+| `SMOKE_VERIFY_ATTEMPTS`         | `4`                                | Re-checks while writes are still propagating             |
+| `SMOKE_VERIFY_RETRY_DELAY_MS`   | `20000`                            | Wait between attempts                                    |
+| `SMOKE_VERIFY_REQUIRE_OPTIONAL` | `false`                            | Fail on org-configuration-dependent fields               |
+| `SMOKE_FULL_FIELD_COVERAGE`     | `true`                             | Layer the stored payload over the full-coverage template |
+| `SMOKE_UNIQUE_EMAIL`            | `true`                             | Give each run its own donor email                        |
+| `SMOKE_ORGANIZATION_NAME`       | `Payment Processor Smoke Test Org` | Resolves to a Salesforce Account                         |
+| `SMOKE_CAMPAIGN_NAME`           | `Deployment Smoke Test`            | Resolves to a Salesforce Campaign                        |
 
 ### QBO Sales Receipt Override Schema (Metadata)
 
