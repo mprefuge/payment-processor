@@ -364,7 +364,16 @@ const summarizeVerification = (body) => {
   for (const object of Array.isArray(body?.objects) ? body.objects : []) {
     lines.push(
       `  ${object.object}: ${object.found ? object.recordId || 'found' : 'NOT FOUND'} — ` +
-        `${object.counts.ok}/${object.counts.checked} ok`
+        `${object.counts.ok}/${object.counts.checked} ok` +
+        // Which link found the record says which links are intact; when nothing
+        // matched, the message says what was searched for.
+        (object.found
+          ? object.matchedBy
+            ? ` (matched by ${object.matchedBy})`
+            : ''
+          : object.message
+            ? ` — ${object.message}`
+            : '')
     );
   }
 

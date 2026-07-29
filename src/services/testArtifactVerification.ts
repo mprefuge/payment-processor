@@ -50,6 +50,10 @@ export interface ObjectVerificationResult {
   object: VerificationObjectKey;
   found: boolean;
   recordId: string | null;
+  /** Which link located the record — tells you which links are intact. */
+  matchedBy?: string;
+  /** Every link tried, in order, so a miss says what was actually searched for. */
+  searched?: string[];
   counts: {
     checked: number;
     ok: number;
@@ -535,12 +539,34 @@ const describeAvailableFields = async (
   }
 };
 
-const querySalesforceRecord = async (
+/** An ordered way of locating a record, strongest link first. */
+interface RecordLookup {
+  /** Human-readable description of the link, surfaced in the result. */
+  label: string;
+  where: string;
+}
+
+/**
+ * Finds a record by trying each link in turn.
+ *
+ * Resolving by the *strongest* link available and then checking the weaker ones
+ * as ordinary fields is what turns an uninformative "record not found" into the
+ * finding that matters — e.g. a Contact that exists and is referenced by the
+ * Stripe customer, but whose `Stripe_Customer_ID__c` still points at an earlier
+ * customer. Looking up solely by the weak link would report the record missing
+ * and hide the stale link that is the actual defect.
+ */
+const findSalesforceRecord = async (
   connection: Connection,
   objectName: string,
   availableFields: Set<string> | null,
-  whereClause: string
-): Promise<{ record: Record<string, unknown> | null; unavailable: Set<string> }> => {
+  lookups: RecordLookup[]
+): Promise<{
+  record: Record<string, unknown> | null;
+  matchedBy?: string;
+  searched: string[];
+  unavailable: Set<string>;
+}> => {
   const objectKey = SALESFORCE_OBJECT_NAMES[objectName];
   const specFields = FIELD_SPECS[objectKey].map((spec) => spec.field);
   const unavailable = new Set(
@@ -548,12 +574,21 @@ const querySalesforceRecord = async (
   );
 
   const selectable = Array.from(new Set(['Id', ...specFields.filter((f) => !unavailable.has(f))]));
-  const soql = `SELECT ${selectable.join(', ')} FROM ${objectName} WHERE ${whereClause} ORDER BY CreatedDate DESC LIMIT 1`;
+  const searched: string[] = [];
 
-  const result = await connection.query<Record<string, unknown>>(soql);
-  const records = Array.isArray(result?.records) ? result.records : [];
+  for (const lookup of lookups) {
+    searched.push(lookup.label);
 
-  return { record: records[0] ?? null, unavailable };
+    const soql = `SELECT ${selectable.join(', ')} FROM ${objectName} WHERE ${lookup.where} ORDER BY CreatedDate DESC LIMIT 1`;
+    const result = await connection.query<Record<string, unknown>>(soql);
+    const records = Array.isArray(result?.records) ? result.records : [];
+
+    if (records[0]) {
+      return { record: records[0], matchedBy: lookup.label, searched, unavailable };
+    }
+  }
+
+  return { record: null, searched, unavailable };
 };
 
 export const executeTestArtifactVerification = async (
@@ -612,40 +647,86 @@ export const executeTestArtifactVerification = async (
     })
   );
 
+  // The id the flow itself wrote back to Stripe. This is the authoritative link to
+  // the Contact — stronger than Stripe_Customer_ID__c, which a returning donor's
+  // Contact keeps pointing at whichever customer it was first linked to.
+  const contactIdFromStripe = trimToNull(readPath(customer, 'metadata.salesforce_id'));
+
   let contactRecord: Record<string, unknown> | null = null;
   let transactionRecord: Record<string, unknown> | null = null;
   let contactUnavailable = new Set<string>();
   let transactionUnavailable = new Set<string>();
+  let contactMatchedBy: string | undefined;
+  let transactionMatchedBy: string | undefined;
+  let contactSearched: string[] = [];
+  let transactionSearched: string[] = [];
   let salesforceError: string | null = null;
 
-  if (stripeCustomerId || sessionId) {
+  if (stripeCustomerId || sessionId || contactIdFromStripe) {
     try {
       const connection = await dependencies.getSalesforceConnection();
 
-      if (stripeCustomerId) {
-        const contactFields = await describeAvailableFields(connection, CONTACT_OBJECT);
-        const contactResult = await querySalesforceRecord(
-          connection,
-          CONTACT_OBJECT,
-          contactFields,
-          `Stripe_Customer_ID__c = '${escapeSoqlLiteral(stripeCustomerId)}'`
-        );
-        contactRecord = contactResult.record;
-        contactUnavailable = contactResult.unavailable;
-      }
+      const contactFields = await describeAvailableFields(connection, CONTACT_OBJECT);
+      const contactResult = await findSalesforceRecord(connection, CONTACT_OBJECT, contactFields, [
+        ...(contactIdFromStripe
+          ? [
+              {
+                label: `Id = ${contactIdFromStripe} (from the Stripe customer's metadata.salesforce_id)`,
+                where: `Id = '${escapeSoqlLiteral(contactIdFromStripe)}'`,
+              },
+            ]
+          : []),
+        ...(stripeCustomerId
+          ? [
+              {
+                label: `Stripe_Customer_ID__c = ${stripeCustomerId}`,
+                where: `Stripe_Customer_ID__c = '${escapeSoqlLiteral(stripeCustomerId)}'`,
+              },
+            ]
+          : []),
+      ]);
+      contactRecord = contactResult.record;
+      contactUnavailable = contactResult.unavailable;
+      contactMatchedBy = contactResult.matchedBy;
+      contactSearched = contactResult.searched;
 
+      const resolvedContactId = trimToNull(contactRecord?.Id);
       const transactionFields = await describeAvailableFields(connection, TRANSACTION_OBJECT);
-      const transactionWhere = sessionId
-        ? `Stripe_Checkout_Session_Id__c = '${escapeSoqlLiteral(sessionId)}'`
-        : `Stripe_Customer_Id__c LIKE '%${escapeSoqlLiteral(stripeCustomerId as string)}%'`;
-      const transactionResult = await querySalesforceRecord(
+      const transactionResult = await findSalesforceRecord(
         connection,
         TRANSACTION_OBJECT,
         transactionFields,
-        transactionWhere
+        [
+          ...(sessionId
+            ? [
+                {
+                  label: `Stripe_Checkout_Session_Id__c = ${sessionId}`,
+                  where: `Stripe_Checkout_Session_Id__c = '${escapeSoqlLiteral(sessionId)}'`,
+                },
+              ]
+            : []),
+          ...(resolvedContactId
+            ? [
+                {
+                  label: `Contact__c = ${resolvedContactId} (most recent)`,
+                  where: `Contact__c = '${escapeSoqlLiteral(resolvedContactId)}'`,
+                },
+              ]
+            : []),
+          ...(stripeCustomerId
+            ? [
+                {
+                  label: `Stripe_Customer_Id__c contains ${stripeCustomerId}`,
+                  where: `Stripe_Customer_Id__c LIKE '%${escapeSoqlLiteral(stripeCustomerId)}%'`,
+                },
+              ]
+            : []),
+        ]
       );
       transactionRecord = transactionResult.record;
       transactionUnavailable = transactionResult.unavailable;
+      transactionMatchedBy = transactionResult.matchedBy;
+      transactionSearched = transactionResult.searched;
     } catch (error) {
       salesforceError = error instanceof Error ? error.message : String(error);
     }
@@ -653,41 +734,45 @@ export const executeTestArtifactVerification = async (
 
   const contactId = trimToNull(contactRecord?.Id);
 
-  objects.push(
-    evaluateObject({
-      object: 'salesforce.Contact',
-      record: contactRecord,
-      derivedExpectations: stripeCustomerId ? { Stripe_Customer_ID__c: stripeCustomerId } : {},
-      callerExpectations: callerExpectations['salesforce.Contact'],
-      optionalFields: optionalFields['salesforce.Contact'],
-      unavailableFields: contactUnavailable,
-      requireOptional,
-      notFoundMessage:
-        salesforceError ??
-        `No Salesforce Contact is linked to Stripe customer ${stripeCustomerId ?? '(unresolved)'}.`,
-    })
-  );
+  const describeMiss = (objectName: string, searched: string[]): string =>
+    searched.length > 0
+      ? `No ${objectName} matched any of: ${searched.join('; ')}.`
+      : `No ${objectName} could be looked up — neither the Stripe customer nor the checkout session resolved.`;
 
-  objects.push(
-    evaluateObject({
-      object: 'salesforce.Transaction__c',
-      record: transactionRecord,
-      derivedExpectations: {
-        ...(sessionId ? { Stripe_Checkout_Session_Id__c: sessionId } : {}),
-        ...(stripeCustomerId ? { Stripe_Customer_Id__c: stripeCustomerId } : {}),
-        ...(contactId ? { Contact__c: contactId } : {}),
-        // Null marks the field not-applicable: no payment intent exists to route.
-        Stripe_Payment_Intent_Id__c: sessionPaymentIntentId,
-      },
-      callerExpectations: callerExpectations['salesforce.Transaction__c'],
-      optionalFields: optionalFields['salesforce.Transaction__c'],
-      unavailableFields: transactionUnavailable,
-      requireOptional,
-      notFoundMessage:
-        salesforceError ??
-        `No Salesforce Transaction__c is linked to checkout session ${sessionId ?? '(unresolved)'}.`,
-    })
-  );
+  const contactResult = evaluateObject({
+    object: 'salesforce.Contact',
+    record: contactRecord,
+    derivedExpectations: stripeCustomerId ? { Stripe_Customer_ID__c: stripeCustomerId } : {},
+    callerExpectations: callerExpectations['salesforce.Contact'],
+    optionalFields: optionalFields['salesforce.Contact'],
+    unavailableFields: contactUnavailable,
+    requireOptional,
+    notFoundMessage: salesforceError ?? describeMiss('Salesforce Contact', contactSearched),
+  });
+  contactResult.matchedBy = contactMatchedBy;
+  contactResult.searched = contactSearched;
+  objects.push(contactResult);
+
+  const transactionResult = evaluateObject({
+    object: 'salesforce.Transaction__c',
+    record: transactionRecord,
+    derivedExpectations: {
+      ...(sessionId ? { Stripe_Checkout_Session_Id__c: sessionId } : {}),
+      ...(stripeCustomerId ? { Stripe_Customer_Id__c: stripeCustomerId } : {}),
+      ...(contactId ? { Contact__c: contactId } : {}),
+      // Null marks the field not-applicable: no payment intent exists to route.
+      Stripe_Payment_Intent_Id__c: sessionPaymentIntentId,
+    },
+    callerExpectations: callerExpectations['salesforce.Transaction__c'],
+    optionalFields: optionalFields['salesforce.Transaction__c'],
+    unavailableFields: transactionUnavailable,
+    requireOptional,
+    notFoundMessage:
+      salesforceError ?? describeMiss('Salesforce Transaction__c', transactionSearched),
+  });
+  transactionResult.matchedBy = transactionMatchedBy;
+  transactionResult.searched = transactionSearched;
+  objects.push(transactionResult);
 
   // `salesforce_id` closes the Stripe -> Salesforce loop, so it is only checkable
   // once the contact is known.
@@ -726,6 +811,14 @@ export const executeTestArtifactVerification = async (
   }
 
   for (const object of objects) {
+    // One line beats N identical "not populated" lines: when the record itself is
+    // missing, every field is trivially missing and the useful detail is what was
+    // searched for, not the field list.
+    if (!object.found) {
+      failures.push(`${object.object}: record not found. ${object.message ?? ''}`.trim());
+      continue;
+    }
+
     for (const field of object.fields) {
       if (field.status === 'ok' || field.status === 'not-applicable') {
         continue;
