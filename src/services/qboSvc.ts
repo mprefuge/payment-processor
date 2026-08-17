@@ -2468,8 +2468,20 @@ export const verifyTokenRefresh = async (options?: PostOptions): Promise<void> =
   await tokenManager.refreshTokens(fetcher);
 };
 
+/**
+ * Escape a string literal for the QuickBooks query endpoint.
+ *
+ * QBO's query language uses backslash as its escape character — NOT the
+ * SQL-standard doubled single quote.  Intuit's data-queries guide gives
+ * `select * from Customer where CompanyName = 'Adam\'s Candy Shop'` as the
+ * canonical form.  Doubling the quote instead produced `'Adam''s Candy Shop'`,
+ * which QBO parses as two adjacent literals and rejects with a parser error,
+ * so every lookup for a donor, account, or item whose name contains an
+ * apostrophe failed.  The backslash itself must be escaped first, otherwise a
+ * trailing backslash in the value would escape the closing quote.
+ */
 const escapeQueryValue = (value: string): string => {
-  return value.replace(/'/g, "''");
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 };
 
 const buildQboQueryUrl = (query: string): string => {
@@ -3112,7 +3124,7 @@ const checkForDuplicate = async (
     const entityName = QUICKBOOKS_ENTITY_METADATA[entity].queryEntity;
 
     // Query QuickBooks for existing document with this DocNumber
-    const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
+    const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${escapeQueryValue(docNumber)}'`;
 
     logger.debug('[QBO] Checking for duplicate', { entity, docNumber, queryString });
 

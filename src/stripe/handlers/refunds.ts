@@ -827,13 +827,22 @@ const processRefund = async (
   );
 };
 
+/**
+ * Pick the most recent refund off a charge.
+ *
+ * Stripe returns list data newest-first — "we return the refunds in sorted
+ * order, with the most recent refunds appearing first", which explicitly
+ * covers the refunds embedded on the Charge object.  Reading the last element
+ * therefore returned the OLDEST refund, so a second partial refund on a charge
+ * re-processed the first one instead of the new one.
+ */
 const getLatestRefund = (charge: Stripe.Charge): Stripe.Refund | null => {
   const refunds = charge.refunds?.data;
   if (!refunds || refunds.length === 0) {
     return null;
   }
 
-  return refunds[refunds.length - 1] ?? null;
+  return refunds[0] ?? null;
 };
 
 export const handleChargeRefunded = async (

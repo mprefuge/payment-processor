@@ -501,10 +501,15 @@ const generateDocNumber = (): string => {
   return `MAN-${year}-${dateTimeStr}`;
 };
 
+// QBO's query language escapes with a backslash, and the backslash itself has
+// to be escaped first so a trailing `\` cannot escape the closing quote.
+const escapeQboQueryValue = (value: string): string =>
+  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
 // Retrieve sales receipt from QBO by ID
 const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> => {
   try {
-    const queryStr = `SELECT * FROM SalesReceipt WHERE Id = '${salesReceiptId.replace(/'/g, "\\'")}'`;
+    const queryStr = `SELECT * FROM SalesReceipt WHERE Id = '${escapeQboQueryValue(salesReceiptId)}'`;
     logger.info('Querying QuickBooks for sales receipt', {
       salesReceiptId,
       query: queryStr,
@@ -563,7 +568,7 @@ const getAccountIdByName = async (
   context: InvocationContext
 ): Promise<string | null> => {
   try {
-    const queryStr = `SELECT Id, Name, AccountType, AccountSubType FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`;
+    const queryStr = `SELECT Id, Name, AccountType, AccountSubType FROM Account WHERE Name = '${escapeQboQueryValue(accountName)}'`;
     logger.info('Querying QuickBooks for account', {
       accountName,
       query: queryStr,

@@ -441,7 +441,9 @@ const extractRefundId = (charge: Stripe.Charge | null | undefined): string | nul
     return null;
   }
 
-  const latestRefund = refunds[refunds.length - 1];
+  // Stripe returns list data newest-first, including the refunds embedded on a
+  // Charge, so the most recent refund is at index 0 — not at the end.
+  const latestRefund = refunds[0];
   return latestRefund?.id ?? null;
 };
 
