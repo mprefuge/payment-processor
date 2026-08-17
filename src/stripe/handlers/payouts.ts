@@ -927,10 +927,16 @@ export const handlePayoutEvent = async (
       });
     }
 
-    context.log('[StripeWebhook] Marked payout for review after failure/cancelation', {
-      payoutId: payout.id,
-      eventType,
-    });
+    // Salesforce status is updated above and the adapter raises a reversal
+    // alert. The QuickBooks Transfer posted by payout.paid is NOT reversed
+    // here, so do not log this as if the accounting were settled.
+    context.log(
+      '[StripeWebhook] Payout failed/canceled — Salesforce updated, QBO Transfer still needs reversal',
+      {
+        payoutId: payout.id,
+        eventType,
+      }
+    );
     return;
   }
 

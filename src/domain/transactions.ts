@@ -265,6 +265,26 @@ const parseMetadataBoolean = (
   return null;
 };
 
+/**
+ * Convert a `cover_fees_amount` metadata value to major units (dollars).
+ *
+ * `Cover_Fees_Amount__c` holds dollars — that is what the checkout path writes
+ * via `centsToMajorUnits` in `crmTransactionWorkflow`, and it is the unit of
+ * the `Amount_Gross__c` it sits beside. The webhook path was storing the raw
+ * metadata value instead, so the same field arrived 100× overstated depending
+ * on which path created the record.
+ *
+ * Stripe metadata carries cents (an integer, as `processTransaction` writes
+ * it); a fractional value can only be dollars already.
+ */
+const coverFeesAmountToMajorUnits = (value: number | null): number | null => {
+  if (value === null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Number.isInteger(value) ? value / 100 : value;
+};
+
 const parseMetadataNumber = (
   metadata: Record<string, unknown> | undefined,
   ...keys: string[]
@@ -674,11 +694,13 @@ export const mapStripeToTransaction = (
       'Cover_Fees__c',
       'cover_fees'
     ),
-    cover_fees_amount__c: parseMetadataNumber(
-      combinedMetadata,
-      'cover_fees_amount__c',
-      'Cover_Fees_Amount__c',
-      'cover_fees_amount'
+    cover_fees_amount__c: coverFeesAmountToMajorUnits(
+      parseMetadataNumber(
+        combinedMetadata,
+        'cover_fees_amount__c',
+        'Cover_Fees_Amount__c',
+        'cover_fees_amount'
+      )
     ),
     payment_method__c: derivePaymentMethod(paymentIntent, charge),
     payment_brand__c: derivePaymentBrand(charge),
