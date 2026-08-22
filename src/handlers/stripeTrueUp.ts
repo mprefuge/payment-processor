@@ -774,7 +774,11 @@ type SalesforceContactRecord = {
   Stripe_Customer_Id__c?: string | null;
 };
 
-const escapeSoqlString = (value: string): string => value.replace(/'/g, "\\'");
+// Backslash is SOQL's escape character, so it has to be escaped before the
+// quote — otherwise a value ending in `\` escapes the closing quote and breaks
+// (or lets a caller steer) the query.
+const escapeSoqlString = (value: string): string =>
+  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 const buildContactIdentity = (
   stripeCustomer: Stripe.Customer,
