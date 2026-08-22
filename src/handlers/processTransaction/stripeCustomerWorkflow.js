@@ -19,6 +19,7 @@ const normalizeAddressInput = (customerData) => {
   if (nestedAddress) {
     return {
       line1: trimToNull(nestedAddress.line1),
+      line2: trimToNull(nestedAddress.line2),
       city: trimToNull(nestedAddress.city),
       state: trimToNull(nestedAddress.state),
       postal_code: trimToNull(nestedAddress.postal_code),
@@ -28,6 +29,7 @@ const normalizeAddressInput = (customerData) => {
 
   return {
     line1: trimToNull(customerData?.address),
+    line2: trimToNull(customerData?.line2),
     city: trimToNull(customerData?.city),
     state: trimToNull(customerData?.state),
     postal_code: trimToNull(customerData?.zipcode),
@@ -39,6 +41,7 @@ const toComparableValue = (value) => (typeof value === 'string' ? value.trim() :
 
 const toComparableAddress = (address) => ({
   line1: toComparableValue(address?.line1),
+  line2: toComparableValue(address?.line2),
   city: toComparableValue(address?.city),
   state: toComparableValue(address?.state),
   postal_code: toComparableValue(address?.postal_code),
@@ -70,6 +73,7 @@ const addressesMatch = (left, right) => {
 
   return (
     comparableLeft.line1 === comparableRight.line1 &&
+    comparableLeft.line2 === comparableRight.line2 &&
     comparableLeft.city === comparableRight.city &&
     comparableLeft.state === comparableRight.state &&
     comparableLeft.postal_code === comparableRight.postal_code &&
