@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import env from '../../config/env';
 import {
   mapStripeToTransaction,
+  readDonorIntentFromMetadata,
   type TransactionUpsertDTO,
   SF_RECORD_TYPE_STRIPE_TRANSACTION,
 } from '../../domain/transactions';
@@ -19,7 +20,7 @@ import {
   timestampToDate,
   timestampToIsoString,
   getProductNameFromCharge,
-  getFrequencyFromSubscription,
+  resolveFrequencyFromSubscription,
 } from '../utils';
 import { ensureStripeClient, markPosted } from './common';
 
@@ -470,32 +471,59 @@ const enrichTransactionWithInvoiceAndSubscription = async (
     transaction.stripe_subscription_id__c = subscriptionId;
   }
 
-  if (subscriptionId && !transaction.frequency__c) {
+  // Donor intent (frequency, cover-fees) lives on the Subscription for
+  // recurring gifts: instalments 2..N are billed by Stripe with no Checkout
+  // Session, and Stripe does not copy Subscription metadata onto the invoice's
+  // PaymentIntent. One retrieve serves both lookups.
+  const needsFrequency = !transaction.frequency__c;
+  const needsCoverFees =
+    transaction.cover_fees_amount__c === null || transaction.cover_fees_amount__c === undefined;
+
+  if (subscriptionId && (needsFrequency || needsCoverFees)) {
     try {
-      const frequency = await getFrequencyFromSubscription(
-        stripe,
-        subscriptionId,
-        (...args: unknown[]) => context.log(...args)
-      );
-      if (frequency) {
-        transaction.frequency__c = frequency;
-        context.log('[StripeWebhook] Set frequency from subscription', {
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+      const donorIntent = readDonorIntentFromMetadata(subscription?.metadata ?? null);
+
+      if (needsFrequency) {
+        const frequency =
+          donorIntent.frequency__c ?? resolveFrequencyFromSubscription(subscription);
+        if (frequency) {
+          transaction.frequency__c = frequency;
+          context.log('[StripeWebhook] Set frequency from subscription', {
+            paymentIntentId: paymentIntent.id,
+            subscriptionId,
+            frequency,
+          });
+        }
+      }
+
+      if (needsCoverFees && donorIntent.cover_fees_amount__c !== null) {
+        transaction.cover_fees_amount__c = donorIntent.cover_fees_amount__c;
+        if (transaction.cover_fees__c === null || transaction.cover_fees__c === undefined) {
+          transaction.cover_fees__c = donorIntent.cover_fees__c ?? true;
+        }
+        context.log('[StripeWebhook] Set cover-fees from subscription metadata', {
           paymentIntentId: paymentIntent.id,
           subscriptionId,
-          frequency,
+          coverFeesAmount: transaction.cover_fees_amount__c,
         });
       }
     } catch (error) {
       const message =
-        error instanceof Error
-          ? error.message
-          : 'Unknown error getting frequency from subscription';
-      context.log('[StripeWebhook] Failed to get frequency from subscription', {
+        error instanceof Error ? error.message : 'Unknown error reading subscription donor intent';
+      context.log('[StripeWebhook] Failed to read donor intent from subscription', {
         paymentIntentId: paymentIntent.id,
         subscriptionId,
         error: message,
       });
     }
+  }
+
+  // A PaymentIntent with no subscription behind it is a one-time gift by
+  // definition; without this, `Frequency__c` on the record went null and
+  // overwrote the 'onetime' the checkout path had already written.
+  if (!subscriptionId && !transaction.frequency__c) {
+    transaction.frequency__c = 'onetime';
   }
 
   if (resolvedInvoice && (resolvedInvoice.status === 'paid' || resolvedInvoice.paid === true)) {

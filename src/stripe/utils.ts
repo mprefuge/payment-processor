@@ -458,6 +458,36 @@ export const getProductNameFromCharge = async (
   }
 };
 
+/**
+ * Map a Stripe recurring price back to the donation form's `frequency` picklist.
+ *
+ * The form sends one of `onetime | week | biweek | month | year`
+ * (`TransactionFrequencySchema` in `src/index.ts`), and `processTransaction`
+ * encodes it as `interval` + `interval_count`
+ * (`getStripeInterval`/`getIntervalCount`): `biweek` becomes `week` x 2 and
+ * every other recurring value becomes itself x 1.
+ *
+ * Reading back only `interval` therefore collapsed `biweek` to `week`, which
+ * doubles a bi-weekly donor's forecast annual value (26 gifts/yr reported as
+ * 52). This is the inverse of that encoding, so the round trip is lossless.
+ */
+export const mapSubscriptionIntervalToFrequency = (
+  interval: string | null | undefined,
+  intervalCount: number | null | undefined
+): string | null => {
+  if (!interval) {
+    return null;
+  }
+
+  const count = typeof intervalCount === 'number' && intervalCount > 0 ? intervalCount : 1;
+
+  if (interval === 'week' && count === 2) {
+    return 'biweek';
+  }
+
+  return interval;
+};
+
 export const getFrequencyFromSubscription = async (
   stripe: Stripe,
   subscriptionId: string,
@@ -465,17 +495,14 @@ export const getFrequencyFromSubscription = async (
 ): Promise<string | null> => {
   try {
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    const frequency = resolveFrequencyFromSubscription(subscription);
 
-    if (subscription.items?.data && subscription.items.data.length > 0) {
-      const firstItem = subscription.items.data[0];
-      if (firstItem.price?.recurring?.interval) {
-        const interval = firstItem.price.recurring.interval;
-        logger('[getFrequencyFromSubscription] Found frequency from subscription', {
-          subscriptionId,
-          interval,
-        });
-        return interval;
-      }
+    if (frequency) {
+      logger('[getFrequencyFromSubscription] Found frequency from subscription', {
+        subscriptionId,
+        frequency,
+      });
+      return frequency;
     }
 
     logger('[getFrequencyFromSubscription] No frequency found in subscription', {
@@ -490,4 +517,22 @@ export const getFrequencyFromSubscription = async (
     });
     return null;
   }
+};
+
+/**
+ * Derive the form-facing `frequency` value from an already-retrieved
+ * Subscription, so callers that need the subscription for other reasons do not
+ * have to retrieve it twice.
+ */
+export const resolveFrequencyFromSubscription = (
+  subscription: Stripe.Subscription | null | undefined
+): string | null => {
+  const firstItem = subscription?.items?.data?.[0];
+  const recurring = firstItem?.price?.recurring;
+
+  if (!recurring?.interval) {
+    return null;
+  }
+
+  return mapSubscriptionIntervalToFrequency(recurring.interval, recurring.interval_count);
 };

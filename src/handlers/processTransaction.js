@@ -886,6 +886,8 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
     transactionData.coverFeesAmount = coverFeesAmount;
   }
 
+  const stripeMetadata = formatStripeMetadata(transactionData);
+
   const baseParams = {
     customer: customerId,
     success_url:
@@ -904,13 +906,23 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
         quantity: 1,
       },
     ],
-    metadata: formatStripeMetadata(transactionData),
+    metadata: stripeMetadata,
   };
 
   if (isOneTime) {
     baseParams.mode = 'payment';
+    // Stripe does NOT copy Checkout Session metadata onto the PaymentIntent it
+    // creates, so anything only written above is invisible to the
+    // payment_intent.succeeded webhook (which reads intent/charge/customer
+    // metadata). Mirror it onto the PaymentIntent so donor intent -- notably
+    // cover_fees_amount and frequency -- survives to the Salesforce upsert.
+    baseParams.payment_intent_data = { metadata: { ...stripeMetadata } };
   } else {
     baseParams.mode = 'subscription';
+    // Same problem for recurring gifts, and worse: instalments 2..N have no
+    // Checkout Session at all. The Subscription is the only object that
+    // outlives checkout, so donor intent has to live there.
+    baseParams.subscription_data = { metadata: { ...stripeMetadata } };
     baseParams.line_items[0].price_data.recurring = {
       interval: getStripeInterval(transactionData.frequency),
       interval_count: getIntervalCount(transactionData.frequency),

@@ -494,6 +494,16 @@ describe('Integration: Complete Payment Flow', () => {
           cover_fees: 'true',
           cover_fees_amount: String(expectedCoverFees),
         }),
+        // Stripe does not copy Checkout Session metadata onto the PaymentIntent,
+        // so the same donor intent has to be mirrored onto payment_intent_data
+        // or the webhook can never see it.
+        payment_intent_data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            cover_fees: 'true',
+            cover_fees_amount: String(expectedCoverFees),
+            frequency: 'onetime',
+          }),
+        }),
         line_items: expect.arrayContaining([
           expect.objectContaining({
             price_data: expect.objectContaining({
@@ -503,6 +513,13 @@ describe('Integration: Complete Payment Flow', () => {
         ]),
       })
     );
+
+    // Whatever the handler asked Stripe to put on the PaymentIntent is exactly
+    // what Stripe hands back on the payment_intent.succeeded event, so drive
+    // the webhook leg from the real captured value rather than a hand-written
+    // literal -- that is what makes this a round-trip test.
+    const checkoutCreateArgs = mockStripeClient.checkout.sessions.create.mock.calls[0][0] as any;
+    const propagatedPaymentIntentMetadata = checkoutCreateArgs.payment_intent_data.metadata;
 
     createdObjects.checkoutSession = mockCheckoutSession;
     createdObjects.stripeCustomer = mockCustomer;
@@ -517,6 +534,7 @@ describe('Integration: Complete Payment Flow', () => {
       currency: 'usd',
       status: 'succeeded',
       customer: 'cus_cover123',
+      metadata: propagatedPaymentIntentMetadata,
       created: Math.floor(Date.now() / 1000),
       charges: {
         data: [
@@ -651,10 +669,16 @@ describe('Integration: Complete Payment Flow', () => {
     expect(mockSalesforceSvc2.upsertTransactionByExternalId).toHaveBeenCalled();
     const sfCall2 = mockSalesforceSvc2.upsertTransactionByExternalId.mock.calls[0];
     const [txnData2] = sfCall2;
-    // Current mapping only derives cover-fees fields from payment intent/charge/customer metadata.
-    // In this flow, cover-fees metadata is persisted on checkout session and then consumed by QBO posting.
-    expect(txnData2.cover_fees__c).toBeNull();
-    expect(txnData2.cover_fees_amount__c).toBeNull();
+    // The cover-fees fields must survive the webhook. Before the fix this test
+    // pinned the bug (`toBeNull()` on both): the webhook resolved them to null
+    // and the upsert wrote that null straight over the value the checkout path
+    // had already stored, so finance lost the split between the base gift and
+    // the fee the donor covered.
+    expect(txnData2.cover_fees__c).toBe(true);
+    // Cover_Fees_Amount__c is stored in dollars, beside Amount_Gross__c.
+    expect(txnData2.cover_fees_amount__c).toBe(expectedCoverFees / 100);
+    // ...and a one-time gift stays 'onetime' rather than going null.
+    expect(txnData2.frequency__c).toBe('onetime');
 
     // verify qbo post got stripe metadata with cover fees
     expect(capturedPostArgs).toBeTruthy();
