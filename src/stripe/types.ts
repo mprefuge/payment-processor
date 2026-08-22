@@ -8,6 +8,7 @@ import type {
   postRefundToQbo,
   postDisputeToQbo,
   postDisputeReversalToQbo,
+  postPaymentReversalToQbo,
 } from '../services/qboSvc';
 
 export interface StripeServices {
@@ -137,6 +138,13 @@ export interface AccountingServices {
   postRefundToQbo: typeof postRefundToQbo;
   postDisputeToQbo: typeof postDisputeToQbo;
   postDisputeReversalToQbo: typeof postDisputeReversalToQbo;
+  /**
+   * Reverses a charge QuickBooks already carries as revenue after Stripe takes
+   * the money back (a returned ACH debit).  Optional so existing dependency
+   * objects keep type-checking; the failure handler logs and skips the reversal
+   * when it is not wired, rather than throwing inside a webhook.
+   */
+  postPaymentReversalToQbo?: typeof postPaymentReversalToQbo;
   refundReceipts?: RefundReceiptAccountingAdapter;
   payouts?: PayoutAccountingAdapter;
 }

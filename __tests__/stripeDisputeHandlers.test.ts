@@ -36,7 +36,7 @@ vi.mock('../src/config/env', () => ({
   },
 }));
 
-import { handleDisputeClosed } from '../src/stripe/handlers/disputes';
+import { handleDisputeClosed, handleDisputeCreated } from '../src/stripe/handlers/disputes';
 import type { HttpContext, StripeWebhookDependencies } from '../src/stripe/types';
 import type { SalesforceSvc } from '../src/services/salesforceSvc';
 
@@ -44,11 +44,25 @@ import type { SalesforceSvc } from '../src/services/salesforceSvc';
 
 const makeContext = (): HttpContext => ({ log: vi.fn(), error: vi.fn() }) as unknown as HttpContext;
 
-const makeIdempotencyStore = () => ({
-  withLock: vi.fn(async (_key: string, fn: () => Promise<unknown>) => fn()),
-  isProcessed: vi.fn().mockResolvedValue(false),
-  markProcessed: vi.fn().mockResolvedValue(undefined),
-});
+/**
+ * `charge.dispute.created` now posts the DSP- withdrawal entry and marks
+ * `stripe_dispute_qbo_<id>` processed. The close path reads that marker: a lost
+ * dispute must not re-post the loss, and a won dispute only reverses a
+ * withdrawal that actually reached QuickBooks. Tests that exercise the close in
+ * isolation therefore seed the marker to stand in for the earlier open.
+ */
+const WITHDRAWAL_POSTED_KEY = 'stripe_dispute_qbo_dp_test001';
+
+const makeIdempotencyStore = (processedKeys: string[] = []) => {
+  const processed = new Set<string>(processedKeys);
+  return {
+    withLock: vi.fn(async (_key: string, fn: () => Promise<unknown>) => fn()),
+    isProcessed: vi.fn(async (key: string) => processed.has(key)),
+    markProcessed: vi.fn(async (key: string) => {
+      processed.add(key);
+    }),
+  };
+};
 
 const makeSalesforceSvc = (): Partial<SalesforceSvc> => ({
   upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: 'sf_dispute_1', success: true }),
@@ -132,7 +146,7 @@ describe('handleDisputeClosed — won disputes (P0-6)', () => {
       .mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' });
     postDisputeToQbo = vi.fn().mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
     salesforceMock = makeSalesforceSvc();
-    idempotencyStore = makeIdempotencyStore();
+    idempotencyStore = makeIdempotencyStore([WITHDRAWAL_POSTED_KEY]);
   });
 
   const makeDeps = (
@@ -325,8 +339,8 @@ describe('handleDisputeClosed — other statuses', () => {
 // T2.3, mirroring refunds.ts) guards against a sequential redelivery re-posting
 // the reversal once the short lock TTL has expired.
 describe('handleDisputeClosed — redelivery dedup (T2.3)', () => {
-  const makeStatefulIdempotencyStore = () => {
-    const processed = new Set<string>();
+  const makeStatefulIdempotencyStore = (seeded: string[] = []) => {
+    const processed = new Set<string>(seeded);
     return {
       withLock: vi.fn(async (_key: string, fn: () => Promise<unknown>) => fn()),
       isProcessed: vi.fn(async (key: string) => processed.has(key)),
@@ -350,7 +364,7 @@ describe('handleDisputeClosed — redelivery dedup (T2.3)', () => {
         verifyEvent: vi.fn(),
         getClient: vi.fn(() => makeStripeClient(balanceTxns) as unknown as Stripe),
       },
-      idempotencyStore: makeStatefulIdempotencyStore(),
+      idempotencyStore: makeStatefulIdempotencyStore([WITHDRAWAL_POSTED_KEY]),
       getSalesforceSvc: vi.fn().mockResolvedValue(makeSalesforceSvc()),
       getCrmSvc: vi.fn().mockResolvedValue({}),
       accounting: {
@@ -367,5 +381,348 @@ describe('handleDisputeClosed — redelivery dedup (T2.3)', () => {
     await handleDisputeClosed(context, event, deps);
 
     expect(postDisputeReversalToQbo).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── charge.dispute.created ────────────────────────────────────────────────────
+//
+// Stripe withdraws the disputed amount and the dispute fee the moment a dispute
+// opens, 60–90 days before it closes. These cover the withdrawal reaching
+// QuickBooks then, the close not booking it a second time, and a won dispute
+// reversing only what Stripe actually gave back.
+
+describe('handleDisputeCreated — withdrawal at open', () => {
+  const makeCreatedEvent = (
+    balanceTransactions: Stripe.BalanceTransaction[],
+    status: Stripe.Dispute['status'] = 'needs_response'
+  ): Stripe.Event => {
+    const { event } = makeDisputeEvent(status, balanceTransactions);
+    return {
+      ...event,
+      id: 'evt_dispute_created',
+      type: 'charge.dispute.created',
+    } as unknown as Stripe.Event;
+  };
+
+  const makeDeps = (
+    balanceTransactions: Stripe.BalanceTransaction[],
+    overrides: {
+      idempotencyStore?: ReturnType<typeof makeIdempotencyStore>;
+      salesforce?: Partial<SalesforceSvc>;
+      postDisputeToQbo?: ReturnType<typeof vi.fn>;
+      postDisputeReversalToQbo?: ReturnType<typeof vi.fn>;
+    } = {}
+  ): StripeWebhookDependencies =>
+    ({
+      stripe: {
+        verifyEvent: vi.fn(),
+        getClient: vi.fn(() => makeStripeClient(balanceTransactions) as unknown as Stripe),
+      },
+      idempotencyStore: overrides.idempotencyStore ?? makeIdempotencyStore(),
+      getSalesforceSvc: vi.fn().mockResolvedValue(overrides.salesforce ?? makeSalesforceSvc()),
+      getCrmSvc: vi.fn().mockResolvedValue({}),
+      accounting: {
+        postChargeToQbo: vi.fn(),
+        postRefundToQbo: vi.fn(),
+        postDisputeToQbo:
+          overrides.postDisputeToQbo ??
+          vi.fn().mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' }),
+        postDisputeReversalToQbo:
+          overrides.postDisputeReversalToQbo ??
+          vi.fn().mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' }),
+      },
+    }) as unknown as StripeWebhookDependencies;
+
+  it('posts the disputed amount and the dispute fee to QBO when the dispute opens', async () => {
+    const balanceTxns = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_fee_1', -1500, 'stripe_fee', 'chargeback_fee'),
+    ];
+    const postDisputeToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
+    const deps = makeDeps(balanceTxns, { postDisputeToQbo });
+
+    await handleDisputeCreated(makeContext(), makeCreatedEvent(balanceTxns), deps);
+
+    expect(postDisputeToQbo).toHaveBeenCalledOnce();
+    expect(postDisputeToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({ lossAmount: 10000, feeAmount: 1500, disputeId: 'dp_test001' })
+    );
+  });
+
+  it('reads the dispute fee from the chargeback balance transaction when Stripe embeds it', async () => {
+    const embedded = {
+      ...makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+      fee: 1500,
+    } as unknown as Stripe.BalanceTransaction;
+    const postDisputeToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
+    const deps = makeDeps([embedded], { postDisputeToQbo });
+
+    await handleDisputeCreated(makeContext(), makeCreatedEvent([embedded]), deps);
+
+    expect(postDisputeToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({ lossAmount: 10000, feeAmount: 1500 })
+    );
+  });
+
+  it('records the dispute in Salesforce and stops the gift reading as completed', async () => {
+    const salesforce = {
+      ...makeSalesforceSvc(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue('sf_charge_1'),
+    } as Partial<SalesforceSvc>;
+    const balanceTxns = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+    ];
+
+    await handleDisputeCreated(
+      makeContext(),
+      makeCreatedEvent(balanceTxns),
+      makeDeps(balanceTxns, { salesforce })
+    );
+
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transaction_type__c: 'dispute',
+        status__c: 'disputed',
+        stripe_dispute_id__c: 'dp_test001',
+        dispute_status__c: 'needs_response',
+        parent_transaction__c: 'sf_charge_1',
+      }),
+      'stripe_dispute_id__c'
+    );
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transaction_type__c: 'charge',
+        status__c: 'disputed',
+        stripe_charge_id__c: 'ch_test001',
+      }),
+      'stripe_charge_id__c',
+      { overrideId: 'sf_charge_1' }
+    );
+  });
+
+  it('posts nothing for an inquiry that has not debited the balance yet', async () => {
+    const postDisputeToQbo = vi.fn();
+    const idempotencyStore = makeIdempotencyStore();
+    const deps = makeDeps([], { postDisputeToQbo, idempotencyStore });
+
+    await handleDisputeCreated(makeContext(), makeCreatedEvent([], 'warning_needs_response'), deps);
+
+    expect(postDisputeToQbo).not.toHaveBeenCalled();
+    // No marker: if the inquiry escalates, the close can still book the loss.
+    expect(idempotencyStore.markProcessed).not.toHaveBeenCalled();
+  });
+
+  it('posts the withdrawal once across a redelivered charge.dispute.created', async () => {
+    const balanceTxns = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+    ];
+    const postDisputeToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
+    const idempotencyStore = makeIdempotencyStore();
+    const deps = makeDeps(balanceTxns, { postDisputeToQbo, idempotencyStore });
+    const event = makeCreatedEvent(balanceTxns);
+
+    await handleDisputeCreated(makeContext(), event, deps);
+    await handleDisputeCreated(makeContext(), event, deps);
+
+    expect(postDisputeToQbo).toHaveBeenCalledTimes(1);
+  });
+
+  // ── created → lost ─────────────────────────────────────────────────────────
+
+  it('created then lost books the loss exactly once, and the close only re-states Salesforce', async () => {
+    const withdrawal = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_fee_1', -1500, 'stripe_fee', 'chargeback_fee'),
+    ];
+    const postDisputeToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
+    const postDisputeReversalToQbo = vi.fn();
+    const idempotencyStore = makeIdempotencyStore();
+    const salesforce = makeSalesforceSvc();
+    const deps = makeDeps(withdrawal, {
+      postDisputeToQbo,
+      postDisputeReversalToQbo,
+      idempotencyStore,
+      salesforce,
+    });
+
+    await handleDisputeCreated(makeContext(), makeCreatedEvent(withdrawal), deps);
+    const { event: closedEvent } = makeDisputeEvent('lost', withdrawal);
+    await handleDisputeClosed(makeContext(), closedEvent, deps);
+
+    expect(postDisputeToQbo).toHaveBeenCalledTimes(1);
+    expect(postDisputeReversalToQbo).not.toHaveBeenCalled();
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({ dispute_status__c: 'lost' }),
+      'stripe_dispute_id__c'
+    );
+  });
+
+  it('created then lost stays at one loss entry when both events are redelivered', async () => {
+    const withdrawal = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+    ];
+    const postDisputeToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
+    const idempotencyStore = makeIdempotencyStore();
+    const deps = makeDeps(withdrawal, { postDisputeToQbo, idempotencyStore });
+    const createdEvent = makeCreatedEvent(withdrawal);
+    const { event: closedEvent } = makeDisputeEvent('lost', withdrawal);
+
+    await handleDisputeCreated(makeContext(), createdEvent, deps);
+    await handleDisputeClosed(makeContext(), closedEvent, deps);
+    await handleDisputeCreated(makeContext(), createdEvent, deps);
+    await handleDisputeClosed(makeContext(), closedEvent, deps);
+
+    expect(postDisputeToQbo).toHaveBeenCalledTimes(1);
+  });
+
+  // ── created → won ──────────────────────────────────────────────────────────
+
+  it('created then won books the loss once and reverses it once', async () => {
+    const withdrawal = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_fee_1', -1500, 'stripe_fee', 'chargeback_fee'),
+    ];
+    // On a win Stripe posts the credit back alongside the original withdrawal.
+    const afterWin = [
+      ...withdrawal,
+      makeBalanceTransaction('bt_recovery_1', 10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_fee_return_1', 1500, 'stripe_fee', 'chargeback_fee'),
+    ];
+    const postDisputeToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_loss_1', type: 'journal-entry' });
+    const postDisputeReversalToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' });
+    const idempotencyStore = makeIdempotencyStore();
+
+    const createdDeps = makeDeps(withdrawal, {
+      postDisputeToQbo,
+      postDisputeReversalToQbo,
+      idempotencyStore,
+    });
+    await handleDisputeCreated(makeContext(), makeCreatedEvent(withdrawal), createdDeps);
+
+    const wonDeps = makeDeps(afterWin, {
+      postDisputeToQbo,
+      postDisputeReversalToQbo,
+      idempotencyStore,
+    });
+    const { event: wonEvent } = makeDisputeEvent('won', afterWin);
+    await handleDisputeClosed(makeContext(), wonEvent, wonDeps);
+
+    expect(postDisputeToQbo).toHaveBeenCalledTimes(1);
+    expect(postDisputeReversalToQbo).toHaveBeenCalledTimes(1);
+    expect(postDisputeReversalToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({ lossAmount: 10000, feeAmount: 1500 })
+    );
+  });
+
+  it('reverses only the disputed amount when Stripe keeps the dispute fee on a win', async () => {
+    const withdrawal = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+      makeBalanceTransaction('bt_fee_1', -1500, 'stripe_fee', 'chargeback_fee'),
+    ];
+    // Amount comes back; no positive chargeback_fee entry, so the $15 stays spent.
+    const afterWin = [
+      ...withdrawal,
+      makeBalanceTransaction('bt_recovery_1', 10000, 'adjustment', 'chargeback'),
+    ];
+    const postDisputeReversalToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' });
+    const idempotencyStore = makeIdempotencyStore();
+
+    await handleDisputeCreated(
+      makeContext(),
+      makeCreatedEvent(withdrawal),
+      makeDeps(withdrawal, { postDisputeReversalToQbo, idempotencyStore })
+    );
+
+    const { event: wonEvent } = makeDisputeEvent('won', afterWin);
+    await handleDisputeClosed(
+      makeContext(),
+      wonEvent,
+      makeDeps(afterWin, { postDisputeReversalToQbo, idempotencyStore })
+    );
+
+    expect(postDisputeReversalToQbo).toHaveBeenCalledWith(
+      expect.objectContaining({ lossAmount: 10000, feeAmount: 0 })
+    );
+  });
+
+  it('restores the gift to paid when the dispute is won', async () => {
+    const salesforce = {
+      ...makeSalesforceSvc(),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue('sf_charge_1'),
+    } as Partial<SalesforceSvc>;
+    const afterWin = [makeBalanceTransaction('bt_recovery_1', 10000, 'adjustment', 'chargeback')];
+    const { event: wonEvent } = makeDisputeEvent('won', afterWin);
+
+    await handleDisputeClosed(
+      makeContext(),
+      wonEvent,
+      makeDeps(afterWin, {
+        salesforce,
+        idempotencyStore: makeIdempotencyStore([WITHDRAWAL_POSTED_KEY]),
+      })
+    );
+
+    expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({ transaction_type__c: 'charge', status__c: 'paid' }),
+      'stripe_charge_id__c',
+      { overrideId: 'sf_charge_1' }
+    );
+  });
+
+  it('created then won posts one reversal even when the won event is redelivered', async () => {
+    const withdrawal = [
+      makeBalanceTransaction('bt_withdrawal_1', -10000, 'adjustment', 'chargeback'),
+    ];
+    const afterWin = [
+      ...withdrawal,
+      makeBalanceTransaction('bt_recovery_1', 10000, 'adjustment', 'chargeback'),
+    ];
+    const postDisputeReversalToQbo = vi
+      .fn()
+      .mockResolvedValue({ qboId: 'qbo_reversal_1', type: 'journal-entry' });
+    const idempotencyStore = makeIdempotencyStore();
+
+    await handleDisputeCreated(
+      makeContext(),
+      makeCreatedEvent(withdrawal),
+      makeDeps(withdrawal, { postDisputeReversalToQbo, idempotencyStore })
+    );
+
+    const { event: wonEvent } = makeDisputeEvent('won', afterWin);
+    const wonDeps = makeDeps(afterWin, { postDisputeReversalToQbo, idempotencyStore });
+    await handleDisputeClosed(makeContext(), wonEvent, wonDeps);
+    await handleDisputeClosed(makeContext(), wonEvent, wonDeps);
+
+    expect(postDisputeReversalToQbo).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the reversal for a won dispute whose withdrawal never reached QBO', async () => {
+    const afterWin = [makeBalanceTransaction('bt_recovery_1', 10000, 'adjustment', 'chargeback')];
+    const postDisputeReversalToQbo = vi.fn();
+    const { event: wonEvent } = makeDisputeEvent('won', afterWin);
+
+    await handleDisputeClosed(
+      makeContext(),
+      wonEvent,
+      makeDeps(afterWin, { postDisputeReversalToQbo, idempotencyStore: makeIdempotencyStore() })
+    );
+
+    expect(postDisputeReversalToQbo).not.toHaveBeenCalled();
   });
 });
