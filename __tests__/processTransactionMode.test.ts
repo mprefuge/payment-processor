@@ -9,6 +9,11 @@
  *   4. STRIPE_MODE env var
  *   5. STRIPE_LIVE_MODE_ENABLED / STRIPE_LIVEMODE env vars
  *   6. Falls back to true (live) UNLESS request category === 'testing'
+ *
+ * Every case below runs with TEST_MODE_OVERRIDE_KEY unset, which is the state
+ * production ships in. Behaviour when it IS set — the request body's `livemode`
+ * becoming authoritative, and unkeyed query/header overrides being ignored — is
+ * covered in processTransactionModeOverrideKey.test.ts.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
@@ -18,7 +23,17 @@ const require = createRequire(import.meta.url);
 describe('processTransaction getConfiguredMode', () => {
   let internals: any;
 
-  const ENV_KEYS = ['STRIPE_MODE', 'STRIPE_LIVE_MODE_ENABLED', 'STRIPE_LIVEMODE'];
+  // TEST_MODE_OVERRIDE_KEY is cleared here as well as in the new
+  // processTransactionModeOverrideKey suite. Every case in this file asserts the
+  // pre-existing, unconfigured behaviour, and CI injects the real deployment
+  // configuration as repository secrets — so leaving it to the ambient
+  // environment would make these tests measure whatever the runner supplied.
+  const ENV_KEYS = [
+    'STRIPE_MODE',
+    'STRIPE_LIVE_MODE_ENABLED',
+    'STRIPE_LIVEMODE',
+    'TEST_MODE_OVERRIDE_KEY',
+  ];
 
   beforeEach(() => {
     vi.resetModules();
