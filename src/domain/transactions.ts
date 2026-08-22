@@ -610,6 +610,39 @@ const deriveStatementDescriptor = (charge: Stripe.Charge | null | undefined): st
   );
 };
 
+/**
+ * Donor intent that only the donation form knows: how often the donor meant to
+ * give, and whether they chose to cover the processing fee (and by how much).
+ *
+ * None of it can be reconstructed from a PaymentIntent, Charge or
+ * BalanceTransaction -- `Amount_Fee__c` is Stripe's own fee, a different
+ * number -- so it has to ride along in metadata. `processTransaction` mirrors
+ * it onto the PaymentIntent (one-time) and the Subscription (recurring); this
+ * reader is what pulls it back off whichever object carried it.
+ */
+export const readDonorIntentFromMetadata = (
+  metadata: Record<string, unknown> | null | undefined
+): {
+  frequency__c: string | null;
+  cover_fees__c: boolean | null;
+  cover_fees_amount__c: number | null;
+} => {
+  const source = metadata ?? undefined;
+
+  return {
+    frequency__c: parseMetadataString(source, 'frequency__c', 'Frequency__c', 'frequency'),
+    cover_fees__c: parseMetadataBoolean(source, 'cover_fees__c', 'Cover_Fees__c', 'cover_fees'),
+    cover_fees_amount__c: coverFeesAmountToMajorUnits(
+      parseMetadataNumber(
+        source,
+        'cover_fees_amount__c',
+        'Cover_Fees_Amount__c',
+        'cover_fees_amount'
+      )
+    ),
+  };
+};
+
 export const mapStripeToTransaction = (
   input: MapStripeToTransactionInput
 ): TransactionUpsertDTO => {

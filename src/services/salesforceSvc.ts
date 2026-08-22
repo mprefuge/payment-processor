@@ -303,6 +303,30 @@ const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
   return apiName ?? (field as string);
 };
 
+/**
+ * Fields where `null` means "this writer could not determine it", never "clear
+ * the value in Salesforce".
+ *
+ * They carry donor intent captured by the donation form at checkout --
+ * how often the donor meant to give, and whether they chose to cover the
+ * processing fee -- which cannot be reconstructed from Stripe's own objects
+ * (`Amount_Fee__c` is Stripe's fee, a different number). When the webhook
+ * cannot find the metadata it emits `null`, and because upsert previously
+ * wrote that null through, `Cover_Fees_Amount__c` and `Frequency__c` were
+ * wiped minutes after every gift -- leaving finance unable to separate the
+ * base gift from the covered fee.
+ *
+ * Deliberately scoped to these three fields rather than skipping every null:
+ * `markPostedToQbo` clears `posting_error__c` with an explicit null, and
+ * `clearStaleQboDocReference` clears `qbo_doc_type__c` / `qbo_doc_id__c` the
+ * same way. Those writes are legitimate and must keep working.
+ */
+const NULL_MEANS_UNKNOWN_FIELDS: ReadonlySet<string> = new Set([
+  'frequency__c',
+  'cover_fees__c',
+  'cover_fees_amount__c',
+]);
+
 const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {
   const record: TransactionRecord = {};
   for (const key of Object.keys(input) as Array<keyof TransactionRecordInput>) {
@@ -312,6 +336,10 @@ const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRe
 
     const value = input[key];
     if (value === undefined) {
+      continue;
+    }
+
+    if (value === null && NULL_MEANS_UNKNOWN_FIELDS.has(key as string)) {
       continue;
     }
 
