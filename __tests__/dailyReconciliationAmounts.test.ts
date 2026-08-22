@@ -27,6 +27,18 @@ const PAYOUT_ID = 'po_1PabcDEF12345';
 
 const FEES_ACCOUNT = { name: 'Stripe Fees', value: '42' };
 const CLEARING_ACCOUNT = { name: 'Stripe Clearing', value: '7' };
+const REVENUE_ACCOUNT = { name: 'Revenue', value: '9' };
+
+/**
+ * `buildDocNumber` pairs a receipt with its fee entry by giving both the same date and
+ * charge-id tail: 'CHG' and 'FEE' are the same length, so CHG-20260528-DEF12345 pairs with
+ * FEE-20260528-DEF12345. `ch_3NabcDEF12345` minus its `ch_` prefix, last 8 characters.
+ */
+const CHARGE_TAIL = '20260528-DEF12345';
+const RECEIPT_DOC_NUMBER = `CHG-${CHARGE_TAIL}`;
+const FEE_JE_DOC_NUMBER = `FEE-${CHARGE_TAIL}`;
+/** `po_1PabcDEF12345` minus its prefix, last 6 characters — the POFEE budget. */
+const POFEE_DOC_NUMBER = 'POFEE-20260528-F12345';
 
 const chargeFixture = (overrides: Record<string, any> = {}) => ({
   id: CHARGE_ID,
@@ -40,13 +52,16 @@ const chargeFixture = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 });
 
-/** A SalesReceipt as qboSvc posts one: positive revenue line, negative Stripe fee line. */
+/**
+ * SHAPE 1 — the legacy sales-receipt: gross as positive item lines with the processor fee
+ * as a negative item line on the same document. Historical documents still look like this.
+ */
 const salesReceiptFixture = ({
   grossDollars = 100,
   feeDollars = 3.2,
 }: { grossDollars?: number; feeDollars?: number } = {}) => ({
   Id: '101',
-  DocNumber: 'CHG-20260528-100',
+  DocNumber: RECEIPT_DOC_NUMBER,
   TxnDate: DATE,
   TotalAmt: grossDollars - feeDollars,
   PrivateNote: `Original Charge Amount: ${grossDollars.toFixed(2)} | Stripe Charge ID: ${CHARGE_ID} | Stripe Payment Intent: ${PI_ID}`,
@@ -70,6 +85,131 @@ const salesReceiptFixture = ({
       : []),
     { Amount: grossDollars - feeDollars, DetailType: 'SubTotalLineDetail', SubTotalLineDetail: {} },
   ],
+});
+
+/**
+ * SHAPE 2 — the current sales-receipt strategy: the receipt carries GROSS with no fee
+ * line, and the fee is a paired journal entry (Dr Stripe Fees / Cr Stripe Clearing).
+ * Reading the receipt alone would report a missing fee on every single gift.
+ */
+const grossOnlyReceiptFixture = (grossDollars = 100) => ({
+  Id: '101',
+  DocNumber: RECEIPT_DOC_NUMBER,
+  TxnDate: DATE,
+  TotalAmt: grossDollars,
+  PrivateNote: `Donation — Jane Doe (Spring Appeal) | Stripe Charge ID: ${CHARGE_ID}`,
+  DepositToAccountRef: CLEARING_ACCOUNT,
+  Line: [
+    {
+      Amount: grossDollars,
+      DetailType: 'SalesItemLineDetail',
+      Description: 'Donation',
+      SalesItemLineDetail: {},
+    },
+    { Amount: grossDollars, DetailType: 'SubTotalLineDetail', SubTotalLineDetail: {} },
+  ],
+});
+
+/**
+ * The paired fee entry for SHAPE 2. Its memo is the receipt's memo, which for anything
+ * posted through the Salesforce sync paths is a donor and campaign name carrying NO Stripe
+ * id — so the pair has to be found by its DocNumber, not by id matching.
+ */
+const pairedFeeJournalEntryFixture = (feeDollars = 3.2) => ({
+  Id: '102',
+  DocNumber: FEE_JE_DOC_NUMBER,
+  TxnDate: DATE,
+  TotalAmt: feeDollars,
+  PrivateNote: 'Donation — Jane Doe (Spring Appeal)',
+  Line: [
+    {
+      Amount: feeDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Debit', AccountRef: FEES_ACCOUNT },
+    },
+    {
+      Amount: feeDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Credit', AccountRef: CLEARING_ACCOUNT },
+    },
+  ],
+});
+
+/** SHAPE 3 — the je-transfer strategy: one combined journal entry for gross and fee. */
+const combinedJournalEntryFixture = ({ grossDollars = 100, feeDollars = 3.2 } = {}) => ({
+  Id: '201',
+  DocNumber: `CHGJE-${CHARGE_TAIL}`,
+  TxnDate: DATE,
+  TotalAmt: grossDollars + feeDollars,
+  PrivateNote: `Stripe charge ${CHARGE_ID}`,
+  Line: [
+    {
+      Amount: grossDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Debit', AccountRef: CLEARING_ACCOUNT },
+    },
+    {
+      Amount: grossDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Credit', AccountRef: REVENUE_ACCOUNT },
+    },
+    {
+      Amount: feeDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Debit', AccountRef: FEES_ACCOUNT },
+    },
+    {
+      Amount: feeDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Credit', AccountRef: CLEARING_ACCOUNT },
+    },
+  ],
+});
+
+/**
+ * The payout-level account-fee entry: one journal entry per payout booking the fees that
+ * belong to no charge. Its memo carries the payout id and, up to a cap, the individual
+ * balance-transaction ids.
+ */
+const payoutAccountFeeJournalEntryFixture = ({
+  feeDollars = 6.8,
+  balanceTransactionIds = [] as string[],
+} = {}) => ({
+  Id: '777',
+  DocNumber: POFEE_DOC_NUMBER,
+  TxnDate: DATE,
+  TotalAmt: feeDollars,
+  PrivateNote: [
+    `Stripe payout ${PAYOUT_ID} account-level activity`,
+    `Account fees: -$${feeDollars.toFixed(2)}`,
+    ...balanceTransactionIds,
+  ].join(' | '),
+  Line: [
+    {
+      Amount: feeDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Debit', AccountRef: FEES_ACCOUNT },
+    },
+    {
+      Amount: feeDollars,
+      DetailType: 'JournalEntryLineDetail',
+      JournalEntryLineDetail: { PostingType: 'Credit', AccountRef: CLEARING_ACCOUNT },
+    },
+  ],
+});
+
+const accountFeeBalanceTransaction = (overrides: Record<string, any> = {}) => ({
+  id: 'txn_feeACH123456',
+  type: 'stripe_fee',
+  amount: -680,
+  fee: 0,
+  net: -680,
+  currency: 'usd',
+  created: CREATED,
+  description: 'Failed ACH payment fee',
+  reporting_category: 'fee',
+  source: null,
+  ...overrides,
 });
 
 const depositFixture = () => ({
@@ -124,7 +264,10 @@ type Scenario = {
 const loadHandlerFor = async (scenario: Scenario) => {
   vi.resetModules();
 
-  vi.doMock('../src/services/qbo/stripe/fetchStripe', () => ({
+  // Only the fetchers are stubbed. The balance-transaction classification stays REAL, so
+  // these tests exercise the same predicate the payout handler posts from.
+  vi.doMock('../src/services/qbo/stripe/fetchStripe', async (importOriginal) => ({
+    ...((await importOriginal()) as Record<string, unknown>),
     fetchStripeChargesSince: vi.fn(async () => scenario.charges ?? []),
     fetchStripeRefundsSince: vi.fn(async () => scenario.refunds ?? []),
     fetchStripePayoutsSince: vi.fn(async () => scenario.payouts ?? []),
@@ -255,20 +398,21 @@ describe('dailyReconciliation — amount-level reconciliation', () => {
   });
 
   it('detects an account-level Stripe fee that belongs to no charge and reached no QBO entry', async () => {
+    const radarFee = accountFeeBalanceTransaction({
+      id: 'txn_feeRADAR12345',
+      amount: -2500,
+      net: -2500,
+      description: 'Billing - Radar for Fraud Teams',
+    });
+
     const scenario = cleanScenario();
-    scenario.accountFees = [
-      {
-        id: 'txn_feeRADAR12345',
-        type: 'stripe_fee',
-        amount: -2500,
-        fee: 0,
-        net: -2500,
-        currency: 'usd',
-        created: CREATED,
-        description: 'Billing - Radar for Fraud Teams',
-        reporting_category: 'fee',
-        source: null,
-      },
+    scenario.accountFees = [radarFee];
+    // Swept into the payout, so it is due: $96.80 of charge net less the $25.00 fee.
+    scenario.payouts = [payoutFixture({ amount: 7180 })];
+    scenario.payoutBalanceTransactions = [
+      chargeBalanceTransaction(),
+      radarFee,
+      payoutBalanceTransaction(7180),
     ];
 
     const report = await runFor(scenario);
@@ -283,6 +427,7 @@ describe('dailyReconciliation — amount-level reconciliation', () => {
     expect(finding.details).toMatchObject({
       balanceTransactionType: 'stripe_fee',
       feeCents: 2500,
+      payoutId: PAYOUT_ID,
     });
   });
 
@@ -324,16 +469,7 @@ describe('dailyReconciliation — amount-level reconciliation', () => {
     scenario.payouts = [payoutFixture({ amount: 9000 })];
     scenario.payoutBalanceTransactions = [
       chargeBalanceTransaction(),
-      {
-        id: 'txn_feeACH123456',
-        type: 'stripe_fee',
-        amount: -680,
-        fee: 0,
-        net: -680,
-        created: CREATED,
-        description: 'Failed ACH payment fee',
-        source: null,
-      },
+      accountFeeBalanceTransaction(),
       payoutBalanceTransaction(9000),
     ];
 
@@ -351,6 +487,157 @@ describe('dailyReconciliation — amount-level reconciliation', () => {
       unpostedBalanceTransactionNetCents: -680,
     });
     expect(imbalance.details!.unpostedBalanceTransactionIds).toEqual(['txn_feeACH123456']);
+  });
+
+  // ── The three document shapes a charge's money can take ──────────────────
+  //
+  // A checker that understands only one of these cries wolf on every gift posted in the
+  // others. An alerting system that fires on everything is worse than none.
+
+  it('reconciles the current sales-receipt shape: gross receipt plus paired FEE- entry', async () => {
+    const scenario = cleanScenario();
+    scenario.qbo!.SalesReceipt = [grossOnlyReceiptFixture()];
+    scenario.qbo!.JournalEntry = [pairedFeeJournalEntryFixture()];
+
+    const report = await runFor(scenario);
+
+    // The receipt carries no fee line at all — the fee is on its pair, found by DocNumber.
+    expect(report.discrepancies.amountMismatches).toEqual([]);
+    expect(report.discrepancies.payoutImbalances).toEqual([]);
+    expect(report.summary.totalDiscrepancies).toBe(0);
+  });
+
+  it('reconciles the je-transfer shape: one combined journal entry', async () => {
+    const scenario = cleanScenario();
+    scenario.qbo!.SalesReceipt = [];
+    scenario.qbo!.JournalEntry = [combinedJournalEntryFixture()];
+
+    const report = await runFor(scenario);
+
+    expect(report.discrepancies.amountMismatches).toEqual([]);
+    expect(report.discrepancies.payoutImbalances).toEqual([]);
+    expect(report.summary.totalDiscrepancies).toBe(0);
+  });
+
+  it('detects the partial failure where the receipt posted but its fee entry did not', async () => {
+    const scenario = cleanScenario();
+    scenario.qbo!.SalesReceipt = [grossOnlyReceiptFixture()];
+    // The paired FEE- entry is genuinely absent — the second half never posted.
+    scenario.qbo!.JournalEntry = [];
+
+    const report = await runFor(scenario);
+
+    const feeFinding = report.discrepancies.amountMismatches.find(
+      (item) => item.type === 'qbo_fee_missing'
+    );
+    expect(feeFinding).toBeDefined();
+    expect(feeFinding!.details).toMatchObject({
+      expectedCents: 320,
+      actualCents: 0,
+      expectedPairedFeeDocNumber: FEE_JE_DOC_NUMBER,
+    });
+    // And the money is missing from the payout arithmetic too.
+    expect(report.discrepancies.payoutImbalances).toHaveLength(1);
+  });
+
+  // ── Account-level fees and the payout entry that books them ───────────────
+
+  it('reports nothing when the payout account-fee entry books the account-level fees', async () => {
+    const scenario = cleanScenario();
+    scenario.payouts = [payoutFixture({ amount: 9000 })];
+    scenario.payoutBalanceTransactions = [
+      chargeBalanceTransaction(),
+      accountFeeBalanceTransaction(),
+      payoutBalanceTransaction(9000),
+    ];
+    // The POFEE- memo lists the payout id but not this balance-transaction id — the memo
+    // caps how many it can carry, so the payout id is what has to make the match.
+    scenario.qbo!.JournalEntry = [payoutAccountFeeJournalEntryFixture()];
+
+    const report = await runFor(scenario);
+
+    expect(report.discrepancies.accountFeesMissingQbo).toEqual([]);
+    // The entry also completes the payout arithmetic: 96.80 − 6.80 = 90.00.
+    expect(report.discrepancies.payoutImbalances).toEqual([]);
+    expect(report.summary.totalDiscrepancies).toBe(0);
+  });
+
+  it('reports the account-level fee when the payout account-fee entry is absent', async () => {
+    const scenario = cleanScenario();
+    scenario.payouts = [payoutFixture({ amount: 9000 })];
+    scenario.payoutBalanceTransactions = [
+      chargeBalanceTransaction(),
+      accountFeeBalanceTransaction(),
+      payoutBalanceTransaction(9000),
+    ];
+    scenario.qbo!.JournalEntry = [];
+
+    const report = await runFor(scenario);
+
+    expect(report.discrepancies.accountFeesMissingQbo).toHaveLength(1);
+    const [finding] = report.discrepancies.accountFeesMissingQbo;
+    expect(finding.stripeId).toBe('txn_feeACH123456');
+    expect(finding.details).toMatchObject({
+      payoutId: PAYOUT_ID,
+      feeCents: 680,
+      expectedQboDocument: 'payout account-fee journal entry (POFEE-)',
+    });
+  });
+
+  it('does not report an account-level fee that has not been paid out yet', async () => {
+    const scenario = cleanScenario();
+    // Enumerated from the window, but swept into no payout — nothing posts it until its
+    // payout arrives, so calling it missing would be a false alarm.
+    scenario.accountFees = [accountFeeBalanceTransaction({ id: 'txn_feeNotYetPaidOut' })];
+
+    const report = await runFor(scenario);
+
+    expect(report.counts.stripe.accountFees).toBe(1);
+    expect(report.discrepancies.accountFeesMissingQbo).toEqual([]);
+  });
+
+  it('does not report a dispute adjustment as an unbooked account-level fee', async () => {
+    const scenario = cleanScenario();
+    scenario.payouts = [payoutFixture({ amount: 9180 })];
+    scenario.payoutBalanceTransactions = [
+      chargeBalanceTransaction(),
+      // charge.dispute.* books this as a DSP- entry; the payout counts it but never posts it.
+      accountFeeBalanceTransaction({
+        id: 'txn_disputeAdj12',
+        type: 'adjustment',
+        reporting_category: 'dispute',
+        amount: -500,
+        net: -500,
+        description: 'Chargeback withdrawn',
+      }),
+      payoutBalanceTransaction(9180),
+    ];
+    scenario.qbo!.JournalEntry = [
+      {
+        Id: '888',
+        DocNumber: 'DSP-20260528-ABC123',
+        TxnDate: DATE,
+        TotalAmt: 5,
+        PrivateNote: 'Dispute txn_disputeAdj12',
+        Line: [
+          {
+            Amount: 5,
+            DetailType: 'JournalEntryLineDetail',
+            JournalEntryLineDetail: { PostingType: 'Debit', AccountRef: FEES_ACCOUNT },
+          },
+          {
+            Amount: 5,
+            DetailType: 'JournalEntryLineDetail',
+            JournalEntryLineDetail: { PostingType: 'Credit', AccountRef: CLEARING_ACCOUNT },
+          },
+        ],
+      },
+    ];
+
+    const report = await runFor(scenario);
+
+    expect(report.discrepancies.accountFeesMissingQbo).toEqual([]);
+    expect(report.discrepancies.payoutImbalances).toEqual([]);
   });
 
   it('renders an actionable alert instead of a bare category count', async () => {
@@ -453,15 +740,58 @@ describe('dailyReconciliation — QBO document amount extraction', () => {
 
   it('skips charges with no expanded balance transaction rather than inventing a fee', () => {
     const docs = [{ ...salesReceiptFixture(), entityType: 'SalesReceipt' as const }];
-    const index = internals.buildQboDocIndex(docs);
+    const lookup = internals.buildQboDocLookup(docs);
 
     const items = internals.findChargeAmountMismatches(
       [chargeFixture({ balance_transaction: BT_ID })],
-      index,
-      docs,
+      lookup,
       accounts
     );
 
     expect(items).toEqual([]);
+  });
+
+  it('pairs a CHG- receipt with its FEE- journal entry by DocNumber alone', () => {
+    const docs = [
+      { ...grossOnlyReceiptFixture(), entityType: 'SalesReceipt' as const },
+      { ...pairedFeeJournalEntryFixture(), entityType: 'JournalEntry' as const },
+    ];
+    const lookup = internals.buildQboDocLookup(docs);
+
+    // Only the receipt carries the charge id; the fee entry's memo is a donor name.
+    const resolved = internals.resolveDocsForStripeIds([CHARGE_ID], lookup);
+
+    expect(resolved.map((doc: any) => doc.DocNumber)).toEqual([
+      RECEIPT_DOC_NUMBER,
+      FEE_JE_DOC_NUMBER,
+    ]);
+  });
+
+  it('does not mistake a per-object entry for the payout account-fee entry', () => {
+    const payoutEntry = {
+      ...payoutAccountFeeJournalEntryFixture(),
+      entityType: 'JournalEntry' as const,
+    };
+    // A dispute entry from the failed-and-disputed work, quoting the same payout id.
+    const disputeEntry = {
+      Id: '888',
+      entityType: 'JournalEntry' as const,
+      DocNumber: 'DSP-20260528-ABC123',
+      TxnDate: DATE,
+      PrivateNote: `Dispute on payout ${PAYOUT_ID}`,
+      Line: [],
+    };
+    const transfer = {
+      Id: '999',
+      entityType: 'Transfer' as const,
+      DocNumber: 'PO-20260528',
+      TxnDate: DATE,
+      PrivateNote: `Stripe payout ${PAYOUT_ID}`,
+      Line: [],
+    };
+
+    expect(internals.isPayoutAccountFeeEntry(payoutEntry, PAYOUT_ID)).toBe(true);
+    expect(internals.isPayoutAccountFeeEntry(disputeEntry, PAYOUT_ID)).toBe(false);
+    expect(internals.isPayoutAccountFeeEntry(transfer, PAYOUT_ID)).toBe(false);
   });
 });

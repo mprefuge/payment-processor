@@ -41,6 +41,8 @@ import {
   fetchStripePayoutsSince,
   fetchAccountFeeBalanceTransactionsSince,
   fetchBalanceTransactionsForPayout,
+  classifyBalanceTransaction,
+  isAccountLevelFeeBalanceTransaction,
 } from '../services/qbo/stripe/fetchStripe';
 import { mapStripeToTransaction } from '../domain/transactions';
 import Stripe from 'stripe';
@@ -2222,6 +2224,131 @@ const findDocsForIds = (
 const describeDoc = (doc: QboDocWithEntity): string =>
   `${doc.entityType} ${String(doc.Id ?? 'unknown')}${doc.DocNumber ? ` (${doc.DocNumber})` : ''}`;
 
+// ── Document shapes and how a charge's money is spread across them ─────────
+//
+// A charge's gross and fee do not always live on one document. Three shapes exist:
+//
+//   1. Legacy `sales-receipt`: ONE SalesReceipt carrying gross as positive item lines and
+//      the processor fee as a NEGATIVE item line. Historical documents still look like
+//      this and must keep reconciling.
+//   2. Current `sales-receipt`: the SalesReceipt is posted at GROSS with no fee line, and
+//      the fee is a PAIRED journal entry (Dr Stripe Fees / Cr Stripe Clearing). Reading
+//      the receipt alone would report a missing fee on every single gift.
+//   3. `je-transfer`: ONE JournalEntry carrying Dr Clearing gross / Cr Revenue gross /
+//      Dr Fees fee / Cr Clearing fee.
+//
+// `buildDocNumber` gives shape 2 a deliberate pairing key: 'CHG' and 'FEE' are both three
+// characters, so the receipt's `CHG-YYYYMMDD-<charge tail>` and the fee entry's
+// `FEE-YYYYMMDD-<charge tail>` share an identical date and charge-id tail. Pairing on that
+// works even when the shared memo carries no Stripe id at all — which is the case for
+// every document posted through the Salesforce sync paths, whose memo is a donor and
+// campaign name.
+
+/** DocNumber layout `buildDocNumber` emits whenever an id is available. */
+const DOC_NUMBER_PAIR_PATTERN = /^([A-Za-z]+)-(\d{8}-[A-Za-z0-9]+)$/;
+
+/** Returns the shared `YYYYMMDD-<tail>` suffix when the DocNumber carries `prefix`. */
+const docNumberPairKey = (docNumber: string | null | undefined, prefix: string): string | null => {
+  const match = DOC_NUMBER_PAIR_PATTERN.exec((docNumber ?? '').trim());
+  if (!match) return null;
+  return match[1].toUpperCase() === prefix ? match[2].toUpperCase() : null;
+};
+
+/**
+ * DocNumber prefixes that identify a document as belonging to ONE Stripe object: a charge
+ * (CHG/CHGJE), its paired fee (FEE), a refund (REF), a dispute or its reversal
+ * (DSP/DSPREV), or a failed-payment reversal (CHGREV).
+ *
+ * Used to make sure a per-object entry is never mistaken for the payout-level
+ * account-fee entry, which is the one document that legitimately references a payout id
+ * from a journal entry.
+ */
+const PER_OBJECT_DOC_NUMBER_PREFIXES = ['CHG', 'CHGJE', 'FEE', 'REF', 'DSP', 'DSPREV', 'CHGREV'];
+
+const hasPerObjectDocNumber = (doc: QboDocRow): boolean => {
+  const docNumber = (doc.DocNumber ?? '').trim().toUpperCase();
+  return PER_OBJECT_DOC_NUMBER_PREFIXES.some((prefix) => docNumber.startsWith(`${prefix}-`));
+};
+
+type QboDocLookup = {
+  /** Stripe id → documents mentioning it. */
+  index: Map<string, QboDocWithEntity[]>;
+  /** `YYYYMMDD-<charge tail>` → the `FEE-` journal entries paired with that receipt. */
+  feePairIndex: Map<string, QboDocWithEntity[]>;
+  allDocs: QboDocWithEntity[];
+};
+
+const buildQboDocLookup = (docs: QboDocWithEntity[]): QboDocLookup => {
+  const feePairIndex = new Map<string, QboDocWithEntity[]>();
+  for (const doc of docs) {
+    if (doc.entityType !== 'JournalEntry') continue;
+    const key = docNumberPairKey(doc.DocNumber, 'FEE');
+    if (!key) continue;
+    const bucket = feePairIndex.get(key) ?? [];
+    bucket.push(doc);
+    feePairIndex.set(key, bucket);
+  }
+
+  return { index: buildQboDocIndex(docs), feePairIndex, allDocs: docs };
+};
+
+const docKey = (doc: QboDocWithEntity): string => `${doc.entityType}:${String(doc.Id ?? '')}`;
+
+/**
+ * Resolves every document that carries part of a charge's money: the ones found by Stripe
+ * id, plus the `FEE-` journal entry paired with any `CHG-` receipt among them.
+ */
+const resolveDocsForStripeIds = (ids: string[], lookup: QboDocLookup): QboDocWithEntity[] => {
+  const docs = findDocsForIds(ids, lookup.index, lookup.allDocs);
+
+  const seen = new Set(docs.map(docKey));
+  const withPairs = [...docs];
+
+  for (const doc of docs) {
+    if (doc.entityType !== 'SalesReceipt') continue;
+    const pairKey = docNumberPairKey(doc.DocNumber, 'CHG');
+    if (!pairKey) continue;
+    for (const feeDoc of lookup.feePairIndex.get(pairKey) ?? []) {
+      const key = docKey(feeDoc);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      withPairs.push(feeDoc);
+    }
+  }
+
+  return withPairs;
+};
+
+/**
+ * The DocNumber the paired fee journal entry would carry for a receipt — quoted in the
+ * finding so an operator can search QuickBooks for the half that never posted.
+ */
+const expectedPairedFeeDocNumber = (docs: QboDocWithEntity[]): string | null => {
+  for (const doc of docs) {
+    if (doc.entityType !== 'SalesReceipt') continue;
+    const pairKey = docNumberPairKey(doc.DocNumber, 'CHG');
+    if (pairKey) return `FEE-${pairKey}`;
+  }
+  return null;
+};
+
+/**
+ * True when `doc` is the payout-level account-fee journal entry for `payoutId` — the
+ * `POFEE-` entry that books account-level fees and non-dispute adjustments.
+ *
+ * Matched by the payout id in its memo rather than by reconstructing its DocNumber, and
+ * fenced off from per-object entries so a dispute or refund entry can never stand in for
+ * it. The payout's own Transfer/Deposit also references the payout id, which is why this
+ * requires a JournalEntry.
+ */
+const isPayoutAccountFeeEntry = (doc: QboDocWithEntity, payoutId: string): boolean =>
+  doc.entityType === 'JournalEntry' &&
+  !hasPerObjectDocNumber(doc) &&
+  docReferencesId(doc, payoutId);
+
+const findPayoutAccountFeeEntries = (payoutId: string, lookup: QboDocLookup): QboDocWithEntity[] =>
+  lookup.allDocs.filter((doc) => isPayoutAccountFeeEntry(doc, payoutId));
+
 /**
  * Compares the gross and fee actually posted to QuickBooks against the Stripe balance
  * transaction for every charge that DOES have a matching QBO document.
@@ -2232,8 +2359,7 @@ const describeDoc = (doc: QboDocWithEntity): string =>
  */
 const findChargeAmountMismatches = (
   charges: Stripe.Charge[],
-  index: Map<string, QboDocWithEntity[]>,
-  allDocs: QboDocWithEntity[],
+  lookup: QboDocLookup,
   accounts: QboAccountNames
 ): DiscrepancyItem[] => {
   const items: DiscrepancyItem[] = [];
@@ -2253,7 +2379,9 @@ const findChargeAmountMismatches = (
     const piId = resolveExpandedId(charge.payment_intent);
     const btId = btObject.id ?? null;
     const ids = uniqueStrings([charge.id, piId, btId]);
-    const docs = findDocsForIds(ids, index, allDocs);
+    // Includes the FEE- journal entry paired with a CHG- receipt: since the fee moved off
+    // the receipt, reading the receipt alone would report a missing fee on every gift.
+    const docs = resolveDocsForStripeIds(ids, lookup);
     if (docs.length === 0) continue;
 
     const summaries = docs.map((doc) => summarizeQboDocAmounts(doc, accounts));
@@ -2318,6 +2446,9 @@ const findChargeAmountMismatches = (
     if (actualFeeCents !== expectedFeeCents) {
       const deltaCents = actualFeeCents - expectedFeeCents;
       const feeAbsent = actualFeeCents === 0 && expectedFeeCents > 0;
+      // Under the sales-receipt strategy the fee is its own paired entry, so an absent fee
+      // means that half never posted. Name the DocNumber it would carry.
+      const missingPairDocNumber = feeAbsent ? expectedPairedFeeDocNumber(docs) : null;
 
       items.push({
         system: 'qbo',
@@ -2325,7 +2456,10 @@ const findChargeAmountMismatches = (
         id: docIds[0] || charge.id,
         description: feeAbsent
           ? `${docLabels.join(' + ')} records no processing fee for charge ${charge.id}, but ` +
-            `Stripe charged ${centsToUsd(expectedFeeCents)} — the fee was never booked`
+            `Stripe charged ${centsToUsd(expectedFeeCents)} — the fee was never booked` +
+            (missingPairDocNumber
+              ? ` (no paired fee entry ${missingPairDocNumber} in QuickBooks)`
+              : '')
           : `${docLabels.join(' + ')} records a fee of ${centsToUsd(actualFeeCents)} for charge ` +
             `${charge.id} but Stripe charged ${centsToUsd(expectedFeeCents)} ` +
             `(off by ${centsToUsd(deltaCents)})`,
@@ -2342,6 +2476,7 @@ const findChargeAmountMismatches = (
           expected: centsToUsd(expectedFeeCents),
           actual: centsToUsd(actualFeeCents),
           feesAccount: accounts.fees,
+          expectedPairedFeeDocNumber: missingPairDocNumber,
         },
       });
     }
@@ -2357,23 +2492,85 @@ const findChargeAmountMismatches = (
  * These belong to no charge, so no existing check enumerates them — they cannot be
  * reported missing because nothing knows they exist.
  */
+type AccountFeeCheckResult = {
+  items: DiscrepancyItem[];
+  /**
+   * Account-level fees that have not been swept into a payout yet. Nothing posts them
+   * until their payout arrives, so reporting them missing would be a false alarm.
+   */
+  pendingPayoutCount: number;
+  /** Fees confirmed present in QuickBooks — the check's own denominator. */
+  postedCount: number;
+};
+
+/**
+ * Account-level Stripe fees (monthly billing, Radar, ACH failure, currency conversion,
+ * instant payout, non-dispute adjustments) with no QuickBooks entry.
+ *
+ * These belong to no charge, so no existing check enumerates them — they cannot be
+ * reported missing because nothing knows they exist.
+ *
+ * A fee counts as posted when either:
+ *   • some document quotes its balance-transaction id (the `POFEE-` memo lists them, up
+ *     to a cap), or
+ *   • the payout that swept it has a payout-level account-fee journal entry.
+ *
+ * The second route is what makes this agree with the posting side: account-level fees are
+ * posted per PAYOUT, as one `POFEE-` entry, not per fee. A fee not yet swept into any
+ * payout is therefore not missing — it is simply not due yet, and is counted rather than
+ * reported.
+ */
 const findAccountFeesMissingQbo = (
   feeBalanceTransactions: any[],
-  allDocs: QboDocWithEntity[]
-): DiscrepancyItem[] => {
+  lookup: QboDocLookup,
+  payoutIdByBalanceTransactionId: Map<string, string>
+): AccountFeeCheckResult => {
   const items: DiscrepancyItem[] = [];
+  let pendingPayoutCount = 0;
+  let postedCount = 0;
+
+  // One lookup per payout rather than per fee: a payout usually carries several.
+  const accountFeeEntriesByPayout = new Map<string, QboDocWithEntity[]>();
+  const payoutAccountFeeEntries = (payoutId: string): QboDocWithEntity[] => {
+    const cached = accountFeeEntriesByPayout.get(payoutId);
+    if (cached) return cached;
+    const found = findPayoutAccountFeeEntries(payoutId, lookup);
+    accountFeeEntriesByPayout.set(payoutId, found);
+    return found;
+  };
+
+  const seen = new Set<string>();
 
   for (const bt of feeBalanceTransactions) {
     const id = typeof bt?.id === 'string' ? bt.id : null;
-    if (!id) continue;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
 
     const sourceId = resolveExpandedId(bt.source);
     const ids = uniqueStrings([id, sourceId]);
-    const posted = allDocs.some((doc) => ids.some((candidate) => docReferencesId(doc, candidate)));
-    if (posted) continue;
 
-    // Account-level fees leave the balance, so `amount` is negative; report the magnitude.
-    const feeCents = Math.abs(typeof bt.amount === 'number' ? bt.amount : 0);
+    if (lookup.allDocs.some((doc) => ids.some((candidate) => docReferencesId(doc, candidate)))) {
+      postedCount += 1;
+      continue;
+    }
+
+    const payoutId = payoutIdByBalanceTransactionId.get(id) ?? null;
+    if (!payoutId) {
+      // Not in a payout yet. The payout is what triggers the account-fee posting, so
+      // there is nothing to expect in QuickBooks and nothing to report.
+      pendingPayoutCount += 1;
+      continue;
+    }
+
+    const feeEntries = payoutAccountFeeEntries(payoutId);
+    if (feeEntries.length > 0) {
+      postedCount += 1;
+      continue;
+    }
+
+    // Account-level fees leave the balance, so `net` is negative; report the magnitude.
+    const netCents = typeof bt.net === 'number' ? bt.net : (bt.amount ?? 0);
+    const feeCents = Math.abs(typeof netCents === 'number' ? netCents : 0);
     const date =
       typeof bt.created === 'number'
         ? new Date(bt.created * 1000).toISOString().slice(0, 10)
@@ -2385,12 +2582,13 @@ const findAccountFeesMissingQbo = (
       id,
       description:
         `Stripe account-level fee ${id} (${bt.type ?? 'unknown type'}` +
-        `${bt.description ? `: ${bt.description}` : ''}) of ${centsToUsd(feeCents)} has no ` +
-        `QuickBooks entry — this fee belongs to no charge, so nothing else looks for it`,
+        `${bt.description ? `: ${bt.description}` : ''}) of ${centsToUsd(feeCents)} was swept ` +
+        `into payout ${payoutId} but has no QuickBooks entry — no account-fee journal entry ` +
+        `exists for that payout, and this fee belongs to no charge, so nothing else books it`,
       stripeId: id,
       amount: feeCents / 100,
       date,
-      relatedIds: ids,
+      relatedIds: uniqueStrings([...ids, payoutId]),
       details: {
         sourceSystem: 'stripe',
         missingIn: 'qbo',
@@ -2399,14 +2597,16 @@ const findAccountFeesMissingQbo = (
         reportingCategory: bt.reporting_category ?? null,
         stripeDescription: bt.description ?? null,
         sourceId,
+        payoutId,
         currency: bt.currency ?? null,
         feeCents,
         fee: centsToUsd(feeCents),
+        expectedQboDocument: 'payout account-fee journal entry (POFEE-)',
       },
     });
   }
 
-  return items;
+  return { items, pendingPayoutCount, postedCount };
 };
 
 type PayoutBalanceCheck = {
@@ -2420,6 +2620,8 @@ type PayoutBalanceCheck = {
   unpostedNetCents: number;
   unpostedIds: string[];
   matchedDocIds: string[];
+  /** Account-level fee/adjustment balance transactions swept into this payout. */
+  accountLevelBalanceTransactions: any[];
   date: string | null;
 };
 
@@ -2431,32 +2633,57 @@ type PayoutBalanceCheck = {
  * clearing account for those documents. That figure must equal the payout net that hit
  * the bank (plus any instant-payout fee taken on the payout itself). When it does not,
  * money was posted wrong or not posted at all, and the delta is what is unaccounted for.
+ *
+ * Two populations make up a payout, and they reach QuickBooks by different routes:
+ *   • posted at source — charges (and the processing fee carried on the charge's own
+ *     balance transaction), refunds, dispute adjustments — each has its own document;
+ *   • account-level — fees and non-dispute adjustments that belong to no object — booked
+ *     together as ONE payout-level journal entry.
+ * Looking for a per-object document for an account-level fee would report every payout as
+ * unbalanced, so those are resolved against the payout's account-fee entry instead.
  */
 const buildPayoutBalanceCheck = (
   payout: Stripe.Payout,
   balanceTransactions: any[],
-  index: Map<string, QboDocWithEntity[]>,
-  allDocs: QboDocWithEntity[],
+  lookup: QboDocLookup,
   accounts: QboAccountNames
 ): PayoutBalanceCheck => {
-  const payoutBt = balanceTransactions.find(
-    (bt) => bt?.type === 'payout' || bt?.type === 'payment'
-  );
-  const payoutFeeCents =
-    payoutBt && payoutBt.type === 'payout' && typeof payoutBt.fee === 'number' ? payoutBt.fee : 0;
+  const payoutBt = balanceTransactions.find((bt) => bt?.type === 'payout');
+  const payoutFeeCents = payoutBt && typeof payoutBt.fee === 'number' ? payoutBt.fee : 0;
 
   const componentBts = balanceTransactions.filter(
-    (bt) => bt?.type !== 'payout' && bt?.type !== 'payout_cancel'
+    (bt) => classifyBalanceTransaction(bt) !== 'ignored'
   );
 
   let postedNetCents = 0;
   let stripeNetCents = 0;
   let unpostedNetCents = 0;
   const unpostedIds: string[] = [];
-  const matchedDocIds = new Set<string>();
+  const accountLevelBalanceTransactions: any[] = [];
+
+  // A document is counted once for the whole payout, however many balance transactions
+  // resolve to it — a receipt and its paired fee entry are reached from the same charge.
+  const countedDocs = new Set<string>();
+  const countDoc = (doc: QboDocWithEntity): boolean => {
+    const summary = summarizeQboDocAmounts(doc, accounts);
+    if (summary.basis === 'unknown') return false;
+    const key = docKey(doc);
+    if (countedDocs.has(key)) return true;
+    countedDocs.add(key);
+    postedNetCents += summary.clearingDeltaCents ?? 0;
+    return true;
+  };
+
+  const netOf = (bt: any): number => (typeof bt?.net === 'number' ? bt.net : 0);
 
   for (const bt of componentBts) {
-    stripeNetCents += typeof bt?.net === 'number' ? bt.net : 0;
+    stripeNetCents += netOf(bt);
+
+    if (isAccountLevelFeeBalanceTransaction(bt)) {
+      // Booked per payout, not per fee — resolved below against the payout's entry.
+      accountLevelBalanceTransactions.push(bt);
+      continue;
+    }
 
     const source = bt?.source;
     const sourceId = resolveExpandedId(source);
@@ -2468,20 +2695,28 @@ const buildPayoutBalanceCheck = (
       source && typeof source === 'object' ? resolveExpandedId((source as any).charge) : null;
     const ids = uniqueStrings([bt?.id, sourceId, sourcePi, sourceCharge]);
 
-    const docs = findDocsForIds(ids, index, allDocs);
-    const usable = docs
-      .map((doc) => ({ doc, summary: summarizeQboDocAmounts(doc, accounts) }))
-      .filter(({ summary }) => summary.basis !== 'unknown');
+    const docs = resolveDocsForStripeIds(ids, lookup);
+    const counted = docs.map(countDoc).filter(Boolean);
 
-    if (usable.length === 0) {
-      unpostedNetCents += typeof bt?.net === 'number' ? bt.net : 0;
+    if (counted.length === 0) {
+      unpostedNetCents += netOf(bt);
       unpostedIds.push(ids[0] ?? 'unknown');
-      continue;
     }
+  }
 
-    for (const { doc, summary } of usable) {
-      postedNetCents += summary.clearingDeltaCents ?? 0;
-      matchedDocIds.add(`${doc.entityType}:${String(doc.Id ?? '')}`);
+  if (accountLevelBalanceTransactions.length > 0) {
+    const accountFeeDocs = findPayoutAccountFeeEntries(payout.id, lookup);
+    const perFeeDocs = accountLevelBalanceTransactions.flatMap((bt) =>
+      resolveDocsForStripeIds(uniqueStrings([bt?.id, resolveExpandedId(bt?.source)]), lookup)
+    );
+    const resolved = [...accountFeeDocs, ...perFeeDocs];
+    const counted = resolved.map(countDoc).filter(Boolean);
+
+    if (counted.length === 0) {
+      for (const bt of accountLevelBalanceTransactions) {
+        unpostedNetCents += netOf(bt);
+        unpostedIds.push(typeof bt?.id === 'string' ? bt.id : 'unknown');
+      }
     }
   }
 
@@ -2497,7 +2732,8 @@ const buildPayoutBalanceCheck = (
     unpostedCount: unpostedIds.length,
     unpostedNetCents,
     unpostedIds: unpostedIds.slice(0, 25),
-    matchedDocIds: [...matchedDocIds],
+    matchedDocIds: [...countedDocs],
+    accountLevelBalanceTransactions,
     date: payout.arrival_date
       ? new Date(payout.arrival_date * 1000).toISOString().slice(0, 10)
       : null,
@@ -2553,6 +2789,16 @@ const daysBetween = (from: string, to: string): number =>
     (new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / 86400000
   );
 
+type PayoutCheckOutcome = {
+  items: DiscrepancyItem[];
+  errors: string[];
+  /** Account-level fees found inside the payouts, whether or not they were posted. */
+  accountLevelFees: any[];
+  payoutIdByBalanceTransactionId: Map<string, string>;
+  /** The lookup used, including any documents back-filled from before the window. */
+  lookup: QboDocLookup | null;
+};
+
 /**
  * Runs the payout-level assertion for every paid payout in the window.
  *
@@ -2568,13 +2814,15 @@ const runPayoutBalanceChecks = async (
   accounts: QboAccountNames,
   windowStartDate: string,
   context: InvocationContext
-): Promise<{ items: DiscrepancyItem[]; errors: string[] }> => {
+): Promise<PayoutCheckOutcome> => {
   const items: DiscrepancyItem[] = [];
   const errors: string[] = [];
+  const accountLevelFees: any[] = [];
+  const payoutIdByBalanceTransactionId = new Map<string, string>();
 
   const paidPayouts = payouts.filter((payout) => payout.status === 'paid');
   if (paidPayouts.length === 0) {
-    return { items, errors };
+    return { items, errors, accountLevelFees, payoutIdByBalanceTransactionId, lookup: null };
   }
 
   const balanceTransactionsByPayout = new Map<string, any[]>();
@@ -2605,7 +2853,7 @@ const runPayoutBalanceChecks = async (
   }
 
   if (balanceTransactionsByPayout.size === 0) {
-    return { items, errors };
+    return { items, errors, accountLevelFees, payoutIdByBalanceTransactionId, lookup: null };
   }
 
   // The run already holds documents for [windowStart-1, windowEnd+1]; fetch whatever the
@@ -2651,19 +2899,27 @@ const runPayoutBalanceChecks = async (
     }
   }
 
-  const index = buildQboDocIndex(docs);
+  const lookup = buildQboDocLookup(docs);
 
   for (const payout of paidPayouts) {
     const balanceTransactions = balanceTransactionsByPayout.get(payout.id);
     if (!balanceTransactions || balanceTransactions.length === 0) continue;
 
-    const check = buildPayoutBalanceCheck(payout, balanceTransactions, index, docs, accounts);
+    const check = buildPayoutBalanceCheck(payout, balanceTransactions, lookup, accounts);
     if (check.deltaCents !== 0) {
       items.push(payoutCheckToDiscrepancy(check));
     }
+
+    // A payout is where account-level fees become due, so it is also where they become
+    // checkable — including fees created before this run's own date window.
+    for (const bt of check.accountLevelBalanceTransactions) {
+      if (typeof bt?.id !== 'string') continue;
+      payoutIdByBalanceTransactionId.set(bt.id, payout.id);
+      accountLevelFees.push(bt);
+    }
   }
 
-  return { items, errors };
+  return { items, errors, accountLevelFees, payoutIdByBalanceTransactionId, lookup };
 };
 
 // ---------------------------------------------------------------------------
@@ -2682,9 +2938,9 @@ const MONEY_CATEGORIES = ['amountMismatches', 'accountFeesMissingQbo', 'payoutIm
 
 const NEXT_STEP_BY_CATEGORY: Record<string, string> = {
   amountMismatches:
-    'amountMismatches — open each QBO document listed in details.qboDocs and correct the gross/fee line against the Stripe balance transaction.',
+    'amountMismatches — open each QBO document listed in details.qboDocs and correct the gross/fee line against the Stripe balance transaction. When details.expectedPairedFeeDocNumber is set, the receipt posted but its paired fee entry did not.',
   accountFeesMissingQbo:
-    'accountFeesMissingQbo — these Stripe fees belong to no charge and were never booked; post them to the Stripe Fees account against Stripe Clearing.',
+    'accountFeesMissingQbo — these Stripe fees belong to no charge and were never booked; the payout named in details.payoutId has no account-fee journal entry (POFEE-) covering them.',
   payoutImbalances:
     'payoutImbalances — the deposit does not equal what was posted for the transactions it swept; work the unpostedBalanceTransactionIds first.',
   stripeMissingSalesforce:
@@ -3202,15 +3458,18 @@ export const runReconciliation = async (
   // payout equals the sum of what was posted for the transactions it swept.
   if (systems.includes('stripe') && systems.includes('qbo')) {
     const qboAccounts = resolveQboAccountNames();
-    const qboDocIndex = buildQboDocIndex(allQboDocsWithEntity);
+    const windowLookup = buildQboDocLookup(allQboDocsWithEntity);
 
     discrepancies.amountMismatches.push(
-      ...findChargeAmountMismatches(stripeCharges, qboDocIndex, allQboDocsWithEntity, qboAccounts)
+      ...findChargeAmountMismatches(stripeCharges, windowLookup, qboAccounts)
     );
 
-    discrepancies.accountFeesMissingQbo.push(
-      ...findAccountFeesMissingQbo(stripeAccountFees, allQboDocsWithEntity)
-    );
+    // The payout check runs first: it is what tells the account-fee check which fees have
+    // actually been swept into a payout (and therefore become due), and it back-fills the
+    // documents posted before this run's window.
+    let feeLookup = windowLookup;
+    let accountFeePopulation = stripeAccountFees;
+    let payoutIdByBalanceTransactionId = new Map<string, string>();
 
     if (stripeClient) {
       const payoutChecks = await runPayoutBalanceChecks(
@@ -3223,7 +3482,25 @@ export const runReconciliation = async (
       );
       discrepancies.payoutImbalances.push(...payoutChecks.items);
       errors.push(...payoutChecks.errors);
+
+      feeLookup = payoutChecks.lookup ?? windowLookup;
+      payoutIdByBalanceTransactionId = payoutChecks.payoutIdByBalanceTransactionId;
+      accountFeePopulation = [...stripeAccountFees, ...payoutChecks.accountLevelFees];
     }
+
+    const accountFeeCheck = findAccountFeesMissingQbo(
+      accountFeePopulation,
+      feeLookup,
+      payoutIdByBalanceTransactionId
+    );
+    discrepancies.accountFeesMissingQbo.push(...accountFeeCheck.items);
+
+    context.log('[DailyReconciliation] Account-level Stripe fee check complete', {
+      enumerated: accountFeePopulation.length,
+      posted: accountFeeCheck.postedCount,
+      awaitingPayout: accountFeeCheck.pendingPayoutCount,
+      missing: accountFeeCheck.items.length,
+    });
   }
 
   const selectedSyncIds = new Set(syncIds.map((id) => normalizeIdentifier(id)));
@@ -3637,6 +3914,9 @@ export const __internals = {
   buildQboDocIndex,
   findChargeAmountMismatches,
   findAccountFeesMissingQbo,
+  buildQboDocLookup,
+  resolveDocsForStripeIds,
+  isPayoutAccountFeeEntry,
   buildPayoutBalanceCheck,
   payoutCheckToDiscrepancy,
   buildReconciliationAlert,

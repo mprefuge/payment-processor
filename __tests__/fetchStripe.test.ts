@@ -7,7 +7,9 @@ import {
   fetchBalanceTransactionsForPayout,
   fetchAccountFeeBalanceTransactionsSince,
   isAccountLevelFeeBalanceTransaction,
-  ACCOUNT_LEVEL_FEE_TYPES,
+  isDisputeBalanceTransaction,
+  isPostedAtSource,
+  classifyBalanceTransaction,
   normalizeSince,
 } from '../src/services/qbo/stripe/fetchStripe';
 
@@ -187,14 +189,82 @@ describe('fetchBalanceTransactionsForPayout', () => {
   });
 });
 
-// ── fetchAccountFeeBalanceTransactionsSince ───────────────────────────────────
+// ── Account-level fee classification ─────────────────────────────────────────
 
 /**
  * Account-level fees — monthly billing, Radar, ACH failure fees, currency conversion,
  * instant-payout fees, adjustments — never hang off a charge, a refund or a payout.
  * Nothing enumerated them, so no population being reconciled contained them, so they
  * could not be reported missing from QuickBooks.
+ *
+ * The classification below has to stay identical to `categorizeTransactions` in
+ * `src/stripe/handlers/payouts.ts`, which decides what the payout handler POSTS as a
+ * `POFEE-` journal entry. Two definitions of "account-level" would mean reconciliation
+ * reporting fees as missing that were correctly posted, or staying quiet about ones that
+ * were not. This table is the pin: if either side moves, it fails here.
  */
+describe('balance transaction classification (mirrors payouts.ts categorizeTransactions)', () => {
+  const cases: Array<[string, any, string, boolean, boolean]> = [
+    // description, balance transaction, class, postedAtSource, accountLevel
+    ['a charge', { type: 'charge' }, 'charge', true, false],
+    ['a payment', { type: 'payment' }, 'charge', true, false],
+    ['a refund', { type: 'refund' }, 'refund', true, false],
+    ['a payment refund', { type: 'payment_refund' }, 'refund', true, false],
+    ['a stripe fee', { type: 'stripe_fee' }, 'fee', false, true],
+    ['a bare fee', { type: 'fee' }, 'fee', false, true],
+    ['an application fee', { type: 'application_fee' }, 'fee', false, true],
+    ['a payout', { type: 'payout' }, 'ignored', false, false],
+    ['an advance', { type: 'advance' }, 'ignored', false, false],
+    ['a payout cancel', { type: 'payout_cancel' }, 'ignored', false, false],
+    [
+      'a dispute adjustment',
+      { type: 'adjustment', reporting_category: 'dispute' },
+      'adjustment',
+      true,
+      false,
+    ],
+    [
+      'a chargeback withdrawal',
+      { type: 'adjustment', reporting_category: 'chargeback_withdrawal' },
+      'adjustment',
+      true,
+      false,
+    ],
+    [
+      'a non-dispute adjustment',
+      { type: 'adjustment', reporting_category: 'fee' },
+      'adjustment',
+      false,
+      true,
+    ],
+    ['a network cost', { type: 'network_cost' }, 'adjustment', false, true],
+    ['a payout failure', { type: 'payout_failure' }, 'adjustment', false, true],
+  ];
+
+  it.each(cases)(
+    'classifies %s consistently',
+    (_label, balanceTransaction, expectedClass, postedAtSource, accountLevel) => {
+      expect(classifyBalanceTransaction(balanceTransaction)).toBe(expectedClass);
+      expect(isPostedAtSource(balanceTransaction)).toBe(postedAtSource);
+      expect(isAccountLevelFeeBalanceTransaction(balanceTransaction)).toBe(accountLevel);
+    }
+  );
+
+  it('identifies disputes by reporting_category, not by source', () => {
+    // The dispute handlers book these; the payout counts them but must not post them again.
+    expect(isDisputeBalanceTransaction({ type: 'adjustment', reporting_category: 'DISPUTE' })).toBe(
+      true
+    );
+    expect(isDisputeBalanceTransaction({ type: 'adjustment', source: 'dp_1abc' })).toBe(false);
+  });
+
+  it('rejects a non-object', () => {
+    expect(isAccountLevelFeeBalanceTransaction(null)).toBe(false);
+  });
+});
+
+// ── fetchAccountFeeBalanceTransactionsSince ───────────────────────────────────
+
 describe('fetchAccountFeeBalanceTransactionsSince', () => {
   const feeBt = (overrides: Record<string, any> = {}) => ({
     id: 'txn_fee1',
@@ -208,10 +278,10 @@ describe('fetchAccountFeeBalanceTransactionsSince', () => {
     ...overrides,
   });
 
-  const makeBalanceStripe = (byType: Record<string, any[]>) => ({
+  const makeBalanceStripe = (data: any[]) => ({
     balanceTransactions: {
       list: vi.fn(async (params: Record<string, any>) => ({
-        data: byType[params.type as string] ?? [],
+        data: params.type ? data.filter((bt) => bt.type === params.type) : data,
         has_more: false,
       })),
     },
@@ -221,22 +291,24 @@ describe('fetchAccountFeeBalanceTransactionsSince', () => {
     await expect(fetchAccountFeeBalanceTransactionsSince({}, SINCE)).rejects.toThrow();
   });
 
-  it('queries every account-level fee type', async () => {
-    const stripe = makeBalanceStripe({});
+  it('lists the window once and classifies locally rather than querying per fee type', async () => {
+    const stripe = makeBalanceStripe([]);
     await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE);
 
-    const queriedTypes = stripe.balanceTransactions.list.mock.calls.map(
-      (call: any[]) => call[0].type
-    );
-    expect(queriedTypes).toEqual([...ACCOUNT_LEVEL_FEE_TYPES]);
-    expect(stripe.balanceTransactions.list.mock.calls[0][0].created?.gte).toBe(SINCE);
+    expect(stripe.balanceTransactions.list).toHaveBeenCalledTimes(1);
+    const params = stripe.balanceTransactions.list.mock.calls[0][0];
+    expect(params.type).toBeUndefined();
+    expect(params.created?.gte).toBe(SINCE);
   });
 
-  it('returns account-level fees across types, deduped by id', async () => {
-    const stripe = makeBalanceStripe({
-      stripe_fee: [feeBt(), feeBt()],
-      adjustment: [feeBt({ id: 'txn_adj1', type: 'adjustment', amount: -125 })],
-    });
+  it('keeps account-level fees and adjustments, dropping charges and refunds', async () => {
+    const stripe = makeBalanceStripe([
+      feeBt(),
+      feeBt({ id: 'txn_charge1', type: 'charge', source: 'ch_1abc' }),
+      feeBt({ id: 'txn_refund1', type: 'refund', source: 're_1abc' }),
+      feeBt({ id: 'txn_adj1', type: 'adjustment', reporting_category: 'fee' }),
+      feeBt({ id: 'txn_payout1', type: 'payout' }),
+    ]);
 
     const result = await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE);
 
@@ -244,46 +316,25 @@ describe('fetchAccountFeeBalanceTransactionsSince', () => {
   });
 
   it('drops adjustments that belong to a dispute rather than to the account', async () => {
-    const stripe = makeBalanceStripe({
-      adjustment: [
-        feeBt({ id: 'txn_chargeback', type: 'adjustment', source: { id: 'dp_1abc' } }),
-        feeBt({ id: 'txn_accountAdj', type: 'adjustment', source: null }),
-      ],
-    });
+    const stripe = makeBalanceStripe([
+      feeBt({ id: 'txn_chargeback', type: 'adjustment', reporting_category: 'dispute' }),
+      feeBt({ id: 'txn_accountAdj', type: 'adjustment', reporting_category: 'fee' }),
+    ]);
 
     const result = await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE);
 
     expect(result.map((bt: any) => bt.id)).toEqual(['txn_accountAdj']);
   });
 
-  it('honours an explicit type list', async () => {
-    const stripe = makeBalanceStripe({ tax_fee: [feeBt({ id: 'txn_tax', type: 'tax_fee' })] });
+  it('narrows the query when explicit types are supplied', async () => {
+    const stripe = makeBalanceStripe([feeBt({ id: 'txn_tax', type: 'tax_fee' }), feeBt()]);
 
     const result = await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE, {
       types: ['tax_fee'],
     });
 
     expect(stripe.balanceTransactions.list).toHaveBeenCalledTimes(1);
+    expect(stripe.balanceTransactions.list.mock.calls[0][0].type).toBe('tax_fee');
     expect(result.map((bt: any) => bt.id)).toEqual(['txn_tax']);
-  });
-});
-
-describe('isAccountLevelFeeBalanceTransaction', () => {
-  it('accepts a stripe_fee with no source', () => {
-    expect(isAccountLevelFeeBalanceTransaction({ type: 'stripe_fee', source: null })).toBe(true);
-  });
-
-  it('rejects a charge balance transaction', () => {
-    expect(isAccountLevelFeeBalanceTransaction({ type: 'charge', source: 'ch_1' })).toBe(false);
-  });
-
-  it('rejects a fee attributable to a single charge', () => {
-    expect(isAccountLevelFeeBalanceTransaction({ type: 'adjustment', source: 'ch_1abc' })).toBe(
-      false
-    );
-  });
-
-  it('rejects a non-object', () => {
-    expect(isAccountLevelFeeBalanceTransaction(null)).toBe(false);
   });
 });
