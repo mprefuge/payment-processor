@@ -1860,6 +1860,148 @@ describe('postPayoutToQbo', () => {
   });
 });
 
+describe('postPayoutAccountFeesToQbo', () => {
+  it('books account-level fees as Dr Stripe Fees / Cr Stripe Clearing', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // DocNumber duplicate pre-check
+      { JournalEntry: { Id: 'je-payout-fees' } }
+    );
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    const result = await postPayoutAccountFeesToQbo({
+      feeDeltaCents: -2_000,
+      adjustmentDeltaCents: 0,
+      memo: 'Stripe payout po_test123 account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'je-payout-fees', type: 'journal-entry' });
+
+    const body = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(body.DocNumber).toMatch(/^POFEE-20240304-/);
+    expect(body.Line).toHaveLength(2);
+
+    const debit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+    );
+    const credit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+    );
+    expect(debit.Amount).toBe(20);
+    expect(debit.JournalEntryLineDetail.AccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_FEES',
+      name: 'Stripe Fees',
+    });
+    expect(credit.Amount).toBe(20);
+    expect(credit.JournalEntryLineDetail.AccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      name: 'Stripe Clearing',
+    });
+  });
+
+  it('reverses the direction for a positive balance adjustment', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'je-payout-credit' } }
+    );
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    await postPayoutAccountFeesToQbo({
+      feeDeltaCents: 0,
+      adjustmentDeltaCents: 500,
+      memo: 'Stripe payout po_credit account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_credit',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const body = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    const debit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+    );
+    const credit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+    );
+    expect(debit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_STRIPE_CLEARING');
+    expect(credit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_FEES');
+    expect(debit.Amount).toBe(5);
+  });
+
+  it('writes one entry carrying both fees and adjustments', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'je-both' } }
+    );
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    await postPayoutAccountFeesToQbo({
+      feeDeltaCents: -2_000,
+      adjustmentDeltaCents: -750,
+      memo: 'Stripe payout po_both account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_both',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const body = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(body.Line).toHaveLength(4);
+    const debits = body.Line.filter(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+    ).reduce((sum: number, line: any) => sum + line.Amount, 0);
+    const credits = body.Line.filter(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+    ).reduce((sum: number, line: any) => sum + line.Amount, 0);
+    expect(debits).toBeCloseTo(27.5);
+    expect(credits).toBeCloseTo(27.5);
+    expect(body.Line.map((line: any) => line.Description)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Stripe account fees'),
+        expect.stringContaining('Stripe balance adjustments'),
+      ])
+    );
+  });
+
+  it('returns the existing entry on a replay instead of posting a second one', async () => {
+    // The DocNumber pre-check finds the entry a previous delivery of the same
+    // payout.paid wrote, so the replay resolves to it rather than duplicating.
+    const { fetcher, requests } = createFetchMock({
+      QueryResponse: { JournalEntry: [{ Id: 'je-already-there' }] },
+    });
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    const result = await postPayoutAccountFeesToQbo({
+      feeDeltaCents: -2_000,
+      adjustmentDeltaCents: 0,
+      memo: 'Stripe payout po_test123 account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'je-already-there', type: 'journal-entry' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toContain('query');
+  });
+
+  it('posts nothing when the payout has no account-level activity', async () => {
+    const { fetcher, requests } = createFetchMock();
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    const result = await postPayoutAccountFeesToQbo({
+      feeDeltaCents: 0,
+      adjustmentDeltaCents: 0,
+      date: new Date('2024-03-04'),
+      payoutId: 'po_quiet',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toBeNull();
+    expect(requests).toHaveLength(0);
+  });
+});
+
 describe('findDocumentsByPrivateNoteTag', () => {
   it('returns tagged documents across supported QuickBooks entities', async () => {
     const { fetcher } = createFetchMock(

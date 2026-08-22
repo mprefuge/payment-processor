@@ -13,7 +13,12 @@ import {
   postDisputeToQbo,
   postDisputeReversalToQbo,
   postPayoutToQbo,
+  postPayoutAccountFeesToQbo,
 } from '../services/qboSvc';
+import {
+  buildAccountLevelFeeMemo,
+  summarizeAccountLevelActivity,
+} from '../stripe/payoutAccountFees';
 import {
   type DependencyOverrides,
   type HttpContext,
@@ -316,7 +321,49 @@ const createRefundReceiptAdapter = (): RefundReceiptAccountingAdapter => ({
 });
 
 const createPayoutAdapter = (): PayoutAccountingAdapter => ({
+  /**
+   * Posts a payout as up to two documents:
+   *
+   *   1. a journal entry for the payout's ACCOUNT-LEVEL activity — Stripe fees
+   *      and adjustments that arrive as their own balance transactions and that
+   *      no per-charge, refund or dispute posting has booked; and
+   *   2. the clearing → bank Transfer for the net that actually landed.
+   *
+   * Before this, `input.lines` was discarded and only step 2 ran, so monthly
+   * account fees, Radar fees, ACH failure fees, currency conversion and
+   * instant-payout fees never reached QuickBooks at all and Stripe Clearing
+   * kept a residue that never cleared.
+   *
+   * Per-charge processing fees are excluded by `summarizeAccountLevelActivity`,
+   * which only takes lines flagged `postedAtSource: false` — see
+   * `src/stripe/payoutAccountFees.ts`.
+   *
+   * The fee entry is posted FIRST so that a failure on the Transfer leaves a
+   * retryable state: the payout's idempotency marker is only written after this
+   * whole method succeeds, and on retry the fee entry's `POFEE-` DocNumber
+   * resolves to the document already in QuickBooks instead of posting twice.
+   */
   async upsertDeposit(input) {
+    const activity = summarizeAccountLevelActivity(input.lines);
+
+    if (activity.hasActivity) {
+      const feeResult = await postPayoutAccountFeesToQbo({
+        feeDeltaCents: activity.feeDeltaCents,
+        adjustmentDeltaCents: activity.adjustmentDeltaCents,
+        memo: buildAccountLevelFeeMemo(input.payout?.id, activity),
+        date: input.txnDate,
+        payoutId: input.payout?.id,
+      });
+
+      logger.info('[QBO] Posted account-level Stripe fees for payout', {
+        payoutId: input.payout?.id ?? input.depositExternalRef ?? null,
+        feeDeltaCents: activity.feeDeltaCents,
+        adjustmentDeltaCents: activity.adjustmentDeltaCents,
+        qboId: feeResult?.qboId ?? null,
+        qboType: feeResult?.type ?? null,
+      });
+    }
+
     const amountCents = Math.abs(Math.trunc(input.totalAmountCents ?? 0));
     return postWhenAmountPositive(amountCents, () =>
       postPayoutToQbo({

@@ -4261,6 +4261,134 @@ export const postPayoutToQbo = async ({
   return { qboId: result.id, type: 'transfer' };
 };
 
+export interface PostPayoutAccountFeesToQboInput {
+  /**
+   * Signed balance delta for account-level Stripe fees, in cents. Negative =
+   * fees charged (the normal case); positive = fees credited back.
+   */
+  feeDeltaCents: number;
+  /**
+   * Signed balance delta for non-dispute balance adjustments, in cents.
+   * Negative = the balance was reduced.
+   */
+  adjustmentDeltaCents: number;
+  memo?: string;
+  date: Date;
+  /** Stripe payout id. Used as the unique suffix in the POFEE DocNumber. */
+  payoutId?: string;
+  cleanupTag?: string;
+  options?: PostOptions;
+}
+
+/**
+ * Posts the account-level part of a Stripe payout — the fees and adjustments
+ * that arrive as their own balance transactions and are booked nowhere else.
+ *
+ * Per-charge processing fees are NOT posted here. Stripe carries those on the
+ * charge's own balance transaction and `postChargeToQbo` already debits Stripe
+ * Fees for them, so the caller filters them out before calling
+ * (`summarizeAccountLevelActivity`, `src/stripe/payoutAccountFees.ts`).
+ *
+ * Direction, per component:
+ *
+ *   delta < 0 (a cost)    Dr Stripe Fees |delta| / Cr Stripe Clearing |delta|
+ *   delta > 0 (a credit)  Dr Stripe Clearing delta / Cr Stripe Fees delta
+ *
+ * The credit/debit against Stripe Clearing is what makes the payout reconcile:
+ * charge postings leave Clearing holding gross - per-charge fees, and these
+ * entries take out the account-level fees, so the residue equals the Transfer
+ * that `postPayoutToQbo` moves to the bank.
+ *
+ * Both sides use the configured accounts (`QBO_ACCOUNT_FEES`,
+ * `QBO_ACCOUNT_STRIPE_CLEARING`) — no account is hardcoded here.
+ *
+ * Idempotency: the entry carries a `POFEE-` DocNumber derived from the payout
+ * id, so `postToQbo`'s DocNumber pre-check returns the existing entry on a
+ * replay instead of creating a second one. `strictDocNumber` is deliberately
+ * NOT set: a replayed `payout.paid` should resolve to the entry already in
+ * QuickBooks, exactly as `postPayoutToQbo` resolves to the existing Transfer,
+ * rather than throwing and wedging the payout.
+ *
+ * Returns null when there is nothing account-level in the payout.
+ */
+export const postPayoutAccountFeesToQbo = async ({
+  feeDeltaCents,
+  adjustmentDeltaCents,
+  memo,
+  date,
+  payoutId,
+  cleanupTag,
+  options,
+}: PostPayoutAccountFeesToQboInput): Promise<PostChargeToQboResult | null> => {
+  const feeDelta = Number.isFinite(feeDeltaCents) ? Math.round(feeDeltaCents) : 0;
+  const adjustmentDelta = Number.isFinite(adjustmentDeltaCents)
+    ? Math.round(adjustmentDeltaCents)
+    : 0;
+
+  if (feeDelta === 0 && adjustmentDelta === 0) {
+    return null;
+  }
+
+  const normalizedMemo = appendTestArtifactMarker(toTrimmed(memo) ?? undefined, cleanupTag);
+
+  if (!payoutId) {
+    logger.warn(
+      '[QBOSvc] postPayoutAccountFeesToQbo called without payoutId — DocNumber may collide',
+      { date, feeDelta, adjustmentDelta }
+    );
+  }
+
+  const lines: (QuickBooksJournalEntryLine | null)[] = [];
+
+  const addComponent = (deltaCents: number, label: string): void => {
+    if (deltaCents === 0) {
+      return;
+    }
+    const lineMemo = normalizedMemo ? `${label} — ${normalizedMemo}` : label;
+    const magnitude = Math.abs(deltaCents);
+
+    if (deltaCents < 0) {
+      lines.push(
+        createJournalEntryLine('debit', env.quickBooks.accounts.fees, magnitude, lineMemo),
+        createJournalEntryLine(
+          'credit',
+          env.quickBooks.accounts.stripeClearing,
+          magnitude,
+          lineMemo
+        )
+      );
+      return;
+    }
+
+    lines.push(
+      createJournalEntryLine('debit', env.quickBooks.accounts.stripeClearing, magnitude, lineMemo),
+      createJournalEntryLine('credit', env.quickBooks.accounts.fees, magnitude, lineMemo)
+    );
+  };
+
+  addComponent(feeDelta, 'Stripe account fees');
+  // Non-dispute balance adjustments are a Stripe account cost like any other
+  // account-level fee, so they use the same configured fees account. Dispute
+  // adjustments never reach here — charge.dispute.* books those against
+  // disputeLosses.
+  addComponent(adjustmentDelta, 'Stripe balance adjustments');
+
+  return postJournalEntryFromLines({
+    docNumber: buildDocNumber(
+      'POFEE',
+      date,
+      Math.abs(feeDelta) + Math.abs(adjustmentDelta),
+      null,
+      payoutId ?? null
+    ),
+    memo: normalizedMemo,
+    date,
+    lines,
+    emptyLineError: 'Payout account-fee journal entry must contain at least one non-zero line.',
+    options,
+  });
+};
+
 export const postDisputeToQbo = async ({
   lossAmount,
   feeAmount,

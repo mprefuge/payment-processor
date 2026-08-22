@@ -79,11 +79,23 @@ export interface RefundReceiptAccountingAdapter {
   appendSalesReceiptAdjustments?: (input: AppendSalesReceiptAdjustmentsInput) => Promise<void>;
 }
 
-export type PayoutDepositLineType = 'charge' | 'fee' | 'refund' | 'adjustment';
+/**
+ * `processing_fee` is the per-charge Stripe fee carried on the charge balance
+ * transaction's own `fee` field. It is split out from `charge` (which stays at
+ * gross) so the lines sum to the net the bank actually received, and it is kept
+ * distinct from `fee` — the account-level Stripe fees that arrive as their own
+ * balance transactions (monthly billing, Radar, ACH failure, instant payout,
+ * currency conversion) and are booked nowhere else.
+ */
+export type PayoutDepositLineType = 'charge' | 'processing_fee' | 'fee' | 'refund' | 'adjustment';
 
 export interface PayoutDepositLineReference {
   balanceTransactionId: string;
   amountCents: number;
+  /** Stripe's `fee` on this balance transaction, in cents. */
+  feeCents?: number;
+  /** Stripe's `net` on this balance transaction, in cents (`amount - fee`). */
+  netCents?: number;
   sourceId?: string | null;
   chargeId?: string | null;
   paymentIntentId?: string | null;
@@ -98,6 +110,17 @@ export interface PayoutDepositLineInput {
   description: string;
   memo?: string | null;
   references: PayoutDepositLineReference[];
+  /**
+   * True when this line's money is ALREADY in QuickBooks because a per-object
+   * webhook posted it: charges and their processing fees via `postChargeToQbo`,
+   * refunds via `postRefundToQbo`, disputes via `postDisputeToQbo` /
+   * `postDisputeReversalToQbo`. Such lines are counted in the payout's
+   * reconciliation arithmetic but MUST NOT be posted again from the payout.
+   *
+   * False means nothing else books this money, so the payout is the only place
+   * it can reach the ledger.
+   */
+  postedAtSource: boolean;
 }
 
 export interface PayoutDepositSummary {
