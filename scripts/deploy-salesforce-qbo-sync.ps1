@@ -143,9 +143,9 @@ $qboCustomerName = @"
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>QBO_Customer_Name__c</fullName>
     <label>QBO Customer Name</label>
-    <description>Customer name to use in QuickBooks (derived from Contact)</description>
+    <description>Customer name to use in QuickBooks (Contact, else Account, else anonymous)</description>
     <type>Text</type>
-    <formula>IF(ISBLANK(Contact__r.Name), "Anonymous Donor", Contact__r.Name)</formula>
+    <formula>IF(NOT(ISBLANK(Contact__c)), Contact__r.Name, IF(NOT(ISBLANK(Account__c)), Account__r.Name, "Anonymous Donor"))</formula>
     <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
 </CustomField>
 "@
@@ -166,12 +166,15 @@ $qboCustomerEmail = @"
 $qboCustomerEmail | Out-File -FilePath "force-app/main/default/objects/Transaction__c/fields/QBO_Customer_Email__c.field-meta.xml" -Encoding UTF8
 
 # Billing Address Fields (Formulas)
+# Each line falls back to the Account's billing address so organization gifts keep a
+# complete address instead of an empty one. The IF keys off the lookup rather than the
+# individual field so every line comes from the same record.
 $billAddrFields = @{
-    "QBO_Bill_Addr_Line1__c" = "Contact__r.MailingStreet"
-    "QBO_Bill_Addr_City__c" = "Contact__r.MailingCity"
-    "QBO_Bill_Addr_State__c" = "Contact__r.MailingState"
-    "QBO_Bill_Addr_PostalCode__c" = "Contact__r.MailingPostalCode"
-    "QBO_Bill_Addr_Country__c" = "Contact__r.MailingCountry"
+    "QBO_Bill_Addr_Line1__c" = "IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingStreet, Account__r.BillingStreet)"
+    "QBO_Bill_Addr_City__c" = "IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingCity, Account__r.BillingCity)"
+    "QBO_Bill_Addr_State__c" = "IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingState, Account__r.BillingState)"
+    "QBO_Bill_Addr_PostalCode__c" = "IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingPostalCode, Account__r.BillingPostalCode)"
+    "QBO_Bill_Addr_Country__c" = "IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingCountry, Account__r.BillingCountry)"
 }
 
 foreach ($fieldName in $billAddrFields.Keys) {

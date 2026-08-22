@@ -283,6 +283,11 @@ interface ManualSyncResponse {
   id?: string;
   type?: QuickBooksDocType;
   docNumber?: string;
+  /** QuickBooks customer the document was actually posted against. */
+  customerId?: string;
+  customerName?: string;
+  /** Non-fatal problems the caller should see on an otherwise successful post. */
+  warnings?: string[];
   error?: string;
 }
 
@@ -300,13 +305,35 @@ const buildHttpResponse = (status: number, jsonBody: Record<string, any>): HttpR
 
 const buildSuccessResponse = (
   result: { id: string; type: QuickBooksDocType },
-  docNumber?: string
+  docNumber?: string,
+  customer?: { value?: string; name?: string } | null,
+  warnings?: string[]
 ): ManualSyncResponse => ({
   success: true,
   id: result.id,
   type: result.type,
   ...(docNumber && { docNumber }),
+  ...(customer?.value && { customerId: customer.value }),
+  ...(customer?.name && { customerName: customer.name }),
+  ...(warnings?.length && { warnings }),
 });
+
+// The caller sends the customer as a *name*, so a placeholder name stands in for a donor
+// the sending system could not identify — a Salesforce Transaction__c with neither a
+// Contact nor an Account behind it, for instance. QuickBooks has no way to tell that apart
+// from a real donor: it just finds or creates a customer with that name, and every such
+// gift piles onto one shared record. Genuinely anonymous gifts are legitimate and must
+// still post, so this is surfaced to the caller rather than rejected.
+const PLACEHOLDER_CUSTOMER_NAMES = new Set([
+  'anonymous',
+  'anonymous donor',
+  'unknown',
+  'unknown donor',
+  'unknown customer',
+]);
+
+const isPlaceholderCustomerName = (name: unknown): boolean =>
+  typeof name === 'string' && PLACEHOLDER_CUSTOMER_NAMES.has(name.trim().toLowerCase());
 
 const buildFailureResponse = (error: unknown): ManualSyncResponse => ({
   success: false,
@@ -474,10 +501,15 @@ const generateDocNumber = (): string => {
   return `MAN-${year}-${dateTimeStr}`;
 };
 
+// QBO's query language escapes with a backslash, and the backslash itself has
+// to be escaped first so a trailing `\` cannot escape the closing quote.
+const escapeQboQueryValue = (value: string): string =>
+  value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
 // Retrieve sales receipt from QBO by ID
 const getSalesReceiptById = async (salesReceiptId: string): Promise<any | null> => {
   try {
-    const queryStr = `SELECT * FROM SalesReceipt WHERE Id = '${salesReceiptId.replace(/'/g, "\\'")}'`;
+    const queryStr = `SELECT * FROM SalesReceipt WHERE Id = '${escapeQboQueryValue(salesReceiptId)}'`;
     logger.info('Querying QuickBooks for sales receipt', {
       salesReceiptId,
       query: queryStr,
@@ -536,7 +568,7 @@ const getAccountIdByName = async (
   context: InvocationContext
 ): Promise<string | null> => {
   try {
-    const queryStr = `SELECT Id, Name, AccountType, AccountSubType FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`;
+    const queryStr = `SELECT Id, Name, AccountType, AccountSubType FROM Account WHERE Name = '${escapeQboQueryValue(accountName)}'`;
     logger.info('Querying QuickBooks for account', {
       accountName,
       query: queryStr,
@@ -591,6 +623,17 @@ const validateRequiredReferences = (data: any, type: QuickBooksDocType): void =>
   if (type === 'sales-receipt') {
     if (!data.DepositToAccountRef?.value) {
       throw new Error('DepositToAccountRef is required and must be resolved to a valid account ID');
+    }
+    // Reference resolution swallows its own failures so one bad reference cannot sink the
+    // request. That is the right call for a decorative reference, but not for the customer:
+    // QuickBooks ignores CustomerRef.name and reads only .value, so posting an unresolved
+    // ref strips the donor off the receipt while the caller is told the sync succeeded and
+    // marks the record posted. Fail instead, so the record keeps its error and is retried.
+    if (data.CustomerRef && !data.CustomerRef.value) {
+      throw new Error(
+        `CustomerRef "${data.CustomerRef.name ?? ''}" could not be resolved to a QuickBooks ` +
+          'customer ID; refusing to post a sales receipt with no customer attribution'
+      );
     }
     if (!data.Line || !Array.isArray(data.Line)) {
       throw new Error('Line array is required');
@@ -1063,6 +1106,20 @@ const validateAndPost = async (
     // Validate required references and amounts
     validateRequiredReferences(resolvedData, type);
 
+    const warnings: string[] = [];
+    if (isPlaceholderCustomerName(resolvedData.CustomerRef?.name)) {
+      const warning =
+        `Posted against placeholder customer "${resolvedData.CustomerRef.name}". If this gift ` +
+        'belongs to a donor, the sending record is missing the link that names them.';
+      warnings.push(warning);
+      logger.warn(`Placeholder customer name on ${type}`, {
+        type,
+        customerRefName: resolvedData.CustomerRef.name,
+        customerRefValue: resolvedData.CustomerRef.value,
+        invocationId: context.invocationId,
+      });
+    }
+
     // Clean the payload to remove any null/undefined values
     const cleanedData = cleanPayload(resolvedData);
 
@@ -1085,7 +1142,7 @@ const validateAndPost = async (
       invocationId: context.invocationId,
     });
 
-    return buildSuccessResponse(result, generatedDocNumber);
+    return buildSuccessResponse(result, generatedDocNumber, cleanedData.CustomerRef, warnings);
   } catch (error) {
     logger.error(`Failed to sync ${type} to QuickBooks`, {
       type,

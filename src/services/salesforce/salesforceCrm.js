@@ -12,8 +12,11 @@ class SalesforceCrmService extends BaseCrmService {
     this._recordTypeIdCache = new Map();
   }
 
+  // Backslash is SOQL's escape character, so it has to be escaped before the
+  // quote — otherwise a value ending in `\` escapes the closing quote and breaks
+  // (or lets a caller steer) the query.
   escapeSoqlLiteral(value) {
-    return String(value).replace(/'/g, "\\'");
+    return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   }
 
   toSoqlDateTimeLiteral(value) {
@@ -268,8 +271,8 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     const soql =
-      `SELECT Id FROM RecordType WHERE SObjectType = '${objectName.replace(/'/g, "\\'")}' ` +
-      `AND Name = '${name.replace(/'/g, "\\'")}' LIMIT 1`;
+      `SELECT Id FROM RecordType WHERE SObjectType = '${this.escapeSoqlLiteral(objectName)}' ` +
+      `AND Name = '${this.escapeSoqlLiteral(name)}' LIMIT 1`;
 
     const result = await this.conn.query(soql);
     const records = Array.isArray(result.records) ? result.records : [];
@@ -287,7 +290,7 @@ class SalesforceCrmService extends BaseCrmService {
       return null;
     }
 
-    const query = `SELECT Id FROM Campaign WHERE Name = '${trimmedName.replace(/'/g, "\\'")}' LIMIT 1`;
+    const query = `SELECT Id FROM Campaign WHERE Name = '${this.escapeSoqlLiteral(trimmedName)}' LIMIT 1`;
     const result = await this.conn.query(query);
     const records = Array.isArray(result.records) ? result.records : [];
 
@@ -307,23 +310,25 @@ class SalesforceCrmService extends BaseCrmService {
       let whereConditions = [];
 
       if (stripeCustomerId) {
-        whereConditions.push(`Stripe_Customer_ID__c = '${stripeCustomerId.replace(/'/g, "\\'")}'`);
+        whereConditions.push(
+          `Stripe_Customer_ID__c = '${this.escapeSoqlLiteral(stripeCustomerId)}'`
+        );
       }
 
       if (email) {
-        whereConditions.push(`Email = '${email.replace(/'/g, "\\'")}'`);
+        whereConditions.push(`Email = '${this.escapeSoqlLiteral(email)}'`);
       }
 
       if (phone) {
         const cleanPhone = phone.replace(/\D/g, '');
         whereConditions.push(
-          `(Phone = '${phone.replace(/'/g, "\\'")}' OR MobilePhone = '${phone.replace(/'/g, "\\'")}' OR Phone LIKE '%${cleanPhone}%' OR MobilePhone LIKE '%${cleanPhone}%')`
+          `(Phone = '${this.escapeSoqlLiteral(phone)}' OR MobilePhone = '${this.escapeSoqlLiteral(phone)}' OR Phone LIKE '%${cleanPhone}%' OR MobilePhone LIKE '%${cleanPhone}%')`
         );
       }
 
       if (firstName && lastName) {
         whereConditions.push(
-          `(FirstName = '${firstName.replace(/'/g, "\\'")}' AND LastName = '${lastName.replace(/'/g, "\\'")}')`
+          `(FirstName = '${this.escapeSoqlLiteral(firstName)}' AND LastName = '${this.escapeSoqlLiteral(lastName)}')`
         );
       }
 
@@ -548,7 +553,7 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     try {
-      const query = `SELECT Id, Name FROM Campaign WHERE Name = '${trimmedName.replace(/'/g, "\\'")}' LIMIT 1`;
+      const query = `SELECT Id, Name FROM Campaign WHERE Name = '${this.escapeSoqlLiteral(trimmedName)}' LIMIT 1`;
       logger.info('Searching for existing campaign:', { campaignName: trimmedName });
 
       const result = await this.conn.query(query);

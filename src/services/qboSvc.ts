@@ -692,6 +692,27 @@ const getCheckoutCategory = (session: Stripe.Checkout.Session | null | undefined
   getCheckoutMetadataValue(session, 'category');
 
 /**
+ * Normalise a `cover_fees_amount` metadata value to cents.
+ *
+ * The writer (`processTransaction`) emits cents — `calculateCoverFees` returns
+ * cents and the value is stringified straight into Stripe metadata — so an
+ * integer is already cents.  A value carrying a fractional part cannot be
+ * cents, so it is dollars and gets scaled.
+ *
+ * The previous rule was `raw >= 100 ? raw : raw * 100`, which scaled every
+ * cover fee under $1.00 by 100×: an 88¢ fee became $88.00.  Fees land under a
+ * dollar routinely — 2.9% + 30¢ stays below $1.00 for any gift under about $24
+ * — and a custom `feeAmount` can be small on a gift of any size.
+ */
+const normalizeCoverFeesAmountToCents = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Number.isInteger(value) ? value : Math.round(value * 100);
+};
+
+/**
  * Determine whether cover fees are enabled and the configured amount.  Covers
  * several sources of Stripe metadata so that the flag survives event
  * propagation even if the Checkout Session itself is unavailable.  The
@@ -749,12 +770,11 @@ export const getCoverFeesInfo = (
   let amountCents = 0;
 
   if (typeof amountRaw === 'number') {
-    // Assume it's in cents if it's a whole number, dollars if it has decimals
-    amountCents = Math.round(amountRaw >= 100 ? amountRaw : amountRaw * 100);
+    amountCents = normalizeCoverFeesAmountToCents(amountRaw);
   } else if (typeof amountRaw === 'string') {
     const parsed = parseFloat(amountRaw);
     if (!isNaN(parsed)) {
-      amountCents = Math.round(parsed >= 100 ? parsed : parsed * 100);
+      amountCents = normalizeCoverFeesAmountToCents(parsed);
     }
   }
 
@@ -2468,8 +2488,20 @@ export const verifyTokenRefresh = async (options?: PostOptions): Promise<void> =
   await tokenManager.refreshTokens(fetcher);
 };
 
+/**
+ * Escape a string literal for the QuickBooks query endpoint.
+ *
+ * QBO's query language uses backslash as its escape character — NOT the
+ * SQL-standard doubled single quote.  Intuit's data-queries guide gives
+ * `select * from Customer where CompanyName = 'Adam\'s Candy Shop'` as the
+ * canonical form.  Doubling the quote instead produced `'Adam''s Candy Shop'`,
+ * which QBO parses as two adjacent literals and rejects with a parser error,
+ * so every lookup for a donor, account, or item whose name contains an
+ * apostrophe failed.  The backslash itself must be escaped first, otherwise a
+ * trailing backslash in the value would escape the closing quote.
+ */
 const escapeQueryValue = (value: string): string => {
-  return value.replace(/'/g, "''");
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 };
 
 const buildQboQueryUrl = (query: string): string => {
@@ -3112,7 +3144,7 @@ const checkForDuplicate = async (
     const entityName = QUICKBOOKS_ENTITY_METADATA[entity].queryEntity;
 
     // Query QuickBooks for existing document with this DocNumber
-    const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}'`;
+    const queryString = `SELECT Id FROM ${entityName} WHERE DocNumber = '${escapeQueryValue(docNumber)}'`;
 
     logger.debug('[QBO] Checking for duplicate', { entity, docNumber, queryString });
 
