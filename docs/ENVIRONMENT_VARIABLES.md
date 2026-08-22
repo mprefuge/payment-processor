@@ -107,6 +107,53 @@ Advanced accounting account-type defaults can also be overridden with:
 | `NOTIFICATION_EMAIL_LIVE` | Optional | Live-mode notification recipient. |
 | `NOTIFICATION_POLICY` | Optional | Used by payout reconciliation email logic. Defaults to `ALL`. |
 
+## Transaction mode selection
+
+`POST /api/transaction` decides live vs test in this order:
+
+1. A client-supplied override — `?mode=` / `?livemode=` on the URL, or the
+   `x-stripe-mode` / `x-livemode` header.
+2. The donation form's own `livemode` field in the request body.
+3. `context.bindingData.livemode`.
+4. `STRIPE_MODE` (`live` / `test` / `sandbox`).
+5. `STRIPE_LIVE_MODE_ENABLED`, else `STRIPE_LIVEMODE`.
+6. Live, unless the gift's `category` is the literal string `testing`.
+
+Steps 1 and 2 are client input on an anonymous endpoint, so they are gated.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `TEST_MODE_OVERRIDE_KEY` | Optional | Shared secret that authorises a caller to choose its own Stripe mode. Presented as `?testKey=`, the `x-test-mode-key` header, or a `testKey` field in the request body. |
+
+**Unset (the default).** Steps 1 and 3-6 behave exactly as they always have: any
+caller may select a mode with a query parameter or a header, and the donation
+form's `livemode` field (step 2) is ignored. This is the state the production
+smoke test and the on-demand E2E workflow rely on — both drive
+`POST /api/transaction?mode=test` with no key.
+
+**Set.** No client may select a mode without presenting the key, and a caller
+that does present it can select the mode from the request body — which is what
+lets the donation form's `?testMode=1` actually route the gift to test Stripe.
+Without the key, an override of either direction is ignored and the mode falls
+through to `STRIPE_MODE`.
+
+Setting this variable is therefore both the feature switch and the hardening:
+there is no configuration in which the form can choose the mode but an arbitrary
+caller cannot.
+
+**Before setting it,** update the deploy smoke test, or the next deploy will run
+its transaction against **live** Stripe. The transaction path is already
+configurable — set the repository variable `AZURE_FUNCTIONAPP_TRANSACTION_PATH`
+to `/api/transaction?mode=test&testKey=<key>` (used by
+`.github/workflows/main_payment-processing-function.yml`), and pass the same
+`transaction_path` when dispatching the E2E flow test. A repository *variable* is
+not masked in logs; moving the key to a secret is the better end state and is
+left as a follow-up.
+
+Note that a key carried in a URL lands in browser history, `Referer` headers and
+request logs. That is acceptable for a value whose only power is selecting test
+mode, and it is the only place a shareable test link can carry it.
+
 ## Stripe true-up
 
 | Variable | Required | Notes |

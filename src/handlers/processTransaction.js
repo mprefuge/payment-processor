@@ -1,6 +1,6 @@
 const { logger } = require('../lib/logger');
 const { parseBoolean } = require('../lib/parsing');
-const { randomUUID } = require('crypto');
+const { randomUUID, timingSafeEqual } = require('crypto');
 const { z } = require('zod');
 const Stripe = require('stripe');
 const { ensureSalesforceIdOnCustomer } = require('../stripe/utils');
@@ -171,13 +171,156 @@ const readModeToggleFromRequest = (request) => {
 const isTestingCategory = (value) =>
   typeof value === 'string' && value.trim().toLowerCase() === 'testing';
 
+/**
+ * The donation form's own statement of which Stripe mode it believes it is
+ * running in. `new-popup-don.js` has always posted this field — it is
+ * `!isTestModeRequested()`, derived from the `testMode` URL parameter — and
+ * until now nothing read it, so the form's test mode was decorative and the
+ * server routed the gift by its own configuration.
+ *
+ * Read only via TEST_MODE_OVERRIDE_KEY (see below). A body field is not, on its
+ * own, any more trustworthy than a query parameter.
+ */
+const readModeToggleFromBody = (requestData) => {
+  if (!requestData || typeof requestData !== 'object') {
+    return null;
+  }
+
+  return normalizeModeToggle(requestData.livemode);
+};
+
+const TEST_MODE_KEY_HEADERS = ['x-test-mode-key'];
+const TEST_MODE_KEY_QUERY_PARAMS = ['testKey', 'testkey'];
+
+/**
+ * Constant-time string comparison. `===` on a secret leaks its prefix through
+ * timing; this endpoint is anonymous and unrate-limited, so that is worth
+ * avoiding even though the value guarded is only a test-mode selector.
+ */
+const secretsMatch = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    return false;
+  }
+
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+
+  // timingSafeEqual throws outright on a length mismatch, so the lengths have to
+  // be checked first. That check does leak the secret's length; a self-comparison
+  // keeps the work roughly constant and the length of a mode selector is not the
+  // part worth protecting.
+  if (left.length !== right.length) {
+    timingSafeEqual(left, left);
+    return false;
+  }
+
+  return timingSafeEqual(left, right);
+};
+
+const readTestModeKeyFromRequest = (request, requestData) => {
+  const candidates = [];
+
+  if (request && typeof request === 'object') {
+    const { headers } = request;
+
+    for (const name of TEST_MODE_KEY_HEADERS) {
+      candidates.push(readHeaderValue(headers, name));
+    }
+
+    if (request.query && typeof request.query.get === 'function') {
+      for (const name of TEST_MODE_KEY_QUERY_PARAMS) {
+        candidates.push(request.query.get(name));
+      }
+    }
+
+    if (typeof request.url === 'string') {
+      try {
+        const parsed = new URL(request.url);
+        for (const name of TEST_MODE_KEY_QUERY_PARAMS) {
+          candidates.push(parsed.searchParams.get(name));
+        }
+      } catch (error) {
+        // ignore URL parse errors
+      }
+    }
+  }
+
+  if (requestData && typeof requestData === 'object') {
+    candidates.push(requestData.testKey);
+  }
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Whether this request is allowed to choose its own Stripe mode.
+ *
+ * Returns:
+ *   'unconfigured' — TEST_MODE_OVERRIDE_KEY is not set on the function app.
+ *                    Client-supplied `?mode=`/`?livemode=`/`x-stripe-mode`/
+ *                    `x-livemode` overrides are honoured exactly as they were
+ *                    before this change, and the body's `livemode` is ignored.
+ *                    This is the shipped default so that deploying this build
+ *                    changes no behaviour: the production smoke test and the
+ *                    on-demand E2E workflow both drive
+ *                    `POST /api/transaction?mode=test` with no key, and would
+ *                    otherwise start running against live Stripe.
+ *   true           — the key is set and the request presented a matching one.
+ *                    Every client-supplied override is honoured, including the
+ *                    body's `livemode`, which is what lets the donation form's
+ *                    test mode actually route the gift.
+ *   false          — the key is set and the request did not present it. Every
+ *                    client-supplied override is ignored and the mode falls
+ *                    through to STRIPE_MODE / STRIPE_LIVE_MODE_ENABLED.
+ *
+ * The single setting therefore both enables the feature and closes the hole:
+ * there is no configuration in which the form can pick the mode but a stranger
+ * cannot. See the PR body for why a shared secret is the only control that
+ * distinguishes an operator's test link from an attacker's.
+ */
+const resolveModeOverrideAuthorization = (request, requestData) => {
+  const configuredKey =
+    typeof process.env.TEST_MODE_OVERRIDE_KEY === 'string'
+      ? process.env.TEST_MODE_OVERRIDE_KEY.trim()
+      : '';
+
+  if (configuredKey.length === 0) {
+    return 'unconfigured';
+  }
+
+  const presented = readTestModeKeyFromRequest(request, requestData);
+
+  if (presented === null) {
+    return false;
+  }
+
+  return secretsMatch(presented.trim(), configuredKey);
+};
+
 const getConfiguredMode = (requestOrContext, maybeContext, requestData) => {
   const request = maybeContext ? requestOrContext : null;
   const context = maybeContext || requestOrContext;
 
-  const requestMode = readModeToggleFromRequest(request);
-  if (requestMode !== null) {
-    return requestMode;
+  const authorization = resolveModeOverrideAuthorization(request, requestData);
+
+  if (authorization !== false) {
+    const requestMode = readModeToggleFromRequest(request);
+    if (requestMode !== null) {
+      return requestMode;
+    }
+  }
+
+  if (authorization === true) {
+    const bodyMode = readModeToggleFromBody(requestData);
+    if (bodyMode !== null) {
+      return bodyMode;
+    }
   }
 
   if (context?.bindingData && typeof context.bindingData.livemode !== 'undefined') {
@@ -462,6 +605,23 @@ function normalizeRequestData(data) {
   const orgName = customer.organization || data.organization || metadata?.organization || null;
   if (orgName) {
     normalized.organization = orgName;
+  }
+
+  // Mode-selection inputs, carried through solely so getConfiguredMode can read
+  // them. Neither is a property of the gift.
+  //
+  // The request schemas are .passthrough(), but this function rebuilds the object
+  // from an explicit allowlist, so anything not copied here is dropped. That is
+  // why the donation form's `livemode` field has never had any effect: it passed
+  // validation and was then discarded one line later, before getConfiguredMode
+  // was ever handed the data. Both fields are deleted again in the handler as
+  // soon as the mode has been resolved, so neither reaches Stripe or Salesforce.
+  if ('livemode' in data) {
+    normalized.livemode = data.livemode;
+  }
+
+  if (typeof data.testKey === 'string') {
+    normalized.testKey = data.testKey;
   }
 
   return normalized;
@@ -999,6 +1159,22 @@ module.exports = async function (request, context) {
 
     const requestData = validation.value;
     const isLiveMode = getConfiguredMode(actualRequest, actualContext, requestData);
+
+    // Both mode-selection fields have now been consumed. Drop them before anything
+    // downstream sees requestData, so the operator's key cannot be written to a
+    // Checkout Session, a Stripe customer, a Contact or a Transaction__c, and the
+    // form's `livemode` claim is not mistaken for a fact about the gift. The mode
+    // actually chosen lives in isLiveMode, and the response reports it from the
+    // Stripe session itself.
+    //
+    // This is defence in depth, not the thing that currently prevents a leak:
+    // every downstream call reads named fields off requestData rather than
+    // spreading it, so removing these two lines changes no observable behaviour
+    // today (verified by mutation). They are here so that stays true if some
+    // future caller starts spreading requestData into metadata.
+    delete requestData.testKey;
+    delete requestData.livemode;
+
     requestData.metadata = applyTestArtifactMetadata(requestData.metadata, {
       headers: actualRequest?.headers,
       isLiveMode,
@@ -1057,6 +1233,8 @@ module.exports.__internals = {
   escapeStripeQueryValue,
   initializeServices,
   getConfiguredMode,
+  resolveModeOverrideAuthorization,
+  readModeToggleFromBody,
   setStripeClientFactory,
   resetStripeClientFactory,
   setIdempotencyStore,
