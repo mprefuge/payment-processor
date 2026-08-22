@@ -601,6 +601,13 @@ function normalizeRequestData(data) {
     normalized.transactionType = data.transactionType;
   }
 
+  // Donor kind selected on the form ('individual' or 'organization'). The form
+  // always posts it, but this allowlist used to drop it, so nothing downstream
+  // could tell a corporate gift from an individual one.
+  if (typeof data.donationType === 'string' && data.donationType.trim().length > 0) {
+    normalized.donationType = data.donationType.trim();
+  }
+
   // Carry organization from top-level or metadata
   const orgName = customer.organization || data.organization || metadata?.organization || null;
   if (orgName) {
@@ -727,6 +734,13 @@ function formatStripeMetadata(transactionData) {
     frequency: transactionData.frequency || 'onetime',
     transactionType: transactionData.transactionType || 'Payment',
   };
+
+  // Additive only: existing keys above are read by the reverse QBO/Salesforce
+  // sync and must not be renamed. 'individual' | 'organization' as posted by the
+  // donation form.
+  if (typeof transactionData.donationType === 'string' && transactionData.donationType.trim()) {
+    baseMetadata.donationType = transactionData.donationType.trim();
+  }
 
   // Add cover fees information if enabled
   if (transactionData.coverFee && transactionData.coverFeesAmount) {
