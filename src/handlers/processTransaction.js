@@ -287,7 +287,7 @@ const modernRequestSchema = z
     attribution: z.string().optional(),
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
-    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
+    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
@@ -311,7 +311,7 @@ const legacyRequestSchema = z
     attribution: z.string().optional(),
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
-    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
+    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
@@ -498,7 +498,9 @@ function sanitizeStripeMetadata(metadata) {
  * - Nonprofit, ACH / bank debit: 0.8% (capped at $5.00)
  *
  * @param {number} baseAmountCents - The base transaction amount in cents
- * @param {string} paymentMethod - Payment method: 'card', 'card_present', 'us_bank_account', 'amex'
+ * @param {string} paymentMethod - Payment method: 'card', 'card_present', 'us_bank_account',
+ *   'amex', 'wallet'. Wallet donations (Apple Pay / Google Pay) settle as card payments and
+ *   therefore fall through to the card rate, which is what the donation form quotes.
  * @returns {number} The fee amount in cents
  */
 function calculateCoverFees(baseAmountCents, paymentMethod = 'card') {
@@ -649,6 +651,35 @@ const validateRequest = (body) => {
   }
 };
 
+/**
+ * Maps the donor's selected payment method onto the Stripe
+ * `payment_method_types` for the Checkout Session.
+ *
+ * Apple Pay and Google Pay ride on the `card` payment method type: Stripe
+ * Checkout surfaces them automatically when `card` is enabled and the domain is
+ * registered, so a 'wallet' selection maps to ['card']. PayPal is a separate
+ * Stripe payment method type that has to be enabled on the account first, so it
+ * is deliberately not emitted here.
+ */
+const STRIPE_PAYMENT_METHOD_TYPES = {
+  card: ['card'],
+  amex: ['card'],
+  card_present: ['card'],
+  wallet: ['card'],
+  us_bank_account: ['us_bank_account'],
+};
+
+const DEFAULT_STRIPE_PAYMENT_METHOD_TYPES = ['card'];
+
+const resolvePaymentMethodTypes = (paymentMethod) => {
+  const types =
+    typeof paymentMethod === 'string' && Object.hasOwn(STRIPE_PAYMENT_METHOD_TYPES, paymentMethod)
+      ? STRIPE_PAYMENT_METHOD_TYPES[paymentMethod]
+      : DEFAULT_STRIPE_PAYMENT_METHOD_TYPES;
+
+  return [...types];
+};
+
 // Create Stripe checkout session
 const createCheckoutSession = async (stripe, customerId, transactionData) => {
   const isOneTime = transactionData.frequency === 'onetime';
@@ -685,7 +716,7 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
     success_url:
       process.env.SUCCESS_URL || process.env.CANCEL_URL || 'https://example.com/thankyou',
     cancel_url: process.env.CANCEL_URL || 'https://example.com/donate',
-    payment_method_types: ['card'],
+    payment_method_types: resolvePaymentMethodTypes(transactionData.paymentMethod),
     line_items: [
       {
         price_data: {
