@@ -327,8 +327,23 @@ const createPayoutAdapter = (): PayoutAccountingAdapter => ({
       })
     );
   },
-  async markDepositForReview() {
-    return;
+  /**
+   * A failed or canceled payout does NOT reverse the QuickBooks Transfer that
+   * `payout.paid` already posted, so the operating bank account stays
+   * overstated and Stripe clearing understated until someone reverses it by
+   * hand. There is no automatic reversal here because whether to auto-reverse
+   * or hold for an accountant is a policy call — but the gap must not be
+   * silent, so raise an alert an operator can act on.
+   */
+  async markDepositForReview(input) {
+    logger.warn('[QBO] Payout failed or canceled after posting — QBO Transfer NOT reversed', {
+      alert: 'payout_reversal_required',
+      payoutId: input.payout?.id ?? input.depositExternalRef ?? null,
+      reason: input.reason,
+      stripeEventId: input.stripeEventId,
+      action:
+        'Reverse the clearing-to-bank Transfer in QuickBooks for this payout, or resubmit via stripeTrueUp once Stripe retries.',
+    });
   },
 });
 

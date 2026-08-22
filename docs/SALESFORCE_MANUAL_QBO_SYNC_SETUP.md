@@ -106,6 +106,36 @@ This guide provides step-by-step instructions for configuring Salesforce to inte
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Two possible senders
+
+The rest of this guide documents the **Apex** sender (`QBOManualSyncService`), but an org
+may instead post the same payload from a **record-triggered Flow** — the production org
+uses one named **CreateSalesReceipt**. Only one of them runs. Before changing anything on
+the Salesforce side, confirm which one is actually sending, or you will fix an artifact
+that is not in the path.
+
+Whichever sends it, the customer name must fall back to the Account so organization gifts
+are attributed to the organization rather than to a shared anonymous customer. The Flow
+formula:
+
+```
+IF(
+    NOT(ISBLANK({!$Record.Contact__c})),
+    TRIM(
+        IF(ISBLANK({!$Record.Contact__r.FirstName}), "", {!$Record.Contact__r.FirstName} & " ") &
+        IF(ISBLANK({!$Record.Contact__r.LastName}), "", {!$Record.Contact__r.LastName})
+    ),
+    IF(
+        NOT(ISBLANK({!$Record.Account__c})),
+        {!$Record.Account__r.Name},
+        "Anonymous"
+    )
+)
+```
+
+Check the Flow for sibling formulas that read `Contact__r` — billing address and email
+resolve the same way, and each needs the same Contact-then-Account fallback.
+
 ### Quick Start Checklist
 
 Use this checklist to track your implementation progress:
@@ -210,7 +240,8 @@ The following fields are already available on the Transaction object:
 | `Amount_Net__c` | Amount Net | Currency | Net transaction amount |
 | `Amount_Gross__c` | Amount Gross | Currency | Gross transaction amount |
 | `Amount_Fee__c` | Amount Fee | Currency | Processing fees |
-| `Contact__c` | Contact | Lookup | Customer reference |
+| `Contact__c` | Contact | Lookup | Customer reference (individual donor) |
+| `Account__c` | Account | Lookup | Customer reference (organization donor) |
 | `Received_At__c` | Date Received | DateTime | Transaction date |
 | `Payment_Method__c` | Payment Method | Text | Payment method type |
 | `Memo__c` | Memo | Text Area | Transaction notes |
@@ -258,9 +289,14 @@ Default Value: "General Giving"
 Label: QBO Customer Name
 API Name: QBO_Customer_Name__c
 Data Type: Formula (Text)
-Formula: IF(ISBLANK(Contact__r.Name), "Anonymous Donor", Contact__r.Name)
-Description: Customer name to use in QuickBooks (derived from Contact)
+Formula: IF(NOT(ISBLANK(Contact__c)), Contact__r.Name, IF(NOT(ISBLANK(Account__c)), Account__r.Name, "Anonymous Donor"))
+Description: Customer name to use in QuickBooks (Contact, else Account, else anonymous)
 ```
+
+> **Organization gifts:** a transaction that is linked to an Account instead of a
+> Contact must resolve to the Account's name. Without the `Account__r.Name` branch
+> every organization gift posts to QuickBooks under a single "Anonymous Donor"
+> customer, and the receipts cannot be attributed back to the organization.
 
 **Field 4: QBO Customer Email**
 ```
@@ -271,13 +307,23 @@ Formula: Contact__r.Email
 Description: Customer email for QuickBooks record matching
 ```
 
+> Accounts have no standard email field, so this stays blank for organization gifts.
+> That is intentional: the sync endpoint then matches the QuickBooks customer by
+> display name instead of by email, which is what keeps the gift on the Account's
+> own customer record.
+
+Billing address fields 5-9 follow the same Contact-then-Account fallback as the
+customer name. Keying each formula off `Contact__c` (rather than off the individual
+address field) guarantees all five lines come from the same record instead of mixing
+a Contact street with an Account city.
+
 **Field 5: QBO Billing Address Line 1**
 ```
 Label: QBO Billing Address Line 1
 API Name: QBO_Bill_Addr_Line1__c
 Data Type: Formula (Text)
-Formula: Contact__r.MailingStreet
-Description: Billing address line 1 from Contact
+Formula: IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingStreet, Account__r.BillingStreet)
+Description: Billing address line 1 from Contact, else Account
 ```
 
 **Field 6: QBO Billing City**
@@ -285,8 +331,8 @@ Description: Billing address line 1 from Contact
 Label: QBO Billing City
 API Name: QBO_Bill_Addr_City__c
 Data Type: Formula (Text)
-Formula: Contact__r.MailingCity
-Description: Billing city from Contact
+Formula: IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingCity, Account__r.BillingCity)
+Description: Billing city from Contact, else Account
 ```
 
 **Field 7: QBO Billing State**
@@ -294,8 +340,8 @@ Description: Billing city from Contact
 Label: QBO Billing State
 API Name: QBO_Bill_Addr_State__c
 Data Type: Formula (Text)
-Formula: Contact__r.MailingState
-Description: Billing state/province from Contact
+Formula: IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingState, Account__r.BillingState)
+Description: Billing state/province from Contact, else Account
 ```
 
 **Field 8: QBO Billing Postal Code**
@@ -303,8 +349,8 @@ Description: Billing state/province from Contact
 Label: QBO Billing Postal Code
 API Name: QBO_Bill_Addr_PostalCode__c
 Data Type: Formula (Text)
-Formula: Contact__r.MailingPostalCode
-Description: Billing postal code from Contact
+Formula: IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingPostalCode, Account__r.BillingPostalCode)
+Description: Billing postal code from Contact, else Account
 ```
 
 **Field 9: QBO Billing Country**
@@ -312,8 +358,8 @@ Description: Billing postal code from Contact
 Label: QBO Billing Country
 API Name: QBO_Bill_Addr_Country__c
 Data Type: Formula (Text)
-Formula: Contact__r.MailingCountry
-Description: Billing country from Contact
+Formula: IF(NOT(ISBLANK(Contact__c)), Contact__r.MailingCountry, Account__r.BillingCountry)
+Description: Billing country from Contact, else Account
 ```
 
 **Field 10: QBO Class**
@@ -951,8 +997,11 @@ public with sharing class QBOManualSyncService {
                 return result;
             }
             
-            // Perform contact matching/creation if requested and no contact is linked
-            if (performContactMatching && txn.Contact__c == null) {
+            // Perform contact matching/creation if requested and no contact is linked.
+            // Account-linked transactions are organization gifts: the donor is the
+            // Account, so creating a Contact named after the organization would both
+            // invent a person and relabel the QuickBooks customer.
+            if (performContactMatching && txn.Contact__c == null && txn.Account__c == null) {
                 Id matchedContactId = findOrCreateContact(txn);
                 if (matchedContactId != null) {
                     // Update transaction with matched/created contact
@@ -1030,6 +1079,13 @@ public with sharing class QBOManualSyncService {
      * @return Contact ID (existing or newly created)
      */
     private static Id findOrCreateContact(Transaction__c txn) {
+        // Organization gifts belong to the Account, not to a person. QBO_Customer_Name__c
+        // holds the Account name in that case, so parsing it into First/Last would create
+        // a fictitious Contact and take the QuickBooks customer away from the Account.
+        if (txn.Account__c != null) {
+            return null;
+        }
+        
         // Extract contact information from transaction
         String email = null;
         String firstName = null;
@@ -1167,7 +1223,8 @@ public with sharing class QBOManualSyncService {
                    QBO_Bill_Addr_State__c, QBO_Bill_Addr_PostalCode__c, QBO_Bill_Addr_Country__c,
                    QBO_Doc_Type_Override__c, Payment_Brand__c, Payment_Last4__c,
                    Stripe_Charge_Id__c, Posted_to_QBO__c, Sync_Attempt_Count__c,
-                   Contact__r.Email, Contact__r.Name
+                   Contact__c, Contact__r.Email, Contact__r.Name,
+                   Account__c, Account__r.Name
             FROM Transaction__c
             WHERE Id = :transactionId
             LIMIT 1
@@ -1766,6 +1823,17 @@ private class QBOManualSyncServiceTest {
         );
         insert testContact;
         
+        // Create test account (organization donor)
+        Account testAccount = new Account(
+            Name = 'Acme Foundation',
+            BillingStreet = '500 Grant Ave',
+            BillingCity = 'Seattle',
+            BillingState = 'WA',
+            BillingPostalCode = '98104',
+            BillingCountry = 'USA'
+        );
+        insert testAccount;
+        
         // Create test transaction WITH contact
         Transaction__c testTxnWithContact = new Transaction__c(
             Name = 'Test Transaction With Contact',
@@ -1799,6 +1867,22 @@ private class QBOManualSyncServiceTest {
             Status__c = 'paid'
         );
         insert testTxnWithoutContact;
+        
+        // Create test transaction linked to an ACCOUNT instead of a Contact
+        Transaction__c testTxnWithAccount = new Transaction__c(
+            Name = 'Test Transaction With Account',
+            Amount_Net__c = 250.00,
+            Amount_Gross__c = 250.00,
+            Amount_Fee__c = 0.00,
+            Account__c = testAccount.Id,
+            Received_At__c = System.now(),
+            Payment_Method__c = 'check',
+            QBO_Target_Account__c = 'Checking Account',
+            QBO_Item_Name__c = 'General Giving',
+            Posted_to_QBO__c = false,
+            Status__c = 'paid'
+        );
+        insert testTxnWithAccount;
     }
     
     @isTest
@@ -1842,6 +1926,46 @@ private class QBOManualSyncServiceTest {
         // Verify contact was created/matched
         // Note: Contact matching logic depends on transaction having email or name data
         // In this test, those fields may be blank, so contact might not be created
+    }
+    
+    @isTest
+    static void testSyncTransactionWithAccountUsesAccountName() {
+        Test.setMock(HttpCalloutMock.class, new QBOSuccessMock());
+        
+        Transaction__c txn = [
+            SELECT Id, Contact__c, Account__c, QBO_Customer_Name__c
+            FROM Transaction__c
+            WHERE Name = 'Test Transaction With Account'
+            LIMIT 1
+        ];
+        System.assertEquals(
+            'Acme Foundation',
+            txn.QBO_Customer_Name__c,
+            'Account-linked transactions must carry the Account name, not the anonymous default'
+        );
+        
+        Test.startTest();
+        // Contact matching is requested, but must not fire for an organization gift
+        QBOManualSyncService.SyncResult result = QBOManualSyncService.syncTransaction(txn.Id, true);
+        Test.stopTest();
+        
+        System.assertEquals(true, result.success, 'Sync should succeed');
+        
+        Transaction__c updatedTxn = [
+            SELECT Contact__c, QBO_Customer_Name__c
+            FROM Transaction__c
+            WHERE Id = :txn.Id
+        ];
+        System.assertEquals(
+            null,
+            updatedTxn.Contact__c,
+            'No Contact should be invented for an Account-linked transaction'
+        );
+        System.assertEquals(
+            'Acme Foundation',
+            updatedTxn.QBO_Customer_Name__c,
+            'Customer name should still resolve to the Account after sync'
+        );
     }
     
     @isTest
@@ -2092,11 +2216,12 @@ The system is configured to automatically sync transactions to QuickBooks when t
 4. If eligible → QBOSyncQueueable job enqueued
    ↓
 5. Queueable job executes (async):
-   a. Contact Matching/Creation (if Contact__c is null):
+   a. Contact Matching/Creation (only if Contact__c AND Account__c are null):
       - Search for contact by email
       - Search for contact by name
       - Create new contact if not found
       - Link contact to transaction
+      - Skipped entirely for Account-linked (organization) gifts
    b. Build QBO payload from transaction data
    c. Call Manual QBO Sync API endpoint
    d. Process response
@@ -2117,7 +2242,7 @@ The system is configured to automatically sync transactions to QuickBooks when t
 
 #### 9.2 Contact Matching Logic
 
-When a transaction is created without a linked Contact (`Contact__c = null`), the system automatically attempts to find or create a matching contact:
+When a transaction is created without a linked Contact **and** without a linked Account (`Contact__c = null AND Account__c = null`), the system automatically attempts to find or create a matching contact. Account-linked transactions are skipped: the donor is the organization itself, so there is no person to match.
 
 **Contact Matching Process:**
 
@@ -2191,6 +2316,20 @@ Transaction Data:
 Result:
   - Contact matching skipped
   - QBO sync proceeds with existing contact data
+```
+
+**Scenario D: Organization Gift (Account, no Contact)**
+```
+Transaction Data:
+  - Contact__c: null
+  - Account__c: 001UQ00000L2ABCYAX (Acme Foundation)
+  - QBO_Customer_Name__c: "Acme Foundation"
+  - QBO_Customer_Email__c: (blank - Accounts have no standard email)
+
+Result:
+  - Contact matching skipped (no person to match; no Contact invented)
+  - QBO sync posts against the "Acme Foundation" QuickBooks customer,
+    matched or created by display name
 ```
 
 #### 9.3 Disable Automatic Sync
@@ -2330,7 +2469,36 @@ Preferred Start Time: 2:00 AM
 - If contact was previously set, it won't be overridden
 - Manually clear Contact__c and trigger re-sync to test
 
-**Issue 8: Duplicate contacts being created**
+**Issue 8: Organization gifts post to QuickBooks as "Anonymous" / "Anonymous Donor"**
+- Cause: the customer name is derived from the Contact only. A transaction linked to an
+  Account instead of a Contact has no Contact name, so it falls through to the anonymous
+  default and every organization gift lands on one shared QuickBooks customer.
+- **First identify which sender is running** (see "Two possible senders" above) — the name
+  is built in a different place in each, and fixing the wrong one changes nothing:
+  - **Flow** (e.g. `CreateSalesReceipt`): the customer-name formula resource inside the
+    Flow. Setup → Flows → open the Flow → Manager → the formula. Corrected formula is in
+    "Two possible senders" above.
+  - **Apex** (`QBOManualSyncService`): the `QBO_Customer_Name__c` formula field. Setup →
+    Object Manager → Transaction → Fields & Relationships → QBO Customer Name → Edit:
+    ```
+    IF(NOT(ISBLANK(Contact__c)), Contact__r.Name, IF(NOT(ISBLANK(Account__c)), Account__r.Name, "Anonymous Donor"))
+    ```
+    Apply the same Contact-then-Account fallback to the five `QBO_Bill_Addr_*` formulas.
+- Either way, the Azure Function takes the name it is given — `POST /qbo/manual-sync`
+  resolves `CustomerRef` by display name and creates the customer if it does not exist, so
+  a placeholder name becomes a real QuickBooks customer. The response reports
+  `customerId`/`customerName` and returns a `warnings` entry when the name it posted
+  against is a placeholder; check the callout response before hunting further.
+- The formula is evaluated at read time, so the fix applies to existing transactions
+  with no data migration.
+- Also confirm `QBOManualSyncService` skips contact matching when `Account__c` is
+  populated; otherwise the next sync creates a Contact named after the organization
+  and the QuickBooks customer flips back to a person.
+- Already-posted receipts keep pointing at the anonymous customer. Repoint them in
+  QuickBooks (or merge that customer into the correct one) — the sync will not rewrite
+  a document it has already posted.
+
+**Issue 9: Duplicate contacts being created**
 - Ensure email addresses are properly formatted
 - Check for extra spaces or case differences
 - Review contact matching logic in code

@@ -14,6 +14,11 @@
   - `.gitattributes`: Proper line ending configuration for cross-platform development
 - **Total Test Coverage**: 20 test files, 104 passing tests, 7 skipped tests
 
+### Fixed
+
+- **Organization gifts no longer sync to QuickBooks as an anonymous customer**: the Salesforce side derived the QuickBooks customer name from the Contact alone, so any `Transaction__c` linked to an `Account__c` instead of a `Contact__c` fell through to an anonymous default and posted against a single shared customer. Fixed in both senders this repo describes — the `QBO_Customer_Name__c` formula field and the five `QBO_Bill_Addr_*` formulas now fall back to the Account's name and billing address, and `QBOManualSyncService` skips contact matching for Account-linked transactions so it no longer invents a Contact named after the organization. The equivalent formula for orgs that send from a record-triggered Flow instead of Apex is documented in `docs/SALESFORCE_MANUAL_QBO_SYNC_SETUP.md`. The name is built in Salesforce, so an org needs its own sender updated for the fix to take effect.
+- **`POST /qbo/manual-sync` no longer posts a sales receipt with no customer**: reference resolution swallows its own failures, and `CustomerRef` was never validated, so an unresolved customer produced a receipt with the donor stripped off — reported as a success, which marked the Salesforce record posted and stopped it being retried. An unresolved `CustomerRef` now fails validation, the response echoes the `customerId`/`customerName` the document was posted against, and a placeholder customer name is returned as a warning.
+
 ### Changed
 
 - **Code Formatting**: All source files formatted with Prettier for consistency
