@@ -39,6 +39,8 @@ import {
   fetchStripeChargesSince,
   fetchStripeRefundsSince,
   fetchStripePayoutsSince,
+  fetchAccountFeeBalanceTransactionsSince,
+  fetchBalanceTransactionsForPayout,
 } from '../services/qbo/stripe/fetchStripe';
 import { mapStripeToTransaction } from '../domain/transactions';
 import Stripe from 'stripe';
@@ -59,7 +61,8 @@ interface ReconciliationOptions {
 }
 
 interface SystemCounts {
-  stripe: { charges: number; refunds: number; payouts: number };
+  /** `accountFees` counts account-level fee balance transactions (fees with no charge). */
+  stripe: { charges: number; refunds: number; payouts: number; accountFees: number };
   salesforce: { transactions: number };
   qbo: { salesReceipts: number; journalEntries: number; deposits: number };
 }
@@ -139,6 +142,23 @@ interface ReconciliationReport {
     duplicatesInSalesforce: DiscrepancyItem[];
     /** QBO documents of the same type containing the same Stripe ID */
     duplicatesInQbo: DiscrepancyItem[];
+    /**
+     * Matched QBO documents whose GROSS or FEE does not equal the Stripe balance
+     * transaction.  Existence matching cannot see these: the document is there, so the
+     * id check passes — only the money on it is wrong.
+     */
+    amountMismatches: DiscrepancyItem[];
+    /**
+     * Stripe account-level fees (monthly billing, Radar, ACH failure, currency
+     * conversion, instant payout, adjustments) with no QuickBooks entry.  These belong
+     * to no charge, so until they are enumerated nothing can report them missing.
+     */
+    accountFeesMissingQbo: DiscrepancyItem[];
+    /**
+     * Payouts where posted receipts − fees − refunds ± adjustments does not equal the
+     * payout net that reached the bank.
+     */
+    payoutImbalances: DiscrepancyItem[];
   };
   summary: {
     totalDiscrepancies: number;
@@ -151,6 +171,8 @@ interface ReconciliationReport {
   };
   /** Present only when dryRun=false; null otherwise */
   repairs: RepairSummary | null;
+  /** Structured, actionable rendering of the findings (also emitted through the logger). */
+  alert: ReconciliationAlert;
   errors: string[];
   triggeredAt: string;
   triggeredBy: 'http' | 'timer';
@@ -505,6 +527,21 @@ const queryTransactionsForRange = async (
 // QBO query helpers
 // ---------------------------------------------------------------------------
 
+type QboRef = { name?: string | null; value?: string | null };
+
+/**
+ * A single line of a QBO document.  Amount comparison needs these: existence matching
+ * only ever read DocNumber/PrivateNote, so a document's actual money was never inspected.
+ */
+type QboDocLine = {
+  Amount?: number | null;
+  DetailType?: string | null;
+  Description?: string | null;
+  SalesItemLineDetail?: { ItemAccountRef?: QboRef | null } | null;
+  JournalEntryLineDetail?: { PostingType?: string | null; AccountRef?: QboRef | null } | null;
+  DepositLineDetail?: { AccountRef?: QboRef | null } | null;
+};
+
 type QboDocRow = {
   Id?: string | number | null;
   SyncToken?: string | null;
@@ -512,7 +549,9 @@ type QboDocRow = {
   TxnDate?: string | null;
   TotalAmt?: number | null;
   PrivateNote?: string | null;
-  CustomerRef?: { name?: string | null; value?: string | null } | null;
+  CustomerRef?: QboRef | null;
+  DepositToAccountRef?: QboRef | null;
+  Line?: QboDocLine[] | null;
 };
 
 type QboDocWithEntity = QboDocRow & {
@@ -1932,6 +1971,910 @@ const repairCrossSystemLinks = async (
 // Core reconciliation logic
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Amount-level reconciliation
+//
+// Everything above this line matches on EXISTENCE: a QBO document is "found" for a
+// Stripe id and the check stops there.  A receipt posted with the wrong gross, or
+// posted with its fee line dropped, is indistinguishable from a correct one — and when
+// a QuickBooks write fails part-way, revenue and fee go missing together, so the books
+// stay internally consistent and the fee-to-revenue ratio still looks plausible.
+//
+// The helpers below compare AMOUNTS: per-document gross and fee against the Stripe
+// balance transaction, account-level fees (which belong to no charge at all) against the
+// QBO population, and each payout against the arithmetic of what was actually posted.
+// ---------------------------------------------------------------------------
+
+type QboAccountNames = {
+  stripeClearing: string;
+  revenue: string;
+  fees: string;
+  refunds: string;
+};
+
+const DEFAULT_QBO_ACCOUNT_NAMES: QboAccountNames = {
+  stripeClearing: 'Stripe Clearing',
+  revenue: 'Revenue',
+  fees: 'Stripe Fees',
+  refunds: 'Refunds',
+};
+
+/**
+ * Reads the configured QBO account names lazily (mirroring `getQboFunctions`) so that
+ * importing this handler never depends on a fully-populated environment.
+ */
+const resolveQboAccountNames = (): QboAccountNames => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('../config/env');
+    const cfg = mod?.default ?? mod?.env ?? mod;
+    const accounts = cfg?.quickBooks?.accounts ?? {};
+    return {
+      stripeClearing: accounts.stripeClearing || DEFAULT_QBO_ACCOUNT_NAMES.stripeClearing,
+      revenue: accounts.revenue || DEFAULT_QBO_ACCOUNT_NAMES.revenue,
+      fees: accounts.fees || DEFAULT_QBO_ACCOUNT_NAMES.fees,
+      refunds: accounts.refunds || DEFAULT_QBO_ACCOUNT_NAMES.refunds,
+    };
+  } catch {
+    return { ...DEFAULT_QBO_ACCOUNT_NAMES };
+  }
+};
+
+/** QBO amounts are dollars; every comparison in this section is done in integer cents. */
+const toCents = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) : 0;
+
+const centsToUsd = (cents: number): string =>
+  `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
+
+const normalizeAccountToken = (value: unknown): string =>
+  typeof value === 'string' ? value.trim().toLowerCase() : '';
+
+/**
+ * QBO account references come back as `{ value: '42', name: 'Stripe Fees' }`, while the
+ * configured name may be a bare name, a bare id, or the `Name|Id` pair that qboSvc uses.
+ */
+const accountRefMatches = (
+  ref: { name?: string | null; value?: string | null } | null | undefined,
+  configured: string | null | undefined
+): boolean => {
+  if (!ref || !configured) return false;
+  const wanted = new Set(
+    configured
+      .split('|')
+      .map(normalizeAccountToken)
+      .filter((token) => token.length > 0)
+  );
+  if (wanted.size === 0) return false;
+  return [ref.name, ref.value]
+    .map(normalizeAccountToken)
+    .filter((token) => token.length > 0)
+    .some((token) => wanted.has(token));
+};
+
+type QboDocAmountSummary = {
+  /** Revenue recognised by the document, in cents (null when it cannot be derived). */
+  grossCents: number | null;
+  /** Processing fee recorded by the document, in cents (null when it cannot be derived). */
+  feeCents: number | null;
+  /** Net movement of the Stripe clearing account, in cents (positive = money in). */
+  clearingDeltaCents: number | null;
+  basis: 'sales-receipt-lines' | 'journal-entry-lines' | 'unknown';
+};
+
+const emptyAmountSummary = (): QboDocAmountSummary => ({
+  grossCents: null,
+  feeCents: null,
+  clearingDeltaCents: null,
+  basis: 'unknown',
+});
+
+/**
+ * Derives gross / fee / clearing movement from a QBO document's lines.
+ *
+ * SalesReceipt (qboSvc `buildSalesReceipt`): positive item lines are revenue, and the
+ * Stripe fee is a single NEGATIVE item line, so TotalAmt is already net.
+ *
+ * JournalEntry (qboSvc `buildSingleJE`): debit clearing gross / credit revenue gross,
+ * then debit fees fee / credit clearing fee.
+ */
+const summarizeQboDocAmounts = (
+  doc: QboDocWithEntity,
+  accounts: QboAccountNames
+): QboDocAmountSummary => {
+  const lines = Array.isArray(doc.Line) ? doc.Line : [];
+
+  if (doc.entityType === 'SalesReceipt') {
+    const itemLines = lines.filter(
+      (line) => line && (line.DetailType === 'SalesItemLineDetail' || line.SalesItemLineDetail)
+    );
+    if (itemLines.length === 0) return emptyAmountSummary();
+
+    let grossCents = 0;
+    let feeCents = 0;
+    for (const line of itemLines) {
+      const cents = toCents(line.Amount);
+      if (cents >= 0) grossCents += cents;
+      else feeCents += Math.abs(cents);
+    }
+
+    return {
+      grossCents,
+      feeCents,
+      clearingDeltaCents: grossCents - feeCents,
+      basis: 'sales-receipt-lines',
+    };
+  }
+
+  if (doc.entityType === 'JournalEntry') {
+    const jeLines = lines.filter(
+      (line) =>
+        line && (line.DetailType === 'JournalEntryLineDetail' || line.JournalEntryLineDetail)
+    );
+    if (jeLines.length === 0) return emptyAmountSummary();
+
+    const sum = (accountName: string, posting: 'Debit' | 'Credit'): number =>
+      jeLines.reduce((total, line) => {
+        const detail = line.JournalEntryLineDetail;
+        if (!detail) return total;
+        if ((detail.PostingType ?? '').toLowerCase() !== posting.toLowerCase()) return total;
+        if (!accountRefMatches(detail.AccountRef, accountName)) return total;
+        return total + toCents(line.Amount);
+      }, 0);
+
+    const feeCents = sum(accounts.fees, 'Debit') - sum(accounts.fees, 'Credit');
+    const revenueCents = sum(accounts.revenue, 'Credit') - sum(accounts.revenue, 'Debit');
+    const refundCents = sum(accounts.refunds, 'Debit') - sum(accounts.refunds, 'Credit');
+    const clearingDeltaCents =
+      sum(accounts.stripeClearing, 'Debit') - sum(accounts.stripeClearing, 'Credit');
+
+    // Revenue lines are the direct signal. A refund JE debits the refunds account instead,
+    // and is reported as negative revenue. Failing both, back the gross out of the clearing
+    // movement (debit gross / credit fee ⇒ clearing = gross − fee).
+    const grossCents =
+      revenueCents !== 0
+        ? revenueCents
+        : refundCents !== 0
+          ? -refundCents
+          : clearingDeltaCents !== 0
+            ? clearingDeltaCents + feeCents
+            : 0;
+
+    return { grossCents, feeCents, clearingDeltaCents, basis: 'journal-entry-lines' };
+  }
+
+  return emptyAmountSummary();
+};
+
+/** Index every QBO document by each Stripe id that appears in its DocNumber/PrivateNote. */
+const buildQboDocIndex = (docs: QboDocWithEntity[]): Map<string, QboDocWithEntity[]> => {
+  const index = new Map<string, QboDocWithEntity[]>();
+  for (const doc of docs) {
+    for (const stripeId of extractStripeIdsFromDoc(doc)) {
+      const bucket = index.get(stripeId) ?? [];
+      bucket.push(doc);
+      index.set(stripeId, bucket);
+    }
+  }
+  return index;
+};
+
+/**
+ * Substring lookup across DocNumber + PrivateNote.
+ *
+ * `extractStripeIdsFromDoc` only recognises the id prefixes in STRIPE_ID_PATTERN, which
+ * does not include `txn_` — the prefix Stripe actually uses for balance transactions. Any
+ * check that has to find a balance-transaction id in QuickBooks must go through here.
+ */
+const docReferencesId = (doc: QboDocRow, id: string): boolean => {
+  const needle = id.trim().toLowerCase();
+  if (!needle) return false;
+  return [doc.DocNumber, doc.PrivateNote]
+    .filter((field): field is string => typeof field === 'string')
+    .some((field) => field.toLowerCase().includes(needle));
+};
+
+const resolveExpandedId = (value: unknown): string | null => {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof (value as any).id === 'string') {
+    return (value as any).id;
+  }
+  return null;
+};
+
+const uniqueStrings = (values: Array<string | null | undefined>): string[] => [
+  ...new Set(
+    values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  ),
+];
+
+/** All QBO documents referencing any of the supplied ids, deduped by document identity. */
+const findDocsForIds = (
+  ids: string[],
+  index: Map<string, QboDocWithEntity[]>,
+  allDocs: QboDocWithEntity[]
+): QboDocWithEntity[] => {
+  const found: QboDocWithEntity[] = [];
+  const seen = new Set<string>();
+
+  const remember = (doc: QboDocWithEntity): void => {
+    const key = `${doc.entityType}:${String(doc.Id ?? '')}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(doc);
+  };
+
+  for (const id of ids) {
+    for (const doc of index.get(id) ?? []) remember(doc);
+  }
+
+  // Ids that STRIPE_ID_PATTERN cannot see (txn_...) still have to be findable.
+  const unindexed = ids.filter((id) => !index.has(id));
+  if (unindexed.length > 0) {
+    for (const doc of allDocs) {
+      if (unindexed.some((id) => docReferencesId(doc, id))) remember(doc);
+    }
+  }
+
+  return found;
+};
+
+const describeDoc = (doc: QboDocWithEntity): string =>
+  `${doc.entityType} ${String(doc.Id ?? 'unknown')}${doc.DocNumber ? ` (${doc.DocNumber})` : ''}`;
+
+/**
+ * Compares the gross and fee actually posted to QuickBooks against the Stripe balance
+ * transaction for every charge that DOES have a matching QBO document.
+ *
+ * Charges with no document at all are already reported by `findChargesMissingQbo`; this
+ * is the case that check cannot see — the document exists, so existence matching is
+ * satisfied, but the money on it is wrong.
+ */
+const findChargeAmountMismatches = (
+  charges: Stripe.Charge[],
+  index: Map<string, QboDocWithEntity[]>,
+  allDocs: QboDocWithEntity[],
+  accounts: QboAccountNames
+): DiscrepancyItem[] => {
+  const items: DiscrepancyItem[] = [];
+
+  for (const charge of charges) {
+    if (charge.status !== 'succeeded') continue;
+
+    const balanceTransaction = charge.balance_transaction;
+    const btObject =
+      balanceTransaction && typeof balanceTransaction === 'object'
+        ? (balanceTransaction as Stripe.BalanceTransaction)
+        : null;
+    // Without an expanded balance transaction there is no fee to compare against.
+    // Reporting a "missing fee" here would be an artefact of the fetch, not of the books.
+    if (!btObject) continue;
+
+    const piId = resolveExpandedId(charge.payment_intent);
+    const btId = btObject.id ?? null;
+    const ids = uniqueStrings([charge.id, piId, btId]);
+    const docs = findDocsForIds(ids, index, allDocs);
+    if (docs.length === 0) continue;
+
+    const summaries = docs.map((doc) => summarizeQboDocAmounts(doc, accounts));
+    const usable = summaries.filter((summary) => summary.basis !== 'unknown');
+    if (usable.length === 0) continue;
+
+    const actualGrossCents = usable.reduce((total, s) => total + (s.grossCents ?? 0), 0);
+    const actualFeeCents = usable.reduce((total, s) => total + (s.feeCents ?? 0), 0);
+    const expectedGrossCents = btObject.amount ?? charge.amount ?? 0;
+    const expectedFeeCents = btObject.fee ?? 0;
+
+    const docIds = docs.map((doc) => String(doc.Id ?? ''));
+    const docLabels = docs.map(describeDoc);
+    const date = charge.created ? new Date(charge.created * 1000).toISOString().slice(0, 10) : null;
+    const relatedIds = uniqueStrings([...ids, ...docIds]);
+
+    const baseDetails = {
+      sourceSystem: 'stripe',
+      comparedAgainst: 'qbo',
+      recordType: 'charge',
+      balanceTransactionId: btId,
+      paymentIntentId: piId,
+      currency: charge.currency ?? null,
+      qboDocs: docLabels,
+      qboDocIds: docIds,
+      matchedDocCount: docs.length,
+    };
+
+    if (actualGrossCents !== expectedGrossCents) {
+      const deltaCents = actualGrossCents - expectedGrossCents;
+      // A charge settled in another currency has bt.amount ≠ charge.amount; a document
+      // posted at the presentment amount is a conversion problem, not a lost gift.
+      const likelyCurrencyConversion =
+        btObject.amount !== charge.amount && actualGrossCents === charge.amount;
+
+      items.push({
+        system: 'qbo',
+        type: 'qbo_gross_mismatch',
+        id: docIds[0] || charge.id,
+        description:
+          `${docLabels.join(' + ')} posts gross ${centsToUsd(actualGrossCents)} for charge ` +
+          `${charge.id} but Stripe settled ${centsToUsd(expectedGrossCents)} ` +
+          `(off by ${centsToUsd(deltaCents)})`,
+        stripeId: charge.id,
+        amount: expectedGrossCents / 100,
+        date,
+        relatedIds,
+        details: {
+          ...baseDetails,
+          field: 'gross',
+          expectedCents: expectedGrossCents,
+          actualCents: actualGrossCents,
+          deltaCents,
+          expected: centsToUsd(expectedGrossCents),
+          actual: centsToUsd(actualGrossCents),
+          chargeAmountCents: charge.amount ?? null,
+          likelyCause: likelyCurrencyConversion ? 'currency_conversion' : null,
+        },
+      });
+    }
+
+    if (actualFeeCents !== expectedFeeCents) {
+      const deltaCents = actualFeeCents - expectedFeeCents;
+      const feeAbsent = actualFeeCents === 0 && expectedFeeCents > 0;
+
+      items.push({
+        system: 'qbo',
+        type: feeAbsent ? 'qbo_fee_missing' : 'qbo_fee_mismatch',
+        id: docIds[0] || charge.id,
+        description: feeAbsent
+          ? `${docLabels.join(' + ')} records no processing fee for charge ${charge.id}, but ` +
+            `Stripe charged ${centsToUsd(expectedFeeCents)} — the fee was never booked`
+          : `${docLabels.join(' + ')} records a fee of ${centsToUsd(actualFeeCents)} for charge ` +
+            `${charge.id} but Stripe charged ${centsToUsd(expectedFeeCents)} ` +
+            `(off by ${centsToUsd(deltaCents)})`,
+        stripeId: charge.id,
+        amount: expectedFeeCents / 100,
+        date,
+        relatedIds,
+        details: {
+          ...baseDetails,
+          field: 'fee',
+          expectedCents: expectedFeeCents,
+          actualCents: actualFeeCents,
+          deltaCents,
+          expected: centsToUsd(expectedFeeCents),
+          actual: centsToUsd(actualFeeCents),
+          feesAccount: accounts.fees,
+        },
+      });
+    }
+  }
+
+  return items;
+};
+
+/**
+ * Account-level fees (monthly billing, Radar, ACH failure, currency conversion, instant
+ * payout, adjustments) with no QuickBooks entry.
+ *
+ * These belong to no charge, so no existing check enumerates them — they cannot be
+ * reported missing because nothing knows they exist.
+ */
+const findAccountFeesMissingQbo = (
+  feeBalanceTransactions: any[],
+  allDocs: QboDocWithEntity[]
+): DiscrepancyItem[] => {
+  const items: DiscrepancyItem[] = [];
+
+  for (const bt of feeBalanceTransactions) {
+    const id = typeof bt?.id === 'string' ? bt.id : null;
+    if (!id) continue;
+
+    const sourceId = resolveExpandedId(bt.source);
+    const ids = uniqueStrings([id, sourceId]);
+    const posted = allDocs.some((doc) => ids.some((candidate) => docReferencesId(doc, candidate)));
+    if (posted) continue;
+
+    // Account-level fees leave the balance, so `amount` is negative; report the magnitude.
+    const feeCents = Math.abs(typeof bt.amount === 'number' ? bt.amount : 0);
+    const date =
+      typeof bt.created === 'number'
+        ? new Date(bt.created * 1000).toISOString().slice(0, 10)
+        : null;
+
+    items.push({
+      system: 'stripe',
+      type: 'account_fee_missing_qbo',
+      id,
+      description:
+        `Stripe account-level fee ${id} (${bt.type ?? 'unknown type'}` +
+        `${bt.description ? `: ${bt.description}` : ''}) of ${centsToUsd(feeCents)} has no ` +
+        `QuickBooks entry — this fee belongs to no charge, so nothing else looks for it`,
+      stripeId: id,
+      amount: feeCents / 100,
+      date,
+      relatedIds: ids,
+      details: {
+        sourceSystem: 'stripe',
+        missingIn: 'qbo',
+        recordType: 'account_fee',
+        balanceTransactionType: bt.type ?? null,
+        reportingCategory: bt.reporting_category ?? null,
+        stripeDescription: bt.description ?? null,
+        sourceId,
+        currency: bt.currency ?? null,
+        feeCents,
+        fee: centsToUsd(feeCents),
+      },
+    });
+  }
+
+  return items;
+};
+
+type PayoutBalanceCheck = {
+  payoutId: string;
+  expectedNetCents: number;
+  postedNetCents: number;
+  deltaCents: number;
+  stripeNetCents: number;
+  payoutFeeCents: number;
+  unpostedCount: number;
+  unpostedNetCents: number;
+  unpostedIds: string[];
+  matchedDocIds: string[];
+  date: string | null;
+};
+
+/**
+ * Payout-level assertion.
+ *
+ * What was posted to QuickBooks for the transactions swept into a payout — receipts less
+ * fees less refunds plus/minus adjustments — is exactly the net movement of the Stripe
+ * clearing account for those documents. That figure must equal the payout net that hit
+ * the bank (plus any instant-payout fee taken on the payout itself). When it does not,
+ * money was posted wrong or not posted at all, and the delta is what is unaccounted for.
+ */
+const buildPayoutBalanceCheck = (
+  payout: Stripe.Payout,
+  balanceTransactions: any[],
+  index: Map<string, QboDocWithEntity[]>,
+  allDocs: QboDocWithEntity[],
+  accounts: QboAccountNames
+): PayoutBalanceCheck => {
+  const payoutBt = balanceTransactions.find(
+    (bt) => bt?.type === 'payout' || bt?.type === 'payment'
+  );
+  const payoutFeeCents =
+    payoutBt && payoutBt.type === 'payout' && typeof payoutBt.fee === 'number' ? payoutBt.fee : 0;
+
+  const componentBts = balanceTransactions.filter(
+    (bt) => bt?.type !== 'payout' && bt?.type !== 'payout_cancel'
+  );
+
+  let postedNetCents = 0;
+  let stripeNetCents = 0;
+  let unpostedNetCents = 0;
+  const unpostedIds: string[] = [];
+  const matchedDocIds = new Set<string>();
+
+  for (const bt of componentBts) {
+    stripeNetCents += typeof bt?.net === 'number' ? bt.net : 0;
+
+    const source = bt?.source;
+    const sourceId = resolveExpandedId(source);
+    const sourcePi =
+      source && typeof source === 'object'
+        ? resolveExpandedId((source as any).payment_intent)
+        : null;
+    const sourceCharge =
+      source && typeof source === 'object' ? resolveExpandedId((source as any).charge) : null;
+    const ids = uniqueStrings([bt?.id, sourceId, sourcePi, sourceCharge]);
+
+    const docs = findDocsForIds(ids, index, allDocs);
+    const usable = docs
+      .map((doc) => ({ doc, summary: summarizeQboDocAmounts(doc, accounts) }))
+      .filter(({ summary }) => summary.basis !== 'unknown');
+
+    if (usable.length === 0) {
+      unpostedNetCents += typeof bt?.net === 'number' ? bt.net : 0;
+      unpostedIds.push(ids[0] ?? 'unknown');
+      continue;
+    }
+
+    for (const { doc, summary } of usable) {
+      postedNetCents += summary.clearingDeltaCents ?? 0;
+      matchedDocIds.add(`${doc.entityType}:${String(doc.Id ?? '')}`);
+    }
+  }
+
+  const expectedNetCents = (payout.amount ?? 0) + payoutFeeCents;
+
+  return {
+    payoutId: payout.id,
+    expectedNetCents,
+    postedNetCents,
+    deltaCents: postedNetCents - expectedNetCents,
+    stripeNetCents,
+    payoutFeeCents,
+    unpostedCount: unpostedIds.length,
+    unpostedNetCents,
+    unpostedIds: unpostedIds.slice(0, 25),
+    matchedDocIds: [...matchedDocIds],
+    date: payout.arrival_date
+      ? new Date(payout.arrival_date * 1000).toISOString().slice(0, 10)
+      : null,
+  };
+};
+
+const payoutCheckToDiscrepancy = (check: PayoutBalanceCheck): DiscrepancyItem => ({
+  system: 'qbo',
+  type: 'payout_balance_mismatch',
+  id: check.payoutId,
+  description:
+    `Payout ${check.payoutId} moved ${centsToUsd(check.expectedNetCents)} out of Stripe, but the ` +
+    `QuickBooks documents for the transactions it swept account for ` +
+    `${centsToUsd(check.postedNetCents)} — ${centsToUsd(Math.abs(check.deltaCents))} ` +
+    `${check.deltaCents > 0 ? 'more than' : 'less than'} the bank received` +
+    (check.unpostedCount > 0
+      ? ` (${check.unpostedCount} balance transaction(s) worth ${centsToUsd(check.unpostedNetCents)} have no QuickBooks entry)`
+      : ''),
+  stripeId: check.payoutId,
+  amount: check.expectedNetCents / 100,
+  date: check.date,
+  relatedIds: [check.payoutId, ...check.unpostedIds],
+  details: {
+    sourceSystem: 'stripe',
+    comparedAgainst: 'qbo',
+    recordType: 'payout',
+    expectedCents: check.expectedNetCents,
+    actualCents: check.postedNetCents,
+    deltaCents: check.deltaCents,
+    expected: centsToUsd(check.expectedNetCents),
+    actual: centsToUsd(check.postedNetCents),
+    delta: centsToUsd(check.deltaCents),
+    payoutNetCents: check.expectedNetCents,
+    instantPayoutFeeCents: check.payoutFeeCents,
+    stripeComponentNetCents: check.stripeNetCents,
+    unpostedBalanceTransactionCount: check.unpostedCount,
+    unpostedBalanceTransactionNetCents: check.unpostedNetCents,
+    unpostedBalanceTransactionIds: check.unpostedIds,
+    matchedQboDocs: check.matchedDocIds,
+  },
+});
+
+/**
+ * Hard stop on how far back the payout assertion will pull extra QuickBooks documents.
+ * A payout sweeps charges from earlier days, whose documents fall outside the run's own
+ * date window; without them every payout would look unbalanced. 14 days covers Stripe's
+ * standard rolling schedules with room to spare.
+ */
+const MAX_PAYOUT_LOOKBACK_DAYS = 14;
+
+const daysBetween = (from: string, to: string): number =>
+  Math.round(
+    (new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / 86400000
+  );
+
+/**
+ * Runs the payout-level assertion for every paid payout in the window.
+ *
+ * Pulls each payout's balance transactions, back-fills any QuickBooks documents that
+ * pre-date the run window (the charges a payout sweeps are usually older than the payout
+ * itself), and reports the delta whenever what was posted does not equal what the bank
+ * received.
+ */
+const runPayoutBalanceChecks = async (
+  stripeClient: Stripe,
+  payouts: Stripe.Payout[],
+  qboDocs: QboDocWithEntity[],
+  accounts: QboAccountNames,
+  windowStartDate: string,
+  context: InvocationContext
+): Promise<{ items: DiscrepancyItem[]; errors: string[] }> => {
+  const items: DiscrepancyItem[] = [];
+  const errors: string[] = [];
+
+  const paidPayouts = payouts.filter((payout) => payout.status === 'paid');
+  if (paidPayouts.length === 0) {
+    return { items, errors };
+  }
+
+  const balanceTransactionsByPayout = new Map<string, any[]>();
+  let earliestComponentDate: string | null = null;
+
+  for (const payout of paidPayouts) {
+    try {
+      const balanceTransactions = await fetchBalanceTransactionsForPayout(stripeClient, payout.id, {
+        logger: context.log.bind(context),
+      });
+      balanceTransactionsByPayout.set(payout.id, balanceTransactions);
+
+      for (const bt of balanceTransactions) {
+        if (typeof bt?.created !== 'number') continue;
+        const date = new Date(bt.created * 1000).toISOString().slice(0, 10);
+        if (!earliestComponentDate || date < earliestComponentDate) {
+          earliestComponentDate = date;
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`Payout balance transactions fetch failed for ${payout.id}: ${message}`);
+      context.log('[DailyReconciliation] Could not fetch balance transactions for payout', {
+        payoutId: payout.id,
+        error: message,
+      });
+    }
+  }
+
+  if (balanceTransactionsByPayout.size === 0) {
+    return { items, errors };
+  }
+
+  // The run already holds documents for [windowStart-1, windowEnd+1]; fetch whatever the
+  // payout reaches back beyond that so an old charge is not mistaken for an unposted one.
+  let docs = qboDocs;
+  const alreadyQueriedFrom = shiftDate(windowStartDate, -1);
+  if (earliestComponentDate && earliestComponentDate < alreadyQueriedFrom) {
+    const lookbackDays = daysBetween(earliestComponentDate, alreadyQueriedFrom);
+    const supplementalStart =
+      lookbackDays > MAX_PAYOUT_LOOKBACK_DAYS
+        ? shiftDate(alreadyQueriedFrom, -MAX_PAYOUT_LOOKBACK_DAYS)
+        : earliestComponentDate;
+    const supplementalEnd = shiftDate(alreadyQueriedFrom, -1);
+
+    if (supplementalStart <= supplementalEnd) {
+      context.log('[DailyReconciliation] Back-filling QBO documents swept by payouts', {
+        startDate: supplementalStart,
+        endDate: supplementalEnd,
+        truncated: lookbackDays > MAX_PAYOUT_LOOKBACK_DAYS,
+      });
+
+      const [receipts, journalEntries, deposits, transfers] = await Promise.all([
+        queryQboDocumentsForRange('SalesReceipt', supplementalStart, supplementalEnd, null),
+        queryQboDocumentsForRange('JournalEntry', supplementalStart, supplementalEnd, null),
+        queryQboDocumentsForRange('Deposit', supplementalStart, supplementalEnd, null),
+        queryQboDocumentsForRange('Transfer', supplementalStart, supplementalEnd, null),
+      ]);
+
+      docs = [
+        ...qboDocs,
+        ...receipts.map((d) => ({ ...d, entityType: 'SalesReceipt' as const })),
+        ...journalEntries.map((d) => ({ ...d, entityType: 'JournalEntry' as const })),
+        ...deposits.map((d) => ({ ...d, entityType: 'Deposit' as const })),
+        ...transfers.map((d) => ({ ...d, entityType: 'Transfer' as const })),
+      ];
+
+      if (lookbackDays > MAX_PAYOUT_LOOKBACK_DAYS) {
+        errors.push(
+          `Payout balance check looked back only ${MAX_PAYOUT_LOOKBACK_DAYS} days; balance ` +
+            `transactions older than ${supplementalStart} were compared without their QBO documents.`
+        );
+      }
+    }
+  }
+
+  const index = buildQboDocIndex(docs);
+
+  for (const payout of paidPayouts) {
+    const balanceTransactions = balanceTransactionsByPayout.get(payout.id);
+    if (!balanceTransactions || balanceTransactions.length === 0) continue;
+
+    const check = buildPayoutBalanceCheck(payout, balanceTransactions, index, docs, accounts);
+    if (check.deltaCents !== 0) {
+      items.push(payoutCheckToDiscrepancy(check));
+    }
+  }
+
+  return { items, errors };
+};
+
+// ---------------------------------------------------------------------------
+// Actionable summary
+//
+// The scheduled run used to end at a bare `logger.warn` with a category count, which is
+// not something anyone can act on. This renders the financial findings as a structured
+// alert (numbers, ids, and the endpoint that fixes each class of problem) and emits it
+// through the project's logger — the only alerting channel this codebase has. There is no
+// ops notification service to hook into: `services/payoutRecon/emailService.js` is
+// donor-facing SendGrid mail, not an operator alert path.
+// ---------------------------------------------------------------------------
+
+/** Categories where a finding means the general ledger is wrong, not merely unlinked. */
+const MONEY_CATEGORIES = ['amountMismatches', 'accountFeesMissingQbo', 'payoutImbalances'] as const;
+
+const NEXT_STEP_BY_CATEGORY: Record<string, string> = {
+  amountMismatches:
+    'amountMismatches — open each QBO document listed in details.qboDocs and correct the gross/fee line against the Stripe balance transaction.',
+  accountFeesMissingQbo:
+    'accountFeesMissingQbo — these Stripe fees belong to no charge and were never booked; post them to the Stripe Fees account against Stripe Clearing.',
+  payoutImbalances:
+    'payoutImbalances — the deposit does not equal what was posted for the transactions it swept; work the unpostedBalanceTransactionIds first.',
+  stripeMissingSalesforce:
+    'stripeMissingSalesforce — a gift may never have reached Salesforce; replay it with /api/stripe/true-up.',
+  stripeMissingQbo:
+    'stripeMissingQbo — replay with /api/stripe/true-up (bypassQbo=false) to post the missing document.',
+  salesforceMissingQbo:
+    'salesforceMissingQbo — post the Salesforce rows with /api/qbo/salesforce-record-sync.',
+  salesforceMissingStripe:
+    'salesforceMissingStripe — Stripe-origin rows with no Stripe id; inspect them by hand.',
+  qboMissingSalesforce:
+    'qboMissingSalesforce — link the documents with /api/qbo/receipts-salesforce-sync.',
+  duplicatesInSalesforce:
+    'duplicatesInSalesforce — de-duplicate with /api/ops/stripe-duplicate-check?deleteDuplicates=true.',
+  duplicatesInQbo:
+    'duplicatesInQbo — de-duplicate with /api/ops/stripe-duplicate-check?deleteDuplicates=true.',
+};
+
+interface ReconciliationFinding {
+  category: string;
+  type: string;
+  id: string;
+  stripeId: string | null;
+  description: string;
+  date: string | null;
+  expectedCents: number | null;
+  actualCents: number | null;
+  deltaCents: number | null;
+}
+
+interface ReconciliationAlert {
+  severity: 'ok' | 'attention' | 'critical';
+  headline: string;
+  range: { startDate: string; endDate: string };
+  liveMode: boolean;
+  dryRun: boolean;
+  totals: {
+    discrepancies: number;
+    moneyFindings: number;
+    unaccountedCents: number;
+    unaccounted: string;
+  };
+  byCategory: Record<string, number>;
+  findings: ReconciliationFinding[];
+  nextSteps: string[];
+  /** Multi-line rendering for humans reading the invocation log. */
+  text: string;
+}
+
+/** Cap on the findings carried inside the alert payload (the full list stays on the report). */
+const MAX_ALERT_FINDINGS = 25;
+
+const readCents = (item: DiscrepancyItem, key: string): number | null => {
+  const value = item.details?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+const buildReconciliationAlert = (
+  report: Omit<ReconciliationReport, 'alert'>
+): ReconciliationAlert => {
+  const entries = Object.entries(report.discrepancies) as Array<[string, DiscrepancyItem[]]>;
+
+  const moneyItems: Array<{ category: string; item: DiscrepancyItem }> = [];
+  for (const [category, items] of entries) {
+    if (!(MONEY_CATEGORIES as readonly string[]).includes(category)) continue;
+    for (const item of items) moneyItems.push({ category, item });
+  }
+
+  const unaccountedCents = moneyItems.reduce((total, { item }) => {
+    const delta = readCents(item, 'deltaCents');
+    if (delta !== null) return total + Math.abs(delta);
+    const fee = readCents(item, 'feeCents');
+    return total + (fee ?? 0);
+  }, 0);
+
+  const byCategory: Record<string, number> = {};
+  for (const [category, items] of entries) {
+    if (items.length > 0) byCategory[category] = items.length;
+  }
+
+  const otherItems: Array<{ category: string; item: DiscrepancyItem }> = [];
+  for (const [category, items] of entries) {
+    if ((MONEY_CATEGORIES as readonly string[]).includes(category)) continue;
+    for (const item of items) otherItems.push({ category, item });
+  }
+
+  const findings: ReconciliationFinding[] = [...moneyItems, ...otherItems]
+    .slice(0, MAX_ALERT_FINDINGS)
+    .map(({ category, item }) => ({
+      category,
+      type: item.type,
+      id: item.id,
+      stripeId: item.stripeId ?? null,
+      description: item.description,
+      date: item.date ?? null,
+      expectedCents: readCents(item, 'expectedCents'),
+      actualCents: readCents(item, 'actualCents'),
+      deltaCents: readCents(item, 'deltaCents'),
+    }));
+
+  const severity: ReconciliationAlert['severity'] =
+    moneyItems.length > 0 ? 'critical' : report.summary.totalDiscrepancies > 0 ? 'attention' : 'ok';
+
+  const rangeLabel =
+    report.range.startDate === report.range.endDate
+      ? report.range.startDate
+      : `${report.range.startDate}..${report.range.endDate}`;
+
+  const headline =
+    severity === 'ok'
+      ? `Reconciliation clean for ${rangeLabel}`
+      : severity === 'critical'
+        ? `${moneyItems.length} accounting discrepanc${moneyItems.length === 1 ? 'y' : 'ies'} for ${rangeLabel} — ${centsToUsd(unaccountedCents)} unaccounted for`
+        : `${report.summary.totalDiscrepancies} unlinked record(s) for ${rangeLabel}`;
+
+  const nextSteps = Object.keys(byCategory)
+    .map((category) => NEXT_STEP_BY_CATEGORY[category])
+    .filter((step): step is string => Boolean(step));
+
+  const lines: string[] = [
+    `[DailyReconciliation] ${headline}`,
+    `  window: ${rangeLabel} · mode: ${report.liveMode ? 'live' : 'test'} · dryRun: ${report.dryRun}`,
+    `  findings: ${report.summary.totalDiscrepancies} total, ${moneyItems.length} affecting the ledger`,
+  ];
+
+  if (moneyItems.length > 0) {
+    lines.push(`  unaccounted for: ${centsToUsd(unaccountedCents)}`);
+  }
+
+  for (const [category, count] of Object.entries(byCategory)) {
+    lines.push(`  · ${category}: ${count}`);
+  }
+
+  for (const finding of findings) {
+    const delta = finding.deltaCents !== null ? ` [delta ${centsToUsd(finding.deltaCents)}]` : '';
+    lines.push(`    - ${finding.category}/${finding.type}: ${finding.description}${delta}`);
+  }
+
+  if (report.summary.totalDiscrepancies > findings.length) {
+    lines.push(
+      `    … ${report.summary.totalDiscrepancies - findings.length} more in the full report`
+    );
+  }
+
+  for (const step of nextSteps) {
+    lines.push(`  → ${step}`);
+  }
+
+  return {
+    severity,
+    headline,
+    range: report.range,
+    liveMode: report.liveMode,
+    dryRun: report.dryRun,
+    totals: {
+      discrepancies: report.summary.totalDiscrepancies,
+      moneyFindings: moneyItems.length,
+      unaccountedCents,
+      unaccounted: centsToUsd(unaccountedCents),
+    },
+    byCategory,
+    findings,
+    nextSteps,
+    text: lines.join('\n'),
+  };
+};
+
+const emitReconciliationAlert = (alert: ReconciliationAlert, context: InvocationContext): void => {
+  const payload = {
+    severity: alert.severity,
+    range: alert.range,
+    liveMode: alert.liveMode,
+    dryRun: alert.dryRun,
+    totals: alert.totals,
+    byCategory: alert.byCategory,
+    findings: alert.findings,
+    nextSteps: alert.nextSteps,
+  };
+
+  if (alert.severity === 'critical') {
+    logger.error(`[DailyReconciliation] ${alert.headline}`, payload);
+  } else if (alert.severity === 'attention') {
+    logger.warn(`[DailyReconciliation] ${alert.headline}`, payload);
+  } else {
+    logger.info(`[DailyReconciliation] ${alert.headline}`, payload);
+  }
+
+  context.log(alert.text);
+};
+
 export const runReconciliation = async (
   options: ReconciliationOptions,
   triggeredBy: 'http' | 'timer',
@@ -1941,7 +2884,7 @@ export const runReconciliation = async (
   const errors: string[] = [];
 
   const counts: SystemCounts = {
-    stripe: { charges: 0, refunds: 0, payouts: 0 },
+    stripe: { charges: 0, refunds: 0, payouts: 0, accountFees: 0 },
     salesforce: { transactions: 0 },
     qbo: { salesReceipts: 0, journalEntries: 0, deposits: 0 },
   };
@@ -1954,6 +2897,9 @@ export const runReconciliation = async (
     qboMissingSalesforce: [],
     duplicatesInSalesforce: [],
     duplicatesInQbo: [],
+    amountMismatches: [],
+    accountFeesMissingQbo: [],
+    payoutImbalances: [],
   };
 
   const sinceUnix = dateToUnix(startDate);
@@ -1966,6 +2912,8 @@ export const runReconciliation = async (
   let stripeCharges: any[] = [];
   let stripeRefunds: any[] = [];
   let stripePayouts: any[] = [];
+  /** Account-level fee balance transactions — fees that belong to no charge. */
+  let stripeAccountFees: any[] = [];
   // stripeClient is hoisted so the repair phase can call .charges/.refunds/.payouts.update()
   let stripeClient: Stripe | null = null;
 
@@ -1995,6 +2943,16 @@ export const runReconciliation = async (
         logger: context.log.bind(context),
       });
       counts.stripe.payouts = stripePayouts.length;
+
+      // Account-level fees are not reachable from any charge, refund or payout, so they
+      // have to be enumerated in their own right before they can be compared to anything.
+      context.log('[DailyReconciliation] Fetching Stripe account-level fees');
+      stripeAccountFees = await fetchAccountFeeBalanceTransactionsSince(
+        stripeClient,
+        sinceUnix,
+        fetchOptions
+      );
+      counts.stripe.accountFees = stripeAccountFees.length;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       errors.push(`Stripe fetch failed: ${msg}`);
@@ -2237,6 +3195,37 @@ export const runReconciliation = async (
     );
   }
 
+  // ── Amount-level checks ─────────────────────────────────────────────────
+  //
+  // Everything above compares populations by id. These compare money: what a matched
+  // document actually posts, the fees that belong to no charge at all, and whether each
+  // payout equals the sum of what was posted for the transactions it swept.
+  if (systems.includes('stripe') && systems.includes('qbo')) {
+    const qboAccounts = resolveQboAccountNames();
+    const qboDocIndex = buildQboDocIndex(allQboDocsWithEntity);
+
+    discrepancies.amountMismatches.push(
+      ...findChargeAmountMismatches(stripeCharges, qboDocIndex, allQboDocsWithEntity, qboAccounts)
+    );
+
+    discrepancies.accountFeesMissingQbo.push(
+      ...findAccountFeesMissingQbo(stripeAccountFees, allQboDocsWithEntity)
+    );
+
+    if (stripeClient) {
+      const payoutChecks = await runPayoutBalanceChecks(
+        stripeClient,
+        stripePayouts,
+        allQboDocsWithEntity,
+        qboAccounts,
+        startDate,
+        context
+      );
+      discrepancies.payoutImbalances.push(...payoutChecks.items);
+      errors.push(...payoutChecks.errors);
+    }
+  }
+
   const selectedSyncIds = new Set(syncIds.map((id) => normalizeIdentifier(id)));
   const targetedDiscrepancies = [
     ...discrepancies.stripeMissingSalesforce,
@@ -2271,6 +3260,9 @@ export const runReconciliation = async (
           stripeMissingQbo: filterRepairItems(discrepancies.stripeMissingQbo),
           salesforceMissingQbo: filterRepairItems(discrepancies.salesforceMissingQbo),
           qboMissingSalesforce: filterRepairItems(discrepancies.qboMissingSalesforce),
+          amountMismatches: filterRepairItems(discrepancies.amountMismatches),
+          accountFeesMissingQbo: filterRepairItems(discrepancies.accountFeesMissingQbo),
+          payoutImbalances: filterRepairItems(discrepancies.payoutImbalances),
           salesforceMissingStripe: [],
           duplicatesInSalesforce: [],
           duplicatesInQbo: [],
@@ -2509,7 +3501,7 @@ export const runReconciliation = async (
   }
   const totalDiscrepancies = Object.values(categories).reduce((sum, n) => sum + n, 0);
 
-  const report: ReconciliationReport = {
+  const reportWithoutAlert: Omit<ReconciliationReport, 'alert'> = {
     success: true,
     dryRun,
     liveMode,
@@ -2529,12 +3521,19 @@ export const runReconciliation = async (
     triggeredBy,
   };
 
+  const alert = buildReconciliationAlert(reportWithoutAlert);
+  const report: ReconciliationReport = { ...reportWithoutAlert, alert };
+
+  emitReconciliationAlert(alert, context);
+
   context.log('[DailyReconciliation] Reconciliation complete', {
     startDate,
     endDate,
     dryRun,
     liveMode,
     totalDiscrepancies,
+    moneyFindings: alert.totals.moneyFindings,
+    unaccounted: alert.totals.unaccounted,
     errors: errors.length,
   });
 
@@ -2613,15 +3612,12 @@ export const dailyReconciliationTimer = async (
   }
 
   try {
+    // runReconciliation already emitted the structured alert (severity, per-finding
+    // amounts, and the endpoint that fixes each class of problem). A bare category count
+    // here would only restate it less usefully.
     const report = await runReconciliation(options, 'timer', context);
 
-    if (report.summary.totalDiscrepancies > 0) {
-      logger.warn('[DailyReconciliation] Discrepancies found during scheduled run', {
-        date: options.startDate,
-        totalDiscrepancies: report.summary.totalDiscrepancies,
-        categories: report.summary.categories,
-      });
-    } else {
+    if (report.summary.totalDiscrepancies === 0) {
       context.log('[DailyReconciliation] All systems in sync for', options.startDate);
     }
   } catch (error) {
@@ -2635,6 +3631,16 @@ export const dailyReconciliationTimer = async (
  * Salesforce and the QuickBooks general ledger or only reports — which makes it the
  * single most safety-critical function in this handler and worth pinning directly.
  */
-export const __internals = { parseOptions };
+export const __internals = {
+  parseOptions,
+  summarizeQboDocAmounts,
+  buildQboDocIndex,
+  findChargeAmountMismatches,
+  findAccountFeesMissingQbo,
+  buildPayoutBalanceCheck,
+  payoutCheckToDiscrepancy,
+  buildReconciliationAlert,
+  resolveQboAccountNames,
+};
 
 export default dailyReconciliationHttp;

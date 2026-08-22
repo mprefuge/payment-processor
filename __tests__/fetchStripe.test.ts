@@ -5,6 +5,9 @@ import {
   fetchStripeDisputesSince,
   fetchStripePayoutsSince,
   fetchBalanceTransactionsForPayout,
+  fetchAccountFeeBalanceTransactionsSince,
+  isAccountLevelFeeBalanceTransaction,
+  ACCOUNT_LEVEL_FEE_TYPES,
   normalizeSince,
 } from '../src/services/qbo/stripe/fetchStripe';
 
@@ -181,5 +184,106 @@ describe('fetchBalanceTransactionsForPayout', () => {
     const callArgs = stripe.balanceTransactions.list.mock.calls[0][0];
     expect(callArgs.expand).toContain('data.source');
     expect(callArgs.expand).toContain('data.source.charge');
+  });
+});
+
+// ── fetchAccountFeeBalanceTransactionsSince ───────────────────────────────────
+
+/**
+ * Account-level fees — monthly billing, Radar, ACH failure fees, currency conversion,
+ * instant-payout fees, adjustments — never hang off a charge, a refund or a payout.
+ * Nothing enumerated them, so no population being reconciled contained them, so they
+ * could not be reported missing from QuickBooks.
+ */
+describe('fetchAccountFeeBalanceTransactionsSince', () => {
+  const feeBt = (overrides: Record<string, any> = {}) => ({
+    id: 'txn_fee1',
+    type: 'stripe_fee',
+    amount: -2500,
+    fee: 0,
+    net: -2500,
+    created: SINCE + 60,
+    description: 'Billing - Radar for Fraud Teams',
+    source: null,
+    ...overrides,
+  });
+
+  const makeBalanceStripe = (byType: Record<string, any[]>) => ({
+    balanceTransactions: {
+      list: vi.fn(async (params: Record<string, any>) => ({
+        data: byType[params.type as string] ?? [],
+        has_more: false,
+      })),
+    },
+  });
+
+  it('throws when stripe.balanceTransactions.list is not a function', async () => {
+    await expect(fetchAccountFeeBalanceTransactionsSince({}, SINCE)).rejects.toThrow();
+  });
+
+  it('queries every account-level fee type', async () => {
+    const stripe = makeBalanceStripe({});
+    await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE);
+
+    const queriedTypes = stripe.balanceTransactions.list.mock.calls.map(
+      (call: any[]) => call[0].type
+    );
+    expect(queriedTypes).toEqual([...ACCOUNT_LEVEL_FEE_TYPES]);
+    expect(stripe.balanceTransactions.list.mock.calls[0][0].created?.gte).toBe(SINCE);
+  });
+
+  it('returns account-level fees across types, deduped by id', async () => {
+    const stripe = makeBalanceStripe({
+      stripe_fee: [feeBt(), feeBt()],
+      adjustment: [feeBt({ id: 'txn_adj1', type: 'adjustment', amount: -125 })],
+    });
+
+    const result = await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE);
+
+    expect(result.map((bt: any) => bt.id)).toEqual(['txn_fee1', 'txn_adj1']);
+  });
+
+  it('drops adjustments that belong to a dispute rather than to the account', async () => {
+    const stripe = makeBalanceStripe({
+      adjustment: [
+        feeBt({ id: 'txn_chargeback', type: 'adjustment', source: { id: 'dp_1abc' } }),
+        feeBt({ id: 'txn_accountAdj', type: 'adjustment', source: null }),
+      ],
+    });
+
+    const result = await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE);
+
+    expect(result.map((bt: any) => bt.id)).toEqual(['txn_accountAdj']);
+  });
+
+  it('honours an explicit type list', async () => {
+    const stripe = makeBalanceStripe({ tax_fee: [feeBt({ id: 'txn_tax', type: 'tax_fee' })] });
+
+    const result = await fetchAccountFeeBalanceTransactionsSince(stripe, SINCE, {
+      types: ['tax_fee'],
+    });
+
+    expect(stripe.balanceTransactions.list).toHaveBeenCalledTimes(1);
+    expect(result.map((bt: any) => bt.id)).toEqual(['txn_tax']);
+  });
+});
+
+describe('isAccountLevelFeeBalanceTransaction', () => {
+  it('accepts a stripe_fee with no source', () => {
+    expect(isAccountLevelFeeBalanceTransaction({ type: 'stripe_fee', source: null })).toBe(true);
+  });
+
+  it('rejects a charge balance transaction', () => {
+    expect(isAccountLevelFeeBalanceTransaction({ type: 'charge', source: 'ch_1' })).toBe(false);
+  });
+
+  it('rejects a fee attributable to a single charge', () => {
+    expect(isAccountLevelFeeBalanceTransaction({ type: 'adjustment', source: 'ch_1abc' })).toBe(
+      false
+    );
+  });
+
+  it('rejects a non-object', () => {
+    expect(isAccountLevelFeeBalanceTransaction(null)).toBe(false);
   });
 });

@@ -209,6 +209,124 @@ export async function fetchStripePayoutsSince(stripe: any, since: unknown, optio
   return fetcher(since, options);
 }
 
+/**
+ * Balance-transaction types that represent money Stripe takes (or gives back) at the
+ * ACCOUNT level rather than against a single charge: monthly billing, Radar, ACH/failed
+ * payment fees, currency-conversion charges, instant-payout fees billed separately, and
+ * balance adjustments.
+ *
+ * These never appear on `charge.balance_transaction`, so nothing that enumerates charges,
+ * refunds or payouts can see them.  Until they are enumerated they cannot be reported
+ * missing from QuickBooks, because no population being compared knows they exist.
+ */
+export const ACCOUNT_LEVEL_FEE_TYPES = [
+  'stripe_fee',
+  'network_cost',
+  'tax_fee',
+  'adjustment',
+  'contribution',
+] as const;
+
+export type AccountLevelFeeType = (typeof ACCOUNT_LEVEL_FEE_TYPES)[number];
+
+/**
+ * Prefixes of Stripe objects that a balance transaction can be sourced from when it
+ * belongs to a specific transaction rather than to the account as a whole.  A
+ * type=adjustment balance transaction sourced from `dp_...` is a chargeback adjustment
+ * that the dispute handlers already own — it is not an account-level fee.
+ */
+const TRANSACTION_LINKED_SOURCE_PREFIXES = [
+  'ch_',
+  'py_',
+  're_',
+  'pyr_',
+  'dp_',
+  'du_',
+  'po_',
+  'in_',
+  'ii_',
+];
+
+const resolveSourceId = (source: unknown): string | null => {
+  if (typeof source === 'string') return source;
+  if (source && typeof source === 'object' && typeof (source as any).id === 'string') {
+    return (source as any).id;
+  }
+  return null;
+};
+
+/**
+ * True when a balance transaction is an account-level fee/adjustment: its type is one of
+ * `types` and it is not attributable to an individual charge, refund, dispute or payout.
+ */
+export function isAccountLevelFeeBalanceTransaction(
+  balanceTransaction: any,
+  types: readonly string[] = ACCOUNT_LEVEL_FEE_TYPES
+): boolean {
+  if (!balanceTransaction || typeof balanceTransaction !== 'object') return false;
+  if (!types.includes(balanceTransaction.type)) return false;
+
+  const sourceId = resolveSourceId(balanceTransaction.source);
+  if (!sourceId) return true;
+
+  return !TRANSACTION_LINKED_SOURCE_PREFIXES.some((prefix) => sourceId.startsWith(prefix));
+}
+
+/**
+ * Enumerates account-level fee balance transactions created since `since`.
+ *
+ * Stripe's list API accepts one `type` per call, so this issues one query per configured
+ * type and merges the results (deduped by balance-transaction id).  Anything that turns
+ * out to be attributable to a single charge/refund/dispute/payout is dropped — those are
+ * already reachable through the charge and refund populations.
+ */
+export async function fetchAccountFeeBalanceTransactionsSince(
+  stripe: any,
+  since: unknown,
+  options: {
+    limit?: number;
+    logger?: LoggerLike;
+    params?: Record<string, unknown>;
+    types?: readonly string[];
+  } = {}
+) {
+  if (
+    !stripe ||
+    !stripe.balanceTransactions ||
+    typeof stripe.balanceTransactions.list !== 'function'
+  ) {
+    throw new Error('Stripe client with balanceTransactions.list is required');
+  }
+
+  const types = options.types && options.types.length > 0 ? options.types : ACCOUNT_LEVEL_FEE_TYPES;
+
+  const fetcher = createListFetcher({
+    listFn: stripe.balanceTransactions.list.bind(stripe.balanceTransactions),
+    baseParams: { expand: ['data.source'] },
+  });
+
+  const seen = new Set<string>();
+  const results: any[] = [];
+
+  for (const type of types) {
+    const page = await fetcher(since, {
+      limit: options.limit,
+      logger: options.logger,
+      params: { ...(options.params || {}), type },
+    });
+
+    for (const balanceTransaction of page) {
+      const id = balanceTransaction?.id;
+      if (typeof id !== 'string' || seen.has(id)) continue;
+      if (!isAccountLevelFeeBalanceTransaction(balanceTransaction, types)) continue;
+      seen.add(id);
+      results.push(balanceTransaction);
+    }
+  }
+
+  return results;
+}
+
 export async function fetchBalanceTransactionsForPayout(
   stripe: any,
   payoutId: string,
