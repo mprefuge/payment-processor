@@ -1,4 +1,5 @@
 const { logger: moduleLogger } = require('../../lib/logger');
+const { trimToNull } = require('../../stripe/customerIdentity');
 const {
   buildContactSearchCriteria,
   createAddressData,
@@ -153,11 +154,23 @@ const createCrmContactWorkflow = ({
       }
 
       if (!contact) {
+        const contactData = buildContactData(customerData, searchCriteria.stripeCustomerId || null);
+
+        // Salesforce requires LastName on Contact. Organization gifts carry the org name in
+        // `firstname` and no `lastname`, so a create here is guaranteed to be rejected. The
+        // gift is still linked to its Salesforce Account by the transaction workflow's
+        // resolveAccountId, so skip the doomed create instead of failing the sync.
+        if (!trimToNull(contactData.lastName)) {
+          logger.info(
+            'Skipping contact creation - no last name available (organization gift or ' +
+              'name-less donor). The gift is linked to its Salesforce Account instead.'
+          );
+          return null;
+        }
+
         logger.info('No existing contact found, creating new contact...');
 
-        contact = await crmService.createContact(
-          buildContactData(customerData, searchCriteria.stripeCustomerId || null)
-        );
+        contact = await crmService.createContact(contactData);
         logger.info(`Created new contact: ${describeContact(contact)}`);
       }
 

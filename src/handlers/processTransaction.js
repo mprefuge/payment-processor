@@ -8,6 +8,7 @@ const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const { AzureIdempotencyStore } = require('../services/idempotencyStore');
 const { applyTestArtifactMetadata } = require('../lib/testArtifactTagging');
+const { buildFullName } = require('../stripe/customerIdentity');
 const {
   createStripeCustomer,
   escapeStripeQueryValue,
@@ -842,7 +843,11 @@ const readRequestBody = async (actualRequest, isV3, debugLog) => {
 };
 
 const resolveStripeCustomerId = async (stripe, customerDetails, log) => {
-  const fullName = `${customerDetails.firstname} ${customerDetails.lastname}`;
+  // Must derive the name exactly as createStripeCustomer does (buildCustomerFullName ->
+  // buildFullName), or the lookup can never match what was written. Organization gifts
+  // carry the org name in `firstname` and no `lastname` at all, so a raw template literal
+  // here searches for "Acme Corp undefined" and mints a new customer on every gift.
+  const fullName = buildFullName(customerDetails.firstname, customerDetails.lastname);
   const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
 
   if (existingCustomers.length === 0) {
