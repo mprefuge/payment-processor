@@ -182,7 +182,7 @@ const CommonTransactionFieldsSchema = {
   attribution: z.string().optional(),
   coverFee: z.boolean().optional(),
   feeAmount: OptionalFeeAmountSchema,
-  paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex']).optional(),
+  paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
   category: z.string().optional(),
   transactionType: z.string().optional(),
 };
