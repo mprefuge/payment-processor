@@ -18,7 +18,10 @@ import {
   stripeChargeReads,
 } from '../services/testHarness/request';
 import { buildSalesforcePreview } from '../services/testHarness/salesforcePreview';
-import { buildStripePreview } from '../services/testHarness/stripePreview';
+import {
+  buildHarnessCustomerDetails,
+  buildStripePreview,
+} from '../services/testHarness/stripePreview';
 import {
   buildSyntheticStripeContext,
   type ResolvedDonation,
@@ -43,19 +46,45 @@ import type { StripeCustomerContext } from '../services/qboSvc';
  * `[source_test_tag:<tag>]` (QuickBooks PrivateNote and Salesforce Memo__c) or
  * `source_test_tag=<tag>` (Stripe metadata), so
  * `POST /api/ops/test-artifact-cleanup?tag=<tag>` can find and remove it afterwards.
+ *
+ * Salesforce needs a second copy of the tag to be cleanable at all: `Memo__c` is a Long Text
+ * Area and SOQL cannot filter on it. Both the `Contact` and the `Transaction__c` therefore
+ * carry the tag inside `Stripe_Customer_Id__c`, which is filterable on both objects, so
+ * cleanup can reach rows keyed on a customer Stripe has never issued.
  */
 
 export interface HarnessDependencies {
   getStripeClient: (livemode: boolean) => Stripe;
   postChargeToQbo: typeof postChargeToQbo;
   getSalesforceSvc: () => Promise<SalesforceSvc>;
+  /**
+   * Find-or-create the Stripe customer a real Checkout Session is opened against. The same
+   * function `POST /api/transaction` uses, so `customer:` is an id Stripe actually knows.
+   */
+  resolveStripeCustomerId: (
+    stripe: Stripe,
+    customerDetails: Record<string, unknown>
+  ) => Promise<string>;
   /** Handed to the QBO posting path so a test can assert it is never called on a dry run. */
   qboFetcher?: Fetcher;
 }
 
+/**
+ * `stripeCustomerWorkflow` is CommonJS and pulls in the donation form's own dependency
+ * graph, so it is required at call time rather than imported at module load — the same
+ * shape `src/services/container.ts` and `src/handlers/stripeWebhook.ts` use. Every caller
+ * that writes injects this dependency, so the require only runs in the function app.
+ */
+const loadStripeCustomerResolver = (): HarnessDependencies['resolveStripeCustomerId'] => {
+  const { resolveStripeCustomerId } = require('./processTransaction/stripeCustomerWorkflow');
+  return resolveStripeCustomerId;
+};
+
 const createDefaultDependencies = (): HarnessDependencies => ({
   getStripeClient: (livemode: boolean) => stripeClientFactory.getClient(livemode),
   postChargeToQbo,
+  resolveStripeCustomerId: (stripe, customerDetails) =>
+    loadStripeCustomerResolver()(stripe, customerDetails),
   getSalesforceSvc: async () => {
     const service = new SalesforceService(buildSalesforceConfig());
     const connection = await service.authenticate();
@@ -249,7 +278,9 @@ export const opsTestSalesforce = async (
         outboundReads: NO_OUTBOUND_READS,
         wouldTouchOnDryRunFalse:
           'Salesforce only. It would find-or-create the Contact below and upsert the ' +
-          'Transaction__c by Stripe_Payment_Intent_Id__c, with the cleanup marker in Memo__c.',
+          'Transaction__c by Stripe_Payment_Intent_Id__c, with the cleanup marker in Memo__c ' +
+          'for a human and the cleanup tag inside Stripe_Customer_Id__c on BOTH records, ' +
+          'which is what POST /api/ops/test-artifact-cleanup can actually query on.',
         synthetic: synthesisNote(donation, stripeContext),
         ...preview,
       });
@@ -286,6 +317,7 @@ export const opsTestSalesforce = async (
         contactId: contactResult.id ?? null,
         transactionId: transactionResult.id ?? null,
         cleanupMarker: buildTestArtifactMarker(tag),
+        cleanupHandle: preview.cleanupHandle,
         fieldsSent: Object.keys(preview.transaction.fields as Record<string, unknown>).length,
       },
       ...preview,
@@ -319,28 +351,47 @@ export const opsTestStripe = async (
   const deps = resolveDependencies();
 
   try {
-    const preview = buildStripePreview({
-      donation,
-      cleanupTag: tag,
-      baseWarnings: donationWarnings,
-    });
-
     if (dryRun) {
+      // No customer is resolved on a dry run, because resolving one can CREATE a Stripe
+      // customer. `customer:` therefore renders as a placeholder Stripe would reject.
+      const preview = buildStripePreview({
+        donation,
+        cleanupTag: tag,
+        baseWarnings: donationWarnings,
+      });
+
       return respond(200, {
         success: true,
         dryRun: true,
         tag,
         outboundReads: NO_OUTBOUND_READS,
         wouldTouchOnDryRunFalse:
-          'Stripe only, and only in TEST mode. It would create the Checkout Session rendered ' +
-          `below, carrying source_test_tag=${tag} in its metadata and in the mirrored ` +
-          'payment_intent_data / subscription_data metadata.',
+          'Stripe only, and only in TEST mode. It would resolve (find or create) the customer ' +
+          'for this donor and then create the Checkout Session rendered below, carrying ' +
+          `source_test_tag=${tag} in its metadata and in the mirrored payment_intent_data / ` +
+          'subscription_data metadata.',
         ...preview,
       });
     }
 
     // rejectLiveMode has already refused a live-mode request, so this is always the test key.
     const stripe = deps.getStripeClient(false);
+
+    // Stripe rejects a `customer:` it has never issued, so the placeholder the preview shows
+    // can never be sent. Resolve the customer through the same find-or-create the donation
+    // form uses, then rebuild the arguments around the id that came back.
+    const customerId = await deps.resolveStripeCustomerId(
+      stripe,
+      buildHarnessCustomerDetails(donation, tag)
+    );
+
+    const preview = buildStripePreview({
+      donation,
+      cleanupTag: tag,
+      baseWarnings: donationWarnings,
+      customerId,
+    });
+
     const session = await stripe.checkout.sessions.create(
       preview.checkoutSessionCreateArgs as unknown as Stripe.Checkout.SessionCreateParams
     );
@@ -354,13 +405,14 @@ export const opsTestStripe = async (
         performed: true,
         services: ['stripe'],
         detail:
-          'Stripe test mode was contacted to create the Checkout Session below. This was not ' +
-          'a dry run.',
+          'Stripe test mode was contacted to find-or-create the customer and then create the ' +
+          'Checkout Session below. This was not a dry run.',
       },
       created: {
         checkoutSessionId: session.id,
         url: session.url ?? null,
         livemode: session.livemode,
+        customerId,
         cleanupKey: `source_test_tag=${tag}`,
       },
       ...preview,

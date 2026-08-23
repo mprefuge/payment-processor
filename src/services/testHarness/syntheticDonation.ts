@@ -4,6 +4,8 @@ import { extendZodWithOpenApi } from 'azure-functions-openapi';
 import type Stripe from 'stripe';
 import { z } from 'zod';
 
+import { buildSyntheticCustomerId } from '../../lib/testArtifactTagging';
+
 // These schemas carry `.openapi({ example })` annotations so Swagger UI prefills "Try it
 // out". The extension is idempotent, and doing it here means the module is safe to import
 // from a test or another handler without going through src/index.ts first.
@@ -292,7 +294,12 @@ export const buildSyntheticStripeContext = (donation: ResolvedDonation): Synthet
   const chargeId = `ch_test${suffix}`;
   const paymentIntentId = `pi_test${suffix}`;
   const checkoutSessionId = `cs_test_${suffix}`;
-  const customerId = `cus_test${suffix.slice(0, 14)}`;
+  // The cleanup tag is baked INTO the customer id, not merely into Memo__c. Both the
+  // Contact and the Transaction__c carry this string in Stripe_Customer_Id__c, which is
+  // the only field on both objects that SOQL can filter, so
+  // POST /api/ops/test-artifact-cleanup can find and delete records for a synthetic
+  // customer that exists nowhere in Stripe.
+  const customerId = buildSyntheticCustomerId(donation.tag, suffix);
   const balanceTransactionId = donation.processorFeeCents === null ? null : `txn_test${suffix}`;
 
   const metadata = buildSyntheticMetadata(donation);

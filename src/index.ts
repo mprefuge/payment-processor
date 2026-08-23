@@ -2247,7 +2247,7 @@ registerFunction('opsTestSalesforce', 'Preview the Salesforce fields a donation 
     '### What a dry run does and does not do\n\n' +
     'A dry run performs no outbound **write**: it creates nothing in Stripe, Salesforce or QuickBooks. This endpoint takes an inline `donation` payload only, so a dry run here makes no outbound call of **any** kind — the response is a pure function of the request body. `outboundReads` on the response says so explicitly, and names the service read when there is one.\n\n' +
     '### What `dryRun=false` touches\n\n' +
-    'Salesforce, and nothing else. It find-or-creates the Contact and upserts the `Transaction__c` by `Stripe_Payment_Intent_Id__c`. `Memo__c` carries `[source_test_tag:<tag>]`; cleanup reaches the row through `Stripe_Customer_Id__c`, because `Memo__c` is a Long Text Area and is not filterable in SOQL. Stripe and QuickBooks are never touched.',
+    'Salesforce, and nothing else. It find-or-creates the Contact and upserts the `Transaction__c` by `Stripe_Payment_Intent_Id__c`. Both records are removable afterwards: `Memo__c` carries `[source_test_tag:<tag>]` for a human reading the row, and because `Memo__c` is a Long Text Area that SOQL cannot filter, the cleanup tag is also embedded in the synthetic `Stripe_Customer_Id__c` written to the Contact **and** the `Transaction__c` — the one field on both objects a SOQL `LIKE` can match. `POST /api/ops/test-artifact-cleanup?tag=<tag>` queries on it directly, so it finds these rows even though the customer exists nowhere in Stripe. Stripe and QuickBooks are never touched.',
   tags: ['Ops', 'Salesforce'],
   operationId: 'opsTestSalesforce',
   methods: ['POST'],
@@ -2314,7 +2314,7 @@ registerFunction('opsTestStripe', 'Preview the Checkout Session a donation would
     '### What a dry run does and does not do\n\n' +
     'A dry run performs no outbound **write**: it creates nothing in Stripe, Salesforce or QuickBooks. This endpoint takes an inline `donation` payload only, so a dry run here makes no outbound call of **any** kind — the response is a pure function of the request body. `outboundReads` on the response says so explicitly, and names the service read when there is one.\n\n' +
     '### What `dryRun=false` touches\n\n' +
-    'Stripe, and **only in test mode**. A live-mode request is rejected outright: a harness that can create a live Checkout Session is a harness that can take real money from a real card. The created session carries `source_test_tag=<tag>` in its metadata and in the mirrored `payment_intent_data` / `subscription_data` metadata, which is the key `POST /api/ops/test-artifact-cleanup?tag=<tag>` searches on. Salesforce and QuickBooks are never touched.',
+    'Stripe, and **only in test mode**. A live-mode request is rejected outright: a harness that can create a live Checkout Session is a harness that can take real money from a real card. The customer is resolved first through `resolveStripeCustomerId` — the same find-or-create `POST /api/transaction` uses — because Stripe rejects a `customer:` it never issued; the `customer` field a dry run renders is a placeholder, not a sendable id. The customer carries `source_test_tag=<tag>` in its metadata, as do the created session and the mirrored `payment_intent_data` / `subscription_data` metadata, which is the key `POST /api/ops/test-artifact-cleanup?tag=<tag>` searches on. Salesforce and QuickBooks are never touched.',
   tags: ['Ops', 'Stripe'],
   operationId: 'opsTestStripe',
   methods: ['POST'],

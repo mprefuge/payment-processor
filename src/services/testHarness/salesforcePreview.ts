@@ -1,5 +1,9 @@
 import { mapStripeToTransaction, type TransactionUpsertDTO } from '../../domain/transactions';
-import { appendTestArtifactMarker, buildTestArtifactMarker } from '../../lib/testArtifactTagging';
+import {
+  appendTestArtifactMarker,
+  buildSyntheticCustomerIdTagSegment,
+  buildTestArtifactMarker,
+} from '../../lib/testArtifactTagging';
 import {
   buildNewContactRecord,
   normalizeCustomerName,
@@ -70,10 +74,9 @@ export const buildSalesforcePreview = (input: {
   });
 
   // The marker is what POST /api/ops/test-artifact-cleanup keys a QuickBooks document on.
-  // Salesforce cleanup keys on Stripe_Customer_Id__c instead (Memo__c is a Long Text Area
-  // and cannot be filtered in SOQL — see cleanupSalesforceArtifacts), so the marker in the
-  // memo is for a human reading the record, and the Stripe customer id is the handle the
-  // cleanup endpoint actually follows.
+  // Salesforce cleanup keys on Stripe_Customer_Id__c instead — Memo__c is a Long Text Area
+  // and cannot be filtered in SOQL — so the marker in the memo is for a human reading the
+  // record, while the queryable copy of the tag rides inside the customer id.
   dto.memo__c = appendTestArtifactMarker(dto.memo__c ?? null, cleanupTag) ?? null;
 
   const sanitized = sanitizeTransactionRecord(dto);
@@ -147,13 +150,18 @@ export const buildSalesforcePreview = (input: {
     skippedByNullMeansUnknown,
     cleanupMarker: buildTestArtifactMarker(cleanupTag),
     cleanupHandle: {
-      memoField: 'Memo__c',
+      queryableField: 'Stripe_Customer_Id__c',
       note:
-        'POST /api/ops/test-artifact-cleanup finds Transaction__c rows through ' +
-        'Stripe_Customer_Id__c (matched from Stripe metadata source_test_tag), because ' +
-        'Memo__c is a Long Text Area and is not filterable in SOQL. The marker in Memo__c ' +
-        'is there so a human reading the record can see which run created it.',
+        'POST /api/ops/test-artifact-cleanup finds BOTH the Contact and the Transaction__c ' +
+        'through Stripe_Customer_Id__c, the one field carried by both objects that SOQL can ' +
+        'filter (Memo__c is a Long Text Area and is not filterable, so the marker there is ' +
+        'only for a human reading the record). The synthetic customer id below embeds the ' +
+        'cleanup tag, so the rows are reachable from the tag alone even though no such ' +
+        'customer has ever existed in Stripe.',
       stripeCustomerId: stripe.ids.customerId,
+      soqlLikeSegment: buildSyntheticCustomerIdTagSegment(cleanupTag),
+      contactField: 'Stripe_Customer_Id__c',
+      transactionField: 'Stripe_Customer_Id__c',
     },
     warnings,
   };

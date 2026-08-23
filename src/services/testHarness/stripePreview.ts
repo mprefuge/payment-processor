@@ -6,6 +6,34 @@ import { buildTestArtifactMarker } from '../../lib/testArtifactTagging';
 import type { ResolvedDonation } from './syntheticDonation';
 
 /**
+ * The placeholder that stands in for `customer:` while nothing is being sent.
+ *
+ * A dry run renders the create arguments without contacting Stripe, so there is no customer
+ * to name yet. It is deliberately not a plausible id: Stripe would reject it outright, which
+ * is what makes it safe to show and fatal to send. `opsTestStripe` must resolve a real one
+ * through `resolveStripeCustomerId` before it writes.
+ */
+export const UNRESOLVED_CUSTOMER_PLACEHOLDER =
+  '<resolved at request time — searchStripeCustomer finds or creates the customer>';
+
+/**
+ * The customer payload the harness resolves against Stripe before a non-dry-run write.
+ *
+ * `source_test_tag` is the key `listStripeCustomersByTag` searches on, so a customer this
+ * harness creates is one POST /api/ops/test-artifact-cleanup can find and delete.
+ */
+export const buildHarnessCustomerDetails = (
+  donation: ResolvedDonation,
+  cleanupTag: string
+): Record<string, unknown> => ({
+  email: donation.donor.email,
+  firstname: donation.donor.organization ?? donation.donor.firstName ?? undefined,
+  lastname: donation.donor.organization ? undefined : (donation.donor.lastName ?? undefined),
+  phone: donation.donor.phone ?? undefined,
+  metadata: { source_test_tag: cleanupTag },
+});
+
+/**
  * Renders the `stripe.checkout.sessions.create` arguments the donation form would send.
  *
  * The construction is not reimplemented here: `buildCheckoutSessionParams` is the exact
@@ -29,6 +57,12 @@ export const buildStripePreview = (input: {
   donation: ResolvedDonation;
   cleanupTag: string;
   baseWarnings?: string[];
+  /**
+   * The customer id to render into `customer:`. Supplied only when the caller is about to
+   * SEND these arguments, in which case it must be an id resolved through
+   * `resolveStripeCustomerId`. Omitted for a preview, which shows the placeholder.
+   */
+  customerId?: string;
 }): StripePreviewResult => {
   const { donation, cleanupTag } = input;
   const warnings = [...(input.baseWarnings ?? [])];
@@ -81,7 +115,7 @@ export const buildStripePreview = (input: {
   }
 
   const args = buildCheckoutSessionParams(
-    '<resolved at request time — searchStripeCustomer finds or creates the customer>',
+    input.customerId ?? UNRESOLVED_CUSTOMER_PLACEHOLDER,
     transactionData
   );
 
@@ -113,8 +147,16 @@ export const buildStripePreview = (input: {
   }
 
   return {
-    writesNothing:
-      'Nothing was created. No Stripe client was constructed and no Stripe API call was made.',
+    writesNothing: input.customerId
+      ? 'Rendering these arguments created nothing. Anything reported under `created` was ' +
+        'created by the handler afterwards, from exactly these arguments.'
+      : 'Nothing was created. No Stripe client was constructed and no Stripe API call was made.',
+    customerResolution: input.customerId
+      ? `customer: ${input.customerId} — found or created by resolveStripeCustomerId, the ` +
+        'same find-or-create POST /api/transaction uses.'
+      : 'customer: is a PLACEHOLDER, not an id. Stripe rejects a customer it never issued, ' +
+        'so these arguments are not sendable as rendered; resolveStripeCustomerId supplies ' +
+        'the real id at write time.',
     mode,
     modeSource:
       "frequency === 'onetime' selects mode 'payment'; anything else selects 'subscription'.",

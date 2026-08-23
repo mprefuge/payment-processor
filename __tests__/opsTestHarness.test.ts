@@ -14,6 +14,9 @@ import {
   resolveDonation,
   DEFAULT_TEST_ARTIFACT_TAG,
 } from '../src/services/testHarness/syntheticDonation';
+import { UNRESOLVED_CUSTOMER_PLACEHOLDER } from '../src/services/testHarness/stripePreview';
+import { buildSyntheticCustomerIdTagSegment } from '../src/lib/testArtifactTagging';
+import { executeTestArtifactCleanup } from '../src/services/testArtifactCleanup';
 
 /**
  * The load-bearing promise of this harness is that a dry run CREATES nothing — not that it
@@ -74,7 +77,11 @@ interface Spies {
   checkoutCreate: ReturnType<typeof vi.fn>;
   upsertCustomer: ReturnType<typeof vi.fn>;
   upsertTransaction: ReturnType<typeof vi.fn>;
+  resolveStripeCustomerId: ReturnType<typeof vi.fn>;
 }
+
+/** The id the resolver hands back; a real write must carry this and nothing else. */
+const RESOLVED_CUSTOMER_ID = 'cus_ResolvedByHarness01';
 
 let spies: Spies;
 let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -99,6 +106,7 @@ beforeEach(() => {
     checkoutCreate,
     upsertCustomer,
     upsertTransaction,
+    resolveStripeCustomerId: vi.fn().mockResolvedValue(RESOLVED_CUSTOMER_ID),
   };
 
   __setTestDependencies({
@@ -106,9 +114,17 @@ beforeEach(() => {
     postChargeToQbo: spies.postChargeToQbo as never,
     getSalesforceSvc: spies.getSalesforceSvc as never,
     qboFetcher: spies.qboFetcher as never,
+    resolveStripeCustomerId: spies.resolveStripeCustomerId as never,
   });
 
-  fetchSpy = vi.spyOn(globalThis, 'fetch');
+  // A bare spy records a real network call; it does not prevent one. Anything that slips
+  // past the injected dependencies must fail here rather than reach out from CI.
+  fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+    throw new Error(
+      `The test harness must make no real network call, but fetch() was called with ` +
+        `${typeof input === 'string' ? input : String((input as Request).url ?? input)}.`
+    );
+  });
 });
 
 afterEach(() => {
@@ -187,6 +203,8 @@ const expectNothingWritten = () => {
   expect(spies.checkoutCreate).not.toHaveBeenCalled();
   expect(spies.upsertCustomer).not.toHaveBeenCalled();
   expect(spies.upsertTransaction).not.toHaveBeenCalled();
+  // Resolving a Stripe customer can CREATE one, so it is a write like any other.
+  expect(spies.resolveStripeCustomerId).not.toHaveBeenCalled();
   expect(fetchSpy).not.toHaveBeenCalled();
 };
 
@@ -198,6 +216,7 @@ const expectNoOutboundCalls = () => {
   expect(spies.checkoutCreate).not.toHaveBeenCalled();
   expect(spies.upsertCustomer).not.toHaveBeenCalled();
   expect(spies.upsertTransaction).not.toHaveBeenCalled();
+  expect(spies.resolveStripeCustomerId).not.toHaveBeenCalled();
   expect(fetchSpy).not.toHaveBeenCalled();
 };
 
@@ -586,6 +605,218 @@ describe('the cleanup marker is applied everywhere a record could be created', (
 
     expect(body.tag).toBe('swagger-test-harness');
     expect(body.cleanupMarker).toBe('[source_test_tag:swagger-test-harness]');
+  });
+});
+
+/**
+ * Both defects an adversarial review found in this harness survived a green test suite
+ * because the tests counted calls and never looked at what was passed. These read the
+ * arguments.
+ */
+
+/**
+ * Evaluates a SOQL `LIKE` WHERE clause against one field value.
+ *
+ * The point of the Salesforce assertions below is not that a query string was built, but
+ * that the query SELECTS the record the harness wrote. `%` matches any run of characters
+ * and `_` any single one, and a backslash escapes either — so an unescaped synthetic
+ * customer id (which is mostly underscores) would silently over-match, and that is worth
+ * catching here rather than in a production org.
+ */
+const soqlLikeToRegExp = (pattern: string): RegExp => {
+  let source = '';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === '\\') {
+      index += 1;
+      source += pattern[index]?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') ?? '';
+      continue;
+    }
+    if (character === '%') {
+      source += '[\\s\\S]*';
+      continue;
+    }
+    if (character === '_') {
+      source += '[\\s\\S]';
+      continue;
+    }
+    source += character.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  return new RegExp(`^${source}$`);
+};
+
+/** Runs a `SELECT Id FROM X WHERE a LIKE '…' OR b LIKE '…'` over in-memory records. */
+const selectBySoql = (soql: string, records: Array<Record<string, string>>) => {
+  const conditions = [...soql.matchAll(/(\w+) LIKE '((?:[^'\\]|\\.)*)'/g)].map(
+    ([, field, pattern]) => ({ field, matches: soqlLikeToRegExp(pattern) })
+  );
+  expect(conditions.length, `no LIKE condition parsed out of: ${soql}`).toBeGreaterThan(0);
+
+  return records.filter((record) =>
+    conditions.some((condition) => {
+      const value = record[condition.field] ?? record[condition.field.toLowerCase()];
+      return typeof value === 'string' && condition.matches.test(value);
+    })
+  );
+};
+
+describe('what dryRun=false actually sends — Salesforce', () => {
+  const TAG = 'harness-cleanup-roundtrip';
+
+  const writeForReal = async () => {
+    const response = await opsTestSalesforce(
+      createRequest({ donation: DONATION }, { tag: TAG, dryRun: 'false' }),
+      createContext()
+    );
+
+    expect(response.status).toBe(200);
+    return response.jsonBody as any;
+  };
+
+  it('puts the cleanup tag in Stripe_Customer_Id__c on BOTH records, not only in Memo__c', async () => {
+    await writeForReal();
+
+    const segment = buildSyntheticCustomerIdTagSegment(TAG);
+
+    // The Contact.
+    const contactDto = spies.upsertCustomer.mock.calls[0][0];
+    expect(contactDto.stripe_customer_id__c).toContain(segment);
+
+    // The Transaction__c, keyed on the same customer so one query reaches both.
+    const transactionDto = spies.upsertTransaction.mock.calls[0][0];
+    expect(transactionDto.stripe_customer_id__c).toBe(contactDto.stripe_customer_id__c);
+
+    // Memo__c still carries the human-readable marker, but it is not the handle: a Long
+    // Text Area cannot appear in a SOQL WHERE clause at all.
+    expect(transactionDto.memo__c).toContain(`[source_test_tag:${TAG}]`);
+  });
+
+  it('writes records that a cleanup run keyed on the tag alone actually selects', async () => {
+    const body = await writeForReal();
+
+    const customerId = spies.upsertCustomer.mock.calls[0][0].stripe_customer_id__c;
+    expect(body.written.cleanupHandle.queryableField).toBe('Stripe_Customer_Id__c');
+
+    // Stand these two rows up as the org's contents, then run the REAL cleanup service
+    // against them with no Stripe customers in play — which is exactly the situation the
+    // harness creates, because the customer it keys on exists nowhere in Stripe.
+    const orgTransactions = [{ Id: 'a0X_harness', Stripe_Customer_Id__c: customerId }];
+    const orgContacts = [{ Id: '003_harness', Stripe_Customer_ID__c: customerId }];
+    // An unrelated real gift that cleanup must leave alone.
+    const untouched = { Id: 'a0X_real', Stripe_Customer_Id__c: 'cus_RealDonor00001' };
+    orgTransactions.push(untouched);
+
+    const queries: string[] = [];
+    const connection = {
+      query: vi.fn(async (soql: string) => {
+        queries.push(soql);
+        const rows = /FROM Contact/.test(soql) ? orgContacts : orgTransactions;
+        return { records: selectBySoql(soql, rows).map((record) => ({ Id: record.Id })) };
+      }),
+      sobject: vi.fn(() => ({ destroy: vi.fn().mockResolvedValue([]) })),
+    };
+
+    const result = await executeTestArtifactCleanup(
+      { tag: TAG, dryRun: true, systems: ['salesforce'] },
+      {
+        createStripeClient: () => {
+          throw new Error('Stripe must not be contacted for a salesforce-only cleanup.');
+        },
+        getSalesforceConnection: async () => connection as never,
+        findTaggedQuickBooksDocuments: async () => [],
+        deleteQuickBooksDocument: async () => undefined,
+      }
+    );
+
+    // No Stripe customer ids at all, and the rows are still found.
+    expect(result.stripeCustomerIds).toEqual([]);
+    expect(queries).toHaveLength(2);
+
+    const salesforce = result.results.find((entry) => entry.system === 'salesforce');
+    const foundIds = salesforce?.records.map((record) => record.id).sort();
+    expect(foundIds).toEqual(['003_harness', 'a0X_harness']);
+    expect(foundIds).not.toContain(untouched.Id);
+  });
+
+  it("finds nothing for a different tag, so one run cannot delete another run's records", async () => {
+    await writeForReal();
+    const customerId = spies.upsertCustomer.mock.calls[0][0].stripe_customer_id__c;
+    const rows = [{ Id: 'a0X_harness', Stripe_Customer_Id__c: customerId }];
+
+    const connection = {
+      query: vi.fn(async (soql: string) => ({
+        records: selectBySoql(soql, rows).map((record) => ({ Id: record.Id })),
+      })),
+      sobject: vi.fn(() => ({ destroy: vi.fn().mockResolvedValue([]) })),
+    };
+
+    const result = await executeTestArtifactCleanup(
+      { tag: 'some-other-run', dryRun: true, systems: ['salesforce'] },
+      {
+        createStripeClient: () => {
+          throw new Error('not used');
+        },
+        getSalesforceConnection: async () => connection as never,
+        findTaggedQuickBooksDocuments: async () => [],
+        deleteQuickBooksDocument: async () => undefined,
+      }
+    );
+
+    expect(result.results.find((entry) => entry.system === 'salesforce')?.counts.found).toBe(0);
+  });
+});
+
+describe('what dryRun=false actually sends — Stripe', () => {
+  it('sends a customer id resolved through Stripe, never the preview placeholder', async () => {
+    const response = await opsTestStripe(
+      createRequest({ donation: DONATION }, { dryRun: 'false', mode: 'test' }),
+      createContext()
+    );
+
+    expect(response.status).toBe(200);
+
+    // The customer was resolved BEFORE the session was created, with the donor Stripe
+    // would be asked to match on and the tag cleanup searches customers by.
+    expect(spies.resolveStripeCustomerId).toHaveBeenCalledTimes(1);
+    const [, customerDetails] = spies.resolveStripeCustomerId.mock.calls[0];
+    expect(customerDetails).toMatchObject({
+      email: DONATION.donor.email,
+      firstname: 'Harness',
+      lastname: 'Testcase',
+      metadata: { source_test_tag: DEFAULT_TEST_ARTIFACT_TAG },
+    });
+
+    // ...and it is that id, not the placeholder, that reaches checkout.sessions.create.
+    const createArgs = spies.checkoutCreate.mock.calls[0][0];
+    expect(createArgs.customer).toBe(RESOLVED_CUSTOMER_ID);
+    expect(createArgs.customer).not.toBe(UNRESOLVED_CUSTOMER_PLACEHOLDER);
+    expect(JSON.stringify(createArgs)).not.toContain('resolved at request time');
+
+    const body = response.jsonBody as any;
+    expect(body.created.customerId).toBe(RESOLVED_CUSTOMER_ID);
+    expect(body.checkoutSessionCreateArgs.customer).toBe(RESOLVED_CUSTOMER_ID);
+  });
+
+  it('keeps the placeholder on a dry run, and resolves no customer', async () => {
+    const body = (await opsTestStripe(createRequest({ donation: DONATION }), createContext()))
+      .jsonBody as any;
+
+    // Nothing is sent, so there is no customer to name — and saying so is the point.
+    expect(body.checkoutSessionCreateArgs.customer).toBe(UNRESOLVED_CUSTOMER_PLACEHOLDER);
+    expect(spies.resolveStripeCustomerId).not.toHaveBeenCalled();
+    expect(spies.checkoutCreate).not.toHaveBeenCalled();
+  });
+
+  it('resolves no customer when live mode is refused', async () => {
+    const response = await opsTestStripe(
+      createRequest({ donation: DONATION }, { dryRun: 'false', mode: 'live' }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    expect(spies.resolveStripeCustomerId).not.toHaveBeenCalled();
+    expect(spies.checkoutCreate).not.toHaveBeenCalled();
   });
 });
 

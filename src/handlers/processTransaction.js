@@ -8,10 +8,10 @@ const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const { AzureIdempotencyStore } = require('../services/idempotencyStore');
 const { applyTestArtifactMetadata } = require('../lib/testArtifactTagging');
-const { buildFullName } = require('../stripe/customerIdentity');
 const {
   createStripeCustomer,
   escapeStripeQueryValue,
+  resolveStripeCustomerId,
   searchStripeCustomer,
   shouldUpdateStripeCustomer,
   updateStripeCustomer,
@@ -817,34 +817,6 @@ const readRequestBody = async (actualRequest, isV3, debugLog) => {
   }
 
   return body;
-};
-
-const resolveStripeCustomerId = async (stripe, customerDetails, log) => {
-  // Must derive the name exactly as createStripeCustomer does (buildCustomerFullName ->
-  // buildFullName), or the lookup can never match what was written. Organization gifts
-  // carry the org name in `firstname` and no `lastname` at all, so a raw template literal
-  // here searches for "Acme Corp undefined" and mints a new customer on every gift.
-  const fullName = buildFullName(customerDetails.firstname, customerDetails.lastname);
-  const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
-
-  if (existingCustomers.length === 0) {
-    log('Creating new Stripe customer');
-    const newCustomer = await createStripeCustomer(stripe, customerDetails);
-    return newCustomer.id;
-  }
-
-  log('Using existing Stripe customer');
-  const existingCustomer = existingCustomers[0];
-  const customerId = existingCustomer.id;
-
-  if (shouldUpdateStripeCustomer(existingCustomer, customerDetails)) {
-    log('Updating existing Stripe customer with latest information');
-    await updateStripeCustomer(stripe, customerId, customerDetails);
-  } else {
-    log('Skipping Stripe customer update; no profile changes detected');
-  }
-
-  return customerId;
 };
 
 const syncPendingCrmTransaction = async (

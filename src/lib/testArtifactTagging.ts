@@ -1,3 +1,5 @@
+import { createHash } from 'crypto';
+
 import { trimToNull as toTrimmedString } from '../stripe/customerIdentity';
 
 const TEST_ARTIFACT_METADATA_KEYS = [
@@ -16,6 +18,45 @@ const TEST_ARTIFACT_HEADER_KEYS = [
 ] as const;
 
 export const TEST_ARTIFACT_MARKER_PREFIX = '[source_test_tag:';
+
+/**
+ * The prefix every synthetic Stripe customer id minted by `/api/ops/test/*` carries.
+ *
+ * Records the harness writes to Salesforce with `dryRun=false` are keyed on a customer that
+ * exists nowhere in Stripe, so cleanup cannot reach them by listing tagged Stripe customers.
+ * `Stripe_Customer_Id__c` is the one field BOTH `Contact` and `Transaction__c` carry that
+ * SOQL can filter on -- `Memo__c` is a Long Text Area and is not filterable -- so the
+ * cleanup tag is written into the customer id itself and cleanup matches it with LIKE.
+ */
+export const SYNTHETIC_CUSTOMER_ID_PREFIX = 'cus_test';
+
+/** Keeps a tag readable inside an id without letting punctuation through. */
+const slugifyTag = (tag: string): string => {
+  const slug = tag
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .slice(0, 24)
+    .replace(/^-+|-+$/g, '');
+
+  return slug || 'tag';
+};
+
+/**
+ * The substring a cleanup run can build from the tag alone and match with SOQL LIKE.
+ *
+ * Shaped `cus_test_<slug>_<hash>_`. The slug keeps the tag legible to whoever opens the
+ * record; the hash is of the exact, untruncated tag, so two tags that slugify alike (`a.b`
+ * and `a-b`) can never delete each other's rows.
+ */
+export const buildSyntheticCustomerIdTagSegment = (tag: string): string => {
+  const hash = createHash('sha256').update(tag.trim()).digest('hex').slice(0, 8);
+  return `${SYNTHETIC_CUSTOMER_ID_PREFIX}_${slugifyTag(tag)}_${hash}_`;
+};
+
+/** A synthetic customer id that carries its own cleanup tag. */
+export const buildSyntheticCustomerId = (tag: string, payloadSuffix: string): string =>
+  `${buildSyntheticCustomerIdTagSegment(tag)}${payloadSuffix.slice(0, 10)}`;
 
 type MetadataLike = Record<string, unknown> | null | undefined;
 
