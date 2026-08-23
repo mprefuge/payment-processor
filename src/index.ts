@@ -64,6 +64,19 @@ const donationFormEmbed = loadHandler('./handlers/donationFormEmbed');
 const donationFormSfObjects = loadHandler('./handlers/donationFormSfObjects');
 const donationFormSfFields = loadHandler('./handlers/donationFormSfFields');
 
+// The staged test harness is authored in TypeScript with named exports, so it is imported
+// directly rather than through loadHandler (which exists for the CommonJS .js handlers).
+import {
+  opsTestDonation,
+  opsTestQuickbooks,
+  opsTestSalesforce,
+  opsTestStripe,
+} from './handlers/opsTestHarness';
+import {
+  DEFAULT_TEST_ARTIFACT_TAG,
+  SyntheticDonationSchema,
+} from './services/testHarness/syntheticDonation';
+
 // configure the Azure Functions runtime and add OpenAPI/Swagger support
 app.setup({ enableHttpStream: true });
 
@@ -83,6 +96,8 @@ const openAPIConfig: OpenAPIObjectConfig = {
       'HTTP endpoints exposed by the payment processor Azure Function. This Swagger surface is intended for post-deployment validation of health, payment flows, reconciliation jobs, and external-system sync paths.\n\n' +
       '## Using this page as a staged test harness\n\n' +
       'Each stage of the pipeline can be exercised on its own, with a prefilled example, without waiting for a Checkout session to be completed and settled. Work down the list; every step is safe to repeat.\n\n' +
+      '### Rehearse a stage before you run it\n\n' +
+      'The `POST /api/ops/test/*` endpoints render exactly what a stage *would* send — QuickBooks document JSON, the Salesforce field map, the Stripe Checkout Session arguments — and by default send none of it. `dryRun` is `true` unless you pass `dryRun=false`, and a dry run performs no outbound **write** — it creates nothing anywhere — so these are safe to hammer. A dry run reads only when you asked about something only the remote system can describe (a `chargeId`); an inline donation payload makes no outbound call at all. Every response says which under `outboundReads`. `POST /api/ops/test/donation` walks one synthetic gift through all three in order. Anything a non-dry-run call creates is tagged for `POST /api/ops/test-artifact-cleanup`.\n\n' +
       '1. **`GET /api/health`** — confirms Stripe, Salesforce, QuickBooks, SendGrid and storage are all reachable, and that the QuickBooks refresh token still exchanges. Start here; if anything is unhealthy the later stages will fail in confusing ways.\n' +
       '2. **`POST /api/transaction`** — creates a Stripe Checkout session and upserts the Salesforce Contact and Transaction\\_\\_c. This is the donor-facing entry point. It does *not* complete a payment, so no charge, no QuickBooks document.\n' +
       '3. **`POST /api/qbo/manual-sync`** — posts a Salesforce transaction to QuickBooks as a SalesReceipt, JournalEntry or BankDeposit. **This is the fastest way to test the accounting path**, because it needs no Stripe charge at all.\n' +
@@ -1027,6 +1042,275 @@ const manualQboSyncResponseExample = {
   customerName: 'Acme Foundation',
 };
 
+// ---------------------------------------------------------------------------
+// /api/ops/test/* — the staged test harness
+// ---------------------------------------------------------------------------
+
+/**
+ * Default cleanup tag for the harness endpoints.
+ *
+ * Distinct from SWAGGER_TEST_TAG above so a harness run can be cleaned up without also
+ * sweeping away records created by the `POST /api/transaction` examples, and vice versa.
+ */
+const TEST_HARNESS_TAG = DEFAULT_TEST_ARTIFACT_TAG;
+
+const TestHarnessQuerySchema = z
+  .object({
+    dryRun: BoolLikeQuerySchema.optional().openapi({
+      example: 'true',
+      description:
+        'Defaults to TRUE. A dry run writes nothing — no record is created in Stripe, ' +
+        'Salesforce or QuickBooks. It reads only where you asked about something only the ' +
+        'remote system can describe (a `chargeId`); an inline donation payload makes no ' +
+        'outbound call at all. The response reports which under `outboundReads`. Pass ' +
+        '`false` only when you intend the endpoint to write.',
+    }),
+    tag: z
+      .string()
+      .optional()
+      .openapi({
+        example: TEST_HARNESS_TAG,
+        description:
+          'Cleanup tag stamped on anything a non-dry-run call creates. Pass the same value to ' +
+          '`POST /api/ops/test-artifact-cleanup?tag=…` afterwards.',
+      }),
+  })
+  .passthrough();
+
+const TestHarnessStripeQuerySchema = z
+  .object({
+    dryRun: BoolLikeQuerySchema.optional().openapi({
+      example: 'true',
+      description:
+        'Defaults to TRUE. A dry run constructs no Stripe client and makes no Stripe call.',
+    }),
+    tag: z.string().optional().openapi({ example: TEST_HARNESS_TAG }),
+    mode: ModeQuerySchema.optional().openapi({
+      example: 'test',
+      description:
+        'Only `test` is accepted when dryRun=false. `live` is rejected — this harness will not create a chargeable session.',
+    }),
+  })
+  .passthrough();
+
+const TestHarnessRequestSchema = z
+  .object({
+    donation: SyntheticDonationSchema,
+    dryRun: z.boolean().optional().openapi({
+      example: true,
+      description: 'Defaults to true. Set false to let the endpoint actually write.',
+    }),
+    tag: z.string().optional().openapi({ example: TEST_HARNESS_TAG }),
+  })
+  .passthrough();
+
+const TestHarnessQuickbooksRequestSchema = z
+  .object({
+    donation: SyntheticDonationSchema.optional(),
+    chargeId: z
+      .string()
+      .optional()
+      .openapi({
+        example: 'ch_3ABC123def456',
+        description:
+          'Preview a real Stripe charge instead of a synthetic donation. Works on a dry run: ' +
+          'resolving the charge is a read-only Stripe retrieve, and this path posts nothing ' +
+          'to QuickBooks either way.',
+      }),
+    dryRun: z.boolean().optional().openapi({ example: true }),
+    tag: z.string().optional().openapi({ example: TEST_HARNESS_TAG }),
+  })
+  .passthrough();
+
+const testHarnessDonationExample = {
+  grossCents: 10300,
+  coveredFeeCents: 300,
+  processorFeeCents: 329,
+  donor: {
+    email: SWAGGER_TEST_EMAIL,
+    firstName: 'Harness',
+    lastName: 'Testcase',
+  },
+  date: '2026-08-20',
+  designation: 'General Fund',
+  frequency: 'onetime',
+  paymentMethod: 'card',
+  category: 'Donation',
+  transactionType: 'Donation',
+  livemode: false,
+};
+
+const testHarnessRecurringDonationExample = {
+  ...testHarnessDonationExample,
+  frequency: 'month',
+  grossCents: 5000,
+  coveredFeeCents: 0,
+  processorFeeCents: 175,
+};
+
+/** No processorFeeCents: the charge has not settled, so the fee is unknown, not zero. */
+const testHarnessUnsettledDonationExample = (() => {
+  const { processorFeeCents: _omitted, ...rest } = testHarnessDonationExample;
+  return { ...rest, paymentMethod: 'us_bank_account' };
+})();
+
+const testHarnessRequestExample = {
+  dryRun: true,
+  tag: TEST_HARNESS_TAG,
+  donation: testHarnessDonationExample,
+};
+
+const testHarnessExamples = {
+  oneTimeCardGift: asNamedExample(
+    'One-time card gift, fee covered',
+    testHarnessRequestExample,
+    'A $100.00 gift with a $3.00 covered fee, charged as $103.00, with a $3.29 Stripe fee.'
+  ),
+  recurringGift: asNamedExample(
+    'Monthly recurring gift',
+    { dryRun: true, tag: TEST_HARNESS_TAG, donation: testHarnessRecurringDonationExample },
+    'Selects subscription mode, so donor intent is mirrored onto subscription_data.metadata.'
+  ),
+  unsettledAchGift: asNamedExample(
+    'ACH gift Stripe has not settled',
+    { dryRun: true, tag: TEST_HARNESS_TAG, donation: testHarnessUnsettledDonationExample },
+    'processorFeeCents omitted: every fee-derived number renders as explicitly unknown, never 0.'
+  ),
+};
+
+const testHarnessQuickbooksExamples = {
+  ...testHarnessExamples,
+  existingCharge: asNamedExample(
+    'Preview a real Stripe charge',
+    { dryRun: true, tag: TEST_HARNESS_TAG, chargeId: 'ch_3ABC123def456' },
+    'A plain dry run. Reads the charge and its balance transaction from Stripe and renders ' +
+      'the documents it would produce. Reads only — nothing is written anywhere.'
+  ),
+};
+
+const testHarnessQuickbooksResponseExample = {
+  success: true,
+  dryRun: true,
+  tag: TEST_HARNESS_TAG,
+  source: 'synthetic',
+  outboundReads: {
+    performed: false,
+    services: [],
+    detail:
+      'None. No outbound call of any kind was made — not a read, not a write. This response ' +
+      'is a pure function of the request body.',
+  },
+  writesNothing:
+    'Nothing was posted. QuickBooks was not contacted, and no QuickBooks reference was resolved.',
+  amounts: {
+    grossCents: 10300,
+    feeAvailable: true,
+    feeCents: 329,
+    netCents: 9971,
+    currency: 'usd',
+    txnDate: '2026-08-20',
+  },
+  memo: `Stripe charge ch_test0123456789abcdef | [source_test_tag:${TEST_HARNESS_TAG}]`,
+  strategies: [
+    {
+      strategy: 'sales-receipt',
+      active: false,
+      documents: [
+        { order: 1, entity: 'SalesReceipt', docNumber: 'CHG-20260820-0123456789ab' },
+        { order: 2, entity: 'JournalEntry', docNumber: 'FEE-20260820-0123456789ab' },
+      ],
+    },
+    {
+      strategy: 'je-transfer',
+      active: true,
+      documents: [{ order: 1, entity: 'JournalEntry', docNumber: 'CHGJE-20260820-23456789ab' }],
+    },
+  ],
+};
+
+const testHarnessSalesforceResponseExample = {
+  success: true,
+  dryRun: true,
+  tag: TEST_HARNESS_TAG,
+  contact: {
+    object: 'Contact',
+    wouldCreate: {
+      Stripe_Customer_Id__c: 'cus_test0123456789ab',
+      LastName: 'Testcase',
+      FirstName: 'Harness',
+      Email: SWAGGER_TEST_EMAIL,
+    },
+  },
+  transaction: {
+    object: 'Transaction__c',
+    externalIdField: 'Stripe_Payment_Intent_Id__c',
+    fields: {
+      Amount_Gross__c: 103,
+      Amount_Fee__c: 3.29,
+      Amount_Net__c: 99.71,
+      Cover_Fees_Amount__c: 3,
+      Frequency__c: 'onetime',
+      Payment_Method__c: 'card',
+      Stripe_Livemode__c: false,
+    },
+  },
+  skippedByNullMeansUnknown: [],
+};
+
+const testHarnessStripeResponseExample = {
+  success: true,
+  dryRun: true,
+  tag: TEST_HARNESS_TAG,
+  mode: 'payment',
+  checkoutSessionCreateArgs: {
+    mode: 'payment',
+    payment_method_types: ['card'],
+    line_items: [{ price_data: { currency: 'usd', unit_amount: 10300 }, quantity: 1 }],
+    metadata: {
+      category: 'Donation',
+      frequency: 'onetime',
+      transactionType: 'Donation',
+      cover_fees: 'true',
+      cover_fees_amount: '300',
+      source_test_tag: TEST_HARNESS_TAG,
+    },
+    payment_intent_data: {
+      metadata: {
+        frequency: 'onetime',
+        cover_fees_amount: '300',
+        source_test_tag: TEST_HARNESS_TAG,
+      },
+    },
+  },
+};
+
+const testHarnessDonationResponseExample = {
+  success: true,
+  dryRun: true,
+  tag: TEST_HARNESS_TAG,
+  writesNothing: 'Nothing was created anywhere. No Stripe, Salesforce or QuickBooks call was made.',
+  trace: [
+    {
+      step: 1,
+      stage: 'stripe',
+      title: 'Donation form creates a Checkout Session',
+      outcome: 'rendered',
+    },
+    {
+      step: 2,
+      stage: 'salesforce',
+      title: 'payment_intent.succeeded upserts Contact and Transaction__c',
+      outcome: 'rendered',
+    },
+    {
+      step: 3,
+      stage: 'quickbooks',
+      title: 'The accounting path posts the charge',
+      outcome: 'rendered',
+    },
+  ],
+};
+
 const cleanupExample = {
   tag: 'deployment-smoke-20260405',
   dryRun: true,
@@ -1845,6 +2129,313 @@ registerFunction('manualQboSync', 'Manually trigger QuickBooks Online sync', {
         'application/json': {
           schema: GenericErrorResponseSchema,
           example: { error: 'internal_error', message: 'QuickBooks sync failed.' },
+        },
+      },
+    },
+  },
+});
+
+registerFunction('opsTestQuickbooks', 'Preview the QuickBooks documents a donation would post', {
+  handler: opsTestQuickbooks,
+  description:
+    'Renders the exact QuickBooks document JSON a donation would produce, under **both** posting strategies, and posts none of it by default.\n\n' +
+    'It exists because there is no other way to see that JSON before it lands in the books: `POST /api/qbo/manual-sync` has no dry-run mode, and QuickBooks has a single un-branched credential set, so exercising the accounting path against production writes a real document into the real company file.\n\n' +
+    '### Input\n\n' +
+    'Either an inline `donation` payload (gross cents, covered fee cents, donor, date, designation) or a `chargeId` for a charge that already exists in Stripe. Both work on a dry run.\n\n' +
+    '### What a dry run does and does not do\n\n' +
+    'A dry run performs no outbound **write**: it creates nothing in QuickBooks, Stripe or Salesforce. It does read when you supply a `chargeId`, because only Stripe can describe an existing charge — the charge and its balance transaction are fetched with retrieves, and nothing is written. Previewing a real charge is what this endpoint is chiefly for, so it does not require you to switch writing on merely to look. An inline `donation` payload makes no outbound call of any kind. Every response reports which it was under `outboundReads`, naming the service read.\n\n' +
+    '### What comes back\n\n' +
+    'For each strategy: every document, in order, with its DocNumber, its AccountRefs and ItemRefs, and the resolved gross / fee / net. DocNumbers come from the same `buildDocNumber` the posting path uses, so a collision is visible here before it is a duplicate in QuickBooks. AccountRef `value` fields carry the configured *name* rather than a QuickBooks id, because resolving an id is a call this endpoint does not make.\n\n' +
+    '**An unresolvable processor fee renders as `feeCents: null` with `feeAvailable: false`, never as 0.** A charge Stripe has not settled — an ACH debit, typically — has no balance transaction, and reporting its fee as zero would read as "Stripe charged nothing" instead of "nobody knows yet".\n\n' +
+    '### What `dryRun=false` touches\n\n' +
+    'QuickBooks, and nothing else. With an inline donation it calls `postChargeToQbo`, creating the documents shown under the ACTIVE strategy in the connected company file. Each one carries `[source_test_tag:<tag>]` in its `PrivateNote`, so `POST /api/ops/test-artifact-cleanup?tag=<tag>` can find and remove it. A `chargeId` request never posts, on a dry run or otherwise — it reads Stripe and stops there. Stripe and Salesforce are never written by this endpoint.\n\n' +
+    'A non-dry-run call with an unknown processor fee is refused rather than posting a guess.',
+  tags: ['Ops', 'QBO'],
+  operationId: 'opsTestQuickbooks',
+  methods: ['POST'],
+  ...withFunctionAuth({}),
+  route: 'ops/test/quickbooks',
+  request: {
+    query: TestHarnessQuerySchema,
+    body: {
+      content: {
+        'application/json': {
+          schema: TestHarnessQuickbooksRequestSchema,
+          example: testHarnessRequestExample,
+          examples: testHarnessQuickbooksExamples,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Documents rendered (and posted, when dryRun=false)',
+      content: {
+        'application/json': {
+          schema: GenericObjectSchema,
+          example: testHarnessQuickbooksResponseExample,
+          examples: {
+            bothStrategies: asNamedExample(
+              'Both posting strategies rendered',
+              testHarnessQuickbooksResponseExample,
+              'sales-receipt produces a receipt plus a paired FEE- journal entry; je-transfer produces one combined entry.'
+            ),
+            unknownFee: asNamedExample(
+              'Unsettled charge — fee unknown',
+              {
+                ...testHarnessQuickbooksResponseExample,
+                amounts: {
+                  ...testHarnessQuickbooksResponseExample.amounts,
+                  feeAvailable: false,
+                  feeCents: null,
+                  netCents: null,
+                  feeSource: 'UNKNOWN — no balance transaction. This is not a fee of 0.',
+                },
+              },
+              'No balance transaction: the fee is null, and the paired FEE- entry is absent.'
+            ),
+          },
+        },
+      },
+    },
+    400: {
+      description:
+        'Invalid donation payload, a malformed chargeId, or dryRun=false with an unknown processor fee',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: {
+            error: 'invalid_charge_id',
+            message: '"ch_nope" is not a Stripe charge id. Expected a ch_… (or legacy py_…) id.',
+          },
+        },
+      },
+    },
+    404: {
+      description: 'The requested Stripe charge does not exist',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: {
+            error: 'charge_not_found',
+            message: 'Stripe has no charge ch_… in the requested mode.',
+          },
+        },
+      },
+    },
+    500: {
+      description: 'Rendering failed',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'internal_error', message: 'Failed to render the QuickBooks preview.' },
+        },
+      },
+    },
+  },
+});
+
+registerFunction('opsTestSalesforce', 'Preview the Salesforce fields a donation would write', {
+  handler: opsTestSalesforce,
+  description:
+    'Renders the `Contact` and `Transaction__c` field map the `payment_intent.succeeded` webhook would write for a donation, without opening a Salesforce connection.\n\n' +
+    'The map is produced by `mapStripeToTransaction` — the same function the webhook calls — and then by `sanitizeTransactionRecord`, the same function `upsertTransaction` applies immediately before DML. It is a preview of the real write, not a second implementation of it.\n\n' +
+    '### What to look at\n\n' +
+    "`highlights` pulls out the fields that go wrong most often: `Cover_Fees_Amount__c`, `Amount_Fee__c`, `Frequency__c`, `Payment_Method__c` and `Stripe_Livemode__c`. Note that `Cover_Fees_Amount__c` is donor intent (what the donor chose to add) while `Amount_Fee__c` is Stripe's own fee — different numbers, and a frequent source of confusion.\n\n" +
+    '`skippedByNullMeansUnknown` lists the fields that would be **dropped from the write** because they are null and appear in the null-means-unknown set (`frequency__c`, `cover_fees__c`, `cover_fees_amount__c`). Null there means "this writer could not determine it", never "clear the value in Salesforce" — the skip is what stops an upsert from wiping donor intent minutes after the gift. The list is computed by the real rule, so it reflects the actual behaviour.\n\n' +
+    'The `Contact` is always rendered in its CREATE shape. The live path first queries by `Stripe_Customer_Id__c`, then `Email`, then first+last name, and updates the best match instead — but running that query is a read against the org, and this endpoint makes no outbound call on a dry run.\n\n' +
+    '### What a dry run does and does not do\n\n' +
+    'A dry run performs no outbound **write**: it creates nothing in Stripe, Salesforce or QuickBooks. This endpoint takes an inline `donation` payload only, so a dry run here makes no outbound call of **any** kind — the response is a pure function of the request body. `outboundReads` on the response says so explicitly, and names the service read when there is one.\n\n' +
+    '### What `dryRun=false` touches\n\n' +
+    'Salesforce, and nothing else. It find-or-creates the Contact and upserts the `Transaction__c` by `Stripe_Payment_Intent_Id__c`. Both records are removable afterwards: `Memo__c` carries `[source_test_tag:<tag>]` for a human reading the row, and because `Memo__c` is a Long Text Area that SOQL cannot filter, the cleanup tag is also embedded in the synthetic `Stripe_Customer_Id__c` written to the Contact **and** the `Transaction__c` — the one field on both objects a SOQL `LIKE` can match. `POST /api/ops/test-artifact-cleanup?tag=<tag>` queries on it directly, so it finds these rows even though the customer exists nowhere in Stripe. Stripe and QuickBooks are never touched.',
+  tags: ['Ops', 'Salesforce'],
+  operationId: 'opsTestSalesforce',
+  methods: ['POST'],
+  ...withFunctionAuth({}),
+  route: 'ops/test/salesforce',
+  request: {
+    query: TestHarnessQuerySchema,
+    body: {
+      content: {
+        'application/json': {
+          schema: TestHarnessRequestSchema,
+          example: testHarnessRequestExample,
+          examples: testHarnessExamples,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Field map rendered (and written, when dryRun=false)',
+      content: {
+        'application/json': {
+          schema: GenericObjectSchema,
+          example: testHarnessSalesforceResponseExample,
+          examples: {
+            fieldMap: asNamedExample(
+              'Contact and Transaction__c field map',
+              testHarnessSalesforceResponseExample,
+              'Exactly what the webhook path would send, after the null-means-unknown rule.'
+            ),
+          },
+        },
+      },
+    },
+    400: {
+      description: 'Invalid synthetic donation payload',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'invalid_donation', message: 'donor.email: Invalid email' },
+        },
+      },
+    },
+    500: {
+      description: 'Rendering failed',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'internal_error', message: 'Failed to render the Salesforce preview.' },
+        },
+      },
+    },
+  },
+});
+
+registerFunction('opsTestStripe', 'Preview the Checkout Session a donation would create', {
+  handler: opsTestStripe,
+  description:
+    'Renders the exact `stripe.checkout.sessions.create` argument object the donation form would send, without contacting Stripe.\n\n' +
+    'The arguments come from `buildCheckoutSessionParams`, the same function `POST /api/transaction` calls — split out of `createCheckoutSession` so it can run without a Stripe client. Line items, `payment_method_types` and metadata mirroring are therefore the real ones.\n\n' +
+    '### What to look at\n\n' +
+    '`mode` resolves to `payment` for a one-time gift and `subscription` for anything recurring.\n\n' +
+    '`metadata` is reported three times over, and the difference matters: Stripe does **not** copy Checkout Session metadata onto the PaymentIntent or the Subscription it creates. Donor intent — `frequency`, `cover_fees_amount` — is only visible to the `payment_intent.succeeded` webhook because it is mirrored onto `payment_intent_data.metadata` (one-time) or `subscription_data.metadata` (recurring). A key present on the session but missing from the mirror is a key Salesforce will never see.\n\n' +
+    '### What a dry run does and does not do\n\n' +
+    'A dry run performs no outbound **write**: it creates nothing in Stripe, Salesforce or QuickBooks. This endpoint takes an inline `donation` payload only, so a dry run here makes no outbound call of **any** kind — the response is a pure function of the request body. `outboundReads` on the response says so explicitly, and names the service read when there is one.\n\n' +
+    '### What `dryRun=false` touches\n\n' +
+    'Stripe, and **only in test mode**. A live-mode request is rejected outright: a harness that can create a live Checkout Session is a harness that can take real money from a real card. The customer is resolved first through `resolveStripeCustomerId` — the same find-or-create `POST /api/transaction` uses — because Stripe rejects a `customer:` it never issued; the `customer` field a dry run renders is a placeholder, not a sendable id. The customer carries `source_test_tag=<tag>` in its metadata, as do the created session and the mirrored `payment_intent_data` / `subscription_data` metadata, which is the key `POST /api/ops/test-artifact-cleanup?tag=<tag>` searches on. Salesforce and QuickBooks are never touched.',
+  tags: ['Ops', 'Stripe'],
+  operationId: 'opsTestStripe',
+  methods: ['POST'],
+  ...withFunctionAuth({}),
+  route: 'ops/test/stripe',
+  request: {
+    query: TestHarnessStripeQuerySchema,
+    body: {
+      content: {
+        'application/json': {
+          schema: TestHarnessRequestSchema,
+          example: testHarnessRequestExample,
+          examples: testHarnessExamples,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Create arguments rendered (and the session created, when dryRun=false)',
+      content: {
+        'application/json': {
+          schema: GenericObjectSchema,
+          example: testHarnessStripeResponseExample,
+          examples: {
+            oneTime: asNamedExample(
+              'One-time gift — mode: payment',
+              testHarnessStripeResponseExample,
+              'Metadata is mirrored onto payment_intent_data so the webhook can read donor intent.'
+            ),
+          },
+        },
+      },
+    },
+    400: {
+      description: 'Invalid payload, or a live-mode non-dry-run request',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: {
+            error: 'live_mode_not_permitted',
+            message: 'A non-dry-run Stripe call from this test harness is restricted to test mode.',
+          },
+        },
+      },
+    },
+    500: {
+      description: 'Rendering failed',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'internal_error', message: 'Failed to render the Stripe preview.' },
+        },
+      },
+    },
+  },
+});
+
+registerFunction('opsTestDonation', 'Trace one donation through all three systems', {
+  handler: opsTestDonation,
+  description:
+    'Runs a single synthetic donation through Stripe, Salesforce and QuickBooks in pipeline order and returns a step-by-step trace: the Checkout Session arguments the form would send, the Salesforce field map the webhook would write, and the QuickBooks documents the accounting path would post.\n\n' +
+    'Use it to see one gift end to end — where an amount changes units, where donor intent has to be mirrored to survive, where the processor fee first becomes known. Each step is the same computation the corresponding `/api/ops/test/*` endpoint performs, so a discrepancy between the trace and a single-stage call would be a bug.\n\n' +
+    'A step that throws is reported as `outcome: "failed"` with its error, and the remaining steps still run.\n\n' +
+    '### What a dry run does and does not do\n\n' +
+    'A dry run performs no outbound **write**: it creates nothing in Stripe, Salesforce or QuickBooks. This endpoint takes an inline `donation` payload only, so a dry run here makes no outbound call of **any** kind — the response is a pure function of the request body. `outboundReads` on the response says so explicitly, and names the service read when there is one.\n\n' +
+    '### What `dryRun=false` touches\n\n' +
+    'Nothing — it is refused. This endpoint is dry-run only. Running one payload through all three systems for real means three separate writes whose failure modes interleave; exercise them one at a time with `POST /api/ops/test/stripe`, `/salesforce` and `/quickbooks`, each with `dryRun=false`.\n\n' +
+    'The trace still reports the `source_test_tag` marker each stage would stamp, so you can see what `POST /api/ops/test-artifact-cleanup` would later match before committing to a write.',
+  tags: ['Ops', 'Stripe', 'Salesforce', 'QBO'],
+  operationId: 'opsTestDonation',
+  methods: ['POST'],
+  ...withFunctionAuth({}),
+  route: 'ops/test/donation',
+  request: {
+    query: TestHarnessQuerySchema,
+    body: {
+      content: {
+        'application/json': {
+          schema: TestHarnessRequestSchema,
+          example: testHarnessRequestExample,
+          examples: testHarnessExamples,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Step-by-step trace rendered',
+      content: {
+        'application/json': {
+          schema: GenericObjectSchema,
+          example: testHarnessDonationResponseExample,
+          examples: {
+            fullTrace: asNamedExample(
+              'Stripe → Salesforce → QuickBooks',
+              testHarnessDonationResponseExample,
+              'Three steps, in the order the real pipeline runs them.'
+            ),
+          },
+        },
+      },
+    },
+    400: {
+      description: 'Invalid payload, or dryRun=false',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: {
+            error: 'dry_run_only',
+            message: 'The end-to-end trace is a dry run only.',
+          },
+        },
+      },
+    },
+    500: {
+      description: 'Trace failed',
+      content: {
+        'application/json': {
+          schema: GenericErrorResponseSchema,
+          example: { error: 'internal_error', message: 'Failed to render the donation trace.' },
         },
       },
     },

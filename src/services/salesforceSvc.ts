@@ -212,7 +212,7 @@ export interface SalesforceSvc {
   findCampaignIdByClass?: (className: string) => Promise<string | null>;
 }
 
-type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
+export type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
   Id?: string | null | undefined;
   RecordTypeId?: string;
 };
@@ -321,13 +321,13 @@ const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
  * `clearStaleQboDocReference` clears `qbo_doc_type__c` / `qbo_doc_id__c` the
  * same way. Those writes are legitimate and must keep working.
  */
-const NULL_MEANS_UNKNOWN_FIELDS: ReadonlySet<string> = new Set([
+export const NULL_MEANS_UNKNOWN_FIELDS: ReadonlySet<string> = new Set([
   'frequency__c',
   'cover_fees__c',
   'cover_fees_amount__c',
 ]);
 
-const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {
+export const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {
   const record: TransactionRecord = {};
   for (const key of Object.keys(input) as Array<keyof TransactionRecordInput>) {
     if (key === 'Name') {
@@ -426,6 +426,59 @@ const mergeStripeCustomerIds = (existingValue: unknown, stripeCustomerId: string
   }
 
   return merged.join(';');
+};
+
+/**
+ * Splits a donor's name into the Contact's FirstName / LastName exactly as the upsert
+ * path does. Module-scoped and exported so `POST /api/ops/test/salesforce` can render the
+ * same split without opening a Salesforce connection.
+ */
+export const normalizeCustomerName = (
+  dto: CustomerUpsertDTO
+): { firstName: string | null; lastName: string | null } => {
+  let firstName = dto.FirstName?.trim() || null;
+  let lastName = dto.LastName?.trim() || null;
+
+  if (!firstName && !lastName) {
+    const nameParts = dto.Name.trim().split(/\s+/);
+    if (nameParts.length === 1) {
+      lastName = nameParts[0];
+    } else if (nameParts.length >= 2) {
+      firstName = nameParts[0];
+      lastName = nameParts.slice(1).join(' ');
+    }
+  }
+
+  return { firstName, lastName };
+};
+
+/**
+ * The Contact record the upsert path creates when no existing Contact matches.
+ *
+ * `RecordTypeId` is deliberately absent: resolving it is a query against the org, so the
+ * dry-run preview cannot fill it in. The live path adds it just before `create`.
+ */
+export const buildNewContactRecord = (input: {
+  stripeCustomerId: string;
+  name: string;
+  email: string | null;
+  firstName: string | null;
+  lastName: string | null;
+}): Record<string, unknown> => {
+  const contactRecord: Record<string, unknown> = {
+    Stripe_Customer_Id__c: input.stripeCustomerId,
+    LastName: input.lastName || input.name,
+  };
+
+  if (input.firstName) {
+    contactRecord.FirstName = input.firstName;
+  }
+
+  if (input.email) {
+    contactRecord.Email = input.email;
+  }
+
+  return contactRecord;
 };
 
 export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): SalesforceSvc => {
@@ -716,25 +769,6 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     }
 
     return null;
-  };
-
-  const normalizeCustomerName = (
-    dto: CustomerUpsertDTO
-  ): { firstName: string | null; lastName: string | null } => {
-    let firstName = dto.FirstName?.trim() || null;
-    let lastName = dto.LastName?.trim() || null;
-
-    if (!firstName && !lastName) {
-      const nameParts = dto.Name.trim().split(/\s+/);
-      if (nameParts.length === 1) {
-        lastName = nameParts[0];
-      } else if (nameParts.length >= 2) {
-        firstName = nameParts[0];
-        lastName = nameParts.slice(1).join(' ');
-      }
-    }
-
-    return { firstName, lastName };
   };
 
   const buildContactWhereConditions = (
@@ -1569,18 +1603,13 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         };
       }
     } else {
-      const contactRecord: Record<string, any> = {
-        Stripe_Customer_Id__c: stripeCustomerId,
-        LastName: lastName || name,
-      };
-
-      if (firstName) {
-        contactRecord.FirstName = firstName;
-      }
-
-      if (email) {
-        contactRecord.Email = email;
-      }
+      const contactRecord: Record<string, any> = buildNewContactRecord({
+        stripeCustomerId,
+        name,
+        email,
+        firstName,
+        lastName,
+      });
 
       if (!cachedContactRecordTypeId) {
         cachedContactRecordTypeId = await resolveRecordTypeId('Contact', 'Contact');

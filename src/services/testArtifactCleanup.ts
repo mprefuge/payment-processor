@@ -2,7 +2,10 @@ import Stripe from 'stripe';
 import type { Connection } from 'jsforce/lib/connection';
 
 import { buildSalesforceConfig, SalesforceService, escapeSoqlLiteral } from './salesforceService';
-import { buildTestArtifactMarker } from '../lib/testArtifactTagging';
+import {
+  buildSyntheticCustomerIdTagSegment,
+  buildTestArtifactMarker,
+} from '../lib/testArtifactTagging';
 import { listStripeCustomersByTag } from './testArtifactStripeSearch';
 import {
   deleteQuickBooksDocument,
@@ -305,6 +308,37 @@ const buildStripeCustomerConditions = (fieldName: string, stripeCustomerIds: str
     (stripeCustomerId) => `${fieldName} LIKE '%${escapeSoqlLiteral(stripeCustomerId)}%'`
   );
 
+/**
+ * SOQL LIKE treats `%` and `_` as wildcards, and a synthetic customer id is mostly
+ * underscores. Escape them so the tag segment matches literally rather than standing in
+ * for any character.
+ */
+const escapeSoqlLikeLiteral = (value: string): string =>
+  escapeSoqlLiteral(value).replace(/([%_])/g, '\\$1');
+
+/**
+ * The second route to a Salesforce test record, and the only one that works for the
+ * `/api/ops/test/salesforce` harness.
+ *
+ * `buildStripeCustomerConditions` can only name customers that exist in Stripe, because it
+ * is fed from `listStripeCustomersByTag`. The harness writes its Contact and Transaction__c
+ * against a customer id it synthesises locally, so Stripe has never heard of it and that
+ * route finds nothing. Those ids embed the cleanup tag (see
+ * `buildSyntheticCustomerIdTagSegment`), which makes them reachable from the tag alone.
+ */
+const buildSyntheticTagCondition = (fieldName: string, tag: string): string =>
+  `${fieldName} LIKE '%${escapeSoqlLikeLiteral(buildSyntheticCustomerIdTagSegment(tag))}%'`;
+
+/** Every way a tagged run's rows can be reached, OR-ed into one WHERE clause. */
+const buildSalesforceCleanupConditions = (
+  fieldName: string,
+  tag: string,
+  stripeCustomerIds: string[]
+): string[] => [
+  ...buildStripeCustomerConditions(fieldName, stripeCustomerIds),
+  buildSyntheticTagCondition(fieldName, tag),
+];
+
 const cleanupSalesforceArtifacts = async (
   connection: Connection,
   request: Required<
@@ -314,14 +348,17 @@ const cleanupSalesforceArtifacts = async (
 ): Promise<TestArtifactCleanupSystemSummary> => {
   const summary = createSummary('salesforce', request.dryRun);
 
-  // Memo__c is a Long Text Area and cannot be filtered in SOQL; use Stripe_Customer_Id__c instead.
-  const transactionIds =
-    stripeCustomerIds.length > 0
-      ? await querySalesforceIds(
-          connection,
-          `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${buildStripeCustomerConditions('Stripe_Customer_Id__c', stripeCustomerIds).join(' OR ')}`
-        )
-      : [];
+  // Memo__c is a Long Text Area and cannot be filtered in SOQL, so Stripe_Customer_Id__c
+  // carries the handle: real customer ids discovered in Stripe, plus the tag segment the
+  // test harness bakes into the synthetic ids Stripe never saw.
+  const transactionIds = await querySalesforceIds(
+    connection,
+    `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE ${buildSalesforceCleanupConditions(
+      'Stripe_Customer_Id__c',
+      request.tag,
+      stripeCustomerIds
+    ).join(' OR ')}`
+  );
 
   if (request.dryRun) {
     transactionIds.forEach((id) =>
@@ -358,13 +395,17 @@ const cleanupSalesforceArtifacts = async (
     });
   }
 
-  if (!request.deleteSalesforceContacts || stripeCustomerIds.length === 0) {
+  if (!request.deleteSalesforceContacts) {
     return summary;
   }
 
   const contactIds = await querySalesforceIds(
     connection,
-    `SELECT Id FROM Contact WHERE ${buildStripeCustomerConditions('Stripe_Customer_ID__c', stripeCustomerIds).join(' OR ')}`
+    `SELECT Id FROM Contact WHERE ${buildSalesforceCleanupConditions(
+      'Stripe_Customer_ID__c',
+      request.tag,
+      stripeCustomerIds
+    ).join(' OR ')}`
   );
 
   if (request.dryRun) {

@@ -159,6 +159,126 @@ describe('OpenAPI document — staged test harness', () => {
     }
   });
 
+  describe('the /api/ops/test/* rehearsal endpoints', () => {
+    const HARNESS_PATHS = [
+      '/api/ops/test/quickbooks',
+      '/api/ops/test/salesforce',
+      '/api/ops/test/stripe',
+      '/api/ops/test/donation',
+    ];
+
+    it('registers all four behind a function key, never anonymously', () => {
+      for (const path of HARNESS_PATHS) {
+        const op = operation(path, 'post');
+        const schemes = (op.security ?? []).flatMap((entry: any) => Object.keys(entry));
+        expect(schemes.length, `${path} is unauthenticated`).toBeGreaterThan(0);
+        expect(schemes).toContain('ApiKeyAuth');
+      }
+    });
+
+    it('defaults dryRun to true on every one of them', () => {
+      for (const path of HARNESS_PATHS) {
+        const param = queryParams(path, 'post').find((p: any) => p.name === 'dryRun');
+        expect(param, `${path} has no dryRun parameter`).toBeDefined();
+        expect(param.schema?.example ?? param.example, `${path} dryRun unsafe default`).toBe(
+          'true'
+        );
+      }
+    });
+
+    it('prefills a working donation payload so "Try it out" needs no source reading', () => {
+      for (const path of HARNESS_PATHS) {
+        const content = operation(path, 'post').requestBody?.content?.['application/json'];
+        expect(content?.example, `${path} has no request example`).toBeDefined();
+
+        const donation = content.example.donation;
+        expect(donation, `${path} example carries no donation`).toBeDefined();
+        expect(typeof donation.grossCents).toBe('number');
+        expect(donation.donor?.email).toMatch(/@/);
+
+        const examples = Object.values(content.examples ?? {}) as any[];
+        expect(examples.length, `${path} has no named examples`).toBeGreaterThan(0);
+      }
+    });
+
+    it('carries an example modelling an unsettled charge, where the fee is unknown', () => {
+      const examples = operation('/api/ops/test/quickbooks', 'post').requestBody?.content?.[
+        'application/json'
+      ]?.examples;
+      const unsettled = Object.values(examples as Record<string, any>).find((example) =>
+        /not settled|unsettled/i.test(example.summary ?? '')
+      );
+
+      expect(unsettled).toBeDefined();
+      // The point of the example is the ABSENCE of the fee, so it must not carry one.
+      expect(unsettled.value.donation).not.toHaveProperty('processorFeeCents');
+    });
+
+    it('draws the read/write line a dry run actually holds, on every endpoint', () => {
+      // A dry run promises no outbound WRITE, not no outbound call. The two differ on
+      // exactly one path — a chargeId, which only Stripe can describe — and an operator
+      // deciding whether a call is safe should not have to read source to learn which.
+      for (const path of HARNESS_PATHS) {
+        const description = operation(path, 'post').description ?? '';
+        expect(description, `${path} does not describe what a dry run does`).toMatch(
+          /what a dry run does and does not do/i
+        );
+        expect(description, `${path} does not say a dry run writes nothing`).toMatch(
+          /no outbound \*\*write\*\*/i
+        );
+        expect(description, `${path} does not point at outboundReads`).toMatch(/outboundReads/);
+      }
+
+      // Only the QuickBooks endpoint reads on a dry run, and it must say why rather than
+      // leaving the exception to be discovered.
+      const quickbooks = operation('/api/ops/test/quickbooks', 'post').description ?? '';
+      expect(quickbooks).toMatch(/chargeId/);
+      expect(quickbooks).toMatch(/only Stripe can describe an existing charge/i);
+
+      // The other three take an inline payload only, so they keep the stronger property.
+      for (const path of HARNESS_PATHS.filter((p) => !p.endsWith('quickbooks'))) {
+        expect(
+          operation(path, 'post').description ?? '',
+          `${path} does not claim the stronger no-call property`
+        ).toMatch(/no outbound call of \*\*any\*\* kind/i);
+      }
+    });
+
+    it('shows the chargeId example as a plain dry run, not a write-enabled one', () => {
+      // Previewing a real charge is what this endpoint is chiefly for. An example that
+      // reached for dryRun=false would teach every operator to switch writing on to look.
+      const examples = operation('/api/ops/test/quickbooks', 'post').requestBody?.content?.[
+        'application/json'
+      ]?.examples;
+      const withCharge = Object.values(examples as Record<string, any>).find(
+        (example) => example.value?.chargeId
+      );
+
+      expect(withCharge, 'no example supplies a chargeId').toBeDefined();
+      expect(withCharge.value.dryRun).toBe(true);
+    });
+
+    it('states plainly what a non-dry-run call would touch', () => {
+      const expectations: Array<[string, RegExp]> = [
+        ['/api/ops/test/quickbooks', /QuickBooks, and nothing else/i],
+        ['/api/ops/test/salesforce', /Salesforce, and nothing else/i],
+        ['/api/ops/test/stripe', /only in test mode/i],
+        ['/api/ops/test/donation', /dry-run only/i],
+      ];
+
+      for (const [path, pattern] of expectations) {
+        const description = operation(path, 'post').description ?? '';
+        expect(description, `${path} does not describe dryRun=false`).toMatch(
+          /what `?dryRun=false`? touches/i
+        );
+        expect(description, `${path} does not say what it touches`).toMatch(pattern);
+        expect(description, `${path} does not mention the cleanup tag`).toMatch(
+          /source_test_tag|test-artifact-cleanup/i
+        );
+      }
+    });
+  });
+
   it('documents the webhook signature constraint rather than suggesting TEST_MODE', () => {
     const description = operation('/api/stripe/webhook', 'post').description ?? '';
     expect(description).toMatch(/signature/i);

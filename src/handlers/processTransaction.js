@@ -8,10 +8,10 @@ const sgMail = require('@sendgrid/mail');
 const CrmFactory = require('../services/salesforce/crmFactory');
 const { AzureIdempotencyStore } = require('../services/idempotencyStore');
 const { applyTestArtifactMetadata } = require('../lib/testArtifactTagging');
-const { buildFullName } = require('../stripe/customerIdentity');
 const {
   createStripeCustomer,
   escapeStripeQueryValue,
+  resolveStripeCustomerId,
   searchStripeCustomer,
   shouldUpdateStripeCustomer,
   updateStripeCustomer,
@@ -19,6 +19,7 @@ const {
 const { createCrmConfigResolver } = require('./processTransaction/crmConfig');
 const { createCrmContactWorkflow } = require('./processTransaction/crmContactWorkflow');
 const { createCrmTransactionWorkflow } = require('./processTransaction/crmTransactionWorkflow');
+const { buildCheckoutSessionParams } = require('./processTransaction/checkoutSessionParams');
 
 const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
 const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
@@ -634,124 +635,6 @@ function normalizeRequestData(data) {
   return normalized;
 }
 
-function sanitizeStripeMetadata(metadata) {
-  return Object.entries(metadata).reduce((accumulator, [key, value]) => {
-    if (value === undefined || value === null) {
-      return accumulator;
-    }
-
-    if (typeof value === 'object') {
-      try {
-        accumulator[key] = JSON.stringify(value);
-      } catch (error) {
-        accumulator[key] = String(value);
-      }
-      return accumulator;
-    }
-
-    accumulator[key] = String(value);
-    return accumulator;
-  }, {});
-}
-
-/**
- * Calculate cover fees for a transaction
- * Supports multiple fee structures based on nonprofit status and payment method
- *
- * Fee structures:
- * - Standard business, online domestic card: 2.9% + $0.30
- * - Standard business, in-person domestic card: 2.7% + $0.05
- * - Nonprofit (eligible), card donation: 2.2% + $0.30
- * - Nonprofit, Amex donation: 3.5% (no fixed fee)
- * - Nonprofit, ACH / bank debit: 0.8% (capped at $5.00)
- *
- * @param {number} baseAmountCents - The base transaction amount in cents
- * @param {string} paymentMethod - Payment method: 'card', 'card_present', 'us_bank_account',
- *   'amex', 'wallet'. Wallet donations (Apple Pay / Google Pay) settle as card payments and
- *   therefore fall through to the card rate, which is what the donation form quotes.
- * @returns {number} The fee amount in cents
- */
-function calculateCoverFees(baseAmountCents, paymentMethod = 'card') {
-  const isNonprofit = parseBoolean(process.env.STRIPE_NONPROFIT_RATES);
-
-  let percentageFee;
-  let fixedFee;
-  let cap = null;
-
-  if (isNonprofit) {
-    // Nonprofit rates
-    switch (paymentMethod) {
-      case 'amex':
-        percentageFee = Math.round(baseAmountCents * 0.035);
-        fixedFee = 0;
-        break;
-      case 'us_bank_account':
-        percentageFee = Math.round(baseAmountCents * 0.008);
-        fixedFee = 0;
-        cap = 500; // $5.00 cap in cents
-        break;
-      case 'card_present':
-        // In-person rates (same as standard for nonprofit)
-        percentageFee = Math.round(baseAmountCents * 0.027);
-        fixedFee = 5; // $0.05 in cents
-        break;
-      case 'card':
-      default:
-        percentageFee = Math.round(baseAmountCents * 0.022);
-        fixedFee = 30; // $0.30 in cents
-        break;
-    }
-  } else {
-    // Standard business rates
-    switch (paymentMethod) {
-      case 'card_present':
-        percentageFee = Math.round(baseAmountCents * 0.027);
-        fixedFee = 5; // $0.05 in cents
-        break;
-      case 'us_bank_account':
-      case 'amex':
-      case 'card':
-      default:
-        percentageFee = Math.round(baseAmountCents * 0.029);
-        fixedFee = 30; // $0.30 in cents
-        break;
-    }
-  }
-
-  const totalFee = percentageFee + fixedFee;
-
-  // Apply cap if specified
-  if (cap !== null && totalFee > cap) {
-    return cap;
-  }
-
-  return totalFee;
-}
-
-function formatStripeMetadata(transactionData) {
-  const baseMetadata = {
-    category: transactionData.category || 'General',
-    frequency: transactionData.frequency || 'onetime',
-    transactionType: transactionData.transactionType || 'Payment',
-  };
-
-  // Additive only: existing keys above are read by the reverse QBO/Salesforce
-  // sync and must not be renamed. 'individual' | 'organization' as posted by the
-  // donation form.
-  if (typeof transactionData.donationType === 'string' && transactionData.donationType.trim()) {
-    baseMetadata.donationType = transactionData.donationType.trim();
-  }
-
-  // Add cover fees information if enabled
-  if (transactionData.coverFee && transactionData.coverFeesAmount) {
-    baseMetadata.cover_fees = 'true';
-    baseMetadata.cover_fees_amount = String(transactionData.coverFeesAmount);
-  }
-
-  const additionalMetadata = sanitizeStripeMetadata(transactionData.metadata || {});
-  return { ...baseMetadata, ...additionalMetadata };
-}
-
 // Initialize Stripe and SendGrid
 const initializeServices = (isLiveMode) => {
   const stripeKey = isLiveMode
@@ -826,108 +709,9 @@ const validateRequest = (body) => {
   }
 };
 
-/**
- * Maps the donor's selected payment method onto the Stripe
- * `payment_method_types` for the Checkout Session.
- *
- * Apple Pay and Google Pay ride on the `card` payment method type: Stripe
- * Checkout surfaces them automatically when `card` is enabled and the domain is
- * registered, so a 'wallet' selection maps to ['card']. PayPal is a separate
- * Stripe payment method type that has to be enabled on the account first, so it
- * is deliberately not emitted here.
- */
-const STRIPE_PAYMENT_METHOD_TYPES = {
-  card: ['card'],
-  amex: ['card'],
-  card_present: ['card'],
-  wallet: ['card'],
-  us_bank_account: ['us_bank_account'],
-};
-
-const DEFAULT_STRIPE_PAYMENT_METHOD_TYPES = ['card'];
-
-const resolvePaymentMethodTypes = (paymentMethod) => {
-  const types =
-    typeof paymentMethod === 'string' && Object.hasOwn(STRIPE_PAYMENT_METHOD_TYPES, paymentMethod)
-      ? STRIPE_PAYMENT_METHOD_TYPES[paymentMethod]
-      : DEFAULT_STRIPE_PAYMENT_METHOD_TYPES;
-
-  return [...types];
-};
-
 // Create Stripe checkout session
 const createCheckoutSession = async (stripe, customerId, transactionData) => {
-  const isOneTime = transactionData.frequency === 'onetime';
-
-  // Calculate total amount including cover fees if enabled
-  let totalAmount = transactionData.amount;
-  let coverFeesAmount = 0;
-
-  if (transactionData.coverFee) {
-    // Use provided feeAmount if specified, otherwise calculate
-    if (typeof transactionData.feeAmount === 'number' && transactionData.feeAmount >= 0) {
-      coverFeesAmount = transactionData.feeAmount;
-      logger.info(`Cover fees enabled: using provided fee amount ${coverFeesAmount} cents`);
-    } else {
-      coverFeesAmount = calculateCoverFees(transactionData.amount, transactionData.paymentMethod);
-      const isNonprofit = parseBoolean(process.env.STRIPE_NONPROFIT_RATES);
-      logger.info(
-        `Cover fees enabled: calculated fee for ${transactionData.paymentMethod} ` +
-          `(${isNonprofit ? 'nonprofit' : 'standard'} rates): ` +
-          `base amount ${transactionData.amount} cents, ` +
-          `cover fees ${coverFeesAmount} cents, ` +
-          `total ${transactionData.amount + coverFeesAmount} cents`
-      );
-    }
-
-    totalAmount = transactionData.amount + coverFeesAmount;
-
-    // Store the cover fees amount in cents for metadata
-    transactionData.coverFeesAmount = coverFeesAmount;
-  }
-
-  const stripeMetadata = formatStripeMetadata(transactionData);
-
-  const baseParams = {
-    customer: customerId,
-    success_url:
-      process.env.SUCCESS_URL || process.env.CANCEL_URL || 'https://example.com/thankyou',
-    cancel_url: process.env.CANCEL_URL || 'https://example.com/donate',
-    payment_method_types: resolvePaymentMethodTypes(transactionData.paymentMethod),
-    line_items: [
-      {
-        price_data: {
-          currency: 'usd',
-          product_data: {
-            name: transactionData.category || transactionData.transactionType || 'Payment',
-          },
-          unit_amount: totalAmount,
-        },
-        quantity: 1,
-      },
-    ],
-    metadata: stripeMetadata,
-  };
-
-  if (isOneTime) {
-    baseParams.mode = 'payment';
-    // Stripe does NOT copy Checkout Session metadata onto the PaymentIntent it
-    // creates, so anything only written above is invisible to the
-    // payment_intent.succeeded webhook (which reads intent/charge/customer
-    // metadata). Mirror it onto the PaymentIntent so donor intent -- notably
-    // cover_fees_amount and frequency -- survives to the Salesforce upsert.
-    baseParams.payment_intent_data = { metadata: { ...stripeMetadata } };
-  } else {
-    baseParams.mode = 'subscription';
-    // Same problem for recurring gifts, and worse: instalments 2..N have no
-    // Checkout Session at all. The Subscription is the only object that
-    // outlives checkout, so donor intent has to live there.
-    baseParams.subscription_data = { metadata: { ...stripeMetadata } };
-    baseParams.line_items[0].price_data.recurring = {
-      interval: getStripeInterval(transactionData.frequency),
-      interval_count: getIntervalCount(transactionData.frequency),
-    };
-  }
+  const baseParams = buildCheckoutSessionParams(customerId, transactionData);
 
   try {
     const session = await stripe.checkout.sessions.create(baseParams);
@@ -935,30 +719,6 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
   } catch (error) {
     logger.error('Error creating checkout session:', error);
     throw error;
-  }
-};
-
-// Helper functions for recurring intervals
-const getStripeInterval = (frequency) => {
-  switch (frequency) {
-    case 'week':
-    case 'biweek':
-      return 'week';
-    case 'month':
-      return 'month';
-    case 'year':
-      return 'year';
-    default:
-      return 'month';
-  }
-};
-
-const getIntervalCount = (frequency) => {
-  switch (frequency) {
-    case 'biweek':
-      return 2;
-    default:
-      return 1;
   }
 };
 
@@ -1057,34 +817,6 @@ const readRequestBody = async (actualRequest, isV3, debugLog) => {
   }
 
   return body;
-};
-
-const resolveStripeCustomerId = async (stripe, customerDetails, log) => {
-  // Must derive the name exactly as createStripeCustomer does (buildCustomerFullName ->
-  // buildFullName), or the lookup can never match what was written. Organization gifts
-  // carry the org name in `firstname` and no `lastname` at all, so a raw template literal
-  // here searches for "Acme Corp undefined" and mints a new customer on every gift.
-  const fullName = buildFullName(customerDetails.firstname, customerDetails.lastname);
-  const existingCustomers = await searchStripeCustomer(stripe, customerDetails.email, fullName);
-
-  if (existingCustomers.length === 0) {
-    log('Creating new Stripe customer');
-    const newCustomer = await createStripeCustomer(stripe, customerDetails);
-    return newCustomer.id;
-  }
-
-  log('Using existing Stripe customer');
-  const existingCustomer = existingCustomers[0];
-  const customerId = existingCustomer.id;
-
-  if (shouldUpdateStripeCustomer(existingCustomer, customerDetails)) {
-    log('Updating existing Stripe customer with latest information');
-    await updateStripeCustomer(stripe, customerId, customerDetails);
-  } else {
-    log('Skipping Stripe customer update; no profile changes detected');
-  }
-
-  return customerId;
 };
 
 const syncPendingCrmTransaction = async (
@@ -1255,6 +987,7 @@ module.exports = async function (request, context) {
 };
 
 module.exports.__internals = {
+  buildCheckoutSessionParams,
   searchStripeCustomer,
   escapeStripeQueryValue,
   initializeServices,

@@ -64,7 +64,7 @@ const QUICKBOOKS_ENTITY_METADATA: Record<QuickBooksDocType, QuickBooksEntityMeta
   },
 };
 
-type Fetcher = (
+export type Fetcher = (
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1]
 ) => ReturnType<typeof fetch>;
@@ -206,7 +206,7 @@ export interface QuickBooksTransfer {
   ToAccountRef: QuickBooksReference;
 }
 
-interface PostOptions {
+export interface PostOptions {
   fetcher?: Fetcher;
   accessToken?: string;
   /**
@@ -254,7 +254,7 @@ interface BuildSalesReceiptInput {
   lineClassRef?: string;
 }
 
-type StripeCustomerContext = {
+export type StripeCustomerContext = {
   charge?: Stripe.Charge | null;
   paymentIntent?: Stripe.PaymentIntent | null;
   customer?: (Stripe.Customer | Stripe.DeletedCustomer) | null;
@@ -268,7 +268,7 @@ interface SalesReceiptCustomerDetails {
   shippingAddress?: QuickBooksPhysicalAddress | null;
 }
 
-interface EnsureCustomerInput {
+export interface EnsureCustomerInput {
   displayName: string;
   preferredDisplayName?: string | null;
   email?: string | null;
@@ -596,7 +596,7 @@ const isDeletedCustomer = (
   return Boolean(customer && 'deleted' in customer && customer.deleted);
 };
 
-const deriveSalesReceiptCustomer = (source: StripeCustomerContext): EnsureCustomerInput => {
+export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): EnsureCustomerInput => {
   const activeCustomer =
     source.customer && !isDeletedCustomer(source.customer)
       ? (source.customer as Stripe.Customer)
@@ -712,7 +712,7 @@ const getCheckoutMetadataValue = (
   return typeof value === 'string' ? (toTrimmed(value) ?? null) : null;
 };
 
-const getCheckoutTransactionType = (
+export const getCheckoutTransactionType = (
   session: Stripe.Checkout.Session | null | undefined
 ): string | null => {
   return (
@@ -722,8 +722,9 @@ const getCheckoutTransactionType = (
   );
 };
 
-const getCheckoutCategory = (session: Stripe.Checkout.Session | null | undefined): string | null =>
-  getCheckoutMetadataValue(session, 'category');
+export const getCheckoutCategory = (
+  session: Stripe.Checkout.Session | null | undefined
+): string | null => getCheckoutMetadataValue(session, 'category');
 
 /**
  * Normalise a `cover_fees_amount` metadata value to cents.
@@ -1663,7 +1664,7 @@ const createItemRef = (input: string): ItemRefWithMetadata => {
   return itemRef;
 };
 
-const createClassRef = (input: string): QuickBooksReference => {
+export const createClassRef = (input: string): QuickBooksReference => {
   const { reference, hasExplicitId } = parseReferenceInput(input, 'class');
   if (!hasExplicitId) {
     throw new Error(
@@ -1731,7 +1732,7 @@ const readMergedStripeMetadata = (
   return metadata;
 };
 
-const getSalesReceiptLineOverrides = (
+export const getSalesReceiptLineOverrides = (
   stripeContext: StripeCustomerContext | null | undefined
 ): SalesReceiptLineOverrides => {
   const metadata = readMergedStripeMetadata(stripeContext);
@@ -1822,7 +1823,7 @@ const getSalesReceiptLineOverrides = (
   return overrides;
 };
 
-const getStripeLineDescription = (
+export const getStripeLineDescription = (
   stripeContext: StripeCustomerContext | null | undefined
 ): string | null => {
   if (!stripeContext) {
@@ -1903,7 +1904,7 @@ const hashToBase36 = (value: string, width: number): string => {
   return out.slice(0, width).toUpperCase();
 };
 
-const buildDocNumber = (
+export const buildDocNumber = (
   prefix: string,
   date: string | Date,
   amountCents: number,
