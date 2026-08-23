@@ -12,8 +12,9 @@ process.env.ACCOUNTING_SYNC_ENABLED = 'false';
 // the Stripe fixtures and the CLI produce -- not because those suites are exercising test mode.
 // ALLOW_TEST_MODE_ACCOUNTING defaults to false in production (a test-mode event does NO
 // QuickBooks work), so without this the whole suite would silently stop asserting the
-// accounting path. Suites that test the gate itself set this explicitly per test; see
-// __tests__/testModeAccountingGate.test.ts.
+// accounting path. The suite that tests the gate itself overrides this per test and reloads
+// the compiled bundle; see the 'test-mode accounting gate' block in
+// __tests__/stripeWebhook.test.ts.
 process.env.ALLOW_TEST_MODE_ACCOUNTING = 'true';
 process.env.AZURE_TABLES_CONNECTION_STRING = 'UseDevelopmentStorage=true;';
 process.env.DISABLE_AZURE_TABLES = '1';

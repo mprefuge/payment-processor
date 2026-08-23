@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 
+import env from '../../config/env';
 import {
   mapStripeToTransaction,
   readDonorIntentFromMetadata,
@@ -962,13 +963,14 @@ export const handleChargeSettled = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies
 ): Promise<void> => {
-  if (!isAccountingEnabledForEvent(event)) {
-    // The deferral note this settlement would have cleared was already written by the
-    // payment-intent path, which recorded the same skip on the Transaction__c; there is
-    // nothing to add to Salesforce here beyond the log.
-    if (isTestModeAccountingSkipped(event)) {
-      logTestModeAccountingSkip(context, event, { path: 'charge_settled' });
-    }
+  // Deliberately the bare `syncEnabled` check, NOT `isAccountingEnabledForEvent`. The
+  // test-mode gate belongs lower down, in `postSuccessfulPaymentIntentToAccounting`, for the
+  // same reason it sits low on the payout path: everything between here and there is
+  // Salesforce work, and a test gift still writes its Transaction__c to the production org.
+  // This handler is the ONLY place the settled money fields (fee, net, balance-transaction
+  // id) are written for an ACH gift -- they are not knowable at `payment_intent.succeeded`
+  // -- so gating here would silently strip them from every test-mode ACH transaction.
+  if (!env.accounting.syncEnabled) {
     return;
   }
 

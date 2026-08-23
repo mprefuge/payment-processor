@@ -1052,6 +1052,136 @@ describe('stripeWebhook', () => {
       expect(skips[0][1]).toBe('stripe_payment_intent_id__c');
     });
 
+    /**
+     * The ACH settlement path (`charge.updated` -> handleChargeSettled) is the ONLY place the
+     * settled money fields are written: an ACH gift has no balance transaction at
+     * `payment_intent.succeeded`, so fee and net are not knowable until days later. Gating
+     * that handler on the test-mode flag rather than on `syncEnabled` alone would strip those
+     * fields from every test-mode ACH transaction -- Salesforce is supposed to be outside the
+     * gate entirely. This pins the handler down to gating QuickBooks and nothing else.
+     */
+    const runChargeSettled = async (options: { allow: boolean; livemode: boolean }) => {
+      loadHandlerWithFlag(options.allow);
+
+      const store = mockIdempotencyStore();
+      const settledEvent: any = {
+        id: 'evt_ach',
+        created: Math.floor(Date.now() / 1000),
+        type: 'charge.updated',
+        livemode: options.livemode,
+        data: {
+          object: {
+            id: 'ch_ach',
+            status: 'succeeded',
+            amount: 5_000,
+            currency: 'usd',
+            customer: 'cus_ach',
+            payment_intent: 'pi_ach',
+            balance_transaction: 'bt_ach',
+            created: 1_700_000_000,
+            livemode: options.livemode,
+            billing_details: { name: 'ACH Donor', email: 'ach@example.com' },
+            payment_method_details: { type: 'us_bank_account' },
+          },
+        },
+      };
+
+      const balanceTransaction = {
+        id: 'bt_ach',
+        amount: 5_000,
+        fee: 80,
+        net: 4_920,
+        currency: 'usd',
+        created: 1_700_000_500,
+        available_on: 1_700_000_600,
+        type: 'charge',
+        status: 'available',
+      };
+
+      const stripeClient = {
+        paymentIntents: {
+          retrieve: vi.fn().mockResolvedValue({
+            id: 'pi_ach',
+            status: 'succeeded',
+            currency: 'usd',
+            amount: 5_000,
+            customer: 'cus_ach',
+            created: 1_700_000_000,
+            latest_charge: 'ch_ach',
+          }),
+        },
+        balanceTransactions: { retrieve: vi.fn().mockResolvedValue(balanceTransaction) },
+        charges: { retrieve: vi.fn().mockResolvedValue(settledEvent.data.object) },
+        customers: {
+          retrieve: vi.fn().mockResolvedValue({ id: 'cus_ach', email: 'ach@example.com' }),
+        },
+        checkout: { sessions: { list: vi.fn().mockResolvedValue({ data: [] }) } },
+        invoices: { retrieve: vi.fn() },
+      };
+
+      const accounting = chargeAccounting();
+      const salesforce = {
+        ...salesforceMock('sf_ach'),
+        findTransactionRecordByExternalId: vi
+          .fn()
+          .mockResolvedValue({ id: 'sf_ach', postedToQbo: false }),
+      };
+
+      internals?.setDependencies({
+        stripe: {
+          verifyEvent: vi.fn(() => settledEvent),
+          getClient: vi.fn(() => stripeClient),
+        },
+        idempotencyStore: store,
+        getSalesforceSvc: async () => salesforce,
+        accounting,
+      });
+
+      const { context } = createContext();
+      const result = await handler(baseRequest(), context);
+
+      return { store, accounting, salesforce, result };
+    };
+
+    it('still writes the settled ACH money fields to Salesforce with the flag off', async () => {
+      const { store, accounting, salesforce } = await runChargeSettled({
+        allow: false,
+        livemode: false,
+      });
+
+      // The fee and net that only the settlement event knows must reach Salesforce even
+      // though QuickBooks is skipped.
+      expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+        expect.objectContaining({
+          stripe_payment_intent_id__c: 'pi_ach',
+          stripe_balance_transaction_id__c: 'bt_ach',
+          amount_gross__c: 50,
+          amount_fee__c: 0.8,
+          amount_net__c: 49.2,
+        }),
+        'stripe_payment_intent_id__c'
+      );
+
+      // ...and QuickBooks is still untouched, with no marker claiming otherwise.
+      expect(accounting.postChargeToQbo).not.toHaveBeenCalled();
+      expect(salesforce.markPostedToQbo).not.toHaveBeenCalled();
+      expect(store.markProcessed.mock.calls.map((call: any[]) => call[0])).toEqual(['evt_ach']);
+      expect(skipNoteCalls(salesforce)).toHaveLength(1);
+    });
+
+    it('posts the settled ACH charge to QuickBooks when the flag is on', async () => {
+      const { store, accounting } = await runChargeSettled({ allow: true, livemode: false });
+
+      expect(accounting.postChargeToQbo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          gross: 5_000,
+          fee: 80,
+          options: expect.objectContaining({ testMode: true }),
+        })
+      );
+      expect(store.markProcessed).toHaveBeenCalledWith('bt_bt_ach');
+    });
+
     it('posts a test-mode charge as a test-mode document when the flag is on', async () => {
       const { store, accounting, salesforce } = await runCharge({ allow: true, livemode: false });
 
