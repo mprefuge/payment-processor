@@ -347,6 +347,36 @@ describe('payload contracts — QuickBooks outbound', () => {
     }
   });
 
+  it('returned-payment reversal is well formed, balances, and takes revenue back out', async () => {
+    const svc = await importQboSvc('journal-entry');
+    const { posted, options } = createCapturingQbo();
+
+    await svc.postPaymentReversalToQbo({
+      grossAmount: 5000,
+      failureFeeAmount: 400,
+      memo: 'Contract test ACH return',
+      date: CHARGE_DATE,
+      paymentIntentId: 'pi_contract_001',
+      chargeId: 'ch_contract_001',
+      options,
+    });
+
+    const journal = posted.find((p) => p.entity === 'JournalEntry');
+    expect(journal, 'payment reversal posted no JournalEntry').toBeDefined();
+    assertQboDocumentContract('payment-reversal', 'JournalEntry', journal!.body);
+    assertJournalEntryBalances('payment-reversal', journal!.body);
+
+    // The gift never arrived: revenue is debited back out, the ACH failure fee
+    // is expensed, and Stripe Clearing is credited for everything Stripe took.
+    const lines = (journal!.body.Line ?? []).map((line: any) => ({
+      posting: line?.JournalEntryLineDetail?.PostingType,
+      amount: Math.round((line?.Amount ?? 0) * 100),
+    }));
+    expect(lines).toContainEqual({ posting: 'Debit', amount: 5000 });
+    expect(lines).toContainEqual({ posting: 'Debit', amount: 400 });
+    expect(lines).toContainEqual({ posting: 'Credit', amount: 5400 });
+  });
+
   it('payout transfer is well formed with distinct source and target accounts', async () => {
     const svc = await importQboSvc('journal-entry');
     const { posted, options } = createCapturingQbo();

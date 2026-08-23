@@ -23,7 +23,7 @@ import {
 } from '../../stripe/handlers/invoicePaid';
 import { handleChargeRefunded, handleRefundEvent } from '../../stripe/handlers/refunds';
 import { handlePayoutEvent } from '../../stripe/handlers/payouts';
-import { handleDisputeClosed } from '../../stripe/handlers/disputes';
+import { handleDisputeClosed, handleDisputeCreated } from '../../stripe/handlers/disputes';
 import { handleCreditNoteEvent } from '../../stripe/handlers/creditNotes';
 
 type StripeEventHandler = (
@@ -59,6 +59,7 @@ const buildStripeEventHandlers = (): Record<string, StripeEventHandler> => {
     'charge.succeeded': handleChargeSettled,
     'charge.updated': handleChargeSettled,
     'charge.refunded': handleChargeRefunded,
+    'charge.dispute.created': handleDisputeCreated,
     'charge.dispute.closed': handleDisputeClosed,
     'invoice.paid': handleInvoicePaid,
     'invoice.payment_succeeded': handleInvoicePaid,

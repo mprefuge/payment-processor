@@ -301,7 +301,9 @@ describe('postChargeToQbo', () => {
       });
 
       expect(result).toEqual({ qboId: 'sr-1', type: 'sales-receipt' });
-      expect(fetcher).toHaveBeenCalledTimes(6); // Customer lookups (2), customer create, item lookup, duplicate check, sales receipt
+      // Customer lookups (2), customer create, item lookup, receipt duplicate check, sales
+      // receipt, fee JE duplicate check, fee JE
+      expect(fetcher).toHaveBeenCalledTimes(8);
 
       const [emailLookupRequest, nameLookupRequest, customerCreateRequest] = requests;
       expect(emailLookupRequest.url).toContain('/query?query=');
@@ -327,10 +329,14 @@ describe('postChargeToQbo', () => {
       });
 
       const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
-      const feeJournalRequest = requests.find((request) => request.url.includes('journalentry'));
+      const feeJournalRequest = requests.find(
+        (request) => request.url.includes('journalentry') && request.init?.method === 'POST'
+      );
 
       expect(salesReceiptRequest).toBeDefined();
-      expect(feeJournalRequest).toBeUndefined();
+      // The processor fee is posted as its own paired journal entry, NOT as a negative line
+      // inside the donor-facing receipt.
+      expect(feeJournalRequest).toBeDefined();
 
       const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
       expect(salesReceiptBody.DepositToAccountRef).toMatchObject({
@@ -356,14 +362,36 @@ describe('postChargeToQbo', () => {
         City: 'Givington',
       });
 
-      // Fee should be present as the second line on the sales receipt with the fees account referenced
-      expect(salesReceiptBody.Line[1].Amount).toBe(-3.25);
-      expect(salesReceiptBody.Line[1].SalesItemLineDetail.Qty).toBe(1);
-      expect(salesReceiptBody.Line[1].SalesItemLineDetail.UnitPrice).toBe(-3.25);
-      expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
+      // The receipt is the donor-facing document and must state the GROSS the donor paid.
+      // No negative fee line, and therefore no contra-revenue.
+      expect(salesReceiptBody.Line).toHaveLength(1);
+      expect(salesReceiptBody.Line[0].Amount).toBe(100);
+      expect(salesReceiptBody.Line.some((line: any) => Number(line.Amount) < 0)).toBe(false);
+      expect(
+        salesReceiptBody.Line.some((line: any) => line.SalesItemLineDetail?.ItemAccountRef)
+      ).toBe(false);
+
+      // The fee is a separate balanced JE: Dr Stripe Fees / Cr Stripe Clearing.
+      const feeJournalBody = JSON.parse((feeJournalRequest?.init?.body ?? '{}') as string);
+      expect(feeJournalBody.Line).toHaveLength(2);
+      const feeDebit = feeJournalBody.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+      );
+      const feeCredit = feeJournalBody.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+      );
+      expect(feeDebit.Amount).toBe(3.25);
+      expect(feeDebit.JournalEntryLineDetail.AccountRef).toMatchObject({
         value: 'QBO_ACCOUNT_FEES',
-        name: 'Stripe Fees',
       });
+      expect(feeCredit.Amount).toBe(3.25);
+      expect(feeCredit.JournalEntryLineDetail.AccountRef).toMatchObject({
+        value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      });
+
+      // The pair is traceable: same date and same charge-id tail on both DocNumbers.
+      expect(salesReceiptBody.DocNumber).toBe('CHG-20240301-test');
+      expect(feeJournalBody.DocNumber).toBe('FEE-20240301-test');
 
       // Verify CustomerMemo (statement message) includes amounts and stripe charge id
       expect(salesReceiptBody.CustomerMemo).toBeDefined();
@@ -386,7 +414,9 @@ describe('postChargeToQbo', () => {
         },
       },
       { QueryResponse: {} },
-      { SalesReceipt: { Id: 'sr-pi-desc' } }
+      { SalesReceipt: { Id: 'sr-pi-desc' } },
+      { QueryResponse: {} }, // fee JE duplicate check
+      { JournalEntry: { Id: 'fee-je-pi-desc' } }
     );
 
     const { postChargeToQbo } = await importQboSvc();
@@ -419,14 +449,14 @@ describe('postChargeToQbo', () => {
       Qty: 1,
       UnitPrice: 100,
     });
-    expect(salesReceiptBody.Line[1]).toMatchObject({
-      Amount: -3.2,
-      Description: 'Stripe Processing Fee',
-      SalesItemLineDetail: {
-        Qty: 1,
-        UnitPrice: -3.2,
-      },
-    });
+    // The fee is no longer a negative receipt line; it is a paired journal entry.
+    expect(salesReceiptBody.Line).toHaveLength(1);
+
+    const feeJournalRequest = requests.find(
+      (request) => request.url.includes('journalentry') && request.init?.method === 'POST'
+    );
+    const feeJournalBody = JSON.parse((feeJournalRequest?.init?.body ?? '{}') as string);
+    expect(feeJournalBody.Line.map((line: any) => line.Amount)).toEqual([3.2, 3.2]);
   });
 
   it('preserves the unique tail of long Stripe charge ids in sales receipt DocNumber', async () => {
@@ -1289,7 +1319,9 @@ describe('postChargeToQbo', () => {
 
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} },
-      { SalesReceipt: { Id: 'sr-customer-override' } }
+      { SalesReceipt: { Id: 'sr-customer-override' } },
+      { QueryResponse: {} }, // fee JE duplicate check
+      { JournalEntry: { Id: 'fee-je-customer-override' } }
     );
 
     const { postChargeToQbo } = await importQboSvc();
@@ -1307,7 +1339,7 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-customer-override', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(4); // + fee JE duplicate check and create
 
     const salesReceiptBody = JSON.parse((requests[1].init?.body ?? '{}') as string);
     expect(salesReceiptBody.CustomerRef).toEqual({ value: '200', name: 'Ada Lovelace' });
@@ -1348,7 +1380,9 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-2', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(7); // Customer lookup, item lookup, customer create, item lookup, account lookup, duplicate check, sales receipt
+    // Customer lookup, item lookup, customer create, item lookup, account lookup, receipt
+    // duplicate check, sales receipt, fee JE duplicate check, fee JE
+    expect(fetcher).toHaveBeenCalledTimes(9);
 
     const accountLookupRequest = requests.find((request, index) => {
       if (!request.url.includes('/query?query=')) {
@@ -1371,11 +1405,21 @@ describe('postChargeToQbo', () => {
       name: 'Stripe Sales Item',
     });
 
-    // Fee should be present as the second line on the sales receipt with the fees account referenced
-    expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
-      value: 'QBO_ACCOUNT_FEES',
-      name: 'Stripe Fees',
-    });
+    // The fee is a separate journal entry against the resolved fees account, not a receipt line.
+    expect(salesReceiptBody.Line).toHaveLength(1);
+
+    const feeJournalRequest = requests.find(
+      (request) => request.url.includes('journalentry') && request.init?.method === 'POST'
+    );
+    const feeJournalBody = JSON.parse((feeJournalRequest?.init?.body ?? '{}') as string);
+    expect(
+      feeJournalBody.Line.find((line: any) => line.JournalEntryLineDetail.PostingType === 'Debit')
+        .JournalEntryLineDetail.AccountRef
+    ).toMatchObject({ value: 'QBO_ACCOUNT_FEES' });
+    expect(
+      feeJournalBody.Line.find((line: any) => line.JournalEntryLineDetail.PostingType === 'Credit')
+        .JournalEntryLineDetail.AccountRef
+    ).toMatchObject({ value: '999' });
   });
 
   it('creates QuickBooks item when transaction type metadata does not exist', async () => {
@@ -1408,7 +1452,9 @@ describe('postChargeToQbo', () => {
     });
 
     expect(result).toEqual({ qboId: 'sr-3', type: 'sales-receipt' });
-    expect(fetcher).toHaveBeenCalledTimes(7); // Customer lookup, item lookup, customer create, item lookup, item create, duplicate check, sales receipt
+    // Customer lookup, item lookup, customer create, item lookup, item create, receipt
+    // duplicate check, sales receipt, fee JE duplicate check, fee JE
+    expect(fetcher).toHaveBeenCalledTimes(9);
 
     const itemLookupRequest = requests.find((request, index) => {
       if (!request.url.includes('/query?query=')) {
@@ -1434,11 +1480,15 @@ describe('postChargeToQbo', () => {
       name: 'New Donation',
     });
 
-    // Fee should be present as the second line on the sales receipt with the fees account referenced
-    expect(salesReceiptBody.Line[1].SalesItemLineDetail.ItemAccountRef).toMatchObject({
-      value: 'QBO_ACCOUNT_FEES',
-      name: 'Stripe Fees',
-    });
+    // The item's own IncomeAccountRef is what a sales line posts to (asserted above), which is
+    // exactly why the fee can never ride on a sales line — it gets its own journal entry.
+    expect(salesReceiptBody.Line).toHaveLength(1);
+    const feeJournalBody = JSON.parse(
+      (requests.find(
+        (request) => request.url.includes('journalentry') && request.init?.method === 'POST'
+      )?.init?.body ?? '{}') as string
+    );
+    expect(feeJournalBody.Line.map((line: any) => line.Amount)).toEqual([3, 3]);
   });
 
   it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
@@ -1810,6 +1860,148 @@ describe('postPayoutToQbo', () => {
   });
 });
 
+describe('postPayoutAccountFeesToQbo', () => {
+  it('books account-level fees as Dr Stripe Fees / Cr Stripe Clearing', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // DocNumber duplicate pre-check
+      { JournalEntry: { Id: 'je-payout-fees' } }
+    );
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    const result = await postPayoutAccountFeesToQbo({
+      feeDeltaCents: -2_000,
+      adjustmentDeltaCents: 0,
+      memo: 'Stripe payout po_test123 account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'je-payout-fees', type: 'journal-entry' });
+
+    const body = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(body.DocNumber).toMatch(/^POFEE-20240304-/);
+    expect(body.Line).toHaveLength(2);
+
+    const debit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+    );
+    const credit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+    );
+    expect(debit.Amount).toBe(20);
+    expect(debit.JournalEntryLineDetail.AccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_FEES',
+      name: 'Stripe Fees',
+    });
+    expect(credit.Amount).toBe(20);
+    expect(credit.JournalEntryLineDetail.AccountRef).toMatchObject({
+      value: 'QBO_ACCOUNT_STRIPE_CLEARING',
+      name: 'Stripe Clearing',
+    });
+  });
+
+  it('reverses the direction for a positive balance adjustment', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'je-payout-credit' } }
+    );
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    await postPayoutAccountFeesToQbo({
+      feeDeltaCents: 0,
+      adjustmentDeltaCents: 500,
+      memo: 'Stripe payout po_credit account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_credit',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const body = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    const debit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+    );
+    const credit = body.Line.find(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+    );
+    expect(debit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_STRIPE_CLEARING');
+    expect(credit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_FEES');
+    expect(debit.Amount).toBe(5);
+  });
+
+  it('writes one entry carrying both fees and adjustments', async () => {
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'je-both' } }
+    );
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    await postPayoutAccountFeesToQbo({
+      feeDeltaCents: -2_000,
+      adjustmentDeltaCents: -750,
+      memo: 'Stripe payout po_both account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_both',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const body = JSON.parse((requests[1].init?.body ?? '{}') as string);
+    expect(body.Line).toHaveLength(4);
+    const debits = body.Line.filter(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+    ).reduce((sum: number, line: any) => sum + line.Amount, 0);
+    const credits = body.Line.filter(
+      (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+    ).reduce((sum: number, line: any) => sum + line.Amount, 0);
+    expect(debits).toBeCloseTo(27.5);
+    expect(credits).toBeCloseTo(27.5);
+    expect(body.Line.map((line: any) => line.Description)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Stripe account fees'),
+        expect.stringContaining('Stripe balance adjustments'),
+      ])
+    );
+  });
+
+  it('returns the existing entry on a replay instead of posting a second one', async () => {
+    // The DocNumber pre-check finds the entry a previous delivery of the same
+    // payout.paid wrote, so the replay resolves to it rather than duplicating.
+    const { fetcher, requests } = createFetchMock({
+      QueryResponse: { JournalEntry: [{ Id: 'je-already-there' }] },
+    });
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    const result = await postPayoutAccountFeesToQbo({
+      feeDeltaCents: -2_000,
+      adjustmentDeltaCents: 0,
+      memo: 'Stripe payout po_test123 account-level activity',
+      date: new Date('2024-03-04'),
+      payoutId: 'po_test123',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'je-already-there', type: 'journal-entry' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toContain('query');
+  });
+
+  it('posts nothing when the payout has no account-level activity', async () => {
+    const { fetcher, requests } = createFetchMock();
+    const { postPayoutAccountFeesToQbo } = await importQboSvc();
+
+    const result = await postPayoutAccountFeesToQbo({
+      feeDeltaCents: 0,
+      adjustmentDeltaCents: 0,
+      date: new Date('2024-03-04'),
+      payoutId: 'po_quiet',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toBeNull();
+    expect(requests).toHaveLength(0);
+  });
+});
+
 describe('findDocumentsByPrivateNoteTag', () => {
   it('returns tagged documents across supported QuickBooks entities', async () => {
     const { fetcher } = createFetchMock(
@@ -1961,7 +2153,9 @@ describe('postDisputeToQbo', () => {
         },
       },
       { QueryResponse: {} },
-      { SalesReceipt: { Id: 'sr-tagged-1' } }
+      { SalesReceipt: { Id: 'sr-tagged-1' } },
+      { QueryResponse: {} }, // fee JE duplicate check
+      { JournalEntry: { Id: 'fee-je-tagged-1' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -2006,8 +2200,11 @@ describe('postToQbo duplicate suppression (dedup safety net)', () => {
       { QueryResponse: {} }, // customer name lookup
       { Customer: { Id: 'cust-1', DisplayName: 'Donor Example' } }, // customer create
       { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } }, // item lookup
-      { QueryResponse: { SalesReceipt: [{ Id: 'sr-existing' }] } }, // duplicate check -> existing doc
-      { SalesReceipt: { Id: 'sr-created-duplicate' } } // create (must NOT be reached: pre-check short-circuits)
+      { QueryResponse: { SalesReceipt: [{ Id: 'sr-existing' }] } }, // receipt dup check -> existing
+      { QueryResponse: { JournalEntry: [{ Id: 'fee-je-existing' }] } }, // fee JE dup check -> existing
+      // Mock responses are consumed in call order, so this trailing entry is only reached if a
+      // create POST is (wrongly) issued for either half of the pair.
+      { SalesReceipt: { Id: 'sr-created-duplicate' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -2024,6 +2221,12 @@ describe('postToQbo duplicate suppression (dedup safety net)', () => {
       (r) => r.url.includes('/salesreceipt') && (r.init?.method ?? 'GET') === 'POST'
     );
     expect(createRequest).toBeUndefined();
+    // The paired fee journal entry dedupes on its own DocNumber too, so a retry cannot
+    // double-post either half of the pair.
+    const feeCreateRequest = requests.find(
+      (r) => r.url.includes('/journalentry') && (r.init?.method ?? 'GET') === 'POST'
+    );
+    expect(feeCreateRequest).toBeUndefined();
   });
 
   it('recovers the existing id from a QuickBooks duplicate-DocNumber error instead of failing', async () => {
@@ -2039,7 +2242,9 @@ describe('postToQbo duplicate suppression (dedup safety net)', () => {
         status: 400,
         text: async () =>
           'Duplicate Document Number Error : DocNumber=CHG-1 is assigned to TxnType=Sales Receipt with TxnId=777',
-      } // create -> QBO rejects as duplicate, carries the existing TxnId
+      }, // create -> QBO rejects as duplicate, carries the existing TxnId
+      { QueryResponse: {} }, // fee JE duplicate check
+      { JournalEntry: { Id: 'fee-je-recovered' } }
     );
     const { postChargeToQbo } = await importQboSvc();
 
@@ -2076,5 +2281,416 @@ describe('postToQbo duplicate suppression (dedup safety net)', () => {
       (r) => r.url.includes('/salesreceipt') && (r.init?.method ?? 'GET') === 'POST'
     );
     expect(createRequest).toBeUndefined();
+  });
+});
+
+/**
+ * End-to-end coverage of both posting strategies against the same donation, so the books are
+ * verifiably correct whichever value ACCOUNTING_POSTING_STRATEGY holds in a given deployment.
+ *
+ * The scenario throughout: a $100 gift where the donor also covers the processing fee. Stripe
+ * charges $102.50 gross and keeps a $2.56 fee, so the payout is $99.94. Gross and fee are read
+ * off the same Stripe balance transaction upstream (src/stripe/handlers/paymentIntents.ts).
+ */
+describe('posting strategies: $100 cover-fee gift, end to end', () => {
+  const GROSS_CENTS = 10_250;
+  const COVER_FEES_CENTS = 250;
+  const STRIPE_FEE_CENTS = 256;
+  const NET_PAYOUT = 99.94;
+
+  const coverFeeStripeContext = () =>
+    buildStripeContext(
+      {},
+      {
+        metadata: {
+          transactionType: 'Stripe Sales Item',
+          cover_fees: 'true',
+          cover_fees_amount: '2.50',
+        },
+      }
+    );
+
+  const chargeArgs = (fetcher: any) => ({
+    gross: GROSS_CENTS,
+    fee: STRIPE_FEE_CENTS,
+    memo: 'Stripe charge ch_test',
+    date: new Date('2024-03-01'),
+    stripe: coverFeeStripeContext(),
+    options: { fetcher, accessToken: 'token' },
+  });
+
+  const salesReceiptCustomerMocks = () => [
+    { QueryResponse: {} }, // customer email lookup
+    { QueryResponse: {} }, // customer name lookup
+    { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } }, // customer create
+    { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } }, // item lookup
+  ];
+
+  const postedBody = (requests: RequestRecord[], path: string) => {
+    const request = requests.find(
+      (candidate) => candidate.url.includes(path) && candidate.init?.method === 'POST'
+    );
+    expect(request, `expected a POST to ${path}`).toBeDefined();
+    return JSON.parse((request?.init?.body ?? '{}') as string);
+  };
+
+  const journalTotals = (body: any) => {
+    let debits = 0;
+    let credits = 0;
+    for (const line of body.Line) {
+      if (line.JournalEntryLineDetail.PostingType === 'Debit') {
+        debits += line.Amount;
+      } else {
+        credits += line.Amount;
+      }
+    }
+    return { debits: Number(debits.toFixed(2)), credits: Number(credits.toFixed(2)) };
+  };
+
+  const clearingMovement = (body: any) => {
+    let net = 0;
+    for (const line of body.Line) {
+      if (line.JournalEntryLineDetail.AccountRef.value !== 'QBO_ACCOUNT_STRIPE_CLEARING') {
+        continue;
+      }
+      net += line.JournalEntryLineDetail.PostingType === 'Debit' ? line.Amount : -line.Amount;
+    }
+    return Number(net.toFixed(2));
+  };
+
+  describe('sales-receipt strategy', () => {
+    it('posts the receipt at gross and a paired fee journal entry, and the two balance', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // receipt duplicate check
+        { SalesReceipt: { Id: 'sr-cover-fee' } },
+        { QueryResponse: {} }, // fee JE duplicate check
+        { JournalEntry: { Id: 'je-cover-fee' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo(chargeArgs(fetcher));
+      expect(result).toEqual({ qboId: 'sr-cover-fee', type: 'sales-receipt' });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const feeJe = postedBody(requests, '/journalentry');
+
+      // The donor-facing receipt states the GROSS the donor actually paid: 100.00 + 2.50.
+      expect(receipt.Line.map((line: any) => [line.Description, line.Amount])).toEqual([
+        ['Stripe Sales Item', 100],
+        ['Processing Fee Coverage', 2.5],
+      ]);
+      const receiptTotal = receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0);
+      expect(Number(receiptTotal.toFixed(2))).toBe(GROSS_CENTS / 100);
+      // No negative line, so no contra-revenue and no netting of revenue.
+      expect(receipt.Line.every((line: any) => line.Amount > 0)).toBe(true);
+      expect(receipt.DepositToAccountRef.value).toBe('QBO_ACCOUNT_STRIPE_CLEARING');
+
+      // The fee is its own balanced entry: Dr Stripe Fees / Cr Stripe Clearing.
+      expect(journalTotals(feeJe)).toEqual({ debits: 2.56, credits: 2.56 });
+      expect(clearingMovement(feeJe)).toBe(-2.56);
+      const feeDebit = feeJe.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+      );
+      expect(feeDebit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_FEES');
+      expect(feeDebit.Amount).toBe(STRIPE_FEE_CENTS / 100);
+
+      // Clearing = gross deposited by the receipt, less the fee taken back out = the payout.
+      expect(Number((receiptTotal + clearingMovement(feeJe)).toFixed(2))).toBe(NET_PAYOUT);
+
+      // Cover-fee revenue is booked, not swallowed.
+      expect(COVER_FEES_CENTS / 100).toBe(2.5);
+    });
+
+    it('pairs the two DocNumbers on the same date and charge-id tail', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-docnum' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-docnum' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+      await postChargeToQbo(chargeArgs(fetcher));
+
+      const receiptDocNumber = postedBody(requests, '/salesreceipt').DocNumber;
+      const feeDocNumber = postedBody(requests, '/journalentry').DocNumber;
+
+      expect(receiptDocNumber).toBe('CHG-20240301-test');
+      expect(feeDocNumber).toBe('FEE-20240301-test');
+      // Same date + same charge-id tail: either half leads to the other in QuickBooks.
+      expect(feeDocNumber.slice(3)).toBe(receiptDocNumber.slice(3));
+    });
+
+    it('does not double-post either half when the charge is retried', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        // Both duplicate checks now find the documents the first attempt created.
+        { QueryResponse: { SalesReceipt: [{ Id: 'sr-cover-fee' }] } },
+        { QueryResponse: { JournalEntry: [{ Id: 'je-cover-fee' }] } },
+        // Only consumed if a create POST is wrongly issued for either half.
+        { SalesReceipt: { Id: 'sr-DUPLICATE' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo(chargeArgs(fetcher));
+
+      expect(result).toEqual({ qboId: 'sr-cover-fee', type: 'sales-receipt' });
+      const creates = requests.filter(
+        (request) =>
+          request.init?.method === 'POST' &&
+          (request.url.includes('/salesreceipt') || request.url.includes('/journalentry'))
+      );
+      expect(creates).toEqual([]);
+    });
+
+    // Parity with buildSingleJE, which classes the fee expense line under je-transfer.
+    // The Stripe webhook forward path does not yet emit qbo_class metadata (see
+    // formatStripeMetadata in src/handlers/processTransaction.js); the manual and
+    // Salesforce-driven sync paths do.
+    it('classes the fee expense line the same way the receipt is classed', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-classed' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-classed' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext(
+          {},
+          {
+            metadata: {
+              transactionType: 'Stripe Sales Item',
+              cover_fees: 'true',
+              cover_fees_amount: '2.50',
+              qbo_class: 'Fund:Designation|QBO_CLASS_FUND',
+            },
+          }
+        ),
+      });
+
+      const feeJe = postedBody(requests, '/journalentry');
+      const feeDebit = feeJe.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+      );
+      const feeCredit = feeJe.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Credit'
+      );
+      expect(feeDebit.JournalEntryLineDetail.ClassRef).toMatchObject({
+        value: 'QBO_CLASS_FUND',
+      });
+      // The clearing credit is a cash movement and stays unclassed, as in buildSingleJE.
+      expect(feeCredit.JournalEntryLineDetail.ClassRef).toBeUndefined();
+    });
+
+    it('skips the fee journal entry entirely when the processor fee is zero', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-no-fee' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo({ ...chargeArgs(fetcher), fee: 0 });
+
+      expect(result).toEqual({ qboId: 'sr-no-fee', type: 'sales-receipt' });
+      expect(requests.some((request) => request.url.includes('/journalentry'))).toBe(false);
+    });
+  });
+
+  describe('je-transfer strategy', () => {
+    it('posts one balanced journal entry whose clearing movement equals the payout', async () => {
+      baseEnv.accounting.postingStrategy = 'je-transfer';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: {} }, // duplicate check
+        { JournalEntry: { Id: 'chgje-1' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo(chargeArgs(fetcher));
+      expect(result).toEqual({ qboId: 'chgje-1', type: 'journal-entry' });
+
+      const journal = postedBody(requests, '/journalentry');
+
+      // Dr Clearing gross / Cr Revenue gross / Dr Fees / Cr Clearing.
+      expect(
+        journal.Line.map((line: any) => [
+          line.JournalEntryLineDetail.PostingType,
+          line.JournalEntryLineDetail.AccountRef.value,
+          line.Amount,
+        ])
+      ).toEqual([
+        ['Debit', 'QBO_ACCOUNT_STRIPE_CLEARING', 102.5],
+        ['Credit', 'QBO_ACCOUNT_REVENUE', 102.5],
+        ['Debit', 'QBO_ACCOUNT_FEES', 2.56],
+        ['Credit', 'QBO_ACCOUNT_STRIPE_CLEARING', 2.56],
+      ]);
+
+      // Debits equal credits, and clearing nets to the Stripe payout.
+      expect(journalTotals(journal)).toEqual({ debits: 105.06, credits: 105.06 });
+      expect(clearingMovement(journal)).toBe(NET_PAYOUT);
+
+      // Revenue is booked at GROSS — the same total the sales-receipt strategy books.
+      const revenueCredit = journal.Line.find(
+        (line: any) => line.JournalEntryLineDetail.AccountRef.value === 'QBO_ACCOUNT_REVENUE'
+      );
+      expect(revenueCredit.Amount).toBe(GROSS_CENTS / 100);
+    });
+
+    it('does not double-post when the charge is retried', async () => {
+      baseEnv.accounting.postingStrategy = 'je-transfer';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: { JournalEntry: [{ Id: 'chgje-1' }] } }, // duplicate check finds it
+        { JournalEntry: { Id: 'chgje-DUPLICATE' } } // only consumed on a wrong create
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo(chargeArgs(fetcher));
+
+      expect(result).toEqual({ qboId: 'chgje-1', type: 'journal-entry' });
+      expect(requests.filter((request) => request.init?.method === 'POST')).toEqual([]);
+    });
+  });
+
+  it('books the same revenue and the same fee expense under both strategies', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const receiptMock = createFetchMock(
+      ...salesReceiptCustomerMocks(),
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-parity' } },
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'je-parity' } }
+    );
+    const salesReceiptSvc = await importQboSvc();
+    await salesReceiptSvc.postChargeToQbo(chargeArgs(receiptMock.fetcher));
+
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    const journalMock = createFetchMock({ QueryResponse: {} }, { JournalEntry: { Id: 'je-only' } });
+    const journalSvc = await importQboSvc();
+    await journalSvc.postChargeToQbo(chargeArgs(journalMock.fetcher));
+
+    const receipt = postedBody(receiptMock.requests, '/salesreceipt');
+    const feeJe = postedBody(receiptMock.requests, '/journalentry');
+    const singleJe = postedBody(journalMock.requests, '/journalentry');
+
+    const receiptRevenue = Number(
+      receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0).toFixed(2)
+    );
+    const journalRevenue = singleJe.Line.find(
+      (line: any) => line.JournalEntryLineDetail.AccountRef.value === 'QBO_ACCOUNT_REVENUE'
+    ).Amount;
+    expect(receiptRevenue).toBe(journalRevenue);
+
+    const receiptFeeExpense = feeJe.Line.find(
+      (line: any) => line.JournalEntryLineDetail.AccountRef.value === 'QBO_ACCOUNT_FEES'
+    ).Amount;
+    const journalFeeExpense = singleJe.Line.find(
+      (line: any) => line.JournalEntryLineDetail.AccountRef.value === 'QBO_ACCOUNT_FEES'
+    ).Amount;
+    expect(receiptFeeExpense).toBe(journalFeeExpense);
+    expect(receiptFeeExpense).toBe(STRIPE_FEE_CENTS / 100);
+
+    // Both strategies leave the clearing account holding exactly the Stripe payout.
+    expect(Number((receiptRevenue + clearingMovement(feeJe)).toFixed(2))).toBe(NET_PAYOUT);
+    expect(clearingMovement(singleJe)).toBe(NET_PAYOUT);
+  });
+});
+
+describe('posting strategy observability', () => {
+  const importWithLoggerSpy = async () => {
+    vi.resetModules();
+    const info = vi.fn();
+    vi.doMock('../src/config/env', () => ({ env: baseEnv, default: baseEnv }));
+    vi.doMock('../src/lib/logger', () => ({
+      logger: { log: vi.fn(), info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      withCorrelationId: (_id: string, fn: () => unknown) => fn(),
+    }));
+    const svc = await import('../src/services/qboSvc');
+    return { svc, info };
+  };
+
+  const strategyLogs = (info: ReturnType<typeof vi.fn>) =>
+    info.mock.calls.filter(
+      (call: unknown[]) => call[0] === '[QBO] Accounting posting strategy in effect'
+    );
+
+  afterEach(() => {
+    vi.doUnmock('../src/lib/logger');
+  });
+
+  it('reports the effective strategy once per process so nobody has to read the secret', async () => {
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    baseEnv.accounting.postingStrategyConfigured = 'je-transfer';
+    const { svc, info } = await importWithLoggerSpy();
+
+    const args = () => ({
+      gross: 10_250,
+      fee: 256,
+      memo: 'Stripe charge ch_test',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext(),
+      options: {
+        fetcher: createFetchMock({ QueryResponse: {} }, { JournalEntry: { Id: 'je-log-1' } })
+          .fetcher,
+        accessToken: 'token',
+      },
+    });
+
+    await svc.postChargeToQbo(args());
+
+    const logs = strategyLogs(info);
+    expect(logs).toHaveLength(1);
+    expect(logs[0][1]).toMatchObject({ strategy: 'je-transfer', alias: false });
+    // The log must carry the strategy name only — never a credential.
+    expect(JSON.stringify(logs[0][1])).not.toContain('token');
+
+    // A second post in the same process does not repeat the line.
+    await svc.postChargeToQbo({
+      ...args(),
+      options: {
+        fetcher: createFetchMock({ QueryResponse: {} }, { JournalEntry: { Id: 'je-log-2' } })
+          .fetcher,
+        accessToken: 'token',
+      },
+    });
+    expect(strategyLogs(info)).toHaveLength(1);
+
+    delete baseEnv.accounting.postingStrategyConfigured;
+  });
+
+  it('flags when the strategy was reached through the journal-entry alias', async () => {
+    baseEnv.accounting.postingStrategy = 'je-transfer';
+    baseEnv.accounting.postingStrategyConfigured = 'journal-entry';
+    const { svc, info } = await importWithLoggerSpy();
+
+    await svc.postChargeToQbo({
+      gross: 10_250,
+      fee: 256,
+      memo: 'Stripe charge ch_test',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext(),
+      options: {
+        fetcher: createFetchMock({ QueryResponse: {} }, { JournalEntry: { Id: 'je-alias' } })
+          .fetcher,
+        accessToken: 'token',
+      },
+    });
+
+    expect(strategyLogs(info)[0][1]).toMatchObject({
+      strategy: 'je-transfer',
+      configuredValue: 'journal-entry',
+      alias: true,
+    });
+
+    delete baseEnv.accounting.postingStrategyConfigured;
   });
 });

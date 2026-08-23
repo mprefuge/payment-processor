@@ -209,6 +209,162 @@ export async function fetchStripePayoutsSince(stripe: any, since: unknown, optio
   return fetcher(since, options);
 }
 
+/**
+ * Balance-transaction classification, kept deliberately identical to
+ * `categorizeTransactions` in `src/stripe/handlers/payouts.ts` (PR #191), which decides
+ * what the payout handler posts to QuickBooks as a `POFEE-` journal entry.
+ *
+ * There must be exactly ONE answer to "is this an account-level fee": if the posting side
+ * and the detection side disagree, reconciliation reports fees as missing that were
+ * correctly posted, or stays quiet about ones that were not. The sets below therefore
+ * mirror that file's constants literally, and `__tests__/fetchStripe.test.ts` pins the
+ * whole table so a change on either side fails a test instead of drifting silently.
+ *
+ * FOLLOW-UP once #191 lands: hoist this predicate into one shared module and have
+ * `payouts.ts` import it, so the duplication becomes structural rather than a convention.
+ */
+export const PAYOUT_CHARGE_TYPES = ['charge', 'payment'] as const;
+export const PAYOUT_FEE_TYPES = ['stripe_fee', 'fee', 'application_fee'] as const;
+export const PAYOUT_REFUND_TYPES = ['refund', 'payment_refund'] as const;
+export const PAYOUT_IGNORED_TYPES = ['payout', 'advance', 'payout_cancel'] as const;
+
+/**
+ * Stripe reports a dispute as a balance transaction of type `adjustment` whose
+ * `reporting_category` names the dispute — the same discriminator
+ * `src/stripe/handlers/disputes.ts` uses. `charge.dispute.*` books those, so they are
+ * posted at source and are NOT account-level.
+ */
+export const DISPUTE_REPORTING_CATEGORIES = [
+  'dispute',
+  'dispute_reversal',
+  'chargeback',
+  'chargeback_withdrawal',
+] as const;
+
+export type BalanceTransactionClass =
+  | 'charge'
+  | 'processing_fee'
+  | 'fee'
+  | 'refund'
+  | 'adjustment'
+  | 'ignored';
+
+const lower = (value: unknown): string => (typeof value === 'string' ? value.toLowerCase() : '');
+
+/** True when a balance transaction is a dispute, by `reporting_category`. */
+export function isDisputeBalanceTransaction(balanceTransaction: any): boolean {
+  return (DISPUTE_REPORTING_CATEGORIES as readonly string[]).includes(
+    lower(balanceTransaction?.reporting_category)
+  );
+}
+
+/**
+ * Classifies one balance transaction the way the payout handler does.
+ *
+ * The structural distinction that matters: a charge's processing fee is a FIELD on the
+ * charge's own balance transaction (`amount` / `fee` / `net` on one object), whereas an
+ * account-level fee is a SEPARATE balance transaction.
+ */
+export function classifyBalanceTransaction(balanceTransaction: any): BalanceTransactionClass {
+  const type = lower(balanceTransaction?.type);
+
+  if ((PAYOUT_IGNORED_TYPES as readonly string[]).includes(type)) return 'ignored';
+  if ((PAYOUT_CHARGE_TYPES as readonly string[]).includes(type)) return 'charge';
+  if ((PAYOUT_FEE_TYPES as readonly string[]).includes(type)) return 'fee';
+  if ((PAYOUT_REFUND_TYPES as readonly string[]).includes(type)) return 'refund';
+  return 'adjustment';
+}
+
+/**
+ * True when this balance transaction's money is ALREADY in QuickBooks because a
+ * per-object webhook posted it — charges and their processing fees via `postChargeToQbo`,
+ * refunds via `postRefundToQbo`, dispute adjustments via the dispute handlers.
+ *
+ * This is the same `postedAtSource` flag the payout handler puts on every payout line.
+ */
+export function isPostedAtSource(balanceTransaction: any): boolean {
+  const classification = classifyBalanceTransaction(balanceTransaction);
+  if (classification === 'charge' || classification === 'refund') return true;
+  if (classification === 'adjustment') return isDisputeBalanceTransaction(balanceTransaction);
+  return false;
+}
+
+/**
+ * True when a balance transaction is account-level: money Stripe took (or gave back) that
+ * belongs to no charge, refund or dispute — monthly billing, Radar, ACH/direct-debit
+ * failure, instant payout, currency conversion, and non-dispute balance adjustments.
+ *
+ * These never appear on `charge.balance_transaction`, so nothing that enumerates charges,
+ * refunds or payouts can see them. Until they are enumerated they cannot be reported
+ * missing from QuickBooks, because no population being compared knows they exist.
+ *
+ * This is exactly the complement of `postedAtSource`, which is what the payout handler
+ * books as its `POFEE-` entry.
+ */
+export function isAccountLevelFeeBalanceTransaction(balanceTransaction: any): boolean {
+  if (!balanceTransaction || typeof balanceTransaction !== 'object') return false;
+  const classification = classifyBalanceTransaction(balanceTransaction);
+  if (classification === 'ignored') return false;
+  return !isPostedAtSource(balanceTransaction);
+}
+
+/**
+ * Enumerates the account-level fee balance transactions created since `since`.
+ *
+ * Lists balance transactions for the window and classifies locally rather than issuing one
+ * `type=` query per fee type: the account-level category is open-ended (anything that is
+ * not a charge, refund or ignored type is an adjustment), so it cannot be enumerated as a
+ * fixed list of Stripe type filters without drifting from the posting side. Pass
+ * `options.types` to narrow the query when a caller does want specific types.
+ */
+export async function fetchAccountFeeBalanceTransactionsSince(
+  stripe: any,
+  since: unknown,
+  options: {
+    limit?: number;
+    logger?: LoggerLike;
+    params?: Record<string, unknown>;
+    types?: readonly string[];
+  } = {}
+) {
+  if (
+    !stripe ||
+    !stripe.balanceTransactions ||
+    typeof stripe.balanceTransactions.list !== 'function'
+  ) {
+    throw new Error('Stripe client with balanceTransactions.list is required');
+  }
+
+  const fetcher = createListFetcher({
+    listFn: stripe.balanceTransactions.list.bind(stripe.balanceTransactions),
+    baseParams: { expand: ['data.source'] },
+  });
+
+  const queries: Array<Record<string, unknown> | null> =
+    options.types && options.types.length > 0 ? options.types.map((type) => ({ type })) : [null];
+
+  const seen = new Set<string>();
+  const results: any[] = [];
+
+  for (const typeParam of queries) {
+    const page = await fetcher(since, {
+      limit: options.limit,
+      logger: options.logger,
+      params: { ...(options.params || {}), ...(typeParam || {}) },
+    });
+
+    for (const balanceTransaction of page) {
+      const id = balanceTransaction?.id;
+      if (typeof id !== 'string' || seen.has(id)) continue;
+      if (!isAccountLevelFeeBalanceTransaction(balanceTransaction)) continue;
+      seen.add(id);
+      results.push(balanceTransaction);
+    }
+  }
+
+  return results;
+}
+
 export async function fetchBalanceTransactionsForPayout(
   stripe: any,
   payoutId: string,

@@ -44,6 +44,12 @@ export interface EnvConfig {
   };
   accounting: {
     postingStrategy: AccountingPostingStrategy;
+    /**
+     * The raw (lower-cased) ACCOUNTING_POSTING_STRATEGY value the operator configured, before
+     * alias normalisation. Kept so the running app can report both what was asked for and
+     * what is in effect without anyone having to read the deployment secret.
+     */
+    postingStrategyConfigured: string;
     syncEnabled: boolean;
     defaultSalesItem: string;
     accounts: {
@@ -195,13 +201,37 @@ function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
   return { environment: environment ?? 'sandbox', ...parsed };
 }
 
+/**
+ * Accepted spellings of ACCOUNTING_POSTING_STRATEGY that are not the canonical enum value.
+ *
+ * `journal-entry` was published in our own operator docs for a long time but was never a valid
+ * enum member, so an operator who followed those docs got an EnvConfigError at module load —
+ * which takes down the entire function app, not just the QuickBooks path. `journal-entry` is
+ * not a *different* strategy, it is the older name for the journal-entry strategy, so it is
+ * accepted here as an alias for `je-transfer`: the operator gets exactly the strategy they
+ * asked for. Genuinely unknown values still fail loudly rather than defaulting to something
+ * the operator did not choose. The effective strategy is logged at first post (see
+ * logPostingStrategyOnce in qboSvc) so an alias is never invisible.
+ */
+const POSTING_STRATEGY_ALIASES: Record<string, AccountingPostingStrategy> = {
+  'journal-entry': 'je-transfer',
+};
+
 function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
   const postingStrategySchema = z.enum(['je-transfer', 'sales-receipt'] as const);
+  const configuredPostingStrategy = resolveEnv('ACCOUNTING_POSTING_STRATEGY', {
+    defaultValue: 'je-transfer',
+  })
+    .trim()
+    .toLowerCase();
   const postingStrategy = postingStrategySchema.safeParse(
-    resolveEnv('ACCOUNTING_POSTING_STRATEGY', { defaultValue: 'je-transfer' }).toLowerCase()
+    POSTING_STRATEGY_ALIASES[configuredPostingStrategy] ?? configuredPostingStrategy
   );
   if (!postingStrategy.success) {
-    ctx.errors.push('ACCOUNTING_POSTING_STRATEGY must be one of: "je-transfer", "sales-receipt".');
+    ctx.errors.push(
+      'ACCOUNTING_POSTING_STRATEGY must be one of: "je-transfer", "sales-receipt" ' +
+        '("journal-entry" is accepted as a legacy alias for "je-transfer").'
+    );
   }
 
   const syncEnabled = parseBoolean(
@@ -266,6 +296,7 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     postingStrategy: (postingStrategy.success
       ? postingStrategy.data
       : 'je-transfer') as AccountingPostingStrategy,
+    postingStrategyConfigured: configuredPostingStrategy,
     syncEnabled,
     defaultSalesItem,
     accounts: {

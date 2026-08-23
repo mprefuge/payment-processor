@@ -62,7 +62,7 @@ class AccountingSyncConfig {
       // Posting policy
       posting: {
         granularity: process.env.ACCOUNTING_POSTING_GRANULARITY || 'per-payout', // per-payout, per-day, per-transaction
-        strategy: process.env.ACCOUNTING_POSTING_STRATEGY || 'je-transfer', // je-transfer, deposit
+        strategy: process.env.ACCOUNTING_POSTING_STRATEGY || 'je-transfer', // je-transfer, sales-receipt ('journal-entry' is a legacy alias for je-transfer)
         dateSource: process.env.ACCOUNTING_POSTING_DATE_SOURCE || 'arrival', // arrival, created
         transactionLineMode: (
           process.env.ACCOUNTING_POSTING_TRANSACTION_LINE_MODE || 'summary'

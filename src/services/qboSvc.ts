@@ -239,7 +239,6 @@ interface BuildSalesReceiptInput {
   date: string | Date;
   revenueItemName: string;
   depositAccountName?: string;
-  feesAccountName?: string;
   stripeFeeAmountCents?: number;
   stripeChargeId?: string | null;
   stripeInvoiceId?: string | null;
@@ -296,6 +295,12 @@ interface BuildFeesJournalEntryInput {
   date: string | Date;
   feesAccountId?: string;
   clearingAccountId?: string;
+  /**
+   * Class for the fee expense line, so the fee is classed the same way the je-transfer
+   * strategy classes it (see buildSingleJE). Only the expense line carries it; the clearing
+   * credit is a cash movement and stays unclassed, matching buildSingleJE.
+   */
+  classRef?: QuickBooksReference | null;
 }
 
 interface BuildSingleJournalEntryInput {
@@ -389,6 +394,35 @@ export interface PostDisputeReversalToQboInput {
   date: string | Date;
   /** Stripe dispute ID. Used as the unique suffix in the DSPREV DocNumber. */
   disputeId?: string | null;
+  cleanupTag?: string;
+  options?: PostOptions;
+}
+
+/**
+ * Input for reversing a charge that QuickBooks already carries as revenue and
+ * that Stripe subsequently took back — an ACH debit returned by the donor's
+ * bank days after it settled being the common case.
+ *
+ * `grossAmount` reverses the revenue the original posting recognised.
+ * `failureFeeAmount` is what Stripe charges for the return (the ACH failure
+ * fee), and `returnedProcessingFeeAmount` is the original processing fee on the
+ * rare occasions Stripe hands it back.  Both are derived from the failure
+ * balance transaction rather than assumed, so an account where Stripe keeps the
+ * processing fee books exactly what happened.
+ */
+export interface PostPaymentReversalToQboInput {
+  /** Gross amount originally recognised as revenue, in cents. */
+  grossAmount: number;
+  /** Fee Stripe charges for the returned payment, in cents. */
+  failureFeeAmount?: number;
+  /** Original processing fee Stripe returned, in cents; 0 when it keeps the fee. */
+  returnedProcessingFeeAmount?: number;
+  memo?: string;
+  date: string | Date;
+  /** Stripe PaymentIntent ID. Preferred unique suffix for the CHGREV DocNumber. */
+  paymentIntentId?: string | null;
+  /** Stripe charge ID, used as the DocNumber suffix when no PaymentIntent ID is known. */
+  chargeId?: string | null;
   cleanupTag?: string;
   options?: PostOptions;
 }
@@ -1944,7 +1978,6 @@ export const buildSalesReceipt = ({
   date,
   revenueItemName,
   depositAccountName = env.quickBooks.accounts.stripeClearing,
-  feesAccountName,
   stripeFeeAmountCents = 0,
   stripeChargeId = null,
   stripeInvoiceId = null,
@@ -2063,35 +2096,20 @@ export const buildSalesReceipt = ({
     });
   }
 
-  // Add Stripe fee line if applicable (platform-paid fee). Represented as a negative amount
-  // on the sales receipt so the net deposit reflects fees without creating a separate JE.
-  const stripeFee = ensurePositiveAmount(stripeFeeAmountCents ?? 0, 'Stripe fee amount');
-  if (stripeFee > 0) {
-    const stripeFeeAmount = -centsToDollars(stripeFee);
-    if (!Number.isFinite(stripeFeeAmount)) {
-      throw new Error(
-        `Invalid stripe fee amount calculated for sales receipt: ${stripeFeeAmount} (from ${stripeFee} cents)`
-      );
-    }
-
-    const feeItemAccountRef =
-      typeof feesAccountName === 'string' && feesAccountName.trim()
-        ? createAccountRef(feesAccountName)
-        : undefined;
-
-    lines.push({
-      Amount: stripeFeeAmount,
-      DetailType: 'SalesItemLineDetail',
-      Description: 'Stripe Processing Fee',
-      SalesItemLineDetail: {
-        ItemRef: createItemRef(itemReference),
-        Qty: 1,
-        UnitPrice: stripeFeeAmount,
-        ...(classRef ? { ClassRef: classRef } : {}),
-        ...(feeItemAccountRef ? { ItemAccountRef: feeItemAccountRef } : {}),
-      },
-    });
-  }
+  // NOTE: the processor fee is deliberately NOT a line on this receipt.
+  //
+  // A SalesReceipt is the donor-facing document and must state what the donor actually
+  // paid — the gross. The earlier implementation appended a negative SalesItemLine for the
+  // Stripe fee, carrying the *revenue* ItemRef with an ItemAccountRef pointed at the fees
+  // account. QuickBooks posts a sales line to the income account configured on the Item
+  // itself; ItemAccountRef on the line does not redirect it. That negative line therefore
+  // landed as contra-revenue: revenue was booked net and no processor-fee expense ever
+  // reached the P&L.
+  //
+  // The fee is now posted as its own paired journal entry (Dr Fees / Cr Stripe Clearing) by
+  // postChargeAsSalesReceipt, which is the correct nonprofit treatment: revenue at gross,
+  // fee as its own expense, and the clearing account netting to the Stripe payout. The fee
+  // is still reported to the donor through CustomerMemo below.
 
   const receipt: QuickBooksSalesReceipt = {
     DocNumber: docNumber,
@@ -2202,11 +2220,14 @@ export const buildFeesJE = ({
   date,
   feesAccountId = env.quickBooks.accounts.fees,
   clearingAccountId = env.quickBooks.accounts.stripeClearing,
+  classRef,
 }: BuildFeesJournalEntryInput): QuickBooksJournalEntry => {
   const feeAmount = ensurePositiveAmount(feeAmountCents, 'Fee amount');
 
   const lines = [
-    createJournalEntryLine('debit', feesAccountId, feeAmount, memo),
+    createJournalEntryLine('debit', feesAccountId, feeAmount, memo, {
+      classRef: classRef ?? null,
+    }),
     createJournalEntryLine('credit', clearingAccountId, feeAmount, memo),
   ].filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
 
@@ -3616,9 +3637,6 @@ const postChargeAsSalesReceipt = async (input: {
     depositAccountName: depositAccountRef.name
       ? `${depositAccountRef.name}|${depositAccountRef.value}`
       : depositAccountRef.value,
-    feesAccountName: feesAccountRef.name
-      ? `${feesAccountRef.name}|${feesAccountRef.value}`
-      : feesAccountRef.value,
     stripeFeeAmountCents: feeAmount,
     stripeChargeId: stripe?.charge?.id ?? null,
     stripeInvoiceId:
@@ -3639,6 +3657,49 @@ const postChargeAsSalesReceipt = async (input: {
   });
 
   const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
+
+  // Post the processor fee as its own paired journal entry (Dr Fees / Cr Stripe Clearing).
+  //
+  // The receipt deposits the GROSS into Stripe Clearing; this entry takes the fee back out,
+  // so Clearing nets to the Stripe payout while revenue stays at gross and the fee shows up
+  // as an expense in the P&L.
+  //
+  // Ordering matters for retry safety: the receipt is posted first, and the receipt and the
+  // fee entry each carry their own DocNumber, so postToQbo's duplicate check short-circuits
+  // whichever half already exists. A retry after a partial failure therefore completes the
+  // pair instead of double-posting either half.
+  //
+  // 'FEE' is the same length as the receipt's 'CHG' prefix, so buildDocNumber leaves both
+  // DocNumbers with an identical date and charge-id tail: CHG-20240301-XXXXXXXX pairs with
+  // FEE-20240301-XXXXXXXX. That makes the pair findable from either side in QuickBooks.
+  if (feeAmount > 0) {
+    const feeDocNumber = buildDocNumber('FEE', date, feeAmount, chargeId);
+    const feeJournalEntry = buildFeesJE({
+      docNumber: feeDocNumber,
+      feeAmountCents: feeAmount,
+      memo: normalizedMemo,
+      date,
+      feesAccountId: feesAccountRef.value,
+      clearingAccountId: depositAccountRef.value,
+      // Mirrors the receipt's class when one is supplied. NOTE: the Stripe webhook forward
+      // path never writes qbo_class metadata (see formatStripeMetadata in
+      // src/handlers/processTransaction.js), so this is currently only exercised by the
+      // manual/Salesforce sync paths that do set it.
+      classRef: toTrimmed(lineOverrides.classRef ?? null)
+        ? createClassRef(lineOverrides.classRef!)
+        : null,
+    });
+
+    const feeJournalResult = await postJournalEntry(feeJournalEntry, options);
+    logger.info('[QBO] Posted paired processor-fee journal entry for sales receipt', {
+      salesReceiptDocNumber,
+      salesReceiptId: salesReceiptResult.id,
+      feeDocNumber,
+      feeJournalEntryId: feeJournalResult.id,
+      feeAmountCents: feeAmount,
+    });
+  }
+
   return { qboId: salesReceiptResult.id, type: 'sales-receipt' };
 };
 
@@ -3748,6 +3809,37 @@ const buildResolvedPayoutTransfer = async (input: {
   };
 };
 
+/**
+ * Emits the effective accounting posting strategy exactly once per process.
+ *
+ * ACCOUNTING_POSTING_STRATEGY is supplied as a deployment secret, so without this line the
+ * only way to find out which strategy a running function app is using is to read the secret.
+ * The value is a strategy name, not a credential — no secret material is logged.
+ */
+let postingStrategyLogged = false;
+const logPostingStrategyOnce = (): void => {
+  if (postingStrategyLogged) {
+    return;
+  }
+  postingStrategyLogged = true;
+
+  const configured = env.accounting.postingStrategyConfigured ?? env.accounting.postingStrategy;
+  logger.info('[QBO] Accounting posting strategy in effect', {
+    strategy: env.accounting.postingStrategy,
+    configuredValue: configured,
+    alias: configured !== env.accounting.postingStrategy,
+    documents:
+      env.accounting.postingStrategy === 'sales-receipt'
+        ? 'SalesReceipt at gross + paired Dr Fees / Cr Stripe Clearing journal entry'
+        : 'single journal entry: Dr Clearing gross / Cr Revenue gross / Dr Fees / Cr Clearing',
+  });
+};
+
+/** Test seam: lets suites assert the once-per-process strategy log independently. */
+export const __resetPostingStrategyLogForTests = (): void => {
+  postingStrategyLogged = false;
+};
+
 export const postChargeToQbo = async ({
   gross,
   fee,
@@ -3758,6 +3850,7 @@ export const postChargeToQbo = async ({
   cleanupTag,
   options,
 }: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
+  logPostingStrategyOnce();
   const grossAmount = ensurePositiveAmount(gross, 'Gross amount');
   const feeAmount = ensurePositiveAmount(fee, 'Fee amount');
   const normalizedMemo = appendTestArtifactMarker(
@@ -4197,6 +4290,134 @@ export const postPayoutToQbo = async ({
   return { qboId: result.id, type: 'transfer' };
 };
 
+export interface PostPayoutAccountFeesToQboInput {
+  /**
+   * Signed balance delta for account-level Stripe fees, in cents. Negative =
+   * fees charged (the normal case); positive = fees credited back.
+   */
+  feeDeltaCents: number;
+  /**
+   * Signed balance delta for non-dispute balance adjustments, in cents.
+   * Negative = the balance was reduced.
+   */
+  adjustmentDeltaCents: number;
+  memo?: string;
+  date: Date;
+  /** Stripe payout id. Used as the unique suffix in the POFEE DocNumber. */
+  payoutId?: string;
+  cleanupTag?: string;
+  options?: PostOptions;
+}
+
+/**
+ * Posts the account-level part of a Stripe payout — the fees and adjustments
+ * that arrive as their own balance transactions and are booked nowhere else.
+ *
+ * Per-charge processing fees are NOT posted here. Stripe carries those on the
+ * charge's own balance transaction and `postChargeToQbo` already debits Stripe
+ * Fees for them, so the caller filters them out before calling
+ * (`summarizeAccountLevelActivity`, `src/stripe/payoutAccountFees.ts`).
+ *
+ * Direction, per component:
+ *
+ *   delta < 0 (a cost)    Dr Stripe Fees |delta| / Cr Stripe Clearing |delta|
+ *   delta > 0 (a credit)  Dr Stripe Clearing delta / Cr Stripe Fees delta
+ *
+ * The credit/debit against Stripe Clearing is what makes the payout reconcile:
+ * charge postings leave Clearing holding gross - per-charge fees, and these
+ * entries take out the account-level fees, so the residue equals the Transfer
+ * that `postPayoutToQbo` moves to the bank.
+ *
+ * Both sides use the configured accounts (`QBO_ACCOUNT_FEES`,
+ * `QBO_ACCOUNT_STRIPE_CLEARING`) — no account is hardcoded here.
+ *
+ * Idempotency: the entry carries a `POFEE-` DocNumber derived from the payout
+ * id, so `postToQbo`'s DocNumber pre-check returns the existing entry on a
+ * replay instead of creating a second one. `strictDocNumber` is deliberately
+ * NOT set: a replayed `payout.paid` should resolve to the entry already in
+ * QuickBooks, exactly as `postPayoutToQbo` resolves to the existing Transfer,
+ * rather than throwing and wedging the payout.
+ *
+ * Returns null when there is nothing account-level in the payout.
+ */
+export const postPayoutAccountFeesToQbo = async ({
+  feeDeltaCents,
+  adjustmentDeltaCents,
+  memo,
+  date,
+  payoutId,
+  cleanupTag,
+  options,
+}: PostPayoutAccountFeesToQboInput): Promise<PostChargeToQboResult | null> => {
+  const feeDelta = Number.isFinite(feeDeltaCents) ? Math.round(feeDeltaCents) : 0;
+  const adjustmentDelta = Number.isFinite(adjustmentDeltaCents)
+    ? Math.round(adjustmentDeltaCents)
+    : 0;
+
+  if (feeDelta === 0 && adjustmentDelta === 0) {
+    return null;
+  }
+
+  const normalizedMemo = appendTestArtifactMarker(toTrimmed(memo) ?? undefined, cleanupTag);
+
+  if (!payoutId) {
+    logger.warn(
+      '[QBOSvc] postPayoutAccountFeesToQbo called without payoutId — DocNumber may collide',
+      { date, feeDelta, adjustmentDelta }
+    );
+  }
+
+  const lines: (QuickBooksJournalEntryLine | null)[] = [];
+
+  const addComponent = (deltaCents: number, label: string): void => {
+    if (deltaCents === 0) {
+      return;
+    }
+    const lineMemo = normalizedMemo ? `${label} — ${normalizedMemo}` : label;
+    const magnitude = Math.abs(deltaCents);
+
+    if (deltaCents < 0) {
+      lines.push(
+        createJournalEntryLine('debit', env.quickBooks.accounts.fees, magnitude, lineMemo),
+        createJournalEntryLine(
+          'credit',
+          env.quickBooks.accounts.stripeClearing,
+          magnitude,
+          lineMemo
+        )
+      );
+      return;
+    }
+
+    lines.push(
+      createJournalEntryLine('debit', env.quickBooks.accounts.stripeClearing, magnitude, lineMemo),
+      createJournalEntryLine('credit', env.quickBooks.accounts.fees, magnitude, lineMemo)
+    );
+  };
+
+  addComponent(feeDelta, 'Stripe account fees');
+  // Non-dispute balance adjustments are a Stripe account cost like any other
+  // account-level fee, so they use the same configured fees account. Dispute
+  // adjustments never reach here — charge.dispute.* books those against
+  // disputeLosses.
+  addComponent(adjustmentDelta, 'Stripe balance adjustments');
+
+  return postJournalEntryFromLines({
+    docNumber: buildDocNumber(
+      'POFEE',
+      date,
+      Math.abs(feeDelta) + Math.abs(adjustmentDelta),
+      null,
+      payoutId ?? null
+    ),
+    memo: normalizedMemo,
+    date,
+    lines,
+    emptyLineError: 'Payout account-fee journal entry must contain at least one non-zero line.',
+    options,
+  });
+};
+
 export const postDisputeToQbo = async ({
   lossAmount,
   feeAmount,
@@ -4331,6 +4552,114 @@ export const postDisputeReversalToQbo = async ({
         : null,
     ],
     emptyLineError: 'Dispute reversal journal entry must contain at least one non-zero line.',
+    options: effectiveOptions,
+  });
+};
+
+/**
+ * Post the reversal of a settled payment that Stripe later took back.
+ *
+ * The success path recognised revenue at gross and deposited the gross into
+ * Stripe Clearing (a SalesReceipt plus its paired fee entry under the
+ * `sales-receipt` strategy, a single journal entry under `journal-entry`).
+ * When an ACH debit is returned days later, Stripe removes the gross from the
+ * balance again and charges a failure fee, so both halves have to come back
+ * out of the books:
+ *
+ *   Debit  revenue         (gross)                   ← revenue that never arrived
+ *   Debit  fees            (failure fee, if any)     ← Stripe's ACH return fee
+ *   Credit fees            (returned processing fee) ← only when Stripe gives it back
+ *   Credit stripeClearing  (gross + failure fee − returned processing fee)
+ *
+ * Revenue is debited rather than an expense account: the gift never arrived, so
+ * the period's revenue is overstated until it is taken back out.  Routing it to
+ * an expense account would leave both revenue and expense overstated.
+ *
+ * The `CHGREV` DocNumber prefix keeps the reversal a separate, traceable
+ * document alongside the original `CHG-…` / `CHGJE-…` entry, and QuickBooks'
+ * own DocNumber duplicate check makes a re-post a no-op.
+ */
+export const postPaymentReversalToQbo = async ({
+  grossAmount,
+  failureFeeAmount = 0,
+  returnedProcessingFeeAmount = 0,
+  memo,
+  date,
+  paymentIntentId,
+  chargeId,
+  cleanupTag,
+  options,
+}: PostPaymentReversalToQboInput): Promise<PostChargeToQboResult> => {
+  const normalizedGross = ensurePositiveAmount(grossAmount, 'Payment reversal gross amount');
+  const normalizedFailureFee = ensurePositiveAmount(failureFeeAmount, 'Payment failure fee amount');
+  const normalizedReturnedFee = ensurePositiveAmount(
+    returnedProcessingFeeAmount,
+    'Returned processing fee amount'
+  );
+  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
+
+  if (normalizedGross === 0) {
+    throw new Error('Payment reversal posting requires a non-zero gross amount.');
+  }
+
+  const clearingCredit = normalizedGross + normalizedFailureFee - normalizedReturnedFee;
+  if (clearingCredit <= 0) {
+    throw new Error(
+      'Payment reversal returned processing fee cannot exceed the reversed gross plus failure fee.'
+    );
+  }
+
+  const uniqueId = paymentIntentId ?? chargeId ?? null;
+  if (!uniqueId) {
+    logger.warn(
+      '[QBOSvc] postPaymentReversalToQbo called without a payment intent or charge id — DocNumber may collide',
+      { date, grossAmount: normalizedGross, failureFeeAmount: normalizedFailureFee }
+    );
+  }
+
+  const effectiveOptions = uniqueId ? { ...options, strictDocNumber: true } : options;
+
+  return postJournalEntryFromLines({
+    docNumber: buildDocNumber(
+      'CHGREV',
+      date,
+      normalizedGross + normalizedFailureFee,
+      null,
+      uniqueId
+    ),
+    memo: normalizedMemo,
+    date,
+    lines: [
+      createJournalEntryLine(
+        'debit',
+        env.quickBooks.accounts.revenue,
+        normalizedGross,
+        normalizedMemo
+      ),
+      normalizedFailureFee > 0
+        ? createJournalEntryLine(
+            'debit',
+            env.quickBooks.accounts.fees,
+            normalizedFailureFee,
+            normalizedMemo
+          )
+        : null,
+      normalizedReturnedFee > 0
+        ? createJournalEntryLine(
+            'credit',
+            env.quickBooks.accounts.fees,
+            normalizedReturnedFee,
+            normalizedMemo
+          )
+        : null,
+      createJournalEntryLine(
+        'credit',
+        env.quickBooks.accounts.stripeClearing,
+        clearingCredit,
+        normalizedMemo
+      ),
+    ],
+    emptyLineError: 'Payment reversal journal entry must contain at least one non-zero line.',
     options: effectiveOptions,
   });
 };
@@ -5422,6 +5751,7 @@ export default {
   postRefundToQbo,
   postDisputeToQbo,
   postDisputeReversalToQbo,
+  postPaymentReversalToQbo,
   postPayoutToQbo,
   ensureItem,
   ensureCustomer,
