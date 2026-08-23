@@ -2363,7 +2363,8 @@ registerFunction('opsTestDonation', 'Trace one donation through all three system
     'Use it to see one gift end to end — where an amount changes units, where donor intent has to be mirrored to survive, where the processor fee first becomes known. Each step is the same computation the corresponding `/api/ops/test/*` endpoint performs, so a discrepancy between the trace and a single-stage call would be a bug.\n\n' +
     'A step that throws is reported as `outcome: "failed"` with its error, and the remaining steps still run.\n\n' +
     '### What `dryRun=false` touches\n\n' +
-    'Nothing — it is refused. This endpoint is dry-run only. Running one payload through all three systems for real means three separate writes whose failure modes interleave; exercise them one at a time with `POST /api/ops/test/stripe`, `/salesforce` and `/quickbooks`, each with `dryRun=false`.',
+    'Nothing — it is refused. This endpoint is dry-run only. Running one payload through all three systems for real means three separate writes whose failure modes interleave; exercise them one at a time with `POST /api/ops/test/stripe`, `/salesforce` and `/quickbooks`, each with `dryRun=false`.\n\n' +
+    'The trace still reports the `source_test_tag` marker each stage would stamp, so you can see what `POST /api/ops/test-artifact-cleanup` would later match before committing to a write.',
   tags: ['Ops', 'Stripe', 'Salesforce', 'QBO'],
   operationId: 'opsTestDonation',
   methods: ['POST'],

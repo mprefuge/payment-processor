@@ -1,3 +1,7 @@
+import {
+  buildCheckoutSessionParams,
+  calculateCoverFees,
+} from '../../handlers/processTransaction/checkoutSessionParams';
 import { buildTestArtifactMarker } from '../../lib/testArtifactTagging';
 import type { ResolvedDonation } from './syntheticDonation';
 
@@ -9,34 +13,9 @@ import type { ResolvedDonation } from './syntheticDonation';
  * run without a Stripe client. Anything that changes about line items, metadata mirroring
  * or `payment_method_types` shows up here for free.
  *
- * `processTransaction` is required lazily. It pulls in the Salesforce CRM factory and the
- * idempotency store at module load, and none of that is wanted by a dry run.
+ * `buildCheckoutSessionParams` lives in its own module precisely so it can be imported
+ * without dragging in the Salesforce CRM factory, the idempotency store, or a Stripe client.
  */
-
-interface ProcessTransactionInternals {
-  buildCheckoutSessionParams: (
-    customerId: string | undefined,
-    transactionData: Record<string, unknown>
-  ) => Record<string, unknown>;
-  calculateCoverFees: (baseAmountCents: number, paymentMethod?: string) => number;
-}
-
-const loadInternals = (): ProcessTransactionInternals => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const module = require('../../handlers/processTransaction');
-  const internals = (module.__internals ?? module.default?.__internals) as
-    | ProcessTransactionInternals
-    | undefined;
-
-  if (!internals?.buildCheckoutSessionParams) {
-    throw new Error(
-      'processTransaction did not expose buildCheckoutSessionParams; the Stripe preview ' +
-        'cannot render the Checkout Session arguments without it.'
-    );
-  }
-
-  return internals;
-};
 
 export interface StripePreviewResult extends Record<string, unknown> {
   writesNothing: string;
@@ -53,7 +32,6 @@ export const buildStripePreview = (input: {
 }): StripePreviewResult => {
   const { donation, cleanupTag } = input;
   const warnings = [...(input.baseWarnings ?? [])];
-  const internals = loadInternals();
 
   // buildCheckoutSessionParams takes the BASE gift and adds the covered fee on top, which is
   // the inverse of how this harness states amounts (grossCents already includes the covered
@@ -102,7 +80,7 @@ export const buildStripePreview = (input: {
     transactionData.organization = donation.donor.organization;
   }
 
-  const args = internals.buildCheckoutSessionParams(
+  const args = buildCheckoutSessionParams(
     '<resolved at request time — searchStripeCustomer finds or creates the customer>',
     transactionData
   );
@@ -116,7 +94,7 @@ export const buildStripePreview = (input: {
     | { metadata?: Record<string, unknown> }
     | undefined;
 
-  const quotedFee = internals.calculateCoverFees(baseAmountCents, donation.paymentMethod);
+  const quotedFee = calculateCoverFees(baseAmountCents, donation.paymentMethod);
   if (donation.coveredFeeCents > 0 && quotedFee !== donation.coveredFeeCents) {
     warnings.push(
       `coveredFeeCents is ${donation.coveredFeeCents}, but calculateCoverFees would quote ` +
