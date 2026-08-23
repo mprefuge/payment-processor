@@ -19,6 +19,78 @@ const FEE_TYPES = new Set<string>(['stripe_fee', 'fee', 'application_fee']);
 const REFUND_TYPES = new Set<string>(['refund', 'payment_refund']);
 const IGNORED_TYPES = new Set<string>(['payout', 'advance', 'payout_cancel']);
 
+/**
+ * Stripe reports a dispute as a balance transaction of type `adjustment` whose
+ * `reporting_category` names the dispute — the same discriminator the dispute
+ * handler uses (`src/stripe/handlers/disputes.ts:67`, `:187`).
+ *
+ * `charge.dispute.*` already books those against Stripe Clearing through
+ * `postDisputeToQbo` / `postDisputeReversalToQbo`, so the payout has to COUNT
+ * them (they moved the balance) but must never post them a second time.
+ */
+const DISPUTE_REPORTING_CATEGORIES = new Set<string>([
+  'dispute',
+  'dispute_reversal',
+  'chargeback',
+  'chargeback_withdrawal',
+]);
+
+const isDisputeTransaction = (transaction: Stripe.BalanceTransaction): boolean => {
+  const category =
+    typeof transaction.reporting_category === 'string'
+      ? transaction.reporting_category.toLowerCase()
+      : '';
+  return DISPUTE_REPORTING_CATEGORIES.has(category);
+};
+
+interface BalanceTransactionAmounts {
+  /** `amount` — what the customer was charged, before Stripe's cut. */
+  grossCents: number;
+  /** `fee` — Stripe's cut on this same balance transaction. */
+  feeCents: number;
+  /** `net` — what this balance transaction actually moved into the balance. */
+  netCents: number;
+}
+
+/**
+ * Reads the three amounts Stripe puts on ONE balance transaction.
+ *
+ * A charge balance transaction carries `amount` (gross), `fee` and `net`
+ * together; the per-charge processing fee is NOT a separate balance
+ * transaction. A payout is paid at net, so summing `amount` against
+ * `payout.amount` is comparing gross to net and can never balance.
+ *
+ * Stripe guarantees `net === amount - fee`. `net` is preferred because it is
+ * what actually moved the balance; `amount - fee` is the fallback for a
+ * balance transaction that omits it.
+ */
+const resolveAmounts = (
+  transaction: Stripe.BalanceTransaction,
+  logger: Logger
+): BalanceTransactionAmounts => {
+  const grossCents = toSafeInteger(transaction.amount);
+  const derivedNet = grossCents - toSafeInteger(transaction.fee);
+
+  if (typeof transaction.net === 'number' && Number.isFinite(transaction.net)) {
+    const reportedNet = toSafeInteger(transaction.net);
+    if (reportedNet !== derivedNet) {
+      logger('[StripeWebhook] Balance transaction net does not equal amount - fee', {
+        balanceTransactionId: transaction.id,
+        amount: grossCents,
+        fee: toSafeInteger(transaction.fee),
+        net: reportedNet,
+      });
+    }
+    return { grossCents, feeCents: grossCents - reportedNet, netCents: reportedNet };
+  }
+
+  return {
+    grossCents,
+    feeCents: toSafeInteger(transaction.fee),
+    netCents: derivedNet,
+  };
+};
+
 const normalizeCurrency = (currency: unknown, fallback: string | null): string => {
   if (typeof currency === 'string' && currency.trim().length > 0) {
     return currency.trim().toLowerCase();
@@ -221,12 +293,17 @@ const categorizeTransactions = async (
 
   const chargeAggregation = new Map<
     string,
-    { amount: number; references: PayoutDepositLineReference[] }
+    {
+      grossAmount: number;
+      feeAmount: number;
+      references: PayoutDepositLineReference[];
+      feeReferences: PayoutDepositLineReference[];
+    }
   >();
 
   for (const charge of charges) {
-    const amount = toSafeInteger(charge.amount);
-    if (amount === 0) {
+    const { grossCents, feeCents, netCents } = resolveAmounts(charge, logger);
+    if (grossCents === 0 && feeCents === 0) {
       continue;
     }
     const chargeId = normalizeStripeId(charge.source);
@@ -234,33 +311,62 @@ const categorizeTransactions = async (
     const currency = normalizeCurrency(charge.currency, payoutCurrency);
     const reference: PayoutDepositLineReference = {
       balanceTransactionId: charge.id,
-      amountCents: amount,
+      amountCents: grossCents,
+      feeCents,
+      netCents,
       sourceId: chargeId,
       chargeId,
       paymentIntentId,
       type: charge.type ?? null,
     };
 
-    const existing = chargeAggregation.get(currency);
-    if (existing) {
-      existing.amount += amount;
-      existing.references.push(reference);
-    } else {
-      chargeAggregation.set(currency, { amount, references: [reference] });
+    const entry = chargeAggregation.get(currency) ?? {
+      grossAmount: 0,
+      feeAmount: 0,
+      references: [],
+      feeReferences: [],
+    };
+    entry.grossAmount += grossCents;
+    entry.feeAmount += feeCents;
+    entry.references.push(reference);
+    if (feeCents !== 0) {
+      entry.feeReferences.push({ ...reference, amountCents: -feeCents });
     }
+    chargeAggregation.set(currency, entry);
   }
 
   const sortedChargeCurrencies = Array.from(chargeAggregation.keys()).sort();
   for (const currency of sortedChargeCurrencies) {
     const entry = chargeAggregation.get(currency)!;
-    lines.push({
-      type: 'charge',
-      currency,
-      amountCents: entry.amount,
-      description: `Stripe charges (${currency.toUpperCase()})`,
-      memo: formatChargeReferenceMemo(entry.references),
-      references: entry.references,
-    });
+    if (entry.grossAmount !== 0) {
+      lines.push({
+        type: 'charge',
+        currency,
+        amountCents: entry.grossAmount,
+        description: `Stripe charges (${currency.toUpperCase()})`,
+        memo: formatChargeReferenceMemo(entry.references),
+        references: entry.references,
+        // postChargeToQbo already booked every one of these at gross.
+        postedAtSource: true,
+      });
+    }
+
+    // The per-charge processing fee lives on the charge balance transaction
+    // itself. It is emitted as its own NEGATIVE line so gross - fee = net and
+    // the payout reconciles, but it is flagged as already booked: the charge
+    // posting (SalesReceipt + paired FEE- journal entry, or the single
+    // je-transfer entry) has debited Stripe Fees for it once already.
+    if (entry.feeAmount !== 0) {
+      lines.push({
+        type: 'processing_fee',
+        currency,
+        amountCents: -entry.feeAmount,
+        description: `Stripe processing fees on charges (${currency.toUpperCase()})`,
+        memo: formatReferenceList(entry.feeReferences),
+        references: entry.feeReferences,
+        postedAtSource: true,
+      });
+    }
   }
 
   const feeAggregation = new Map<
@@ -268,7 +374,10 @@ const categorizeTransactions = async (
     { amount: number; references: PayoutDepositLineReference[] }
   >();
   for (const fee of fees) {
-    const amount = toSafeInteger(fee.amount);
+    const { feeCents, netCents } = resolveAmounts(fee, logger);
+    // An account-level fee balance transaction is itself the cost; use `net` so
+    // any fee-on-the-fee is included rather than silently dropped.
+    const amount = netCents;
     if (amount === 0) {
       continue;
     }
@@ -276,6 +385,8 @@ const categorizeTransactions = async (
     const reference: PayoutDepositLineReference = {
       balanceTransactionId: fee.id,
       amountCents: amount,
+      feeCents,
+      netCents,
       sourceId: normalizeStripeId(fee.source),
       type: fee.type ?? null,
     };
@@ -295,15 +406,22 @@ const categorizeTransactions = async (
       type: 'fee',
       currency,
       amountCents: entry.amount,
-      description: `Stripe fees (${currency.toUpperCase()})`,
+      description: `Stripe account fees (${currency.toUpperCase()})`,
       memo: formatReferenceList(entry.references),
       references: entry.references,
+      // Account-level fees — monthly billing, Radar, ACH failure, instant
+      // payout, currency conversion. No per-charge document books these, so the
+      // payout is the only place they can reach the ledger.
+      postedAtSource: false,
     });
   }
 
   const refundLines: PayoutDepositLineInput[] = [];
   for (const refund of refunds) {
-    const amount = toSafeInteger(refund.amount);
+    const { feeCents, netCents } = resolveAmounts(refund, logger);
+    // `net` covers the rare refunded-processing-fee case, where a refund
+    // balance transaction carries a non-zero (negative) `fee`.
+    const amount = netCents;
     if (amount === 0) {
       continue;
     }
@@ -313,6 +431,8 @@ const categorizeTransactions = async (
       {
         balanceTransactionId: refund.id,
         amountCents: amount,
+        feeCents,
+        netCents,
         sourceId: refundId,
         refundId,
         type: refund.type ?? null,
@@ -329,6 +449,8 @@ const categorizeTransactions = async (
       description: refundId ? `Refund ${refundId}` : `Refund ${refund.id}`,
       memo: memoParts.join(' / '),
       references,
+      // refund.created already posted this through postRefundToQbo.
+      postedAtSource: true,
     });
   }
   refundLines.sort((a, b) => a.description.localeCompare(b.description));
@@ -336,15 +458,19 @@ const categorizeTransactions = async (
 
   const adjustmentLines: PayoutDepositLineInput[] = [];
   for (const adjustment of adjustments) {
-    const amount = toSafeInteger(adjustment.amount);
+    const { feeCents, netCents } = resolveAmounts(adjustment, logger);
+    const amount = netCents;
     if (amount === 0) {
       continue;
     }
     const currency = normalizeCurrency(adjustment.currency, payoutCurrency);
+    const isDispute = isDisputeTransaction(adjustment);
     const references: PayoutDepositLineReference[] = [
       {
         balanceTransactionId: adjustment.id,
         amountCents: amount,
+        feeCents,
+        netCents,
         sourceId: normalizeStripeId(adjustment.source),
         type: adjustment.type ?? null,
       },
@@ -353,9 +479,15 @@ const categorizeTransactions = async (
       type: 'adjustment',
       currency,
       amountCents: amount,
-      description: `Adjustment ${adjustment.id}`,
+      description: isDispute
+        ? `Dispute adjustment ${adjustment.id}`
+        : `Adjustment ${adjustment.id}`,
       memo: formatReferenceList(references),
       references,
+      // A dispute adjustment is already in QuickBooks from charge.dispute.*;
+      // everything else here (negative balance adjustments, payout failures,
+      // network costs) is booked nowhere else.
+      postedAtSource: isDispute,
     });
   }
   adjustmentLines.sort((a, b) => a.description.localeCompare(b.description));
@@ -393,6 +525,9 @@ const buildDepositInput = async (
         description: `Payout ${payout.id}${payout.automatic === false ? ' (Manual)' : ''}`,
         memo: `Stripe payout without transaction details`,
         references: [],
+        // No balance transaction history, so nothing account-level can be
+        // identified here — post the movement only.
+        postedAtSource: true,
       },
     ];
 
@@ -513,9 +648,17 @@ const buildPayoutTransaction = async (
     .filter((line) => line.type === 'charge')
     .reduce((sum, line) => sum + line.amountCents, 0);
 
-  const feeTotal = depositInput.lines
+  const processingFeeTotal = depositInput.lines
+    .filter((line) => line.type === 'processing_fee')
+    .reduce((sum, line) => sum + Math.abs(line.amountCents), 0);
+
+  const accountFeeTotal = depositInput.lines
     .filter((line) => line.type === 'fee')
     .reduce((sum, line) => sum + Math.abs(line.amountCents), 0);
+
+  // Salesforce's amount_fee__c is the payout's total Stripe cost, so it must
+  // include BOTH the per-charge processing fees and the account-level fees.
+  const feeTotal = processingFeeTotal + accountFeeTotal;
 
   const refundTotal = depositInput.lines
     .filter((line) => line.type === 'refund')
@@ -532,6 +675,10 @@ const buildPayoutTransaction = async (
     `Charges: $${(chargeTotal / 100).toFixed(2)}`,
     `Fees: -$${(feeTotal / 100).toFixed(2)}`,
   ];
+
+  if (accountFeeTotal > 0) {
+    memoLines.push(`Account fees: -$${(accountFeeTotal / 100).toFixed(2)}`);
+  }
 
   if (refundTotal > 0) {
     memoLines.push(`Refunds: -$${(refundTotal / 100).toFixed(2)}`);
