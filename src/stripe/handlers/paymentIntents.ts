@@ -15,6 +15,12 @@ import {
 } from '../../domain/transactions';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
+import {
+  isAccountingEnabledForEvent,
+  isTestModeAccountingSkipped,
+  logTestModeAccountingSkip,
+  recordTestModeAccountingSkip,
+} from '../testModeAccounting';
 import type { HttpContext, StripeWebhookDependencies } from '../types';
 import {
   centsToPositiveMajorUnits,
@@ -112,6 +118,8 @@ interface ProcessPaymentIntentOptions {
   stripe: Stripe;
   salesforce: SalesforceSvc;
   deps: StripeWebhookDependencies;
+  /** The Stripe event being processed. Carries the livemode flag the accounting gate reads. */
+  event: Stripe.Event;
   invoice?: Stripe.Invoice | null;
   eventId?: string | null;
   livemode?: boolean | null;
@@ -750,6 +758,7 @@ const describeBalanceTransactionAbsence = (
 
 const postSuccessfulPaymentIntentToAccounting = async (
   context: HttpContext,
+  event: Stripe.Event,
   deps: StripeWebhookDependencies,
   salesforce: SalesforceSvc,
   upsertResult: Awaited<ReturnType<SalesforceSvc['upsertTransactionByExternalId']>>,
@@ -760,7 +769,20 @@ const postSuccessfulPaymentIntentToAccounting = async (
   checkoutSession: Stripe.Checkout.Session | null,
   balanceTransactionAbsence: BalanceTransactionAbsenceReason | null = null
 ): Promise<void> => {
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // A test gift with ALLOW_TEST_MODE_ACCOUNTING off stops here, ABOVE the `bt_<id>` lock
+    // and marker below. Nothing is posted, `Posted_to_QBO__c` stays false, and the balance
+    // transaction stays unmarked, so a genuine posting for it later is still possible.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_payment_intent_id__c',
+        transaction: {
+          stripe_payment_intent_id__c: paymentIntent.id,
+          transaction_type__c: 'charge',
+          status__c: 'paid',
+        },
+      });
+    }
     return;
   }
 
@@ -947,6 +969,13 @@ export const handleChargeSettled = async (
   event: Stripe.Event,
   deps: StripeWebhookDependencies
 ): Promise<void> => {
+  // Deliberately the bare `syncEnabled` check, NOT `isAccountingEnabledForEvent`. The
+  // test-mode gate belongs lower down, in `postSuccessfulPaymentIntentToAccounting`, for the
+  // same reason it sits low on the payout path: everything between here and there is
+  // Salesforce work, and a test gift still writes its Transaction__c to the production org.
+  // This handler is the ONLY place the settled money fields (fee, net, balance-transaction
+  // id) are written for an ACH gift -- they are not knowable at `payment_intent.succeeded`
+  // -- so gating here would silently strip them from every test-mode ACH transaction.
   if (!env.accounting.syncEnabled) {
     return;
   }
@@ -1055,6 +1084,7 @@ export const handleChargeSettled = async (
 
   await postSuccessfulPaymentIntentToAccounting(
     context,
+    event,
     deps,
     salesforce,
     upsertResult,
@@ -1095,6 +1125,7 @@ const processSuccessfulPaymentIntent = async ({
   stripe,
   salesforce,
   deps,
+  event,
   invoice,
   eventId,
   livemode,
@@ -1163,6 +1194,7 @@ const processSuccessfulPaymentIntent = async ({
 
   await postSuccessfulPaymentIntentToAccounting(
     context,
+    event,
     deps,
     salesforce,
     upsertResult,
@@ -1418,6 +1450,7 @@ export const handlePaymentIntentSucceeded = async (
     stripe,
     salesforce,
     deps,
+    event,
     eventId: event.id,
     livemode: event.livemode,
   });
@@ -1439,6 +1472,7 @@ export const handleSuccessfulPaymentIntent = async (
     stripe,
     salesforce,
     deps,
+    event,
     invoice,
     eventId: event.id,
     livemode: event.livemode,
@@ -1548,7 +1582,11 @@ const reverseSettledPaymentInAccounting = async (
   deps: StripeWebhookDependencies,
   paymentIntent: Stripe.PaymentIntent
 ): Promise<void> => {
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // Nothing was posted for a skipped test gift, so there is nothing to reverse.
+    if (isTestModeAccountingSkipped(event)) {
+      logTestModeAccountingSkip(context, event, { path: 'payment_reversal' });
+    }
     return;
   }
 

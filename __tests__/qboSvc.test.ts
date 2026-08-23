@@ -490,6 +490,92 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.DocNumber).toBe('CHG-20240301-h_test_4');
   });
 
+  /**
+   * ALLOW_TEST_MODE_ACCOUNTING lets a Stripe test-mode gift post for real, into the real
+   * company file — there is no QuickBooks sandbox. What makes that safe is that the
+   * documents are unmistakable and removable: a `T`-prefixed DocNumber no live posting can
+   * produce, and a `[source_test_tag:…]` marker in the PrivateNote for
+   * POST /api/ops/test-artifact-cleanup.
+   */
+  it('marks a test-mode charge with a T-prefixed DocNumber and a cleanup tag', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-test-mode', DisplayName: 'Donor Example' } },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-test-mode' } },
+      { QueryResponse: {} },
+      { JournalEntry: { Id: 'fee-je-test-mode' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 325,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext({ id: 'ch_micah_test_4' }),
+      options: { fetcher, accessToken: 'token', testMode: true },
+    });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    const feeJournalRequest = requests.find(
+      (request) => request.url.includes('journalentry') && request.init?.method === 'POST'
+    );
+    const feeJournalBody = JSON.parse((feeJournalRequest?.init?.body ?? '{}') as string);
+
+    // Live would be CHG-20240301-h_test_4 (see the test above): the T costs one character of
+    // charge-id tail and nothing else.
+    expect(salesReceiptBody.DocNumber).toBe('TCHG-20240301-_test_4');
+    expect(salesReceiptBody.DocNumber.length).toBeLessThanOrEqual(21);
+    // The pair still shares an identical date-and-tail suffix, because TCHG and TFEE are the
+    // same length just as CHG and FEE are.
+    expect(feeJournalBody.DocNumber).toBe('TFEE-20240301-_test_4');
+    expect(salesReceiptBody.DocNumber.slice(4)).toBe(feeJournalBody.DocNumber.slice(4));
+
+    expect(salesReceiptBody.PrivateNote).toContain('[source_test_tag:stripe-test-mode]');
+    expect(feeJournalBody.PrivateNote).toContain('[source_test_tag:stripe-test-mode]');
+  });
+
+  it('leaves a live charge with no test prefix and no cleanup tag', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-live', DisplayName: 'Donor Example' } },
+      {
+        QueryResponse: {
+          Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+        },
+      },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-live' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: buildStripeContext({ id: 'ch_micah_test_4' }),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+
+    expect(salesReceiptBody.DocNumber).toBe('CHG-20240301-h_test_4');
+    expect(salesReceiptBody.PrivateNote).toBe('Charge memo');
+  });
+
   it('prefers donor name over checkout category when deriving QuickBooks payee/customer', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(

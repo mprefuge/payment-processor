@@ -1,6 +1,10 @@
 import Stripe from 'stripe';
 
-import env from '../../config/env';
+import {
+  isAccountingEnabledForEvent,
+  isTestModeAccountingSkipped,
+  recordTestModeAccountingSkip,
+} from '../testModeAccounting';
 import {
   centsToMajorUnits,
   centsToPositiveMajorUnits,
@@ -441,7 +445,19 @@ export const handleCreditNoteEvent = async (
     return;
   }
 
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // Above the `stripe_evt_<id>` lock and marker below; the Transaction__c upserted a few
+    // lines up keeps its Salesforce fields and simply carries the skip note.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_credit_note_id__c',
+        transaction: {
+          stripe_credit_note_id__c: creditNote.id,
+          transaction_type__c: 'refund',
+          status__c: mapStatus(creditNote.status ?? null),
+        },
+      });
+    }
     return;
   }
 

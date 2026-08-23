@@ -57,6 +57,13 @@ export interface UpsertRefundReceiptInput {
     fallbackReason?: string | null;
     rawSourceLines?: unknown;
   };
+  /**
+   * Set by the test-mode accounting policy (see src/stripe/testModeAccounting.ts) when this
+   * refund came from a Stripe test-mode event that ALLOW_TEST_MODE_ACCOUNTING let through.
+   * The adapter forwards it to qboSvc as `options.testMode`, which is what gives the document
+   * its `TREF` DocNumber and its cleanup tag.
+   */
+  testMode?: boolean;
 }
 
 export interface RefundReceiptAccountingAdapter {
@@ -142,6 +149,8 @@ export interface UpsertPayoutDepositInput {
   lines: PayoutDepositLineInput[];
   balanceTransactions: Stripe.BalanceTransaction[];
   summary: PayoutDepositSummary;
+  /** See UpsertRefundReceiptInput.testMode — same flag, for the payout documents. */
+  testMode?: boolean;
 }
 
 export interface PayoutAccountingAdapter {

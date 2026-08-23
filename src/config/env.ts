@@ -51,6 +51,20 @@ export interface EnvConfig {
      */
     postingStrategyConfigured: string;
     syncEnabled: boolean;
+    /**
+     * Whether a Stripe TEST-mode event (`livemode: false`) is allowed to reach QuickBooks.
+     *
+     * There is no QuickBooks sandbox behind this integration, so a test-mode posting writes a
+     * real document into the real company file. Default `false`: a test-mode event does no
+     * accounting work at all, and — critically — writes neither `Posted_to_QBO__c` nor the
+     * `bt_<id>` idempotency marker, so a later genuine posting for the same balance
+     * transaction is still possible. Turn it on only deliberately, and only when the test
+     * documents it creates are meant to be found and removed afterwards: with the flag on,
+     * every test-mode document carries a `T`-prefixed DocNumber and a
+     * `[source_test_tag:...]` marker in its PrivateNote for
+     * `POST /api/ops/test-artifact-cleanup`.
+     */
+    allowTestModeAccounting: boolean;
     defaultSalesItem: string;
     accounts: {
       autoCreate: boolean;
@@ -240,6 +254,12 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     false
   );
 
+  const allowTestModeAccounting = parseBoolean(
+    'ALLOW_TEST_MODE_ACCOUNTING',
+    resolveEnv('ALLOW_TEST_MODE_ACCOUNTING', { defaultValue: 'false' }),
+    false
+  );
+
   const defaultSalesItem = resolveEnv('QBO_DEFAULT_SALES_ITEM', {
     fallbackNames: ['ACCOUNTING_DEFAULT_SALES_ITEM'],
     defaultValue: 'Stripe Transaction',
@@ -298,6 +318,7 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
       : 'je-transfer') as AccountingPostingStrategy,
     postingStrategyConfigured: configuredPostingStrategy,
     syncEnabled,
+    allowTestModeAccounting,
     defaultSalesItem,
     accounts: {
       autoCreate,

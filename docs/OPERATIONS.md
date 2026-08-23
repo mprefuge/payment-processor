@@ -201,9 +201,27 @@ SELECT Id, Name, Stripe_Charge_Id__c, Received_At__c, posting_error__c
 FROM Transaction__c
 WHERE posting_error__c != null
 AND Posted_to_QBO__c = false
+AND (NOT posting_error__c LIKE 'TEST MODE SKIPPED%')
 ORDER BY Received_At__c DESC
 LIMIT 50
 ```
+
+`TEST MODE SKIPPED` is excluded on purpose. Test-mode money does no QuickBooks work while
+`ALLOW_TEST_MODE_ACCOUNTING` is off, and the skip is written to `posting_error__c` with that
+fixed prefix so it is visible on the record without reading as a posting failure that needs
+chasing. Drop the `NOT LIKE` clause to see them.
+
+Both paths into QuickBooks honour the flag identically. The webhook reads its mode from
+`event.livemode`; `stripeTrueUp` is told its mode by the caller (`?mode=test`, or
+`STRIPE_TRUE_UP_MODE`) and reads test-mode Stripe objects with the test key. Either way, with
+the flag off nothing is posted, `Posted_to_QBO__c` stays false and no idempotency marker is
+written — so the record stays postable. With the flag on, both paths post, and the documents
+they create carry a `T`-prefixed DocNumber (`TCHG`/`TFEE`/`TREF`) and a `[source_test_tag:...]`
+marker in their PrivateNote, so `POST /api/ops/test-artifact-cleanup` can find and remove them.
+
+**Recovering a skipped test posting:** set `ALLOW_TEST_MODE_ACCOUNTING=true` and re-run
+`stripeTrueUp` over the same window with `mode=test`. The true-up posts the record for real,
+clears `posting_error__c`, and the resulting documents are `T`-prefixed and cleanup-tagged.
 
 If results > 0, run `stripeTrueUp`:
 ```bash

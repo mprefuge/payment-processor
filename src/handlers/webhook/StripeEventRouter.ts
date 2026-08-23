@@ -25,6 +25,7 @@ import { handleChargeRefunded, handleRefundEvent } from '../../stripe/handlers/r
 import { handlePayoutEvent } from '../../stripe/handlers/payouts';
 import { handleDisputeClosed, handleDisputeCreated } from '../../stripe/handlers/disputes';
 import { handleCreditNoteEvent } from '../../stripe/handlers/creditNotes';
+import { applyTestModeAccountingPolicy } from '../../stripe/testModeAccounting';
 
 type StripeEventHandler = (
   context: HttpContext,
@@ -148,6 +149,12 @@ export class StripeEventRouter implements EventRouter {
       return;
     }
 
-    await handler(context, event, deps);
+    // Test-mode policy, applied once for every handler. For a live event, and for a
+    // test-mode event while ALLOW_TEST_MODE_ACCOUNTING is off, this returns `deps`
+    // untouched -- in the latter case the per-path gate in testModeAccounting stops the
+    // accounting before it starts. Only a deliberately allowed test-mode event runs with
+    // wrapped accounting, so that every QuickBooks document it creates carries the test
+    // DocNumber prefix and the [source_test_tag:...] cleanup marker.
+    await handler(context, event, applyTestModeAccountingPolicy(event, deps));
   }
 }

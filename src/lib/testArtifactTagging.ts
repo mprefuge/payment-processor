@@ -20,6 +20,19 @@ const TEST_ARTIFACT_HEADER_KEYS = [
 export const TEST_ARTIFACT_MARKER_PREFIX = '[source_test_tag:';
 
 /**
+ * The cleanup tag a QuickBooks document gets when it was posted for a Stripe TEST-mode event
+ * and nothing else supplied one.
+ *
+ * With `ALLOW_TEST_MODE_ACCOUNTING=true` a test gift writes a real document into the real
+ * company file, so every such document has to be findable afterwards. Stripe metadata may
+ * carry its own `source_test_tag`, and a run may set `TEST_ARTIFACT_RUN_ID`; when neither
+ * does, this constant is used, so `POST /api/ops/test-artifact-cleanup?tag=stripe-test-mode`
+ * always has something to match on. A default is the point: a test-mode document with no tag
+ * at all is one nobody can clean up.
+ */
+export const TEST_MODE_CLEANUP_TAG = 'stripe-test-mode';
+
+/**
  * The prefix every synthetic Stripe customer id minted by `/api/ops/test/*` carries.
  *
  * Records the harness writes to Salesforce with `dryRun=false` are keyed on a customer that
