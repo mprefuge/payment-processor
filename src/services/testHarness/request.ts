@@ -24,6 +24,13 @@ import { CHARGE_ID_PATTERN } from './quickbooksPreview';
  * harness offers, and refusing it until writes are switched on would force a caller to
  * enable writing merely to look.
  *
+ * `chargeId` and a `donation` payload are mutually exclusive, and supplying both is refused
+ * rather than resolved: they describe two different charges — one Stripe really has, one
+ * that exists nowhere — and only the chargeId would ever have been used. Quietly discarding
+ * the other is the same class of no-op as quietly ignoring `dryRun: false`, so neither is
+ * allowed to happen. `dryRun` differs only in having a behaviour worth keeping, which is why
+ * it warns where this refuses.
+ *
  * The inline-synthetic-donation path makes no outbound call of ANY kind, so that response
  * stays a pure function of the request body. Every response reports which of the two it
  * was via `outboundReads`, so a caller never has to infer it.
@@ -127,6 +134,14 @@ const readQuery = (request: HttpRequest, key: string): string | null => {
   return null;
 };
 
+/**
+ * The donation field names, read off the schema so this cannot drift as the schema grows.
+ * `chargeId`, `tag`, `dryRun` and `mode` are request-level and deliberately not among them.
+ */
+const DONATION_FIELD_KEYS: ReadonlySet<string> = new Set(
+  Object.keys(SyntheticDonationSchema.shape)
+);
+
 export interface ParsedHarnessRequest {
   dryRun: boolean;
   /**
@@ -188,6 +203,40 @@ export const parseHarnessRequest = async (
         message: `"${chargeId}" is not a Stripe charge id. Expected a ch_… (or legacy py_…) id.`,
       }),
     };
+  }
+
+  // Both supplied: refuse rather than pick. A chargeId previews the charge Stripe already
+  // has; a donation payload previews a synthetic one that exists nowhere. Only the chargeId
+  // would have been used, and the donation would have been dropped without a word — the same
+  // quiet no-op as swallowing an explicit dryRun=false. Unlike dryRun there is no behaviour
+  // here worth preserving, and a caller who sent both plainly expects something this call
+  // will not do, so the mistake is worth stopping outright.
+  if (chargeId) {
+    const strayDonationKeys = Object.keys(body).filter((key) => DONATION_FIELD_KEYS.has(key));
+    const suppliedAs =
+      body.donation !== undefined && body.donation !== null
+        ? 'a `donation` payload'
+        : strayDonationKeys.length > 0
+          ? `donation fields at the top level (${strayDonationKeys.join(', ')})`
+          : null;
+
+    if (suppliedAs) {
+      return {
+        ok: false,
+        response: respond(400, {
+          error: 'charge_id_and_donation',
+          message:
+            `This request supplies both \`chargeId\` (${chargeId}) and ${suppliedAs}. They ` +
+            'cannot both be honoured: a chargeId previews the charge Stripe already has, ' +
+            'while a donation payload previews a synthetic one that exists nowhere. Only the ' +
+            'chargeId would have been used and the donation would have been discarded in ' +
+            'silence, so the request is refused instead of quietly answering a different ' +
+            'question. Send exactly one of them. Note also that a chargeId request never ' +
+            'posts to QuickBooks: if you meant to write, drop the chargeId and send the ' +
+            'donation payload with dryRun=false.',
+        }),
+      };
+    }
   }
 
   const rawDonation = body.donation ?? (chargeId ? null : body);

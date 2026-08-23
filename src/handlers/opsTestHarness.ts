@@ -50,6 +50,11 @@ import type { StripeCustomerContext } from '../services/qboSvc';
  * catch, so no endpoint is allowed to commit it. A caller who simply omits `dryRun` is
  * getting the documented default and is not warned.
  *
+ * The same rule covers mutually exclusive inputs. `chargeId` and a `donation` payload
+ * describe two different charges and only the chargeId would ever be used, so supplying both
+ * is refused with a 400 rather than silently resolved — see `parseHarnessRequest`. The other
+ * three endpoints take no chargeId at all and already refuse it outright.
+ *
  * When `dryRun=false`, every record created carries the cleanup marker
  * `[source_test_tag:<tag>]` (QuickBooks PrivateNote and Salesforce Memo__c) or
  * `source_test_tag=<tag>` (Stripe metadata), so

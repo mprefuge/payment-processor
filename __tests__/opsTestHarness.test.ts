@@ -940,4 +940,74 @@ describe('request validation', () => {
     expect(response.status).toBe(400);
     expect((response.jsonBody as any).error).toBe('charge_id_not_supported');
   });
+
+  // Same quiet no-op as swallowing dryRun=false: only the chargeId would ever have been
+  // used, and the donation would have gone in the bin without a word.
+  it('refuses a chargeId and a donation together, naming both', async () => {
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, donation: DONATION }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    const body = response.jsonBody as any;
+    expect(body.error).toBe('charge_id_and_donation');
+    expect(body.message).toMatch(/chargeId/);
+    expect(body.message).toMatch(/donation/);
+    // Says which one would have won, rather than leaving the caller to guess.
+    expect(body.message).toMatch(/Only the chargeId would have been used/);
+    expect(body.message).toMatch(new RegExp(CHARGE_ID));
+
+    // Refused before anything reached out, including the Stripe read the chargeId path
+    // would otherwise have performed.
+    expectNoOutboundCalls();
+  });
+
+  it('refuses donation fields smuggled in at the top level beside a chargeId', async () => {
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, grossCents: 10300, donor: DONATION.donor }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    const body = response.jsonBody as any;
+    expect(body.error).toBe('charge_id_and_donation');
+    // The offending keys are named, since without a `donation` wrapper it is not obvious
+    // which parts of the body were read as one.
+    expect(body.message).toMatch(/grossCents/);
+    expect(body.message).toMatch(/donor/);
+    expectNoOutboundCalls();
+  });
+
+  it('leaves request-level fields alone beside a chargeId', async () => {
+    // tag, dryRun and mode are not donation fields, so they must not trip the refusal.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, tag: 'exclusivity-check', dryRun: true, mode: 'test' }),
+      createContext()
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.jsonBody as any).source).toBe('stripe-charge');
+    expectNothingWritten();
+  });
+
+  it.each([
+    ['salesforce', opsTestSalesforce],
+    ['stripe', opsTestStripe],
+    ['donation', opsTestDonation],
+  ] as const)('%s refuses a chargeId outright, with or without a donation', async (_n, handler) => {
+    // The other three take no chargeId at all, so the same mistake is already refused —
+    // one step earlier, and with the error that names the real problem.
+    const response = await handler(
+      createRequest({ chargeId: CHARGE_ID, donation: DONATION }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    expect((response.jsonBody as any).error).toBe('charge_id_not_supported');
+    expectNoOutboundCalls();
+  });
 });

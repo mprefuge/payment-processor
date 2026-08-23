@@ -1119,7 +1119,7 @@ const TestHarnessQuickbooksRequestSchema = z
           'request is always a read-only preview — sending one with `dryRun: false` writes ' +
           'NOTHING, anywhere; the response echoes `dryRun: true` and names `dryRun` as an ' +
           'ignored parameter in `warnings`. To make this endpoint actually write, drop the ' +
-          'chargeId and send an inline `donation` payload with `dryRun: false`.',
+          'chargeId and send an inline `donation` payload with `dryRun: false`. `chargeId` and `donation` are **mutually exclusive** — send one or the other. A request carrying both is refused with a 400 `charge_id_and_donation` rather than silently previewing the chargeId and discarding the donation.',
       }),
     dryRun: z
       .boolean()
@@ -2154,7 +2154,7 @@ registerFunction('opsTestQuickbooks', 'Preview the QuickBooks documents a donati
     'Renders the exact QuickBooks document JSON a donation would produce, under **both** posting strategies, and posts none of it by default.\n\n' +
     'It exists because there is no other way to see that JSON before it lands in the books: `POST /api/qbo/manual-sync` has no dry-run mode, and QuickBooks has a single un-branched credential set, so exercising the accounting path against production writes a real document into the real company file.\n\n' +
     '### Input\n\n' +
-    'Either an inline `donation` payload (gross cents, covered fee cents, donor, date, designation) or a `chargeId` for a charge that already exists in Stripe. Both work on a dry run.\n\n' +
+    'Either an inline `donation` payload (gross cents, covered fee cents, donor, date, designation) or a `chargeId` for a charge that already exists in Stripe — one or the other, never both. Both work on a dry run. A request supplying both is refused with a 400 `charge_id_and_donation`: only the `chargeId` could have been used, and discarding the `donation` without saying so would answer a different question than the one asked.\n\n' +
     '### What a dry run does and does not do\n\n' +
     'A dry run performs no outbound **write**: it creates nothing in QuickBooks, Stripe or Salesforce. It does read when you supply a `chargeId`, because only Stripe can describe an existing charge — the charge and its balance transaction are fetched with retrieves, and nothing is written. Previewing a real charge is what this endpoint is chiefly for, so it does not require you to switch writing on merely to look. An inline `donation` payload makes no outbound call of any kind. Every response reports which it was under `outboundReads`, naming the service read.\n\n' +
     '### What comes back\n\n' +
@@ -2213,7 +2213,7 @@ registerFunction('opsTestQuickbooks', 'Preview the QuickBooks documents a donati
     },
     400: {
       description:
-        'Invalid donation payload, a malformed chargeId, or dryRun=false with an unknown processor fee',
+        'Invalid donation payload, a malformed chargeId, both a chargeId and a donation, or dryRun=false with an unknown processor fee',
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,
