@@ -1,0 +1,168 @@
+import { buildTestArtifactMarker } from '../../lib/testArtifactTagging';
+import type { ResolvedDonation } from './syntheticDonation';
+
+/**
+ * Renders the `stripe.checkout.sessions.create` arguments the donation form would send.
+ *
+ * The construction is not reimplemented here: `buildCheckoutSessionParams` is the exact
+ * function `POST /api/transaction` calls, split out of `createCheckoutSession` so it can be
+ * run without a Stripe client. Anything that changes about line items, metadata mirroring
+ * or `payment_method_types` shows up here for free.
+ *
+ * `processTransaction` is required lazily. It pulls in the Salesforce CRM factory and the
+ * idempotency store at module load, and none of that is wanted by a dry run.
+ */
+
+interface ProcessTransactionInternals {
+  buildCheckoutSessionParams: (
+    customerId: string | undefined,
+    transactionData: Record<string, unknown>
+  ) => Record<string, unknown>;
+  calculateCoverFees: (baseAmountCents: number, paymentMethod?: string) => number;
+}
+
+const loadInternals = (): ProcessTransactionInternals => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const module = require('../../handlers/processTransaction');
+  const internals = (module.__internals ?? module.default?.__internals) as
+    | ProcessTransactionInternals
+    | undefined;
+
+  if (!internals?.buildCheckoutSessionParams) {
+    throw new Error(
+      'processTransaction did not expose buildCheckoutSessionParams; the Stripe preview ' +
+        'cannot render the Checkout Session arguments without it.'
+    );
+  }
+
+  return internals;
+};
+
+export interface StripePreviewResult extends Record<string, unknown> {
+  writesNothing: string;
+  mode: 'payment' | 'subscription';
+  checkoutSessionCreateArgs: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  warnings: string[];
+}
+
+export const buildStripePreview = (input: {
+  donation: ResolvedDonation;
+  cleanupTag: string;
+  baseWarnings?: string[];
+}): StripePreviewResult => {
+  const { donation, cleanupTag } = input;
+  const warnings = [...(input.baseWarnings ?? [])];
+  const internals = loadInternals();
+
+  // buildCheckoutSessionParams takes the BASE gift and adds the covered fee on top, which is
+  // the inverse of how this harness states amounts (grossCents already includes the covered
+  // fee, because that is what the donor is charged and what the balance transaction reports).
+  const baseAmountCents = donation.grossCents - donation.coveredFeeCents;
+  if (baseAmountCents <= 0) {
+    warnings.push(
+      `coveredFeeCents (${donation.coveredFeeCents}) consumes the whole gross ` +
+        `(${donation.grossCents}), leaving no base gift. Stripe would reject the line item.`
+    );
+  }
+
+  const metadataExtras: Record<string, string> = { source_test_tag: cleanupTag };
+  if (donation.designation) {
+    metadataExtras.designation__c = donation.designation;
+  }
+  if (donation.campaign) {
+    metadataExtras.campaign__c = donation.campaign;
+  }
+  if (donation.attribution) {
+    metadataExtras.attribution__c = donation.attribution;
+  }
+  if (donation.memo) {
+    metadataExtras.memo__c = donation.memo;
+  }
+
+  const transactionData: Record<string, unknown> = {
+    amount: baseAmountCents,
+    frequency: donation.frequency,
+    paymentMethod: donation.paymentMethod,
+    coverFee: donation.coveredFeeCents > 0,
+    feeAmount: donation.coveredFeeCents,
+    category: donation.category,
+    transactionType: donation.transactionType,
+    attribution: donation.attribution ?? undefined,
+    metadata: metadataExtras,
+    customer: {
+      email: donation.donor.email,
+      firstname: donation.donor.firstName ?? undefined,
+      lastname: donation.donor.lastName ?? undefined,
+    },
+  };
+
+  if (donation.donor.organization) {
+    transactionData.donationType = 'organization';
+    transactionData.organization = donation.donor.organization;
+  }
+
+  const args = internals.buildCheckoutSessionParams(
+    '<resolved at request time — searchStripeCustomer finds or creates the customer>',
+    transactionData
+  );
+
+  const mode = (args.mode as 'payment' | 'subscription') ?? 'payment';
+  const sessionMetadata = (args.metadata ?? {}) as Record<string, unknown>;
+  const paymentIntentData = args.payment_intent_data as
+    | { metadata?: Record<string, unknown> }
+    | undefined;
+  const subscriptionData = args.subscription_data as
+    | { metadata?: Record<string, unknown> }
+    | undefined;
+
+  const quotedFee = internals.calculateCoverFees(baseAmountCents, donation.paymentMethod);
+  if (donation.coveredFeeCents > 0 && quotedFee !== donation.coveredFeeCents) {
+    warnings.push(
+      `coveredFeeCents is ${donation.coveredFeeCents}, but calculateCoverFees would quote ` +
+        `${quotedFee} for a ${baseAmountCents}-cent ${donation.paymentMethod} gift under the ` +
+        'rates configured on this deployment (STRIPE_NONPROFIT_RATES). The supplied value ' +
+        'wins, because the form sends feeAmount explicitly.'
+    );
+  }
+
+  if (mode === 'subscription') {
+    warnings.push(
+      'Recurring gift: donor intent is mirrored onto subscription_data.metadata, not ' +
+        'payment_intent_data. Instalments 2..N have no Checkout Session at all, so the ' +
+        'Subscription is the only object that carries the metadata forward.'
+    );
+  }
+
+  return {
+    writesNothing:
+      'Nothing was created. No Stripe client was constructed and no Stripe API call was made.',
+    mode,
+    modeSource:
+      "frequency === 'onetime' selects mode 'payment'; anything else selects 'subscription'.",
+    checkoutSessionCreateArgs: args,
+    metadata: {
+      session: sessionMetadata,
+      payment_intent_data: paymentIntentData?.metadata ?? null,
+      subscription_data: subscriptionData?.metadata ?? null,
+      note:
+        'Stripe does NOT copy Checkout Session metadata onto the PaymentIntent or the ' +
+        'Subscription it creates. The mirror below the session is what the ' +
+        'payment_intent.succeeded webhook actually reads, so a key missing from it is a key ' +
+        'Salesforce will never see.',
+    },
+    amounts: {
+      baseGiftCents: baseAmountCents,
+      coveredFeeCents: donation.coveredFeeCents,
+      chargedTotalCents: donation.grossCents,
+      quotedCoverFeeCents: quotedFee,
+      quotedBy: 'calculateCoverFees (src/handlers/processTransaction.js)',
+    },
+    cleanupMarker: buildTestArtifactMarker(cleanupTag),
+    cleanupNote:
+      `Stripe metadata carries source_test_tag=${cleanupTag} on the session and on the ` +
+      'mirrored payment_intent_data / subscription_data, which is the key ' +
+      'POST /api/ops/test-artifact-cleanup searches on.',
+    warnings,
+  };
+};

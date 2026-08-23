@@ -855,8 +855,15 @@ const resolvePaymentMethodTypes = (paymentMethod) => {
   return [...types];
 };
 
-// Create Stripe checkout session
-const createCheckoutSession = async (stripe, customerId, transactionData) => {
+/**
+ * Builds the exact `stripe.checkout.sessions.create` argument object for a normalized
+ * donation payload, without contacting Stripe.
+ *
+ * Split out of `createCheckoutSession` so the same construction can be rendered by
+ * `POST /api/ops/test/stripe` as a dry run. Keep it pure: no network, no Stripe client,
+ * no mutation beyond `transactionData.coverFeesAmount`, which the caller relies on.
+ */
+const buildCheckoutSessionParams = (customerId, transactionData) => {
   const isOneTime = transactionData.frequency === 'onetime';
 
   // Calculate total amount including cover fees if enabled
@@ -928,6 +935,13 @@ const createCheckoutSession = async (stripe, customerId, transactionData) => {
       interval_count: getIntervalCount(transactionData.frequency),
     };
   }
+
+  return baseParams;
+};
+
+// Create Stripe checkout session
+const createCheckoutSession = async (stripe, customerId, transactionData) => {
+  const baseParams = buildCheckoutSessionParams(customerId, transactionData);
 
   try {
     const session = await stripe.checkout.sessions.create(baseParams);
@@ -1255,6 +1269,10 @@ module.exports = async function (request, context) {
 };
 
 module.exports.__internals = {
+  buildCheckoutSessionParams,
+  calculateCoverFees,
+  formatStripeMetadata,
+  resolvePaymentMethodTypes,
   searchStripeCustomer,
   escapeStripeQueryValue,
   initializeServices,
