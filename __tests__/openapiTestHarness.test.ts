@@ -214,6 +214,50 @@ describe('OpenAPI document — staged test harness', () => {
       expect(unsettled.value.donation).not.toHaveProperty('processorFeeCents');
     });
 
+    it('draws the read/write line a dry run actually holds, on every endpoint', () => {
+      // A dry run promises no outbound WRITE, not no outbound call. The two differ on
+      // exactly one path — a chargeId, which only Stripe can describe — and an operator
+      // deciding whether a call is safe should not have to read source to learn which.
+      for (const path of HARNESS_PATHS) {
+        const description = operation(path, 'post').description ?? '';
+        expect(description, `${path} does not describe what a dry run does`).toMatch(
+          /what a dry run does and does not do/i
+        );
+        expect(description, `${path} does not say a dry run writes nothing`).toMatch(
+          /no outbound \*\*write\*\*/i
+        );
+        expect(description, `${path} does not point at outboundReads`).toMatch(/outboundReads/);
+      }
+
+      // Only the QuickBooks endpoint reads on a dry run, and it must say why rather than
+      // leaving the exception to be discovered.
+      const quickbooks = operation('/api/ops/test/quickbooks', 'post').description ?? '';
+      expect(quickbooks).toMatch(/chargeId/);
+      expect(quickbooks).toMatch(/only Stripe can describe an existing charge/i);
+
+      // The other three take an inline payload only, so they keep the stronger property.
+      for (const path of HARNESS_PATHS.filter((p) => !p.endsWith('quickbooks'))) {
+        expect(
+          operation(path, 'post').description ?? '',
+          `${path} does not claim the stronger no-call property`
+        ).toMatch(/no outbound call of \*\*any\*\* kind/i);
+      }
+    });
+
+    it('shows the chargeId example as a plain dry run, not a write-enabled one', () => {
+      // Previewing a real charge is what this endpoint is chiefly for. An example that
+      // reached for dryRun=false would teach every operator to switch writing on to look.
+      const examples = operation('/api/ops/test/quickbooks', 'post').requestBody?.content?.[
+        'application/json'
+      ]?.examples;
+      const withCharge = Object.values(examples as Record<string, any>).find(
+        (example) => example.value?.chargeId
+      );
+
+      expect(withCharge, 'no example supplies a chargeId').toBeDefined();
+      expect(withCharge.value.dryRun).toBe(true);
+    });
+
     it('states plainly what a non-dry-run call would touch', () => {
       const expectations: Array<[string, RegExp]> = [
         ['/api/ops/test/quickbooks', /QuickBooks, and nothing else/i],
