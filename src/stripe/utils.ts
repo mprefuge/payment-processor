@@ -79,24 +79,73 @@ const getPreferredCharge = (charges: Stripe.Charge[]): Stripe.Charge | null => {
   return charges.find((charge: Stripe.Charge) => charge.status === 'succeeded') || charges[0];
 };
 
-const retrieveBalanceTransactionSafely = async (
+/**
+ * Why a balance transaction could not be resolved.
+ *
+ * `resolveBalanceTransaction` collapses every one of these to `null`, which is
+ * the right shape for callers that only want the object. Callers that must
+ * explain the absence to a human -- the accounting path, which otherwise skips
+ * a QuickBooks posting with no trace -- use `resolveBalanceTransactionOutcome`
+ * and get this reason instead of a bare null.
+ */
+export type BalanceTransactionAbsenceReason =
+  | { kind: 'no_id' }
+  | { kind: 'retrieve_failed'; balanceTransactionId: string; message: string };
+
+type BalanceTransactionLookup = {
+  balanceTransaction: Stripe.BalanceTransaction | null;
+  absence: BalanceTransactionAbsenceReason | null;
+};
+
+const lookupBalanceTransaction = async (
   stripe: Stripe,
   balanceTransactionId: string | null
-): Promise<Stripe.BalanceTransaction | null> => {
+): Promise<BalanceTransactionLookup> => {
   if (!balanceTransactionId) {
-    return null;
+    return { balanceTransaction: null, absence: { kind: 'no_id' } };
   }
 
   try {
-    return await stripe.balanceTransactions.retrieve(balanceTransactionId);
+    return { balanceTransaction: await stripe.balanceTransactions.retrieve(balanceTransactionId), absence: null };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     logger.debug('[StripeUtils] Balance transaction fetch failed', {
       balanceTransactionId,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     });
-    return null;
+    return {
+      balanceTransaction: null,
+      absence: { kind: 'retrieve_failed', balanceTransactionId, message },
+    };
   }
 };
+
+/**
+ * A balance transaction whose funds have not yet reached the available balance.
+ *
+ * This is NOT the same question as "is the fee final". Stripe creates the
+ * balance transaction for an ordinary card charge in `pending` status too, with
+ * `available_on` a couple of days out, and that fee is final the moment it is
+ * written. Gating a posting on `status === 'available'` would therefore defer
+ * every card gift for days. Use `isChargeAwaitingSettlement` to decide whether
+ * to post at all; use this only to record that the fee, while postable, came
+ * from a balance transaction Stripe may still restate.
+ */
+export const isBalanceTransactionPending = (
+  balanceTransaction: Stripe.BalanceTransaction | null | undefined
+): boolean => balanceTransaction?.status === 'pending';
+
+/**
+ * Has the money not moved yet?
+ *
+ * An ACH debit's charge sits in `pending` from the moment it is submitted until
+ * the bank settles it several days later. Until then any fee Stripe reports is
+ * provisional and the debit can still be returned outright, so nothing should
+ * be booked to QuickBooks. A card charge is `succeeded` immediately, so this is
+ * false for cards and the card path is unaffected.
+ */
+export const isChargeAwaitingSettlement = (charge: Stripe.Charge | null | undefined): boolean =>
+  charge?.status === 'pending';
 
 const buildCustomerMetadataUpdate = (
   metadata: Stripe.Metadata | undefined,
@@ -131,27 +180,53 @@ export const resolveCharge = async (
   return null;
 };
 
-export const resolveBalanceTransaction = async (
+/**
+ * Resolve a balance transaction and, when it cannot be resolved, say why.
+ *
+ * Same lookup order as `resolveBalanceTransaction` -- the fallback object's own
+ * `balance_transaction` first, then the charge's -- but it keeps the reason the
+ * last attempt came up empty so the caller can surface it instead of skipping
+ * silently. `no_id` is the normal ACH case: Stripe has not attached a balance
+ * transaction to the charge yet because the debit has not settled.
+ */
+export const resolveBalanceTransactionOutcome = async (
   stripe: Stripe,
   charge: Stripe.Charge | null,
   fallback: Stripe.PaymentIntent | Stripe.Refund | Stripe.Dispute | Stripe.Payout | null
-): Promise<Stripe.BalanceTransaction | null> => {
+): Promise<BalanceTransactionLookup> => {
   const fallbackId = fallback
     ? extractBalanceTransactionId(
         (fallback as { balance_transaction?: unknown }).balance_transaction
       )
     : null;
 
-  const fallbackTransaction = await retrieveBalanceTransactionSafely(stripe, fallbackId);
-  if (fallbackTransaction) {
-    return fallbackTransaction;
+  const fromFallback = await lookupBalanceTransaction(stripe, fallbackId);
+  if (fromFallback.balanceTransaction) {
+    return fromFallback;
   }
 
-  return retrieveBalanceTransactionSafely(
-    stripe,
-    extractBalanceTransactionId(charge?.balance_transaction)
-  );
+  const chargeBtId = extractBalanceTransactionId(charge?.balance_transaction);
+  const fromCharge = await lookupBalanceTransaction(stripe, chargeBtId);
+  if (fromCharge.balanceTransaction) {
+    return fromCharge;
+  }
+
+  // Prefer a concrete retrieve failure over "there was no id to try": a 404 or a
+  // network fault is a different operational problem from an unsettled debit.
+  const absence =
+    fromFallback.absence?.kind === 'retrieve_failed'
+      ? fromFallback.absence
+      : (fromCharge.absence ?? fromFallback.absence ?? { kind: 'no_id' as const });
+
+  return { balanceTransaction: null, absence };
 };
+
+export const resolveBalanceTransaction = async (
+  stripe: Stripe,
+  charge: Stripe.Charge | null,
+  fallback: Stripe.PaymentIntent | Stripe.Refund | Stripe.Dispute | Stripe.Payout | null
+): Promise<Stripe.BalanceTransaction | null> =>
+  (await resolveBalanceTransactionOutcome(stripe, charge, fallback)).balanceTransaction;
 
 export const resolveStripeCustomer = async (
   stripe: Stripe,
