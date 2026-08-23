@@ -118,6 +118,50 @@ describe('buildDocNumber — tested via postRefundToQbo / postDisputeToQbo', () 
     expect(doc.length).toBeLessThanOrEqual(DOC_NUMBER_MAX_LENGTH);
   });
 
+  // ── Test-mode prefixes (ALLOW_TEST_MODE_ACCOUNTING) ───────────────────────
+
+  it('test-mode refund gets a TREF prefix, a tagged PrivateNote, and still fits in 21', async () => {
+    const { svc, capturedPayloads, fakeFetcher } = await importQboSvc();
+    await svc.postRefundToQbo({
+      amount: 10000,
+      date: new Date('2024-01-01'),
+      refundId: 're_VERY_LONG_REFUND_ID_123456789',
+      options: { ...makeOpts(fakeFetcher), testMode: true },
+    });
+    const payload = capturedPayloads.at(-1) as any;
+    expect(payload.DocNumber.startsWith('TREF')).toBe(true);
+    expect(payload.DocNumber.length).toBeLessThanOrEqual(DOC_NUMBER_MAX_LENGTH);
+    expect(payload.PrivateNote).toContain('[source_test_tag:stripe-test-mode]');
+  });
+
+  it('test-mode dispute gets a TDSP prefix and still fits in 21', async () => {
+    const { svc, capturedPayloads, fakeFetcher } = await importQboSvc();
+    await svc.postDisputeToQbo({
+      lossAmount: 10000,
+      feeAmount: 1500,
+      date: new Date('2024-01-01'),
+      disputeId: 'dp_VERY_LONG_DISPUTE_ID_1234567',
+      options: { ...makeOpts(fakeFetcher), testMode: true },
+    });
+    const payload = capturedPayloads.at(-1) as any;
+    expect(payload.DocNumber.startsWith('TDSP')).toBe(true);
+    expect(payload.DocNumber.length).toBeLessThanOrEqual(DOC_NUMBER_MAX_LENGTH);
+  });
+
+  it('a live posting keeps its untouched prefix and carries no cleanup tag', async () => {
+    const { svc, capturedPayloads, fakeFetcher } = await importQboSvc();
+    await svc.postRefundToQbo({
+      amount: 10000,
+      memo: 'Refund memo',
+      date: new Date('2024-01-01'),
+      refundId: 're_live_1',
+      options: makeOpts(fakeFetcher),
+    });
+    const payload = capturedPayloads.at(-1) as any;
+    expect(payload.DocNumber.startsWith('REF-')).toBe(true);
+    expect(payload.PrivateNote).toBe('Refund memo');
+  });
+
   it('DocNumber ≤ 21 chars — amount+date fallback (no ID)', async () => {
     const { svc, capturedPayloads, fakeFetcher } = await importQboSvc();
     await svc.postRefundToQbo({

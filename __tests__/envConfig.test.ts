@@ -46,6 +46,9 @@ const MINIMAL_ENV: Record<string, string | undefined> = {
 
   // Cleared so the "defaults …" cases below measure the code's defaults, not the runner's.
   ACCOUNTING_POSTING_STRATEGY: undefined,
+  // __tests__/setup.ts turns this on suite-wide; cleared so the default case below measures
+  // the code's default (false) rather than the suite's override.
+  ALLOW_TEST_MODE_ACCOUNTING: undefined,
   ACCOUNTING_PROVIDER: undefined,
   CRM_PROVIDER: undefined,
   TEST_MODE: undefined,
@@ -127,6 +130,20 @@ describe('env config', () => {
         QBO_CLIENT_SECRET: 'secret123',
       });
       expect(env.accounting.syncEnabled).toBe(true);
+    });
+
+    it('defaults accounting.allowTestModeAccounting to false', async () => {
+      const { env } = await loadEnvWith({ ...MINIMAL_ENV });
+      // The whole point of the flag: deploying it changes nothing until someone turns it on.
+      expect(env.accounting.allowTestModeAccounting).toBe(false);
+    });
+
+    it('enables accounting.allowTestModeAccounting when ALLOW_TEST_MODE_ACCOUNTING=true', async () => {
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        ALLOW_TEST_MODE_ACCOUNTING: 'true',
+      });
+      expect(env.accounting.allowTestModeAccounting).toBe(true);
     });
 
     it('sets testMode=true when TEST_MODE=true', async () => {

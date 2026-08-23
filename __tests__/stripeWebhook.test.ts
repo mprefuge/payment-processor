@@ -829,4 +829,313 @@ describe('stripeWebhook', () => {
       eventType: 'charge.dispute.closed',
     });
   });
+
+  /**
+   * The livemode gate (ALLOW_TEST_MODE_ACCOUNTING).
+   *
+   * The rest of this file runs with the flag ON, because its fixtures are all
+   * `livemode: false` and are asserting the accounting path (see __tests__/setup.ts).
+   * These cases drive the flag from both sides, and check the three things a skip has to
+   * get right: no QuickBooks call, no `Posted_to_QBO__c`, no `bt_<id>` idempotency marker —
+   * and the fourth, that the skip is recorded as a skip and not as a failure.
+   */
+  describe('test-mode accounting gate', () => {
+    /**
+     * `env` is read once, at module load, so the flag can only be changed by loading the
+     * compiled bundle again. `vi.resetModules()` does not reach the CommonJS cache these
+     * `require`s come from, so that cache is cleared explicitly.
+     */
+    const clearDistModuleCache = (): void => {
+      for (const key of Object.keys(require.cache)) {
+        if (key.includes(`${'/'}dist${'/'}`)) {
+          delete require.cache[key];
+        }
+      }
+    };
+
+    const loadHandlerWithFlag = (allow: boolean): void => {
+      internals?.resetDependencies();
+      clearDistModuleCache();
+      vi.resetModules();
+      process.env.ALLOW_TEST_MODE_ACCOUNTING = allow ? 'true' : 'false';
+      handler = require('../dist/handlers/stripeWebhook').default;
+      internals = handler.__internals;
+    };
+
+    afterEach(() => {
+      // Restore the suite-wide default AND drop the bundle that was loaded with the
+      // overridden flag, so nothing after this block inherits it.
+      process.env.ALLOW_TEST_MODE_ACCOUNTING = 'true';
+      clearDistModuleCache();
+    });
+
+    const chargeStripeClient = () => ({
+      balanceTransactions: {
+        retrieve: vi.fn().mockResolvedValue({
+          id: 'bt_123',
+          amount: 1_000,
+          fee: 100,
+          net: 900,
+          currency: 'usd',
+          created: 1_700_000_000,
+          available_on: 1_700_000_100,
+          type: 'charge',
+        }),
+      },
+      charges: { retrieve: vi.fn() },
+      customers: {
+        retrieve: vi.fn().mockResolvedValue({ id: 'cus_123', email: 'donor@example.com' }),
+      },
+      checkout: { sessions: { list: vi.fn().mockResolvedValue({ data: [] }) } },
+      invoices: { retrieve: vi.fn() },
+    });
+
+    const chargeAccounting = () => ({
+      postChargeToQbo: vi.fn().mockResolvedValue({ qboId: '123', type: 'journal-entry' }),
+      postRefundToQbo: vi.fn(),
+      postDisputeToQbo: vi.fn(),
+      postDisputeReversalToQbo: vi.fn(),
+    });
+
+    const salesforceMock = (upsertId: string) => ({
+      upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: upsertId, success: true }),
+      linkPayoutOnTransactions: vi.fn(),
+      markPostedToQbo: vi.fn().mockResolvedValue(undefined),
+      findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+    });
+
+    const runCharge = async (options: { allow: boolean; livemode: boolean }) => {
+      loadHandlerWithFlag(options.allow);
+
+      const store = mockIdempotencyStore();
+      const stripeEvent = createStripeEvent({ livemode: options.livemode } as any);
+      stripeEvent.data.object.charges.data[0].livemode = options.livemode;
+
+      const stripeClient = chargeStripeClient();
+      const accounting = chargeAccounting();
+      const salesforce = salesforceMock('sf_1');
+
+      internals?.setDependencies({
+        stripe: {
+          verifyEvent: vi.fn(() => stripeEvent),
+          getClient: vi.fn(() => stripeClient),
+        },
+        idempotencyStore: store,
+        getSalesforceSvc: async () => salesforce,
+        accounting,
+      });
+
+      const { context } = createContext();
+      const result = await handler(baseRequest(), context);
+
+      return { store, accounting, salesforce, result };
+    };
+
+    const disputeEventFixture = (livemode: boolean): any => ({
+      id: 'evt_dispute',
+      created: Math.floor(Date.now() / 1000),
+      type: 'charge.dispute.closed',
+      data: {
+        object: {
+          id: 'dp_123',
+          status: 'lost',
+          charge: 'ch_dispute',
+          payment_intent: 'pi_dispute',
+          currency: 'usd',
+          created: 1_700_000_900,
+          balance_transactions: ['bt_dispute_loss', 'bt_dispute_fee'],
+        },
+      },
+      livemode,
+    });
+
+    const runDispute = async (options: { allow: boolean; livemode: boolean }) => {
+      loadHandlerWithFlag(options.allow);
+
+      const store = mockIdempotencyStore();
+      const stripeClient = {
+        charges: {
+          retrieve: vi.fn().mockResolvedValue({
+            id: 'ch_dispute',
+            payment_intent: 'pi_dispute',
+            customer: 'cus_dispute',
+            billing_details: {},
+          }),
+        },
+        balanceTransactions: {
+          retrieve: vi.fn().mockImplementation(async (id: string) => ({
+            id,
+            amount: id === 'bt_dispute_loss' ? -1_000 : -150,
+            fee: 0,
+            net: id === 'bt_dispute_loss' ? -1_000 : -150,
+            currency: 'usd',
+            created: 1_700_000_900,
+            available_on: 1_700_000_901,
+            type: id === 'bt_dispute_loss' ? 'adjustment' : 'stripe_fee',
+            reporting_category: id === 'bt_dispute_loss' ? 'chargeback' : 'chargeback_fee',
+          })),
+        },
+      };
+
+      const accounting = {
+        postChargeToQbo: vi.fn(),
+        postRefundToQbo: vi.fn(),
+        postDisputeToQbo: vi
+          .fn()
+          .mockResolvedValue({ qboId: 'qbo_dispute_1', type: 'journal-entry' }),
+        postDisputeReversalToQbo: vi.fn(),
+      };
+
+      const salesforce = salesforceMock('sf_dispute');
+
+      internals?.setDependencies({
+        stripe: {
+          verifyEvent: vi.fn(() => disputeEventFixture(options.livemode)),
+          getClient: vi.fn(() => stripeClient),
+        },
+        idempotencyStore: store,
+        getSalesforceSvc: async () => salesforce,
+        accounting,
+      });
+
+      const { context } = createContext();
+      const result = await handler(baseRequest(), context);
+
+      return { store, accounting, salesforce, result };
+    };
+
+    const skipNoteCalls = (salesforce: { upsertTransactionByExternalId: any }) =>
+      salesforce.upsertTransactionByExternalId.mock.calls.filter((call: any[]) =>
+        String(call[0]?.posting_error__c ?? '').startsWith('TEST MODE SKIPPED')
+      );
+
+    it('does not post a test-mode charge to QuickBooks while the flag is off', async () => {
+      const { store, accounting, salesforce, result } = await runCharge({
+        allow: false,
+        livemode: false,
+      });
+
+      expect(accounting.postChargeToQbo).not.toHaveBeenCalled();
+      // Posted_to_QBO__c must not be claimed with no document behind it.
+      expect(salesforce.markPostedToQbo).not.toHaveBeenCalled();
+      // The `bt_<id>` marker must stay unwritten, or a genuine posting for this balance
+      // transaction later would be permanently suppressed. Only the event-level key is
+      // marked, so this asserts the exact set of keys rather than one absence.
+      expect(store.markProcessed.mock.calls.map((call: any[]) => call[0])).toEqual(['evt_test']);
+      expect(result.status).toBe(200);
+    });
+
+    it('still writes the test gift to Salesforce, with stripe_livemode__c false', async () => {
+      const { salesforce } = await runCharge({ allow: false, livemode: false });
+
+      expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+        expect.objectContaining({
+          stripe_payment_intent_id__c: 'pi_test',
+          stripe_livemode__c: false,
+        }),
+        'stripe_payment_intent_id__c',
+        undefined
+      );
+    });
+
+    it('records the skip as a skip, not as a QuickBooks failure', async () => {
+      const { salesforce } = await runCharge({ allow: false, livemode: false });
+
+      const skips = skipNoteCalls(salesforce);
+      expect(skips).toHaveLength(1);
+      expect(skips[0][0]).toMatchObject({
+        stripe_payment_intent_id__c: 'pi_test',
+        posted_to_qbo__c: false,
+      });
+      expect(skips[0][0].posting_error__c).toContain('ALLOW_TEST_MODE_ACCOUNTING');
+      expect(skips[0][0].posting_error__c).toContain('not a QuickBooks failure');
+      expect(skips[0][1]).toBe('stripe_payment_intent_id__c');
+    });
+
+    it('posts a test-mode charge as a test-mode document when the flag is on', async () => {
+      const { store, accounting, salesforce } = await runCharge({ allow: true, livemode: false });
+
+      expect(accounting.postChargeToQbo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          gross: 1_000,
+          fee: 100,
+          options: expect.objectContaining({ testMode: true }),
+        })
+      );
+      expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_1', {
+        id: '123',
+        type: 'journal-entry',
+      });
+      expect(store.markProcessed).toHaveBeenCalledWith('bt_bt_123');
+      expect(skipNoteCalls(salesforce)).toHaveLength(0);
+    });
+
+    it.each([
+      ['off', false],
+      ['on', true],
+    ])('leaves a live-mode charge untouched with the flag %s', async (_label, allow) => {
+      const { store, accounting, salesforce } = await runCharge({
+        allow: allow as boolean,
+        livemode: true,
+      });
+
+      expect(accounting.postChargeToQbo).toHaveBeenCalledTimes(1);
+      // No test-mode marking of any kind on a live posting.
+      expect(accounting.postChargeToQbo.mock.calls[0][0].options?.testMode).toBeFalsy();
+      expect(store.markProcessed).toHaveBeenCalledWith('bt_bt_123');
+      expect(skipNoteCalls(salesforce)).toHaveLength(0);
+    });
+
+    it('skips the dispute posting for a test-mode event while the flag is off', async () => {
+      const { store, accounting, salesforce, result } = await runDispute({
+        allow: false,
+        livemode: false,
+      });
+
+      expect(accounting.postDisputeToQbo).not.toHaveBeenCalled();
+      expect(salesforce.markPostedToQbo).not.toHaveBeenCalled();
+      // Same shape as the charge case: the dispute's own durable dedup marker must not be
+      // written, only the event key.
+      expect(store.markProcessed.mock.calls.map((call: any[]) => call[0])).toEqual(['evt_dispute']);
+      expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
+        expect.objectContaining({
+          transaction_type__c: 'dispute',
+          stripe_dispute_id__c: 'dp_123',
+          stripe_livemode__c: false,
+        }),
+        'stripe_dispute_id__c'
+      );
+
+      const skips = skipNoteCalls(salesforce);
+      expect(skips).toHaveLength(1);
+      expect(skips[0][1]).toBe('stripe_dispute_id__c');
+      expect(result.status).toBe(200);
+    });
+
+    it('posts a test-mode dispute as a test-mode document when the flag is on', async () => {
+      const { accounting, salesforce } = await runDispute({ allow: true, livemode: false });
+
+      expect(accounting.postDisputeToQbo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          disputeId: 'dp_123',
+          options: expect.objectContaining({ testMode: true }),
+        })
+      );
+      expect(skipNoteCalls(salesforce)).toHaveLength(0);
+    });
+
+    it.each([
+      ['off', false],
+      ['on', true],
+    ])('leaves a live-mode dispute untouched with the flag %s', async (_label, allow) => {
+      const { accounting, salesforce } = await runDispute({
+        allow: allow as boolean,
+        livemode: true,
+      });
+
+      expect(accounting.postDisputeToQbo).toHaveBeenCalledTimes(1);
+      expect(accounting.postDisputeToQbo.mock.calls[0][0].options?.testMode).toBeFalsy();
+      expect(skipNoteCalls(salesforce)).toHaveLength(0);
+    });
+  });
 });

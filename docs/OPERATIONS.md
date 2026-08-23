@@ -201,9 +201,15 @@ SELECT Id, Name, Stripe_Charge_Id__c, Received_At__c, posting_error__c
 FROM Transaction__c
 WHERE posting_error__c != null
 AND Posted_to_QBO__c = false
+AND (NOT posting_error__c LIKE 'TEST MODE SKIPPED%')
 ORDER BY Received_At__c DESC
 LIMIT 50
 ```
+
+`TEST MODE SKIPPED` is excluded on purpose. A Stripe test-mode event (`livemode: false`)
+does no QuickBooks work while `ALLOW_TEST_MODE_ACCOUNTING` is off, and the skip is written
+to `posting_error__c` with that fixed prefix so it is visible on the record without reading
+as a posting failure that needs chasing. Drop the `NOT LIKE` clause to see them.
 
 If results > 0, run `stripeTrueUp`:
 ```bash
