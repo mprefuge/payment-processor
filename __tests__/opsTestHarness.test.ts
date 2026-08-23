@@ -295,6 +295,77 @@ describe('POST /api/ops/test/* — dry run is the default and creates nothing', 
     expectNothingWritten();
   });
 
+  // An afternoon was lost to this exact response: success true, dryRun false, warnings
+  // empty, posted.attempted false. Nothing had been written, and nothing said so.
+  it('warns loudly, and echoes dryRun honestly, when dryRun=false is ignored', async () => {
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID }, { dryRun: 'false' }),
+      createContext()
+    );
+
+    const body = response.jsonBody as any;
+
+    // The echo agrees with what the call did, rather than with what was asked for.
+    expect(body.dryRun).toBe(true);
+    expect(body.dryRunRequested).toBe(false);
+    expect(body.posted.requestedButNotPerformed).toBe(true);
+
+    // The warning names the ignored parameter, says nothing was written, and points at
+    // the request that would have written.
+    expect(body.warnings.length).toBeGreaterThan(0);
+    const warning = body.warnings[0];
+    expect(warning).toMatch(/IGNORED PARAMETER `dryRun`/);
+    expect(warning).toMatch(/NOTHING WAS WRITTEN/);
+    expect(warning).toMatch(/donation/);
+    expect(warning).toMatch(/dryRun=false/);
+
+    expectNothingWritten();
+  });
+
+  it('does not warn about dryRun when the caller never sent it', async () => {
+    // Omitting the flag is taking the documented default, not being overridden.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID }),
+      createContext()
+    );
+
+    const body = response.jsonBody as any;
+    expect(body.dryRun).toBe(true);
+    expect(body.dryRunRequested).toBe(true);
+    expect(body.posted.requestedButNotPerformed).toBe(false);
+    expect(body.warnings).not.toContainEqual(expect.stringMatching(/IGNORED PARAMETER/));
+    expectNothingWritten();
+  });
+
+  it('reads an explicit dryRun from the body as well as the query', async () => {
+    // Same distinction, read from the other source the parser accepts: explicit is
+    // explicit, so this one DOES warn — and dryRun=true in the body does not.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const written = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, dryRun: false }),
+      createContext()
+    );
+    expect((written.jsonBody as any).warnings[0]).toMatch(/IGNORED PARAMETER `dryRun`/);
+
+    const explicitDryRun = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, dryRun: true }),
+      createContext()
+    );
+    expect((explicitDryRun.jsonBody as any).warnings).not.toContainEqual(
+      expect.stringMatching(/IGNORED PARAMETER/)
+    );
+
+    expectNothingWritten();
+  });
+
   it('reports an inline donation dry run as having made no outbound read at all', async () => {
     const response = await opsTestQuickbooks(
       createRequest({ donation: DONATION }),
@@ -868,5 +939,75 @@ describe('request validation', () => {
 
     expect(response.status).toBe(400);
     expect((response.jsonBody as any).error).toBe('charge_id_not_supported');
+  });
+
+  // Same quiet no-op as swallowing dryRun=false: only the chargeId would ever have been
+  // used, and the donation would have gone in the bin without a word.
+  it('refuses a chargeId and a donation together, naming both', async () => {
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, donation: DONATION }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    const body = response.jsonBody as any;
+    expect(body.error).toBe('charge_id_and_donation');
+    expect(body.message).toMatch(/chargeId/);
+    expect(body.message).toMatch(/donation/);
+    // Says which one would have won, rather than leaving the caller to guess.
+    expect(body.message).toMatch(/Only the chargeId would have been used/);
+    expect(body.message).toMatch(new RegExp(CHARGE_ID));
+
+    // Refused before anything reached out, including the Stripe read the chargeId path
+    // would otherwise have performed.
+    expectNoOutboundCalls();
+  });
+
+  it('refuses donation fields smuggled in at the top level beside a chargeId', async () => {
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, grossCents: 10300, donor: DONATION.donor }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    const body = response.jsonBody as any;
+    expect(body.error).toBe('charge_id_and_donation');
+    // The offending keys are named, since without a `donation` wrapper it is not obvious
+    // which parts of the body were read as one.
+    expect(body.message).toMatch(/grossCents/);
+    expect(body.message).toMatch(/donor/);
+    expectNoOutboundCalls();
+  });
+
+  it('leaves request-level fields alone beside a chargeId', async () => {
+    // tag, dryRun and mode are not donation fields, so they must not trip the refusal.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, tag: 'exclusivity-check', dryRun: true, mode: 'test' }),
+      createContext()
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.jsonBody as any).source).toBe('stripe-charge');
+    expectNothingWritten();
+  });
+
+  it.each([
+    ['salesforce', opsTestSalesforce],
+    ['stripe', opsTestStripe],
+    ['donation', opsTestDonation],
+  ] as const)('%s refuses a chargeId outright, with or without a donation', async (_n, handler) => {
+    // The other three take no chargeId at all, so the same mistake is already refused —
+    // one step earlier, and with the error that names the real problem.
+    const response = await handler(
+      createRequest({ chargeId: CHARGE_ID, donation: DONATION }),
+      createContext()
+    );
+
+    expect(response.status).toBe(400);
+    expect((response.jsonBody as any).error).toBe('charge_id_not_supported');
+    expectNoOutboundCalls();
   });
 });

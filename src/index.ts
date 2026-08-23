@@ -1115,9 +1115,22 @@ const TestHarnessQuickbooksRequestSchema = z
         description:
           'Preview a real Stripe charge instead of a synthetic donation. Works on a dry run: ' +
           'resolving the charge is a read-only Stripe retrieve, and this path posts nothing ' +
-          'to QuickBooks either way.',
+          'to QuickBooks either way. **`dryRun: false` does not change that.** A chargeId ' +
+          'request is always a read-only preview — sending one with `dryRun: false` writes ' +
+          'NOTHING, anywhere; the response echoes `dryRun: true` and names `dryRun` as an ' +
+          'ignored parameter in `warnings`. To make this endpoint actually write, drop the ' +
+          'chargeId and send an inline `donation` payload with `dryRun: false`. `chargeId` and `donation` are **mutually exclusive** — send one or the other. A request carrying both is refused with a 400 `charge_id_and_donation` rather than silently previewing the chargeId and discarding the donation.',
       }),
-    dryRun: z.boolean().optional().openapi({ example: true }),
+    dryRun: z
+      .boolean()
+      .optional()
+      .openapi({
+        example: true,
+        description:
+          'Defaults to true. Set false to let the endpoint actually write — which it does only ' +
+          'for an inline `donation` payload. With a `chargeId` the write is not available and ' +
+          'a `false` here is reported back as an ignored parameter rather than obeyed.',
+      }),
     tag: z.string().optional().openapi({ example: TEST_HARNESS_TAG }),
   })
   .passthrough();
@@ -2141,14 +2154,14 @@ registerFunction('opsTestQuickbooks', 'Preview the QuickBooks documents a donati
     'Renders the exact QuickBooks document JSON a donation would produce, under **both** posting strategies, and posts none of it by default.\n\n' +
     'It exists because there is no other way to see that JSON before it lands in the books: `POST /api/qbo/manual-sync` has no dry-run mode, and QuickBooks has a single un-branched credential set, so exercising the accounting path against production writes a real document into the real company file.\n\n' +
     '### Input\n\n' +
-    'Either an inline `donation` payload (gross cents, covered fee cents, donor, date, designation) or a `chargeId` for a charge that already exists in Stripe. Both work on a dry run.\n\n' +
+    'Either an inline `donation` payload (gross cents, covered fee cents, donor, date, designation) or a `chargeId` for a charge that already exists in Stripe — one or the other, never both. Both work on a dry run. A request supplying both is refused with a 400 `charge_id_and_donation`: only the `chargeId` could have been used, and discarding the `donation` without saying so would answer a different question than the one asked.\n\n' +
     '### What a dry run does and does not do\n\n' +
     'A dry run performs no outbound **write**: it creates nothing in QuickBooks, Stripe or Salesforce. It does read when you supply a `chargeId`, because only Stripe can describe an existing charge — the charge and its balance transaction are fetched with retrieves, and nothing is written. Previewing a real charge is what this endpoint is chiefly for, so it does not require you to switch writing on merely to look. An inline `donation` payload makes no outbound call of any kind. Every response reports which it was under `outboundReads`, naming the service read.\n\n' +
     '### What comes back\n\n' +
     'For each strategy: every document, in order, with its DocNumber, its AccountRefs and ItemRefs, and the resolved gross / fee / net. DocNumbers come from the same `buildDocNumber` the posting path uses, so a collision is visible here before it is a duplicate in QuickBooks. AccountRef `value` fields carry the configured *name* rather than a QuickBooks id, because resolving an id is a call this endpoint does not make.\n\n' +
     '**An unresolvable processor fee renders as `feeCents: null` with `feeAvailable: false`, never as 0.** A charge Stripe has not settled — an ACH debit, typically — has no balance transaction, and reporting its fee as zero would read as "Stripe charged nothing" instead of "nobody knows yet".\n\n' +
     '### What `dryRun=false` touches\n\n' +
-    'QuickBooks, and nothing else. With an inline donation it calls `postChargeToQbo`, creating the documents shown under the ACTIVE strategy in the connected company file. Each one carries `[source_test_tag:<tag>]` in its `PrivateNote`, so `POST /api/ops/test-artifact-cleanup?tag=<tag>` can find and remove it. A `chargeId` request never posts, on a dry run or otherwise — it reads Stripe and stops there. Stripe and Salesforce are never written by this endpoint.\n\n' +
+    'QuickBooks, and nothing else. With an inline donation it calls `postChargeToQbo`, creating the documents shown under the ACTIVE strategy in the connected company file. Each one carries `[source_test_tag:<tag>]` in its `PrivateNote`, so `POST /api/ops/test-artifact-cleanup?tag=<tag>` can find and remove it. A `chargeId` request never posts, on a dry run or otherwise — it reads Stripe and stops there, so pairing a `chargeId` with `dryRun: false` writes nothing at all. That combination is not silently accepted: the response echoes `dryRun: true`, sets `posted.requestedButNotPerformed`, and puts a warning at the head of `warnings` naming `dryRun` as the ignored parameter and pointing at the inline `donation` payload as the route that does write. Stripe and Salesforce are never written by this endpoint.\n\n' +
     'A non-dry-run call with an unknown processor fee is refused rather than posting a guess.',
   tags: ['Ops', 'QBO'],
   operationId: 'opsTestQuickbooks',
@@ -2200,7 +2213,7 @@ registerFunction('opsTestQuickbooks', 'Preview the QuickBooks documents a donati
     },
     400: {
       description:
-        'Invalid donation payload, a malformed chargeId, or dryRun=false with an unknown processor fee',
+        'Invalid donation payload, a malformed chargeId, both a chargeId and a donation, or dryRun=false with an unknown processor fee',
       content: {
         'application/json': {
           schema: GenericErrorResponseSchema,

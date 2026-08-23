@@ -12,6 +12,7 @@ import {
 } from '../services/testHarness/quickbooksPreview';
 import {
   NO_OUTBOUND_READS,
+  ignoredDryRunWarning,
   parseHarnessRequest,
   rejectLiveMode,
   respond,
@@ -41,6 +42,18 @@ import type { StripeCustomerContext } from '../services/qboSvc';
  * remote system can describe — a `chargeId` on the QuickBooks endpoint, which is read out of
  * Stripe with retrieves alone. The inline-synthetic-donation path makes no outbound call of
  * any kind. Every response says which it was under `outboundReads`.
+ *
+ * An endpoint that cannot honour an explicit `dryRun: false` says so instead of quietly
+ * behaving as though the flag had been left alone: the `chargeId` path here warns and echoes
+ * `dryRun: true`, and `POST /api/ops/test/donation` refuses the call outright with a 400.
+ * Silently downgrading a requested write to a preview is the failure this harness exists to
+ * catch, so no endpoint is allowed to commit it. A caller who simply omits `dryRun` is
+ * getting the documented default and is not warned.
+ *
+ * The same rule covers mutually exclusive inputs. `chargeId` and a `donation` payload
+ * describe two different charges and only the chargeId would ever be used, so supplying both
+ * is refused with a 400 rather than silently resolved — see `parseHarnessRequest`. The other
+ * three endpoints take no chargeId at all and already refuse it outright.
  *
  * When `dryRun=false`, every record created carries the cleanup marker
  * `[source_test_tag:<tag>]` (QuickBooks PrivateNote and Salesforce Memo__c) or
@@ -131,6 +144,16 @@ const synthesisNote = (donation: ResolvedDonation, stripe: SyntheticStripeContex
 // QuickBooks
 // ---------------------------------------------------------------------------
 
+const CHARGE_ID_NEVER_POSTS =
+  'A chargeId request previews an existing Stripe charge and stops there — the accounting ' +
+  'path owns the decision to post a real charge, and POST /api/qbo/manual-sync already ' +
+  'exposes it, so this endpoint never posts one on a dry run or otherwise.';
+
+const CHARGE_ID_WRITE_INSTEAD =
+  'To make this endpoint actually write, drop the chargeId and send an inline `donation` ' +
+  'payload (including processorFeeCents) with dryRun=false: that path calls postChargeToQbo ' +
+  'and creates tagged documents you can remove with POST /api/ops/test-artifact-cleanup.';
+
 export const opsTestQuickbooks = async (
   request: HttpRequest,
   context: InvocationContext
@@ -140,7 +163,7 @@ export const opsTestQuickbooks = async (
     return parsed.response;
   }
 
-  const { dryRun, tag, chargeId, donation, donationWarnings } = parsed.value;
+  const { dryRun, dryRunExplicit, tag, chargeId, donation, donationWarnings } = parsed.value;
   const deps = resolveDependencies();
 
   try {
@@ -150,15 +173,34 @@ export const opsTestQuickbooks = async (
       // until dryRun=false would make a caller enable writing merely to look.
       const stripe = deps.getStripeClient(parsed.value.liveMode);
       const preview = await buildQboPreviewForCharge(chargeId, { stripe }, tag);
+
+      // The caller asked for a write this path will not perform. Left unsaid, the response
+      // was `success: true`, `dryRun: false`, `warnings: []` and a `posted.attempted: false`
+      // buried further down — which reads as a completed write to anyone who requested one.
+      const ignoredDryRun = dryRunExplicit && !dryRun;
+      const warnings = [
+        ...(ignoredDryRun
+          ? [ignoredDryRunWarning(CHARGE_ID_NEVER_POSTS, CHARGE_ID_WRITE_INSTEAD)]
+          : []),
+        ...preview.warnings,
+      ];
+
       return respond(200, {
         success: true,
-        dryRun,
+        // Always true, whatever was asked for: this path only ever reads Stripe. Echoing
+        // back the `false` the caller sent would report a write that did not happen.
+        dryRun: true,
+        dryRunRequested: dryRun,
         tag,
         source: 'stripe-charge',
         outboundReads: stripeChargeReads(chargeId),
         ...preview,
+        // After the spread: the preview carries its own `warnings`, and this list is that
+        // list with the ignored-parameter notice on the front.
+        warnings,
         posted: {
           attempted: false,
+          requestedButNotPerformed: ignoredDryRun,
           note:
             'Posting a charge previewed from Stripe is not offered here, on a dry run or ' +
             'otherwise: the accounting path owns that decision and POST /api/qbo/manual-sync ' +
@@ -454,6 +496,10 @@ export const opsTestDonation = async (
 
   const { dryRun, tag, donation, donationWarnings } = parsed.value;
 
+  // The same rule the QuickBooks chargeId path applies, in its louder form: an explicit
+  // `dryRun: false` this endpoint cannot honour is refused outright rather than quietly
+  // served as a preview. `dryRun` defaults to true, so reaching here means the caller
+  // asked for this in so many words.
   if (!dryRun) {
     return respond(400, {
       error: 'dry_run_only',
