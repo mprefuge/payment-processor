@@ -2615,7 +2615,19 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
     'Salesforce. Fix with `/api/qbo/receipts-salesforce-sync`.\n' +
     '- `duplicatesInSalesforce` — multiple `Transaction__c` rows sharing one Stripe ID. Fix with ' +
     '`/api/ops/stripe-duplicate-check?deleteDuplicates=true`.\n' +
-    '- `duplicatesInQbo` — multiple QBO documents sharing one Stripe ID. Same fix endpoint.\n\n' +
+    '- `duplicatesInQbo` — multiple QBO documents sharing one Stripe ID. Same fix endpoint.\n' +
+    '- `amountMismatches` — matched QBO documents whose gross or fee does not equal the Stripe ' +
+    'balance transaction; the ID checks pass because the document exists, only the money on it is ' +
+    'wrong. Correct the documents listed in `details.qboDocs` by hand; when ' +
+    '`details.expectedPairedFeeDocNumber` is set, the receipt posted but its paired `FEE-` journal ' +
+    'entry did not.\n' +
+    '- `accountFeesMissingQbo` — Stripe account-level fees (monthly billing, Radar, ACH failure, ' +
+    'currency conversion, instant payout, adjustments) that belong to no charge and have no ' +
+    '`POFEE-` journal entry on the payout that swept them (`details.payoutId`). Fees no payout has ' +
+    'swept yet are not due and are not reported.\n' +
+    '- `payoutImbalances` — payouts where posted receipts − fees − refunds ± adjustments does not ' +
+    'equal the payout net that reached the bank. Work `details.unpostedBalanceTransactionIds` ' +
+    'first.\n\n' +
     'The timer trigger runs at **02:00 UTC daily** when `ENABLE_DAILY_RECONCILIATION_TIMER=true`.',
   tags: ['Ops'],
   operationId: 'dailyReconciliation',
