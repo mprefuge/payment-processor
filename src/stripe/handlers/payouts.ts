@@ -11,6 +11,7 @@ import type {
 import { normalizeStripeId, timestampToDate, toSafeInteger } from '../utils';
 import { ensureStripeClient } from './common';
 import env from '../../config/env';
+import { isTestModeAccountingSkipped, recordTestModeAccountingSkip } from '../testModeAccounting';
 
 type Logger = (...args: unknown[]) => void;
 
@@ -903,6 +904,23 @@ export const handlePayoutEvent = async (
         },
       }
     );
+
+    // The test-mode gate sits HERE rather than beside the `syncEnabled` check above,
+    // deliberately: everything above this line is Salesforce work, and a test payout still
+    // writes its Transaction__c to the production org. Only the QuickBooks deposit is
+    // gated -- and gating it here also leaves the `payout_<id>` marker below unwritten, so
+    // stripeTrueUp's payout backfill can still post the payout for real later.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_payout_id__c',
+        transaction: {
+          stripe_payout_id__c: payout.id,
+          transaction_type__c: 'payout',
+          status__c: 'paid',
+        },
+      });
+      return;
+    }
 
     if (!depositInput) {
       context.log('[StripeWebhook] No deposit input created, skipping QBO sync', {

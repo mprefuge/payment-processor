@@ -1,6 +1,5 @@
 import Stripe from 'stripe';
 
-import env from '../../config/env';
 import type { HttpContext, StripeWebhookDependencies } from '../types';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
 import {
@@ -11,6 +10,11 @@ import {
   timestampToIsoString,
 } from '../utils';
 import { markPosted } from './common';
+import {
+  isAccountingEnabledForEvent,
+  isTestModeAccountingSkipped,
+  recordTestModeAccountingSkip,
+} from '../testModeAccounting';
 import {
   type TransactionUpsertDTO,
   SF_RECORD_TYPE_STRIPE_TRANSACTION,
@@ -361,7 +365,19 @@ export const handleDisputeCreated = async (
 
   await restatePaymentForDispute(context, salesforce, chargeId, parentId, 'disputed');
 
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // Above the dispute's `bt_<id>` lock and its durable dedup marker, so a skipped test
+    // dispute neither claims a QuickBooks document nor blocks a real posting later.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_dispute_id__c',
+        transaction: {
+          stripe_dispute_id__c: dispute.id,
+          transaction_type__c: 'dispute',
+          status__c: 'disputed',
+        },
+      });
+    }
     return;
   }
 
@@ -470,7 +486,19 @@ const handleDisputeWon = async (
   const parentId = await findParentTransactionId(salesforce, chargeId);
   await restatePaymentForDispute(context, salesforce, chargeId, parentId, 'paid');
 
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // Above the dispute's `bt_<id>` lock and its durable dedup marker, so a skipped test
+    // dispute neither claims a QuickBooks document nor blocks a real posting later.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_dispute_id__c',
+        transaction: {
+          stripe_dispute_id__c: dispute.id,
+          transaction_type__c: 'dispute',
+          status__c: 'disputed',
+        },
+      });
+    }
     return;
   }
 
@@ -611,7 +639,19 @@ export const handleDisputeClosed = async (
   // A lost dispute keeps the donation flagged: the money is gone for good.
   await restatePaymentForDispute(context, salesforce, chargeId, parentId, 'disputed');
 
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // Above the dispute's `bt_<id>` lock and its durable dedup marker, so a skipped test
+    // dispute neither claims a QuickBooks document nor blocks a real posting later.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_dispute_id__c',
+        transaction: {
+          stripe_dispute_id__c: dispute.id,
+          transaction_type__c: 'dispute',
+          status__c: 'disputed',
+        },
+      });
+    }
     return;
   }
 

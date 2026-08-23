@@ -1,6 +1,5 @@
 import Stripe from 'stripe';
 
-import env from '../../config/env';
 import type {
   AppendSalesReceiptAdjustmentsInput,
   HttpContext,
@@ -31,6 +30,11 @@ import {
   SF_RECORD_TYPE_STRIPE_TRANSACTION,
 } from '../../domain/transactions';
 import type { SalesforceSvc } from '../../services/salesforceSvc';
+import {
+  isAccountingEnabledForEvent,
+  isTestModeAccountingSkipped,
+  recordTestModeAccountingSkip,
+} from '../testModeAccounting';
 
 type Nullable<T> = T | null | undefined;
 
@@ -710,7 +714,19 @@ const syncRefundReceipt = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown
 ): Promise<void> => {
-  if (!env.accounting.syncEnabled) {
+  if (!isAccountingEnabledForEvent(event)) {
+    // Above the `stripe_refund_qbo_<id>` lock and marker below, so a skipped test refund
+    // leaves nothing marked as posted and stays postable for real later.
+    if (isTestModeAccountingSkipped(event)) {
+      await recordTestModeAccountingSkip(context, salesforce, event, {
+        externalIdField: 'stripe_refund_id__c',
+        transaction: {
+          stripe_refund_id__c: refund.id,
+          transaction_type__c: 'refund',
+          status__c: 'refunded',
+        },
+      });
+    }
     return;
   }
 

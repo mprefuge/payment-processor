@@ -9,6 +9,7 @@ import {
   appendTestArtifactMarker,
   buildTestArtifactMarker,
   extractTestArtifactTagFromStripeContext,
+  TEST_MODE_CLEANUP_TAG,
 } from '../lib/testArtifactTagging';
 import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
 import tokenManager from './qbo/qboTokenManager';
@@ -216,6 +217,17 @@ export interface PostOptions {
    * that an unexpected collision surfaces as an actionable error.
    */
   strictDocNumber?: boolean;
+  /**
+   * Marks this posting as belonging to a Stripe TEST-mode event that
+   * `ALLOW_TEST_MODE_ACCOUNTING` has deliberately let through.
+   *
+   * There is no QuickBooks sandbox, so the document lands in the real company file. Two
+   * things make it unmistakable and removable: its DocNumber prefix is `T`-prefixed
+   * (`TCHG`/`TFEE` rather than `CHG`/`FEE`), which no live posting ever produces, and its
+   * PrivateNote carries a `[source_test_tag:...]` marker so
+   * `POST /api/ops/test-artifact-cleanup` can find it.
+   */
+  testMode?: boolean;
   debugLogger?: (event: {
     operation: string;
     stage: 'request' | 'response' | 'error';
@@ -1904,6 +1916,36 @@ const hashToBase36 = (value: string, width: number): string => {
   return out.slice(0, width).toUpperCase();
 };
 
+/**
+ * Prepended to a DocNumber prefix for a test-mode posting (`PostOptions.testMode`).
+ *
+ * One character, deliberately: `buildDocNumber` spends a fixed 21-character budget on
+ * `PREFIX-YYYYMMDD-<id tail>`, so every character the prefix takes is a character of Stripe
+ * id uniqueness lost. `T` is also the smallest change that can never collide with a live
+ * DocNumber — no live prefix (CHG, FEE, CHGJE, REF, DSP, DSPREV, POFEE, CHGREV) starts with
+ * it — and it preserves the equal prefix lengths that keep paired documents' date-and-tail
+ * suffixes matching (`TCHG`/`TFEE` are both 4, as `CHG`/`FEE` are both 3).
+ */
+export const TEST_MODE_DOC_NUMBER_PREFIX = 'T';
+
+/** Applies TEST_MODE_DOC_NUMBER_PREFIX when, and only when, this posting is test-mode. */
+const docNumberPrefix = (prefix: string, options?: PostOptions): string =>
+  options?.testMode ? `${TEST_MODE_DOC_NUMBER_PREFIX}${prefix}` : prefix;
+
+/**
+ * The cleanup tag to stamp into a document's PrivateNote.
+ *
+ * An explicit tag wins, then whatever the Stripe objects carried in their metadata, and only
+ * then the test-mode default. A live posting with no tag anywhere still gets `undefined`, so
+ * live PrivateNotes are unchanged.
+ */
+const resolveCleanupTag = (
+  explicitTag: string | null | undefined,
+  options?: PostOptions,
+  contextTag: string | null = null
+): string | undefined =>
+  explicitTag ?? contextTag ?? (options?.testMode ? TEST_MODE_CLEANUP_TAG : undefined);
+
 export const buildDocNumber = (
   prefix: string,
   date: string | Date,
@@ -3556,7 +3598,12 @@ const postChargeAsSalesReceipt = async (input: {
 }): Promise<PostChargeToQboResult> => {
   const { grossAmount, feeAmount, normalizedMemo, date, stripe, customer, options } = input;
   const chargeId = stripe?.charge?.id ?? null;
-  const salesReceiptDocNumber = buildDocNumber('CHG', date, grossAmount, chargeId);
+  const salesReceiptDocNumber = buildDocNumber(
+    docNumberPrefix('CHG', options),
+    date,
+    grossAmount,
+    chargeId
+  );
   const context = await createRequestContext(options);
   let receiptCustomer: SalesReceiptCustomerDetails | null = customer ?? null;
 
@@ -3673,8 +3720,10 @@ const postChargeAsSalesReceipt = async (input: {
   // 'FEE' is the same length as the receipt's 'CHG' prefix, so buildDocNumber leaves both
   // DocNumbers with an identical date and charge-id tail: CHG-20240301-XXXXXXXX pairs with
   // FEE-20240301-XXXXXXXX. That makes the pair findable from either side in QuickBooks.
+  // A test-mode posting prefixes both halves identically ('TCHG' / 'TFEE', both 4 characters),
+  // so the pairing survives -- TCHG-20240301-XXXXXXX pairs with FEE's TFEE-20240301-XXXXXXX.
   if (feeAmount > 0) {
-    const feeDocNumber = buildDocNumber('FEE', date, feeAmount, chargeId);
+    const feeDocNumber = buildDocNumber(docNumberPrefix('FEE', options), date, feeAmount, chargeId);
     const feeJournalEntry = buildFeesJE({
       docNumber: feeDocNumber,
       feeAmountCents: feeAmount,
@@ -3713,7 +3762,12 @@ const postChargeAsJournalEntry = async (input: {
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
   const { grossAmount, feeAmount, normalizedMemo, date, chargeId, options } = input;
-  const journalDocNumber = buildDocNumber('CHGJE', date, grossAmount + feeAmount, chargeId);
+  const journalDocNumber = buildDocNumber(
+    docNumberPrefix('CHGJE', options),
+    date,
+    grossAmount + feeAmount,
+    chargeId
+  );
   const context = await createRequestContext(options);
 
   const clearingAccountRef = createAccountRef(env.quickBooks.accounts.stripeClearing);
@@ -3856,7 +3910,7 @@ export const postChargeToQbo = async ({
   const feeAmount = ensurePositiveAmount(fee, 'Fee amount');
   const normalizedMemo = appendTestArtifactMarker(
     memo?.trim() || undefined,
-    cleanupTag ?? extractTestArtifactTagFromStripeContext(stripe ?? null)
+    resolveCleanupTag(cleanupTag, options, extractTestArtifactTagFromStripeContext(stripe ?? null))
   );
 
   if (env.accounting.postingStrategy === 'sales-receipt') {
@@ -3911,7 +3965,7 @@ export const postManualEntryAsSalesReceipt = async (input: {
 }): Promise<PostChargeToQboResult> => {
   const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
   const docNumber = buildDocNumber(
-    'CHG-MANUAL',
+    docNumberPrefix('CHG-MANUAL', input.options),
     input.date,
     grossAmount,
     null,
@@ -4106,7 +4160,7 @@ export const postManualEntryAsJournalEntry = async (input: {
   const grossAmount = ensurePositiveAmount(input.grossAmountCents, 'Gross amount');
   const feeAmount = ensurePositiveAmount(input.feeAmountCents ?? 0, 'Fee amount');
   const docNumber = buildDocNumber(
-    'CHGJE',
+    docNumberPrefix('CHGJE', input.options),
     input.date,
     grossAmount + feeAmount,
     null,
@@ -4200,7 +4254,7 @@ export const postRefundToQbo = async ({
 }: PostRefundToQboInput): Promise<PostChargeToQboResult> => {
   const refundAmount = ensurePositiveAmount(amount, 'Refund amount');
   const refundFeeAmount = ensurePositiveAmount(feeAmount, 'Refund fee amount');
-  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
+  const normalizedMemo = appendTestArtifactMarker(memo, resolveCleanupTag(cleanupTag, options));
 
   if (refundAmount === 0) {
     throw new Error('Refund amount must be greater than zero.');
@@ -4216,7 +4270,13 @@ export const postRefundToQbo = async ({
   const effectiveOptions = refundId ? { ...options, strictDocNumber: true } : options;
 
   return postJournalEntryFromLines({
-    docNumber: buildDocNumber('REF', date, refundAmount + refundFeeAmount, null, refundId ?? null),
+    docNumber: buildDocNumber(
+      docNumberPrefix('REF', options),
+      date,
+      refundAmount + refundFeeAmount,
+      null,
+      refundId ?? null
+    ),
     memo: normalizedMemo,
     date,
     lines: [
@@ -4264,7 +4324,10 @@ export const postPayoutToQbo = async ({
   options,
 }: PostPayoutToQboInput): Promise<PostChargeToQboResult> => {
   const payoutAmount = ensurePositiveAmount(amount, 'Payout amount');
-  const normalizedMemo = appendTestArtifactMarker(toTrimmed(memo) ?? undefined, cleanupTag);
+  const normalizedMemo = appendTestArtifactMarker(
+    toTrimmed(memo) ?? undefined,
+    resolveCleanupTag(cleanupTag, options)
+  );
 
   if (payoutAmount === 0) {
     throw new Error('Payout amount must be greater than zero.');
@@ -4359,7 +4422,10 @@ export const postPayoutAccountFeesToQbo = async ({
     return null;
   }
 
-  const normalizedMemo = appendTestArtifactMarker(toTrimmed(memo) ?? undefined, cleanupTag);
+  const normalizedMemo = appendTestArtifactMarker(
+    toTrimmed(memo) ?? undefined,
+    resolveCleanupTag(cleanupTag, options)
+  );
 
   if (!payoutId) {
     logger.warn(
@@ -4405,7 +4471,7 @@ export const postPayoutAccountFeesToQbo = async ({
 
   return postJournalEntryFromLines({
     docNumber: buildDocNumber(
-      'POFEE',
+      docNumberPrefix('POFEE', options),
       date,
       Math.abs(feeDelta) + Math.abs(adjustmentDelta),
       null,
@@ -4430,7 +4496,7 @@ export const postDisputeToQbo = async ({
 }: PostDisputeToQboInput): Promise<PostChargeToQboResult> => {
   const normalizedLoss = ensurePositiveAmount(lossAmount, 'Dispute loss amount');
   const normalizedFee = ensurePositiveAmount(feeAmount, 'Dispute fee amount');
-  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
+  const normalizedMemo = appendTestArtifactMarker(memo, resolveCleanupTag(cleanupTag, options));
   const total = normalizedLoss + normalizedFee;
 
   if (total === 0) {
@@ -4448,7 +4514,13 @@ export const postDisputeToQbo = async ({
   const effectiveOptions = disputeId ? { ...options, strictDocNumber: true } : options;
 
   return postJournalEntryFromLines({
-    docNumber: buildDocNumber('DSP', date, total, null, disputeId ?? null),
+    docNumber: buildDocNumber(
+      docNumberPrefix('DSP', options),
+      date,
+      total,
+      null,
+      disputeId ?? null
+    ),
     memo: normalizedMemo,
     date,
     lines: [
@@ -4505,7 +4577,7 @@ export const postDisputeReversalToQbo = async ({
 }: PostDisputeReversalToQboInput): Promise<PostChargeToQboResult> => {
   const normalizedLoss = ensurePositiveAmount(lossAmount, 'Dispute loss amount');
   const normalizedFee = ensurePositiveAmount(feeAmount, 'Dispute fee amount');
-  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
+  const normalizedMemo = appendTestArtifactMarker(memo, resolveCleanupTag(cleanupTag, options));
   const total = normalizedLoss + normalizedFee;
 
   if (total === 0) {
@@ -4522,7 +4594,13 @@ export const postDisputeReversalToQbo = async ({
   const effectiveOptions = disputeId ? { ...options, strictDocNumber: true } : options;
 
   return postJournalEntryFromLines({
-    docNumber: buildDocNumber('DSPREV', date, total, null, disputeId ?? null),
+    docNumber: buildDocNumber(
+      docNumberPrefix('DSPREV', options),
+      date,
+      total,
+      null,
+      disputeId ?? null
+    ),
     memo: normalizedMemo,
     date,
     lines: [
@@ -4597,7 +4675,7 @@ export const postPaymentReversalToQbo = async ({
     returnedProcessingFeeAmount,
     'Returned processing fee amount'
   );
-  const normalizedMemo = appendTestArtifactMarker(memo, cleanupTag);
+  const normalizedMemo = appendTestArtifactMarker(memo, resolveCleanupTag(cleanupTag, options));
 
   if (normalizedGross === 0) {
     throw new Error('Payment reversal posting requires a non-zero gross amount.');
@@ -4622,7 +4700,7 @@ export const postPaymentReversalToQbo = async ({
 
   return postJournalEntryFromLines({
     docNumber: buildDocNumber(
-      'CHGREV',
+      docNumberPrefix('CHGREV', options),
       date,
       normalizedGross + normalizedFailureFee,
       null,

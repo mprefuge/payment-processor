@@ -5,6 +5,9 @@ vi.mock('../src/config/env', () => ({
   default: {
     accounting: {
       syncEnabled: true,
+      // These fixtures are all `livemode: false` events; without this the test-mode
+      // accounting gate would skip every posting they assert on.
+      allowTestModeAccounting: true,
     },
   },
 }));

@@ -316,6 +316,7 @@ const createRefundReceiptAdapter = (): RefundReceiptAccountingAdapter => ({
         memo: input.memo,
         date: input.txnDate,
         refundId: input.stripeRefundId,
+        ...(input.testMode ? { options: { testMode: true } } : {}),
       })
     );
   },
@@ -354,6 +355,7 @@ const createPayoutAdapter = (): PayoutAccountingAdapter => ({
         memo: buildAccountLevelFeeMemo(input.payout?.id, activity),
         date: input.txnDate,
         payoutId: input.payout?.id,
+        ...(input.testMode ? { options: { testMode: true } } : {}),
       });
 
       logger.info('[QBO] Posted account-level Stripe fees for payout', {
@@ -372,6 +374,7 @@ const createPayoutAdapter = (): PayoutAccountingAdapter => ({
         memo: input.memo,
         date: input.txnDate,
         payoutId: input.payout?.id,
+        ...(input.testMode ? { options: { testMode: true } } : {}),
       })
     );
   },
