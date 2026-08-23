@@ -432,7 +432,13 @@ const modernRequestSchema = z
     attribution: z.string().optional(),
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
-    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
+    paymentMethod: z
+      .enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet'])
+      // .nullish(), not .optional(): a caller that declares no payment rail may
+      // either omit the field or send an explicit null. Both mean "no rail
+      // declared" and must not fail validation, because a 400 here would reject
+      // an otherwise valid donation.
+      .nullish(),
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
@@ -456,7 +462,13 @@ const legacyRequestSchema = z
     attribution: z.string().optional(),
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
-    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
+    paymentMethod: z
+      .enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet'])
+      // .nullish(), not .optional(): a caller that declares no payment rail may
+      // either omit the field or send an explicit null. Both mean "no rail
+      // declared" and must not fail validation, because a 400 here would reject
+      // an otherwise valid donation.
+      .nullish(),
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
@@ -591,7 +603,12 @@ function normalizeRequestData(data) {
     attribution,
     coverFee: data.coverFee || false,
     feeAmount: data.feeAmount,
-    paymentMethod: data.paymentMethod || 'card',
+    // Deliberately NOT defaulted to 'card'. The donation form only declares a
+    // payment rail when the donor opts into covering processing fees; when no
+    // rail is declared this stays undefined so the Checkout Session can leave
+    // `payment_method_types` unset and let Stripe offer every method enabled in
+    // the dashboard. `?? undefined` also folds an explicit null into "absent".
+    paymentMethod: data.paymentMethod ?? undefined,
   };
 
   if (data.category) {
