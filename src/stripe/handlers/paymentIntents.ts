@@ -1156,6 +1156,236 @@ export const handleSuccessfulPaymentIntent = async (
   });
 };
 
+// ── Reversal of a payment that settled and was later returned ────────────────
+//
+// An ACH debit can succeed, post revenue to QuickBooks, and then be returned by
+// the donor's bank days later.  Handling the failure in Salesforce alone left
+// the SalesReceipt (or journal entry) standing forever — revenue that never
+// arrived — and never booked the fee Stripe charges for the return.
+
+/** Durable marker for the CHGREV- reversal entry, so a replay cannot reverse twice. */
+const paymentReversalDedupKey = (paymentIntentId: string): string =>
+  `stripe_payment_failure_reversal_qbo_${paymentIntentId}`;
+
+const retrieveBalanceTransactionOrNull = async (
+  stripe: Stripe,
+  reference: string | Stripe.BalanceTransaction | null | undefined
+): Promise<Stripe.BalanceTransaction | null> => {
+  if (!reference) {
+    return null;
+  }
+
+  if (typeof reference === 'object') {
+    return reference;
+  }
+
+  try {
+    return await stripe.balanceTransactions.retrieve(reference);
+  } catch (error) {
+    return null;
+  }
+};
+
+/**
+ * Did this payment ever reach QuickBooks?
+ *
+ * A payment that fails at authorisation posted nothing, and reversing it would
+ * invent a credit.  The idempotency marker written by the success path
+ * (`bt_<balance transaction id>`) is the primary answer; the Transaction__c
+ * `Posted_to_QBO__c` flag is the durable second source, because an ACH return
+ * can arrive days after the marker was written.
+ */
+const wasPaymentPostedToQbo = async (
+  deps: StripeWebhookDependencies,
+  salesforce: SalesforceSvc,
+  paymentIntent: Stripe.PaymentIntent,
+  originalBalanceTransactionId: string | null
+): Promise<boolean> => {
+  if (
+    originalBalanceTransactionId &&
+    (await deps.idempotencyStore.isProcessed(`bt_${originalBalanceTransactionId}`))
+  ) {
+    return true;
+  }
+
+  try {
+    const record = await salesforce.findTransactionRecordByExternalId?.(
+      'stripe_payment_intent_id__c',
+      paymentIntent.id
+    );
+    return record?.postedToQbo === true;
+  } catch (error) {
+    return false;
+  }
+};
+
+interface PaymentReversalAmounts {
+  grossCents: number;
+  failureFeeCents: number;
+  returnedProcessingFeeCents: number;
+}
+
+/**
+ * Read the money movement of the return out of Stripe rather than assuming it.
+ *
+ * The failure balance transaction carries the gross Stripe took back in
+ * `amount` and what it did with fees in `fee`: a positive `fee` is the failure
+ * fee it charged, a negative `fee` is the original processing fee it handed
+ * back.  Accounts differ on the latter, so it is read, not guessed.
+ */
+const summarizePaymentReversalAmounts = (
+  failureBalanceTransaction: Stripe.BalanceTransaction | null,
+  originalBalanceTransaction: Stripe.BalanceTransaction | null,
+  charge: Stripe.Charge | null,
+  paymentIntent: Stripe.PaymentIntent
+): PaymentReversalAmounts => {
+  const feeCents = failureBalanceTransaction?.fee ?? 0;
+  const grossCents =
+    Math.abs(failureBalanceTransaction?.amount ?? 0) ||
+    Math.abs(originalBalanceTransaction?.amount ?? 0) ||
+    Math.abs(charge?.amount ?? 0) ||
+    Math.abs(paymentIntent.amount ?? 0);
+
+  return {
+    grossCents,
+    failureFeeCents: feeCents > 0 ? feeCents : 0,
+    returnedProcessingFeeCents: feeCents < 0 ? -feeCents : 0,
+  };
+};
+
+const reverseSettledPaymentInAccounting = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<void> => {
+  if (!env.accounting.syncEnabled) {
+    return;
+  }
+
+  const postPaymentReversal = deps.accounting.postPaymentReversalToQbo;
+  if (!postPaymentReversal) {
+    context.log('[StripeWebhook] No payment reversal adapter configured; skipping QBO reversal', {
+      paymentIntentId: paymentIntent.id,
+    });
+    return;
+  }
+
+  const stripe = ensureStripeClient(deps, event);
+  const salesforce = await deps.getSalesforceSvc();
+  const charge = await resolveCharge(stripe, paymentIntent);
+  const originalBalanceTransaction = await resolveBalanceTransaction(stripe, charge, paymentIntent);
+
+  const posted = await wasPaymentPostedToQbo(
+    deps,
+    salesforce,
+    paymentIntent,
+    originalBalanceTransaction?.id ?? null
+  );
+
+  if (!posted) {
+    context.log('[StripeWebhook] Payment failed with nothing posted to QBO; no reversal needed', {
+      paymentIntentId: paymentIntent.id,
+      chargeId: charge?.id ?? null,
+    });
+    return;
+  }
+
+  const failureBalanceTransaction = await retrieveBalanceTransactionOrNull(
+    stripe,
+    (charge as (Stripe.Charge & { failure_balance_transaction?: unknown }) | null)
+      ?.failure_balance_transaction as string | Stripe.BalanceTransaction | null | undefined
+  );
+
+  const amounts = summarizePaymentReversalAmounts(
+    failureBalanceTransaction,
+    originalBalanceTransaction,
+    charge,
+    paymentIntent
+  );
+
+  if (amounts.grossCents === 0) {
+    context.log('[StripeWebhook] Cannot determine reversal amount for failed payment; skipping', {
+      alert: 'payment_reversal_amount_unknown',
+      paymentIntentId: paymentIntent.id,
+      chargeId: charge?.id ?? null,
+    });
+    return;
+  }
+
+  const dedupKey = paymentReversalDedupKey(paymentIntent.id);
+  const lockId =
+    failureBalanceTransaction?.id ?? originalBalanceTransaction?.id ?? paymentIntent.id;
+
+  await deps.idempotencyStore.withLock(`bt_${lockId}`, async () => {
+    // The lock only serialises concurrent processing; the durable marker is what
+    // stops a redelivery after the lock TTL from reversing the revenue twice.
+    if (await deps.idempotencyStore.isProcessed(dedupKey)) {
+      context.log('[StripeWebhook] Payment reversal already posted to QBO, skipping', {
+        paymentIntentId: paymentIntent.id,
+      });
+      return;
+    }
+
+    try {
+      const posting = await postPaymentReversal({
+        grossAmount: amounts.grossCents,
+        failureFeeAmount: amounts.failureFeeCents,
+        returnedProcessingFeeAmount: amounts.returnedProcessingFeeCents,
+        memo: `Stripe payment returned ${paymentIntent.id}${charge?.id ? ` (charge ${charge.id})` : ''}`,
+        date: timestampToDate(
+          failureBalanceTransaction?.created ??
+            failureBalanceTransaction?.available_on ??
+            paymentIntent.created ??
+            null
+        ),
+        paymentIntentId: paymentIntent.id,
+        chargeId: charge?.id ?? null,
+      });
+
+      await deps.idempotencyStore.markProcessed(dedupKey);
+
+      context.log('[StripeWebhook] Reversed returned payment in QBO', {
+        alert: 'payment_return_reversal',
+        paymentIntentId: paymentIntent.id,
+        chargeId: charge?.id ?? null,
+        grossCents: amounts.grossCents,
+        failureFeeCents: amounts.failureFeeCents,
+        returnedProcessingFeeCents: amounts.returnedProcessingFeeCents,
+        reversalQboId: posting.qboId,
+        reversalType: posting.type,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      context.log('[StripeWebhook] Failed to reverse returned payment in QBO', {
+        alert: 'payment_return_reversal_failed',
+        paymentIntentId: paymentIntent.id,
+        error: errorMessage,
+      });
+
+      // Surface the failure in Salesforce instead of re-throwing: throwing makes
+      // Stripe retry the whole event indefinitely, and the reversal can be
+      // resubmitted from the recorded error.
+      try {
+        await salesforce.upsertTransactionByExternalId(
+          {
+            stripe_payment_intent_id__c: paymentIntent.id,
+            transaction_type__c: 'charge',
+            status__c: 'failed',
+            posting_error__c: errorMessage.slice(0, 255),
+          },
+          'stripe_payment_intent_id__c'
+        );
+      } catch (storeError) {
+        context.log('[StripeWebhook] Failed to store reversal error in Salesforce', {
+          paymentIntentId: paymentIntent.id,
+          error: storeError instanceof Error ? storeError.message : String(storeError),
+        });
+      }
+    }
+  });
+};
+
 export const handlePaymentIntentFailed = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -1167,6 +1397,8 @@ export const handlePaymentIntentFailed = async (
     eventId: event.id,
     livemode: event.livemode,
   });
+
+  await reverseSettledPaymentInAccounting(context, event, deps, paymentIntent);
 };
 
 export const handlePaymentIntentCanceled = async (

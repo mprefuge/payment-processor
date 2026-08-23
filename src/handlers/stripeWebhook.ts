@@ -12,6 +12,7 @@ import {
   postRefundToQbo,
   postDisputeToQbo,
   postDisputeReversalToQbo,
+  postPaymentReversalToQbo,
   postPayoutToQbo,
 } from '../services/qboSvc';
 import {
@@ -352,6 +353,7 @@ const createAccountingDependencies = (): StripeWebhookDependencies['accounting']
   postRefundToQbo,
   postDisputeToQbo,
   postDisputeReversalToQbo,
+  postPaymentReversalToQbo,
   refundReceipts: createRefundReceiptAdapter(),
   payouts: createPayoutAdapter(),
 });
