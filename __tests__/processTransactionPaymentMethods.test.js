@@ -2,11 +2,21 @@
  * Tests for how the donor's selected payment method flows through
  * processTransaction into the Stripe Checkout Session.
  *
- * Two behaviours are covered:
+ * Three behaviours are covered:
  *   1. `paymentMethod: 'wallet'` (the donation form's "Digital Wallet" chip)
  *      must pass request validation instead of returning HTTP 400.
  *   2. `payment_method_types` on the Checkout Session must reflect the
  *      donor's selection instead of always being `['card']`.
+ *   3. When the request declares NO payment rail, `payment_method_types` must
+ *      be left off the Checkout Session entirely so Stripe offers whatever is
+ *      enabled in the dashboard.
+ *
+ * (3) is the precondition for the donation form to stop declaring a rail for
+ * donors who are not covering fees. The form does not do that yet -- it
+ * currently always sends one, hardcoding 'card' when the box is unticked, which
+ * is what pins those donors to card and makes ACH unreachable. Nothing changes
+ * for them until mprefuge/site-assets#17 ships; these tests lock in the server
+ * behaviour that change depends on.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
@@ -127,8 +137,27 @@ describe('processTransaction payment method handling', () => {
     expect(captured.sessionParams.payment_method_types).toEqual(expected);
   });
 
-  it('defaults to card when the request omits paymentMethod', async () => {
+  // Previously this asserted a default of ['card']. That default is the server
+  // half of the bug: it makes "said nothing" indistinguishable from "chose
+  // card", so the form has no way to express "no restriction". The intent is
+  // now the opposite -- no rail declared means no restriction imposed.
+  it('leaves payment_method_types unset when the request declares no rail', async () => {
     const { context, captured } = await runDonation();
+
+    expect(context.res.status).toBe(200);
+    expect(captured.sessionParams).not.toHaveProperty('payment_method_types');
+  });
+
+  it('treats an explicit null paymentMethod as no rail rather than rejecting it', async () => {
+    const { context, captured } = await runDonation({ paymentMethod: null });
+
+    expect(context.res.status).toBe(200);
+    expect(captured.sessionParams).not.toHaveProperty('payment_method_types');
+  });
+
+  // The distinction the fix turns on: absent is not the same as explicit card.
+  it('still pins payment_method_types to card when card is explicitly declared', async () => {
+    const { context, captured } = await runDonation({ paymentMethod: 'card' });
 
     expect(context.res.status).toBe(200);
     expect(captured.sessionParams.payment_method_types).toEqual(['card']);

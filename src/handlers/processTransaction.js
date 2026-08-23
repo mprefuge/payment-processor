@@ -432,7 +432,13 @@ const modernRequestSchema = z
     attribution: z.string().optional(),
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
-    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
+    paymentMethod: z
+      .enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet'])
+      // .nullish(), not .optional(): a caller that declares no payment rail may
+      // either omit the field or send an explicit null. Both mean "no rail
+      // declared" and must not fail validation, because a 400 here would reject
+      // an otherwise valid donation.
+      .nullish(),
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
@@ -456,7 +462,13 @@ const legacyRequestSchema = z
     attribution: z.string().optional(),
     coverFee: z.boolean().optional(),
     feeAmount: z.number().int().nonnegative().optional(),
-    paymentMethod: z.enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet']).optional(),
+    paymentMethod: z
+      .enum(['card', 'card_present', 'us_bank_account', 'amex', 'wallet'])
+      // .nullish(), not .optional(): a caller that declares no payment rail may
+      // either omit the field or send an explicit null. Both mean "no rail
+      // declared" and must not fail validation, because a 400 here would reject
+      // an otherwise valid donation.
+      .nullish(),
     category: z.string().optional(),
     transactionType: z.string().optional(),
   })
@@ -591,7 +603,21 @@ function normalizeRequestData(data) {
     attribution,
     coverFee: data.coverFee || false,
     feeAmount: data.feeAmount,
-    paymentMethod: data.paymentMethod || 'card',
+    // Deliberately NOT defaulted to 'card'. An absent paymentMethod means "the
+    // caller declared no payment rail", and that is now carried through as
+    // undefined instead of being turned into a choice the caller never made.
+    // The Checkout Session then leaves `payment_method_types` unset and Stripe
+    // offers every method enabled in the dashboard.
+    //
+    // This is a precondition, not a description of the live form: the donation
+    // form currently always sends a rail, hardcoding 'card' when the donor is
+    // not covering fees (site-assets scripts/new-popup-don.js, the initialiser
+    // at :1408 and the cover-fee reset at :1344). Until the companion change
+    // ships (mprefuge/site-assets#17) this branch is simply not reached from
+    // the form, and behaviour there is unchanged.
+    //
+    // `?? undefined` also folds an explicit null into "absent".
+    paymentMethod: data.paymentMethod ?? undefined,
   };
 
   if (data.category) {

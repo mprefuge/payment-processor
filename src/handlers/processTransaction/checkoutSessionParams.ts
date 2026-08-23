@@ -165,14 +165,37 @@ const STRIPE_PAYMENT_METHOD_TYPES: Record<string, string[]> = {
   us_bank_account: ['us_bank_account'],
 };
 
-const DEFAULT_STRIPE_PAYMENT_METHOD_TYPES = ['card'];
+const FALLBACK_STRIPE_PAYMENT_METHOD_TYPES = ['card'];
 
-export const resolvePaymentMethodTypes = (paymentMethod: unknown): string[] => {
+/**
+ * Returns the `payment_method_types` to pin on the Checkout Session, or
+ * `undefined` when the caller declared no payment rail at all.
+ *
+ * "No rail declared" and "explicitly card" are deliberately different answers.
+ * A caller that says nothing is not choosing card, it is simply not choosing.
+ * Returning `undefined` lets the session omit the parameter, and Stripe then
+ * offers whatever is enabled in the dashboard (ACH included) instead of
+ * silently restricting the donor to card.
+ *
+ * Note this only changes anything for a caller that actually omits the field.
+ * The donation form does not yet: it always sends a rail, hardcoding 'card'
+ * when the donor is not covering fees. This change is what makes omitting it
+ * safe and meaningful; mprefuge/site-assets#17 is what starts omitting it.
+ *
+ * A declared-but-unrecognised value still falls back to ['card'] — that is a
+ * defensive path only, since request validation rejects anything outside the
+ * enum before this is reached.
+ */
+export const resolvePaymentMethodTypes = (paymentMethod: unknown): string[] | undefined => {
+  if (paymentMethod === undefined || paymentMethod === null || paymentMethod === '') {
+    return undefined;
+  }
+
   const types =
     typeof paymentMethod === 'string' &&
     Object.prototype.hasOwnProperty.call(STRIPE_PAYMENT_METHOD_TYPES, paymentMethod)
       ? STRIPE_PAYMENT_METHOD_TYPES[paymentMethod]
-      : DEFAULT_STRIPE_PAYMENT_METHOD_TYPES;
+      : FALLBACK_STRIPE_PAYMENT_METHOD_TYPES;
 
   return [...types];
 };
@@ -230,7 +253,7 @@ export const buildCheckoutSessionParams = (
       );
       const isNonprofit = parseBoolean(process.env.STRIPE_NONPROFIT_RATES);
       logger.info(
-        `Cover fees enabled: calculated fee for ${transactionData.paymentMethod} ` +
+        `Cover fees enabled: calculated fee for ${transactionData.paymentMethod ?? 'card (no rail declared)'} ` +
           `(${isNonprofit ? 'nonprofit' : 'standard'} rates): ` +
           `base amount ${transactionData.amount} cents, ` +
           `cover fees ${coverFeesAmount} cents, ` +
@@ -246,12 +269,13 @@ export const buildCheckoutSessionParams = (
 
   const stripeMetadata = formatStripeMetadata(transactionData);
 
+  const paymentMethodTypes = resolvePaymentMethodTypes(transactionData.paymentMethod);
+
   const baseParams: Record<string, any> = {
     customer: customerId,
     success_url:
       process.env.SUCCESS_URL || process.env.CANCEL_URL || 'https://example.com/thankyou',
     cancel_url: process.env.CANCEL_URL || 'https://example.com/donate',
-    payment_method_types: resolvePaymentMethodTypes(transactionData.paymentMethod),
     line_items: [
       {
         price_data: {
@@ -266,6 +290,13 @@ export const buildCheckoutSessionParams = (
     ],
     metadata: stripeMetadata,
   };
+
+  // Only pin the rail when one was actually declared. Leaving the key off
+  // entirely (rather than sending undefined) is what makes Stripe fall back to
+  // the dashboard's enabled payment methods.
+  if (paymentMethodTypes) {
+    baseParams.payment_method_types = paymentMethodTypes;
+  }
 
   if (isOneTime) {
     baseParams.mode = 'payment';
