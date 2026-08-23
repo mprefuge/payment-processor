@@ -16,11 +16,16 @@ import {
 } from '../src/services/testHarness/syntheticDonation';
 
 /**
- * The load-bearing promise of this harness is that a dry run touches nothing. It is worth
- * asserting mechanically rather than by reading the handlers: every dependency is injected
- * as a spy and the tests check that none of them was ever invoked, so a future edit that
- * reaches for a Stripe client or a Salesforce connection on the default path fails here
- * instead of in production.
+ * The load-bearing promise of this harness is that a dry run CREATES nothing — not that it
+ * stays offline. It is worth asserting mechanically rather than by reading the handlers:
+ * every dependency is injected as a spy and the tests check that no write path was ever
+ * invoked, so a future edit that posts to QuickBooks or upserts a Contact on the default
+ * path fails here instead of in production.
+ *
+ * The two are distinguished deliberately. An inline donation payload makes no outbound call
+ * at all, and `expectNoOutboundCalls` holds it to that. A `chargeId` is a read — only Stripe
+ * can describe a charge that already exists — so those tests assert the reads happened and
+ * that `expectNothingWritten` still holds.
  */
 
 const DONATION = {
@@ -111,6 +116,80 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const CHARGE_ID = 'ch_3ABC123def456';
+const BALANCE_TXN_ID = 'txn_3ABC123def456';
+
+/**
+ * A Stripe client double whose every method is a READ. If the handler ever reaches for a
+ * create/update on this object it throws rather than silently succeeding, so "the dry run
+ * wrote nothing" is enforced by the double as well as by the assertions.
+ */
+const createStripeReadSpies = () => {
+  const charge = {
+    id: CHARGE_ID,
+    object: 'charge',
+    amount: 10300,
+    amount_refunded: 0,
+    refunded: false,
+    currency: 'usd',
+    status: 'succeeded',
+    livemode: false,
+    created: 1755648000,
+    description: 'Donation',
+    customer: null,
+    payment_intent: null,
+    balance_transaction: BALANCE_TXN_ID,
+    billing_details: { email: 'harness.testcase@example.invalid', name: 'Harness Testcase' },
+    metadata: {},
+  };
+
+  const chargeRetrieve = vi.fn().mockResolvedValue(charge);
+  const balanceTransactionRetrieve = vi.fn().mockResolvedValue({
+    id: BALANCE_TXN_ID,
+    object: 'balance_transaction',
+    amount: 10300,
+    fee: 329,
+    net: 9971,
+    currency: 'usd',
+    status: 'available',
+    created: 1755648000,
+    available_on: 1755734400,
+  });
+  const sessionsList = vi.fn().mockResolvedValue({ data: [] });
+  const customersRetrieve = vi.fn().mockResolvedValue(null);
+  const paymentIntentsRetrieve = vi.fn().mockResolvedValue(null);
+  const forbidden = (name: string) =>
+    vi.fn(() => {
+      throw new Error(`dry run must not call ${name}`);
+    });
+
+  return {
+    chargeRetrieve,
+    balanceTransactionRetrieve,
+    sessionsList,
+    client: {
+      charges: { retrieve: chargeRetrieve, update: forbidden('charges.update') },
+      balanceTransactions: { retrieve: balanceTransactionRetrieve },
+      paymentIntents: { retrieve: paymentIntentsRetrieve },
+      customers: { retrieve: customersRetrieve, create: forbidden('customers.create') },
+      checkout: {
+        sessions: { list: sessionsList, create: forbidden('checkout.sessions.create') },
+      },
+    } as never,
+  };
+};
+
+/** The invariant a dry run must hold: no write reached any system. */
+const expectNothingWritten = () => {
+  expect(spies.postChargeToQbo).not.toHaveBeenCalled();
+  expect(spies.getSalesforceSvc).not.toHaveBeenCalled();
+  expect(spies.qboFetcher).not.toHaveBeenCalled();
+  expect(spies.checkoutCreate).not.toHaveBeenCalled();
+  expect(spies.upsertCustomer).not.toHaveBeenCalled();
+  expect(spies.upsertTransaction).not.toHaveBeenCalled();
+  expect(fetchSpy).not.toHaveBeenCalled();
+};
+
 const expectNoOutboundCalls = () => {
   expect(spies.getStripeClient).not.toHaveBeenCalled();
   expect(spies.postChargeToQbo).not.toHaveBeenCalled();
@@ -122,7 +201,7 @@ const expectNoOutboundCalls = () => {
   expect(fetchSpy).not.toHaveBeenCalled();
 };
 
-describe('POST /api/ops/test/* — dry run is the default and touches nothing', () => {
+describe('POST /api/ops/test/* — dry run is the default and creates nothing', () => {
   const handlers = [
     ['quickbooks', opsTestQuickbooks],
     ['salesforce', opsTestSalesforce],
@@ -148,14 +227,66 @@ describe('POST /api/ops/test/* — dry run is the default and touches nothing', 
     expectNoOutboundCalls();
   });
 
-  it('refuses a chargeId on a dry run rather than quietly reading Stripe', async () => {
+  it('reads Stripe but writes nothing for a chargeId on a dry run', async () => {
+    // Previewing a real charge is the main thing this endpoint is for, and it is a READ.
+    // Refusing it until dryRun=false would force writes on merely to look. What must stay
+    // true is that nothing is created: the write paths below are never invoked.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
     const response = await opsTestQuickbooks(
-      createRequest({ chargeId: 'ch_3ABC123def456' }),
+      createRequest({ chargeId: CHARGE_ID }),
       createContext()
     );
 
-    expect(response.status).toBe(400);
-    expect((response.jsonBody as any).error).toBe('dry_run_cannot_read_stripe');
+    expect(response.status).toBe(200);
+    const body = response.jsonBody as any;
+    expect(body.dryRun).toBe(true);
+    expect(body.source).toBe('stripe-charge');
+
+    // The read actually happened, against Stripe, and the body says so.
+    expect(reads.chargeRetrieve).toHaveBeenCalledWith(CHARGE_ID);
+    expect(reads.balanceTransactionRetrieve).toHaveBeenCalledWith(BALANCE_TXN_ID);
+    expect(body.outboundReads.performed).toBe(true);
+    expect(body.outboundReads.services).toEqual(['stripe']);
+
+    // ...and the preview is real, not a stub.
+    expect(body.amounts.grossCents).toBe(10300);
+    expect(body.amounts.feeCents).toBe(329);
+    expect(body.charge.id).toBe(CHARGE_ID);
+    expect(body.balanceTransaction.available).toBe(true);
+    expect(body.strategies.length).toBeGreaterThan(0);
+
+    expectNothingWritten();
+    // Nothing was posted to QuickBooks on this path, dry run or not.
+    expect(body.posted.attempted).toBe(false);
+  });
+
+  it('still writes nothing for a chargeId with dryRun=false', async () => {
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID }, { dryRun: 'false' }),
+      createContext()
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.jsonBody as any).posted.attempted).toBe(false);
+    expectNothingWritten();
+  });
+
+  it('reports an inline donation dry run as having made no outbound read at all', async () => {
+    const response = await opsTestQuickbooks(
+      createRequest({ donation: DONATION }),
+      createContext()
+    );
+
+    expect((response.jsonBody as any).outboundReads).toEqual({
+      performed: false,
+      services: [],
+      detail: expect.stringMatching(/no outbound call of any kind/i),
+    });
     expectNoOutboundCalls();
   });
 });

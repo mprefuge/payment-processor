@@ -16,10 +16,44 @@ import { CHARGE_ID_PATTERN } from './quickbooksPreview';
  * `dryRun` defaults to TRUE on every endpoint, following
  * `src/handlers/dailyReconciliation.ts:329-340`: a handler that can write to Stripe,
  * Salesforce and the general ledger must make writing an explicit opt-in rather than
- * something a caller inherits by forgetting a flag. Here it is stricter still — a dry run
- * makes NO outbound call at all, not even a read, so the response is provably a pure
- * function of the request body.
+ * something a caller inherits by forgetting a flag.
+ *
+ * A dry run performs NO OUTBOUND WRITE — nothing is created in Stripe, QuickBooks or
+ * Salesforce. It may perform an outbound READ when the caller asked about something only
+ * the remote system can describe, which in practice means a `chargeId`: previewing what an
+ * existing charge would produce in QuickBooks is the safest and most useful call this
+ * harness offers, and refusing it until writes are switched on would force a caller to
+ * enable writing merely to look.
+ *
+ * The inline-synthetic-donation path makes no outbound call of ANY kind, so that response
+ * stays a pure function of the request body. Every response reports which of the two it
+ * was via `outboundReads`, so a caller never has to infer it.
  */
+
+/** Whether a call reached out to read, and against what. Reported on every response. */
+export interface OutboundReadReport {
+  performed: boolean;
+  services: string[];
+  detail: string;
+}
+
+export const NO_OUTBOUND_READS: OutboundReadReport = {
+  performed: false,
+  services: [],
+  detail:
+    'None. No outbound call of any kind was made — not a read, not a write. This response ' +
+    'is a pure function of the request body.',
+};
+
+/** The read-only Stripe retrieves the chargeId path performs. Stripe only, and never a write. */
+export const stripeChargeReads = (chargeId: string): OutboundReadReport => ({
+  performed: true,
+  services: ['stripe'],
+  detail:
+    `Stripe was read to describe ${chargeId}: the charge, its balance transaction, and where ` +
+    'available the payment intent, Checkout Session and customer. Every one is a retrieve or ' +
+    'a list. Nothing was written to Stripe, QuickBooks or Salesforce.',
+});
 
 export const respond = (status: number, jsonBody: Record<string, unknown>): HttpResponseInit => ({
   status,
@@ -66,12 +100,6 @@ export type ParseResult =
   | { ok: true; value: ParsedHarnessRequest }
   | { ok: false; response: HttpResponseInit };
 
-const DRY_RUN_AND_CHARGE_ID =
-  'chargeId identifies a charge that only Stripe can describe, and a dry run makes no ' +
-  'outbound call of any kind — not even a read. Either supply an inline `donation` payload, ' +
-  'or pass dryRun=false to let this endpoint read the charge from Stripe (which will also ' +
-  'let it write).';
-
 export const parseHarnessRequest = async (
   request: HttpRequest,
   options: { allowChargeId?: boolean } = {}
@@ -112,16 +140,6 @@ export const parseHarnessRequest = async (
       response: respond(400, {
         error: 'invalid_charge_id',
         message: `"${chargeId}" is not a Stripe charge id. Expected a ch_… (or legacy py_…) id.`,
-      }),
-    };
-  }
-
-  if (chargeId && dryRun) {
-    return {
-      ok: false,
-      response: respond(400, {
-        error: 'dry_run_cannot_read_stripe',
-        message: DRY_RUN_AND_CHARGE_ID,
       }),
     };
   }

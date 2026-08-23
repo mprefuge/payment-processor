@@ -10,7 +10,13 @@ import {
   buildQboPreviewForCharge,
   buildQuickBooksPreviewFromContext,
 } from '../services/testHarness/quickbooksPreview';
-import { parseHarnessRequest, rejectLiveMode, respond } from '../services/testHarness/request';
+import {
+  NO_OUTBOUND_READS,
+  parseHarnessRequest,
+  rejectLiveMode,
+  respond,
+  stripeChargeReads,
+} from '../services/testHarness/request';
 import { buildSalesforcePreview } from '../services/testHarness/salesforcePreview';
 import { buildStripePreview } from '../services/testHarness/stripePreview';
 import {
@@ -24,9 +30,14 @@ import type { StripeCustomerContext } from '../services/qboSvc';
  * `POST /api/ops/test/{quickbooks,salesforce,stripe,donation}`
  *
  * One stage of the donation pipeline per endpoint, exercisable on its own from Swagger,
- * with `dryRun` defaulting to TRUE everywhere. A dry run makes no outbound call at all —
- * that is the invariant the unit tests assert by handing every dependency in as a spy and
- * checking none of them was ever invoked.
+ * with `dryRun` defaulting to TRUE everywhere. A dry run performs no outbound WRITE: it
+ * creates nothing in Stripe, QuickBooks or Salesforce. That is the invariant the unit tests
+ * assert by handing every dependency in as a spy and checking no write path was invoked.
+ *
+ * A dry run may still READ, and does so only where the caller asked about something only the
+ * remote system can describe — a `chargeId` on the QuickBooks endpoint, which is read out of
+ * Stripe with retrieves alone. The inline-synthetic-donation path makes no outbound call of
+ * any kind. Every response says which it was under `outboundReads`.
  *
  * When `dryRun=false`, every record created carries the cleanup marker
  * `[source_test_tag:<tag>]` (QuickBooks PrivateNote and Salesforce Memo__c) or
@@ -105,7 +116,9 @@ export const opsTestQuickbooks = async (
 
   try {
     if (chargeId) {
-      // Only reachable with dryRun=false; parseHarnessRequest rejects the pairing otherwise.
+      // Reads Stripe on a dry run too. Previewing what a real charge would produce in
+      // QuickBooks is the main thing this endpoint is for, and it is a read: refusing it
+      // until dryRun=false would make a caller enable writing merely to look.
       const stripe = deps.getStripeClient(parsed.value.liveMode);
       const preview = await buildQboPreviewForCharge(chargeId, { stripe }, tag);
       return respond(200, {
@@ -113,13 +126,15 @@ export const opsTestQuickbooks = async (
         dryRun,
         tag,
         source: 'stripe-charge',
+        outboundReads: stripeChargeReads(chargeId),
         ...preview,
         posted: {
           attempted: false,
           note:
-            'Posting a charge previewed from Stripe is not offered here: the accounting path ' +
-            'owns that decision and POST /api/qbo/manual-sync already exposes it. Use an ' +
-            'inline donation payload with dryRun=false to exercise a tagged write.',
+            'Posting a charge previewed from Stripe is not offered here, on a dry run or ' +
+            'otherwise: the accounting path owns that decision and POST /api/qbo/manual-sync ' +
+            'already exposes it. Use an inline donation payload with dryRun=false to ' +
+            'exercise a tagged write.',
         },
       });
     }
@@ -142,6 +157,7 @@ export const opsTestQuickbooks = async (
         dryRun: true,
         tag,
         source: 'synthetic',
+        outboundReads: NO_OUTBOUND_READS,
         wouldTouchOnDryRunFalse:
           'QuickBooks only. It would create the documents rendered under the ACTIVE strategy ' +
           `below, each carrying "${buildTestArtifactMarker(tag)}" in its PrivateNote.`,
@@ -175,6 +191,13 @@ export const opsTestQuickbooks = async (
       tag,
       source: 'synthetic',
       touched: 'QuickBooks',
+      outboundReads: {
+        performed: true,
+        services: ['quickbooks'],
+        detail:
+          'QuickBooks was contacted to resolve the refs the posting path needs and to create ' +
+          'the documents below. This was not a dry run.',
+      },
       synthetic: synthesisNote(donation, stripeContext),
       posted: { attempted: true, ...result, cleanupMarker: buildTestArtifactMarker(tag) },
       ...preview,
@@ -223,6 +246,7 @@ export const opsTestSalesforce = async (
         success: true,
         dryRun: true,
         tag,
+        outboundReads: NO_OUTBOUND_READS,
         wouldTouchOnDryRunFalse:
           'Salesforce only. It would find-or-create the Contact below and upsert the ' +
           'Transaction__c by Stripe_Payment_Intent_Id__c, with the cleanup marker in Memo__c.',
@@ -250,6 +274,13 @@ export const opsTestSalesforce = async (
       dryRun: false,
       tag,
       touched: 'Salesforce',
+      outboundReads: {
+        performed: true,
+        services: ['salesforce'],
+        detail:
+          'Salesforce was contacted to find-or-create the Contact and upsert the ' +
+          'Transaction__c below. This was not a dry run.',
+      },
       synthetic: synthesisNote(donation, stripeContext),
       written: {
         contactId: contactResult.id ?? null,
@@ -299,6 +330,7 @@ export const opsTestStripe = async (
         success: true,
         dryRun: true,
         tag,
+        outboundReads: NO_OUTBOUND_READS,
         wouldTouchOnDryRunFalse:
           'Stripe only, and only in TEST mode. It would create the Checkout Session rendered ' +
           `below, carrying source_test_tag=${tag} in its metadata and in the mirrored ` +
@@ -318,6 +350,13 @@ export const opsTestStripe = async (
       dryRun: false,
       tag,
       touched: 'Stripe (test mode)',
+      outboundReads: {
+        performed: true,
+        services: ['stripe'],
+        detail:
+          'Stripe test mode was contacted to create the Checkout Session below. This was not ' +
+          'a dry run.',
+      },
       created: {
         checkoutSessionId: session.id,
         url: session.url ?? null,
@@ -441,6 +480,7 @@ export const opsTestDonation = async (
     success: true,
     dryRun: true,
     tag,
+    outboundReads: NO_OUTBOUND_READS,
     writesNothing:
       'Nothing was created anywhere. No Stripe, Salesforce or QuickBooks call was made.',
     cleanupMarker: buildTestArtifactMarker(tag),
