@@ -106,7 +106,10 @@ const lookupBalanceTransaction = async (
   }
 
   try {
-    return { balanceTransaction: await stripe.balanceTransactions.retrieve(balanceTransactionId), absence: null };
+    return {
+      balanceTransaction: await stripe.balanceTransactions.retrieve(balanceTransactionId),
+      absence: null,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.debug('[StripeUtils] Balance transaction fetch failed', {
