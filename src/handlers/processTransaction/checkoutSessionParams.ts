@@ -172,11 +172,15 @@ const FALLBACK_STRIPE_PAYMENT_METHOD_TYPES = ['card'];
  * `undefined` when the caller declared no payment rail at all.
  *
  * "No rail declared" and "explicitly card" are deliberately different answers.
- * The donation form only declares a rail when the donor opts into covering
- * processing fees; a donor who declines is not choosing card, they are simply
- * not choosing. Returning `undefined` lets the session omit the parameter, and
- * Stripe then offers whatever is enabled in the dashboard (ACH included)
- * instead of silently restricting the donor to card.
+ * A caller that says nothing is not choosing card, it is simply not choosing.
+ * Returning `undefined` lets the session omit the parameter, and Stripe then
+ * offers whatever is enabled in the dashboard (ACH included) instead of
+ * silently restricting the donor to card.
+ *
+ * Note this only changes anything for a caller that actually omits the field.
+ * The donation form does not yet: it always sends a rail, hardcoding 'card'
+ * when the donor is not covering fees. This change is what makes omitting it
+ * safe and meaningful; mprefuge/site-assets#17 is what starts omitting it.
  *
  * A declared-but-unrecognised value still falls back to ['card'] — that is a
  * defensive path only, since request validation rejects anything outside the

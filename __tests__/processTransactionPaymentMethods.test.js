@@ -9,10 +9,14 @@
  *      donor's selection instead of always being `['card']`.
  *   3. When the request declares NO payment rail, `payment_method_types` must
  *      be left off the Checkout Session entirely so Stripe offers whatever is
- *      enabled in the dashboard. The donation form only declares a rail when
- *      the donor opts into covering fees, so this is the path a donor who
- *      declines to cover fees takes -- previously it pinned them to card and
- *      made ACH unreachable.
+ *      enabled in the dashboard.
+ *
+ * (3) is the precondition for the donation form to stop declaring a rail for
+ * donors who are not covering fees. The form does not do that yet -- it
+ * currently always sends one, hardcoding 'card' when the box is unticked, which
+ * is what pins those donors to card and makes ACH unreachable. Nothing changes
+ * for them until mprefuge/site-assets#17 ships; these tests lock in the server
+ * behaviour that change depends on.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
@@ -133,10 +137,10 @@ describe('processTransaction payment method handling', () => {
     expect(captured.sessionParams.payment_method_types).toEqual(expected);
   });
 
-  // Previously this asserted a default of ['card']. That default was the bug:
-  // a donor who declined to cover fees sent no rail and was silently restricted
-  // to card, unable to pay by bank. The intent is now the opposite -- no rail
-  // declared means no restriction imposed.
+  // Previously this asserted a default of ['card']. That default is the server
+  // half of the bug: it makes "said nothing" indistinguishable from "chose
+  // card", so the form has no way to express "no restriction". The intent is
+  // now the opposite -- no rail declared means no restriction imposed.
   it('leaves payment_method_types unset when the request declares no rail', async () => {
     const { context, captured } = await runDonation();
 
