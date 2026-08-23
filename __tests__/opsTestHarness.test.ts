@@ -295,6 +295,77 @@ describe('POST /api/ops/test/* — dry run is the default and creates nothing', 
     expectNothingWritten();
   });
 
+  // An afternoon was lost to this exact response: success true, dryRun false, warnings
+  // empty, posted.attempted false. Nothing had been written, and nothing said so.
+  it('warns loudly, and echoes dryRun honestly, when dryRun=false is ignored', async () => {
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID }, { dryRun: 'false' }),
+      createContext()
+    );
+
+    const body = response.jsonBody as any;
+
+    // The echo agrees with what the call did, rather than with what was asked for.
+    expect(body.dryRun).toBe(true);
+    expect(body.dryRunRequested).toBe(false);
+    expect(body.posted.requestedButNotPerformed).toBe(true);
+
+    // The warning names the ignored parameter, says nothing was written, and points at
+    // the request that would have written.
+    expect(body.warnings.length).toBeGreaterThan(0);
+    const warning = body.warnings[0];
+    expect(warning).toMatch(/IGNORED PARAMETER `dryRun`/);
+    expect(warning).toMatch(/NOTHING WAS WRITTEN/);
+    expect(warning).toMatch(/donation/);
+    expect(warning).toMatch(/dryRun=false/);
+
+    expectNothingWritten();
+  });
+
+  it('does not warn about dryRun when the caller never sent it', async () => {
+    // Omitting the flag is taking the documented default, not being overridden.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const response = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID }),
+      createContext()
+    );
+
+    const body = response.jsonBody as any;
+    expect(body.dryRun).toBe(true);
+    expect(body.dryRunRequested).toBe(true);
+    expect(body.posted.requestedButNotPerformed).toBe(false);
+    expect(body.warnings).not.toContainEqual(expect.stringMatching(/IGNORED PARAMETER/));
+    expectNothingWritten();
+  });
+
+  it('reads an explicit dryRun from the body as well as the query', async () => {
+    // Same distinction, read from the other source the parser accepts: explicit is
+    // explicit, so this one DOES warn — and dryRun=true in the body does not.
+    const reads = createStripeReadSpies();
+    spies.getStripeClient.mockReturnValue(reads.client);
+
+    const written = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, dryRun: false }),
+      createContext()
+    );
+    expect((written.jsonBody as any).warnings[0]).toMatch(/IGNORED PARAMETER `dryRun`/);
+
+    const explicitDryRun = await opsTestQuickbooks(
+      createRequest({ chargeId: CHARGE_ID, dryRun: true }),
+      createContext()
+    );
+    expect((explicitDryRun.jsonBody as any).warnings).not.toContainEqual(
+      expect.stringMatching(/IGNORED PARAMETER/)
+    );
+
+    expectNothingWritten();
+  });
+
   it('reports an inline donation dry run as having made no outbound read at all', async () => {
     const response = await opsTestQuickbooks(
       createRequest({ donation: DONATION }),

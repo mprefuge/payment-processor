@@ -1115,9 +1115,22 @@ const TestHarnessQuickbooksRequestSchema = z
         description:
           'Preview a real Stripe charge instead of a synthetic donation. Works on a dry run: ' +
           'resolving the charge is a read-only Stripe retrieve, and this path posts nothing ' +
-          'to QuickBooks either way.',
+          'to QuickBooks either way. **`dryRun: false` does not change that.** A chargeId ' +
+          'request is always a read-only preview — sending one with `dryRun: false` writes ' +
+          'NOTHING, anywhere; the response echoes `dryRun: true` and names `dryRun` as an ' +
+          'ignored parameter in `warnings`. To make this endpoint actually write, drop the ' +
+          'chargeId and send an inline `donation` payload with `dryRun: false`.',
       }),
-    dryRun: z.boolean().optional().openapi({ example: true }),
+    dryRun: z
+      .boolean()
+      .optional()
+      .openapi({
+        example: true,
+        description:
+          'Defaults to true. Set false to let the endpoint actually write — which it does only ' +
+          'for an inline `donation` payload. With a `chargeId` the write is not available and ' +
+          'a `false` here is reported back as an ignored parameter rather than obeyed.',
+      }),
     tag: z.string().optional().openapi({ example: TEST_HARNESS_TAG }),
   })
   .passthrough();
@@ -2148,7 +2161,7 @@ registerFunction('opsTestQuickbooks', 'Preview the QuickBooks documents a donati
     'For each strategy: every document, in order, with its DocNumber, its AccountRefs and ItemRefs, and the resolved gross / fee / net. DocNumbers come from the same `buildDocNumber` the posting path uses, so a collision is visible here before it is a duplicate in QuickBooks. AccountRef `value` fields carry the configured *name* rather than a QuickBooks id, because resolving an id is a call this endpoint does not make.\n\n' +
     '**An unresolvable processor fee renders as `feeCents: null` with `feeAvailable: false`, never as 0.** A charge Stripe has not settled — an ACH debit, typically — has no balance transaction, and reporting its fee as zero would read as "Stripe charged nothing" instead of "nobody knows yet".\n\n' +
     '### What `dryRun=false` touches\n\n' +
-    'QuickBooks, and nothing else. With an inline donation it calls `postChargeToQbo`, creating the documents shown under the ACTIVE strategy in the connected company file. Each one carries `[source_test_tag:<tag>]` in its `PrivateNote`, so `POST /api/ops/test-artifact-cleanup?tag=<tag>` can find and remove it. A `chargeId` request never posts, on a dry run or otherwise — it reads Stripe and stops there. Stripe and Salesforce are never written by this endpoint.\n\n' +
+    'QuickBooks, and nothing else. With an inline donation it calls `postChargeToQbo`, creating the documents shown under the ACTIVE strategy in the connected company file. Each one carries `[source_test_tag:<tag>]` in its `PrivateNote`, so `POST /api/ops/test-artifact-cleanup?tag=<tag>` can find and remove it. A `chargeId` request never posts, on a dry run or otherwise — it reads Stripe and stops there, so pairing a `chargeId` with `dryRun: false` writes nothing at all. That combination is not silently accepted: the response echoes `dryRun: true`, sets `posted.requestedButNotPerformed`, and puts a warning at the head of `warnings` naming `dryRun` as the ignored parameter and pointing at the inline `donation` payload as the route that does write. Stripe and Salesforce are never written by this endpoint.\n\n' +
     'A non-dry-run call with an unknown processor fee is refused rather than posting a guess.',
   tags: ['Ops', 'QBO'],
   operationId: 'opsTestQuickbooks',

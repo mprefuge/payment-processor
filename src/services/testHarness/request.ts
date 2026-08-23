@@ -1,6 +1,5 @@
 import type { HttpRequest, HttpResponseInit } from '@azure/functions';
 
-import { readBooleanQuery } from '../../lib/http';
 import { parseBoolean } from '../../lib/parsing';
 import {
   DEFAULT_TEST_ARTIFACT_TAG,
@@ -55,6 +54,22 @@ export const stripeChargeReads = (chargeId: string): OutboundReadReport => ({
     'a list. Nothing was written to Stripe, QuickBooks or Salesforce.',
 });
 
+/**
+ * The warning an endpoint emits when it cannot honour an explicit `dryRun: false`.
+ *
+ * Quietly downgrading a requested write to a preview is the exact failure this harness
+ * exists to catch, and `success: true` beside an empty `warnings` array reads as "it wrote"
+ * to the person who asked it to write. So the ignored parameter is named, the fact that
+ * nothing was written is stated outright rather than left to be inferred from
+ * `posted.attempted: false`, and the caller is pointed at the request that would have
+ * written.
+ */
+export const ignoredDryRunWarning = (reason: string, instead: string): string =>
+  'IGNORED PARAMETER `dryRun`. You passed dryRun=false, but NOTHING WAS WRITTEN — nothing ' +
+  `was created in QuickBooks, Stripe or Salesforce. ${reason} This response therefore ` +
+  'echoes dryRun=true, because a read-only preview is how the call actually behaved. ' +
+  instead;
+
 export const respond = (status: number, jsonBody: Record<string, unknown>): HttpResponseInit => ({
   status,
   jsonBody,
@@ -77,6 +92,32 @@ const readBody = async (request: HttpRequest): Promise<Record<string, unknown>> 
   return {};
 };
 
+/**
+ * `parseBoolean` folds an absent value and an unrecognised one into the caller's default,
+ * which is right for reading a flag but loses the distinction that matters here: someone
+ * who omits `dryRun` is getting the documented default and has been ignored by nobody,
+ * while someone who wrote `dryRun: false` asked for a write and is owed a warning when the
+ * endpoint cannot give them one. Parsing twice with opposite defaults recovers it — the two
+ * agree only when the value was actually recognised.
+ */
+const strictBoolean = (value: unknown): boolean | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const asTrue = parseBoolean(value, true);
+  return asTrue === parseBoolean(value, false) ? asTrue : null;
+};
+
+/** The raw `dryRun` as sent, before parsing, from wherever this request carries it. */
+const readRawQuery = (request: HttpRequest, key: string): unknown => {
+  if (request.query && typeof request.query.get === 'function') {
+    return request.query.get(key);
+  }
+
+  return (request.query as unknown as Record<string, unknown> | undefined)?.[key];
+};
+
 const readQuery = (request: HttpRequest, key: string): string | null => {
   if (request.query && typeof request.query.get === 'function') {
     const value = request.query.get(key);
@@ -88,6 +129,11 @@ const readQuery = (request: HttpRequest, key: string): string | null => {
 
 export interface ParsedHarnessRequest {
   dryRun: boolean;
+  /**
+   * True only when the caller actually sent `dryRun`, in the query or the body. An endpoint
+   * that cannot honour `dryRun: false` warns on this and not on the bare default.
+   */
+  dryRunExplicit: boolean;
   tag: string;
   chargeId: string | null;
   donation: ResolvedDonation;
@@ -106,11 +152,11 @@ export const parseHarnessRequest = async (
 ): Promise<ParseResult> => {
   const body = await readBody(request);
 
-  const dryRun = readBooleanQuery(
-    request,
-    'dryRun',
-    typeof body.dryRun === 'boolean' ? body.dryRun : parseBoolean(body.dryRun, true)
-  );
+  // Query first, then body, then the default of true — the same precedence as before, but
+  // keeping hold of whether either source actually said anything.
+  const dryRunValue = strictBoolean(readRawQuery(request, 'dryRun')) ?? strictBoolean(body.dryRun);
+  const dryRun = dryRunValue ?? true;
+  const dryRunExplicit = dryRunValue !== null;
 
   const tagRaw = readQuery(request, 'tag') ?? body.tag;
   const tag =
@@ -177,7 +223,15 @@ export const parseHarnessRequest = async (
 
   return {
     ok: true,
-    value: { dryRun, tag, chargeId, donation, donationWarnings: warnings, liveMode },
+    value: {
+      dryRun,
+      dryRunExplicit,
+      tag,
+      chargeId,
+      donation,
+      donationWarnings: warnings,
+      liveMode,
+    },
   };
 };
 
