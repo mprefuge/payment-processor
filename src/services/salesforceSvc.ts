@@ -316,7 +316,16 @@ const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
  * wiped minutes after every gift -- leaving finance unable to separate the
  * base gift from the covered fee.
  *
- * Deliberately scoped to these three fields rather than skipping every null:
+ * `amount_fee__c` and `amount_net__c` are here for a different reason with the
+ * same shape. Both are read straight off the Stripe balance transaction
+ * (`mapStripeToTransaction`, src/domain/transactions.ts:697-702), and for an ACH
+ * debit that object does not exist yet when `payment_intent.succeeded` fires --
+ * the debit settles days later. `centsToMajorUnits(undefined)` yields `null`,
+ * so every ACH gift used to write a null over whatever fee was already stored.
+ * `amount_gross__c` is deliberately NOT in this set: it falls back to
+ * `charge.amount`, so it is always a real number and a null there is meaningful.
+ *
+ * Deliberately scoped to these five fields rather than skipping every null:
  * `markPostedToQbo` clears `posting_error__c` with an explicit null, and
  * `clearStaleQboDocReference` clears `qbo_doc_type__c` / `qbo_doc_id__c` the
  * same way. Those writes are legitimate and must keep working.
@@ -325,6 +334,8 @@ export const NULL_MEANS_UNKNOWN_FIELDS: ReadonlySet<string> = new Set([
   'frequency__c',
   'cover_fees__c',
   'cover_fees_amount__c',
+  'amount_fee__c',
+  'amount_net__c',
 ]);
 
 export const sanitizeTransactionRecord = (input: TransactionRecordInput): TransactionRecord => {

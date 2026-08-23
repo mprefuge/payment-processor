@@ -14,7 +14,12 @@ import {
   centsToPositiveMajorUnits,
   findCheckoutSessionForPaymentIntent,
   normalizeStripeId,
+  extractBalanceTransactionId,
   resolveBalanceTransaction,
+  resolveBalanceTransactionOutcome,
+  isChargeAwaitingSettlement,
+  isBalanceTransactionPending,
+  type BalanceTransactionAbsenceReason,
   resolveCharge,
   resolveStripeCustomer,
   timestampToDate,
@@ -109,6 +114,8 @@ interface ProcessPaymentIntentOptions {
 interface SuccessfulPaymentIntentResources {
   charge: Stripe.Charge | null;
   balanceTransaction: Stripe.BalanceTransaction | null;
+  /** Why the balance transaction is missing, when it is. Null when one was found. */
+  balanceTransactionAbsence: BalanceTransactionAbsenceReason | null;
   checkoutSession: Stripe.Checkout.Session | null;
   stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null;
 }
@@ -404,7 +411,8 @@ const loadSuccessfulPaymentIntentResources = async (
   paymentIntent: Stripe.PaymentIntent
 ): Promise<SuccessfulPaymentIntentResources> => {
   const charge = await resolveCharge(stripe, paymentIntent);
-  const balanceTransaction = await resolveBalanceTransaction(stripe, charge, paymentIntent);
+  const { balanceTransaction, absence: balanceTransactionAbsence } =
+    await resolveBalanceTransactionOutcome(stripe, charge, paymentIntent);
   const checkoutSession = await resolveCheckoutSessionForPaymentIntent(
     context,
     stripe,
@@ -420,6 +428,7 @@ const loadSuccessfulPaymentIntentResources = async (
   return {
     charge,
     balanceTransaction,
+    balanceTransactionAbsence,
     checkoutSession,
     stripeCustomer,
   };
@@ -659,6 +668,80 @@ const resolveSuccessfulPaymentIntentOverrideId = async (
   );
 };
 
+/**
+ * Record, on the Transaction__c record itself, that a QuickBooks posting could
+ * not happen yet.
+ *
+ * The alternative -- the bare `return` this replaces -- left an ACH gift in
+ * Salesforce with no QuickBooks document and nothing anywhere saying so. The
+ * webhook still answers 200, so Stripe never redelivers, and the gap was
+ * invisible until someone reconciled by hand. Writing `posting_error__c` puts
+ * it in the same place, and the same reports, as the gross/fee mismatch guard
+ * below, and makes it recoverable through `stripe/true-up?resubmit=true`.
+ *
+ * `markPostedToQbo` clears `posting_error__c` with an explicit null, so when the
+ * settlement path does post, this note clears itself.
+ */
+const recordAccountingDeferral = async (
+  context: HttpContext,
+  salesforce: SalesforceSvc,
+  paymentIntent: Stripe.PaymentIntent,
+  message: string
+): Promise<void> => {
+  context.log('[StripeWebhook] ' + message, { paymentIntentId: paymentIntent.id });
+
+  try {
+    await salesforce.upsertTransactionByExternalId(
+      {
+        stripe_payment_intent_id__c: paymentIntent.id,
+        transaction_type__c: 'charge',
+        status__c: 'paid',
+        posting_error__c: message.slice(0, 255),
+      },
+      'stripe_payment_intent_id__c'
+    );
+  } catch (storeError) {
+    context.log('[StripeWebhook] Failed to store accounting deferral in Salesforce', {
+      paymentIntentId: paymentIntent.id,
+      error: storeError instanceof Error ? storeError.message : String(storeError),
+    });
+  }
+};
+
+/**
+ * Explain a missing balance transaction in words a human can act on.
+ *
+ * This text lands in `posting_error__c`, so it has to be readable by whoever
+ * works the exception report, and specific enough to tell an unsettled ACH debit
+ * (normal, self-healing) apart from a balance transaction Stripe refused to hand
+ * over (an operational fault worth chasing).
+ */
+const describeBalanceTransactionAbsence = (
+  paymentIntent: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  absence: BalanceTransactionAbsenceReason | null
+): string => {
+  if (absence?.kind === 'retrieve_failed') {
+    return `Deferred QuickBooks posting: balance transaction ${absence.balanceTransactionId} could not be retrieved (${absence.message}). Retry with stripe/true-up?resubmit=true once Stripe returns it.`;
+  }
+
+  const method = charge?.payment_method_details?.type ?? 'unknown';
+
+  // An ACH debit's charge sits in `pending` from submission until the bank
+  // settles it days later, and Stripe attaches no balance transaction until
+  // then. That is the expected reason for a missing fee, and it clears itself
+  // when charge.succeeded / charge.updated arrives.
+  if (isChargeAwaitingSettlement(charge)) {
+    return `Deferred QuickBooks posting: charge ${
+      charge?.id ?? paymentIntent.id
+    } has not settled yet (status pending, payment method ${method}), so Stripe has not reported a fee. Will post on settlement.`;
+  }
+
+  return `Deferred QuickBooks posting: Stripe has not attached a balance transaction to ${
+    charge?.id ?? paymentIntent.id
+  } yet (payment method ${method}), so the fee is unknown. Will post when the charge settles.`;
+};
+
 const postSuccessfulPaymentIntentToAccounting = async (
   context: HttpContext,
   deps: StripeWebhookDependencies,
@@ -668,9 +751,31 @@ const postSuccessfulPaymentIntentToAccounting = async (
   charge: Stripe.Charge | null,
   balanceTransaction: Stripe.BalanceTransaction | null,
   stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null,
-  checkoutSession: Stripe.Checkout.Session | null
+  checkoutSession: Stripe.Checkout.Session | null,
+  balanceTransactionAbsence: BalanceTransactionAbsenceReason | null = null
 ): Promise<void> => {
-  if (!env.accounting.syncEnabled || !balanceTransaction?.id) {
+  if (!env.accounting.syncEnabled) {
+    return;
+  }
+
+  // The whole point of this change. This used to be part of a bare
+  // `if (!env.accounting.syncEnabled || !balanceTransaction?.id) return;` --
+  // an ACH gift whose debit had not settled produced no QuickBooks document, no
+  // log above debug, no `posting_error__c`, and a 200 back to Stripe so it was
+  // never redelivered. Now the absence is written where finance can see it, and
+  // the settlement path below posts it for real when the fee arrives.
+  //
+  // Deliberately gated on the balance transaction alone, not on
+  // `charge.status === 'pending'`: whenever Stripe has given us a real balance
+  // transaction the fee on it is the fee, and refusing to post it would stall
+  // gifts that are perfectly postable today.
+  if (!balanceTransaction?.id) {
+    await recordAccountingDeferral(
+      context,
+      salesforce,
+      paymentIntent,
+      describeBalanceTransactionAbsence(paymentIntent, charge, balanceTransactionAbsence)
+    );
     return;
   }
 
@@ -730,6 +835,24 @@ const postSuccessfulPaymentIntentToAccounting = async (
       return;
     }
 
+    // `status: 'pending'` means the funds have not reached the available balance
+    // yet -- not that the fee is provisional. Stripe writes card balance
+    // transactions in `pending` too, with `available_on` days out, and those fees
+    // are final on arrival; deferring on this flag would stall every card gift.
+    // We post, and record that the figure came from an unsettled balance
+    // transaction so the daily fee reconciliation can catch a restatement.
+    if (isBalanceTransactionPending(resolvedBt)) {
+      context.log(
+        '[StripeWebhook] Posting a charge whose balance transaction is still pending; fee may be restated',
+        {
+          paymentIntentId: paymentIntent.id,
+          balanceTransactionId: resolvedBt.id,
+          availableOn: resolvedBt.available_on ?? null,
+          fee: resolvedBt.fee,
+        }
+      );
+    }
+
     try {
       const posting = await deps.accounting.postChargeToQbo({
         gross: Math.abs(resolvedBt.amount),
@@ -779,6 +902,165 @@ const postSuccessfulPaymentIntentToAccounting = async (
   });
 };
 
+// ── Settlement of a payment whose fee was not knowable when it succeeded ──────
+//
+// Stripe's event sequence for an ACH (`us_bank_account`) debit:
+//
+//   payment_intent.created
+//   payment_intent.processing      debit submitted; charge.status = 'pending'
+//   charge.pending                 no balance transaction attached yet
+//   ...  three to five business days ...
+//   charge.succeeded / charge.updated   bank settled; balance_transaction now set
+//   payment_intent.succeeded
+//   checkout.session.async_payment_succeeded   (Checkout-initiated payments only)
+//
+// The fee lives on the balance transaction, and for ACH that object does not
+// exist until the bottom half of that list. `charge.updated` is the event that
+// actually carries the news -- it is emitted when Stripe attaches the balance
+// transaction -- and unlike `checkout.session.async_payment_succeeded` it fires
+// for payments created straight off the API as well as through Checkout. Both
+// `charge.succeeded` and `charge.updated` are wired here because Stripe does not
+// guarantee which one carries the newly attached balance transaction.
+//
+// This deliberately does NOT re-run `processSuccessfulPaymentIntent`: that would
+// re-enter `sendFirstTransactionNotifications`, which has no durable dedupe of
+// its own, and email the donor a second time. It refreshes the money fields and
+// runs the posting that was deferred, nothing else.
+
+/**
+ * Post a charge to QuickBooks once its balance transaction finally exists.
+ *
+ * Every exit is a no-op for a payment that is already handled:
+ *  - a card charge posted at `payment_intent.succeeded` carries the `bt_<id>`
+ *    marker, so this returns before doing any work;
+ *  - a charge whose Transaction__c does not exist yet is left to the
+ *    payment-intent path, which is mid-flight and will post it itself.
+ */
+export const handleChargeSettled = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies
+): Promise<void> => {
+  if (!env.accounting.syncEnabled) {
+    return;
+  }
+
+  const charge = event.data.object as Stripe.Charge;
+
+  // Still in flight. `charge.updated` also fires for metadata edits and other
+  // changes that say nothing about settlement.
+  if (charge.status !== 'succeeded') {
+    return;
+  }
+
+  const balanceTransactionId = extractBalanceTransactionId(charge.balance_transaction);
+  if (!balanceTransactionId) {
+    return;
+  }
+
+  // The cheap filter that keeps the card path untouched: if this balance
+  // transaction was already posted, there is nothing to settle.
+  if (await deps.idempotencyStore.isProcessed(`bt_${balanceTransactionId}`)) {
+    return;
+  }
+
+  const paymentIntentId = normalizeStripeId(charge.payment_intent);
+  if (!paymentIntentId) {
+    return;
+  }
+
+  const salesforce = await deps.getSalesforceSvc();
+
+  // No Transaction__c yet means `payment_intent.succeeded` has not run. It owns
+  // the initial upsert and will post this itself; stepping in here would post to
+  // QuickBooks against a Salesforce record that does not exist.
+  const existing = await salesforce.findTransactionRecordByExternalId?.(
+    'stripe_payment_intent_id__c',
+    paymentIntentId
+  );
+  if (!existing) {
+    return;
+  }
+  if (existing.postedToQbo === true) {
+    return;
+  }
+
+  context.log(
+    '[StripeWebhook] Charge settled with a balance transaction; posting deferred charge',
+    {
+      chargeId: charge.id,
+      paymentIntentId,
+      balanceTransactionId,
+    }
+  );
+
+  const stripe = ensureStripeClient(deps, event);
+
+  let paymentIntent: Stripe.PaymentIntent;
+  try {
+    paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  } catch (error) {
+    context.log('[StripeWebhook] Failed to retrieve payment intent for settled charge', {
+      chargeId: charge.id,
+      paymentIntentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  const { balanceTransaction, absence } = await resolveBalanceTransactionOutcome(
+    stripe,
+    charge,
+    paymentIntent
+  );
+
+  const checkoutSession = await resolveCheckoutSessionForPaymentIntent(
+    context,
+    stripe,
+    paymentIntent
+  );
+  const stripeCustomer = await resolveStripeCustomerForTransaction(
+    context,
+    stripe,
+    charge,
+    paymentIntent
+  );
+
+  // Write the fee the original webhook could not know. Scoped to the money
+  // fields on purpose: re-running the full mapping would push nulls over the
+  // campaign and contact enrichment the payment-intent path resolved.
+  const settledFields: TransactionUpsertDTO = {
+    stripe_payment_intent_id__c: paymentIntentId,
+    transaction_type__c: 'charge',
+    status__c: 'paid',
+  } as TransactionUpsertDTO;
+
+  if (balanceTransaction) {
+    settledFields.stripe_balance_transaction_id__c = balanceTransaction.id;
+    settledFields.amount_gross__c = centsToPositiveMajorUnits(balanceTransaction.amount);
+    settledFields.amount_fee__c = centsToPositiveMajorUnits(balanceTransaction.fee);
+    settledFields.amount_net__c = centsToPositiveMajorUnits(balanceTransaction.net);
+  }
+
+  const upsertResult = await salesforce.upsertTransactionByExternalId(
+    settledFields,
+    'stripe_payment_intent_id__c'
+  );
+
+  await postSuccessfulPaymentIntentToAccounting(
+    context,
+    deps,
+    salesforce,
+    upsertResult,
+    paymentIntent,
+    charge,
+    balanceTransaction,
+    stripeCustomer,
+    checkoutSession,
+    absence
+  );
+};
+
 const formatPaymentIntentErrorMessage = (paymentIntent: Stripe.PaymentIntent): string | null => {
   const lastError = paymentIntent.last_payment_error;
   if (!lastError) {
@@ -811,7 +1093,7 @@ const processSuccessfulPaymentIntent = async ({
   eventId,
   livemode,
 }: ProcessPaymentIntentOptions): Promise<void> => {
-  const { charge, balanceTransaction, checkoutSession, stripeCustomer } =
+  const { charge, balanceTransaction, balanceTransactionAbsence, checkoutSession, stripeCustomer } =
     await loadSuccessfulPaymentIntentResources(context, stripe, paymentIntent);
 
   const transaction = mapStripeToTransaction({
@@ -882,7 +1164,8 @@ const processSuccessfulPaymentIntent = async ({
     charge,
     balanceTransaction,
     stripeCustomer,
-    checkoutSession
+    checkoutSession,
+    balanceTransactionAbsence
   );
 
   await sendFirstTransactionNotifications(

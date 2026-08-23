@@ -10,6 +10,7 @@ import {
   handleCheckoutSessionExpired,
 } from '../../stripe/handlers/common';
 import {
+  handleChargeSettled,
   handlePaymentIntentActionRequired,
   handlePaymentIntentCanceled,
   handlePaymentIntentFailed,
@@ -51,6 +52,12 @@ const buildStripeEventHandlers = (): Record<string, StripeEventHandler> => {
     'payment_intent.payment_failed': handlePaymentIntentFailed,
     'payment_intent.canceled': handlePaymentIntentCanceled,
     'payment_intent.requires_action': handlePaymentIntentActionRequired,
+    // An ACH debit settles days after payment_intent.succeeded, and only then
+    // does Stripe attach the balance transaction that carries the fee. These two
+    // events are where that news arrives; handleChargeSettled is a no-op for a
+    // charge that was already posted, which is every card charge.
+    'charge.succeeded': handleChargeSettled,
+    'charge.updated': handleChargeSettled,
     'charge.refunded': handleChargeRefunded,
     'charge.dispute.created': handleDisputeCreated,
     'charge.dispute.closed': handleDisputeClosed,
@@ -96,9 +103,9 @@ const stripeEventHandlers: Record<string, StripeEventHandler> = buildStripeEvent
  * WARN log noise in production.
  */
 const KNOWN_IGNORED_EVENT_TYPES = new Set<string>([
-  // Charge lifecycle: covered via payment_intent.succeeded / checkout.session.completed
-  'charge.succeeded',
-  'charge.updated',
+  // Charge lifecycle: covered via payment_intent.succeeded / checkout.session.completed.
+  // 'charge.succeeded' and 'charge.updated' are no longer ignored -- they are the
+  // settlement signal for ACH; see the handler map above.
   'charge.captured',
   // Payment intent early-stage events: no actionable state yet
   'payment_intent.created',
