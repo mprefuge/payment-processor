@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 
 import env from '../../config/env';
+import { logger } from '../../lib/logger';
 import {
   mapStripeToTransaction,
   readDonorIntentFromMetadata,
@@ -794,7 +795,10 @@ const postSuccessfulPaymentIntentToAccounting = async (
     const message = `Refusing to post charge: balance transaction ${resolvedBt.id} is missing finite amount/fee (amount=${String(
       resolvedBt.amount
     )}, fee=${String(resolvedBt.fee)})`;
-    context.log('[StripeWebhook] ' + message, {
+    // `context.log` lands at Information severity, which hides a genuine posting
+    // failure from any App Insights alert filtered on severity >= Error. Use the
+    // shared logger's error level so this surfaces where failures are looked for.
+    logger.error('[StripeWebhook] ' + message, {
       paymentIntentId: paymentIntent.id,
       balanceTransactionId: resolvedBt.id,
     });
@@ -873,7 +877,9 @@ const postSuccessfulPaymentIntentToAccounting = async (
       await deps.idempotencyStore.markProcessed(btKey);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      context.log('[StripeWebhook] Failed to post charge to accounting or update Salesforce', {
+      // Error level, not `context.log`: this is a real posting failure and must be
+      // reachable by an App Insights filter on severity >= Error.
+      logger.error('[StripeWebhook] Failed to post charge to accounting or update Salesforce', {
         paymentIntentId: paymentIntent.id,
         balanceTransactionId: balanceTransaction.id,
         error: errorMessage,

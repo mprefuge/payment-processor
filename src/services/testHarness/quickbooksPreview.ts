@@ -510,11 +510,12 @@ export const buildQboPreviewForCharge = async (
     warnings.push(
       'NO BALANCE TRANSACTION. Stripe has not settled this charge yet — the usual cause is ' +
         'an ACH debit previewed before settlement. Two consequences, both real: (1) the live ' +
-        'webhook path posts NOTHING for this charge, because it returns early when the ' +
-        'balance transaction has no id, so today this charge silently never reaches ' +
-        'QuickBooks; (2) the fee below is UNKNOWN, not zero — and under the sales-receipt ' +
-        'strategy that absence also suppresses the paired FEE- journal entry a settled ' +
-        'charge would produce. Do not read these amounts as final.'
+        'webhook path posts nothing for this charge YET — it records a deferral in ' +
+        'posting_error__c on the Salesforce record and posts on settlement, provided ' +
+        'charge.succeeded and charge.updated are enabled on the Stripe webhook endpoint; ' +
+        '(2) the fee below is UNKNOWN, not zero — and under the sales-receipt strategy that ' +
+        'absence also suppresses the paired FEE- journal entry a settled charge would ' +
+        'produce. Do not read these amounts as final.'
     );
   }
 
