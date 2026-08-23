@@ -165,6 +165,28 @@ describe('env config', () => {
         ACCOUNTING_POSTING_STRATEGY: 'sales-receipt',
       });
       expect(env.accounting.postingStrategy).toBe('sales-receipt');
+      expect(env.accounting.postingStrategyConfigured).toBe('sales-receipt');
+    });
+
+    // `journal-entry` was published in our own operator docs but was never an enum member,
+    // so it used to take down the whole function app at module load. It names the same
+    // strategy as `je-transfer`, so it is honoured as an alias rather than rejected.
+    it('accepts journal-entry as a legacy alias for je-transfer', async () => {
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        ACCOUNTING_POSTING_STRATEGY: 'journal-entry',
+      });
+      expect(env.accounting.postingStrategy).toBe('je-transfer');
+      // The operator's literal value is preserved so the startup log can show the alias.
+      expect(env.accounting.postingStrategyConfigured).toBe('journal-entry');
+    });
+
+    it('normalizes case and surrounding whitespace on the strategy value', async () => {
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        ACCOUNTING_POSTING_STRATEGY: '  Journal-Entry  ',
+      });
+      expect(env.accounting.postingStrategy).toBe('je-transfer');
     });
 
     it('auto-enables client-credentials when credentials present and mode not explicitly set', async () => {
@@ -216,10 +238,18 @@ describe('env config', () => {
   });
 
   describe('invalid values', () => {
+    // An unrecognised value must fail loudly. Silently falling back to a strategy the
+    // operator did not choose would post a different set of documents than intended.
     it('throws on invalid ACCOUNTING_POSTING_STRATEGY value', async () => {
       await expect(
         loadEnvWith({ ...MINIMAL_ENV, ACCOUNTING_POSTING_STRATEGY: 'invalid-strategy' })
-      ).rejects.toThrow();
+      ).rejects.toThrow(/je-transfer.*sales-receipt/s);
+    });
+
+    it('names the accepted values, including the alias, in the rejection message', async () => {
+      await expect(
+        loadEnvWith({ ...MINIMAL_ENV, ACCOUNTING_POSTING_STRATEGY: 'bank-deposit' })
+      ).rejects.toThrow(/journal-entry/);
     });
 
     it('throws on invalid ACCOUNTING_SYNC_ENABLED value', async () => {

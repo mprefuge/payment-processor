@@ -37,7 +37,7 @@ Go to: Azure Portal → Function App → Configuration → Application Settings
 #### Optional
 - [ ] `IDEMPOTENCY_TABLE_NAME` = `IdempotencyState` (default)
 - [ ] `DISABLE_AZURE_TABLES` = `0` (use `1` for testing without Azure Tables)
-- [ ] `ACCOUNTING_POSTING_STRATEGY` = `journal-entry` or `sales-receipt`
+- [ ] `ACCOUNTING_POSTING_STRATEGY` = `je-transfer` (default) or `sales-receipt` — `journal-entry` is accepted as a legacy alias for `je-transfer`; any other value fails startup
 
 ---
 

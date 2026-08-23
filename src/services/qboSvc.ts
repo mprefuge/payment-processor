@@ -239,7 +239,6 @@ interface BuildSalesReceiptInput {
   date: string | Date;
   revenueItemName: string;
   depositAccountName?: string;
-  feesAccountName?: string;
   stripeFeeAmountCents?: number;
   stripeChargeId?: string | null;
   stripeInvoiceId?: string | null;
@@ -296,6 +295,12 @@ interface BuildFeesJournalEntryInput {
   date: string | Date;
   feesAccountId?: string;
   clearingAccountId?: string;
+  /**
+   * Class for the fee expense line, so the fee is classed the same way the je-transfer
+   * strategy classes it (see buildSingleJE). Only the expense line carries it; the clearing
+   * credit is a cash movement and stays unclassed, matching buildSingleJE.
+   */
+  classRef?: QuickBooksReference | null;
 }
 
 interface BuildSingleJournalEntryInput {
@@ -1944,7 +1949,6 @@ export const buildSalesReceipt = ({
   date,
   revenueItemName,
   depositAccountName = env.quickBooks.accounts.stripeClearing,
-  feesAccountName,
   stripeFeeAmountCents = 0,
   stripeChargeId = null,
   stripeInvoiceId = null,
@@ -2063,35 +2067,20 @@ export const buildSalesReceipt = ({
     });
   }
 
-  // Add Stripe fee line if applicable (platform-paid fee). Represented as a negative amount
-  // on the sales receipt so the net deposit reflects fees without creating a separate JE.
-  const stripeFee = ensurePositiveAmount(stripeFeeAmountCents ?? 0, 'Stripe fee amount');
-  if (stripeFee > 0) {
-    const stripeFeeAmount = -centsToDollars(stripeFee);
-    if (!Number.isFinite(stripeFeeAmount)) {
-      throw new Error(
-        `Invalid stripe fee amount calculated for sales receipt: ${stripeFeeAmount} (from ${stripeFee} cents)`
-      );
-    }
-
-    const feeItemAccountRef =
-      typeof feesAccountName === 'string' && feesAccountName.trim()
-        ? createAccountRef(feesAccountName)
-        : undefined;
-
-    lines.push({
-      Amount: stripeFeeAmount,
-      DetailType: 'SalesItemLineDetail',
-      Description: 'Stripe Processing Fee',
-      SalesItemLineDetail: {
-        ItemRef: createItemRef(itemReference),
-        Qty: 1,
-        UnitPrice: stripeFeeAmount,
-        ...(classRef ? { ClassRef: classRef } : {}),
-        ...(feeItemAccountRef ? { ItemAccountRef: feeItemAccountRef } : {}),
-      },
-    });
-  }
+  // NOTE: the processor fee is deliberately NOT a line on this receipt.
+  //
+  // A SalesReceipt is the donor-facing document and must state what the donor actually
+  // paid — the gross. The earlier implementation appended a negative SalesItemLine for the
+  // Stripe fee, carrying the *revenue* ItemRef with an ItemAccountRef pointed at the fees
+  // account. QuickBooks posts a sales line to the income account configured on the Item
+  // itself; ItemAccountRef on the line does not redirect it. That negative line therefore
+  // landed as contra-revenue: revenue was booked net and no processor-fee expense ever
+  // reached the P&L.
+  //
+  // The fee is now posted as its own paired journal entry (Dr Fees / Cr Stripe Clearing) by
+  // postChargeAsSalesReceipt, which is the correct nonprofit treatment: revenue at gross,
+  // fee as its own expense, and the clearing account netting to the Stripe payout. The fee
+  // is still reported to the donor through CustomerMemo below.
 
   const receipt: QuickBooksSalesReceipt = {
     DocNumber: docNumber,
@@ -2202,11 +2191,14 @@ export const buildFeesJE = ({
   date,
   feesAccountId = env.quickBooks.accounts.fees,
   clearingAccountId = env.quickBooks.accounts.stripeClearing,
+  classRef,
 }: BuildFeesJournalEntryInput): QuickBooksJournalEntry => {
   const feeAmount = ensurePositiveAmount(feeAmountCents, 'Fee amount');
 
   const lines = [
-    createJournalEntryLine('debit', feesAccountId, feeAmount, memo),
+    createJournalEntryLine('debit', feesAccountId, feeAmount, memo, {
+      classRef: classRef ?? null,
+    }),
     createJournalEntryLine('credit', clearingAccountId, feeAmount, memo),
   ].filter((line): line is QuickBooksJournalEntryLine => Boolean(line));
 
@@ -3616,9 +3608,6 @@ const postChargeAsSalesReceipt = async (input: {
     depositAccountName: depositAccountRef.name
       ? `${depositAccountRef.name}|${depositAccountRef.value}`
       : depositAccountRef.value,
-    feesAccountName: feesAccountRef.name
-      ? `${feesAccountRef.name}|${feesAccountRef.value}`
-      : feesAccountRef.value,
     stripeFeeAmountCents: feeAmount,
     stripeChargeId: stripe?.charge?.id ?? null,
     stripeInvoiceId:
@@ -3639,6 +3628,49 @@ const postChargeAsSalesReceipt = async (input: {
   });
 
   const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
+
+  // Post the processor fee as its own paired journal entry (Dr Fees / Cr Stripe Clearing).
+  //
+  // The receipt deposits the GROSS into Stripe Clearing; this entry takes the fee back out,
+  // so Clearing nets to the Stripe payout while revenue stays at gross and the fee shows up
+  // as an expense in the P&L.
+  //
+  // Ordering matters for retry safety: the receipt is posted first, and the receipt and the
+  // fee entry each carry their own DocNumber, so postToQbo's duplicate check short-circuits
+  // whichever half already exists. A retry after a partial failure therefore completes the
+  // pair instead of double-posting either half.
+  //
+  // 'FEE' is the same length as the receipt's 'CHG' prefix, so buildDocNumber leaves both
+  // DocNumbers with an identical date and charge-id tail: CHG-20240301-XXXXXXXX pairs with
+  // FEE-20240301-XXXXXXXX. That makes the pair findable from either side in QuickBooks.
+  if (feeAmount > 0) {
+    const feeDocNumber = buildDocNumber('FEE', date, feeAmount, chargeId);
+    const feeJournalEntry = buildFeesJE({
+      docNumber: feeDocNumber,
+      feeAmountCents: feeAmount,
+      memo: normalizedMemo,
+      date,
+      feesAccountId: feesAccountRef.value,
+      clearingAccountId: depositAccountRef.value,
+      // Mirrors the receipt's class when one is supplied. NOTE: the Stripe webhook forward
+      // path never writes qbo_class metadata (see formatStripeMetadata in
+      // src/handlers/processTransaction.js), so this is currently only exercised by the
+      // manual/Salesforce sync paths that do set it.
+      classRef: toTrimmed(lineOverrides.classRef ?? null)
+        ? createClassRef(lineOverrides.classRef!)
+        : null,
+    });
+
+    const feeJournalResult = await postJournalEntry(feeJournalEntry, options);
+    logger.info('[QBO] Posted paired processor-fee journal entry for sales receipt', {
+      salesReceiptDocNumber,
+      salesReceiptId: salesReceiptResult.id,
+      feeDocNumber,
+      feeJournalEntryId: feeJournalResult.id,
+      feeAmountCents: feeAmount,
+    });
+  }
+
   return { qboId: salesReceiptResult.id, type: 'sales-receipt' };
 };
 
@@ -3748,6 +3780,37 @@ const buildResolvedPayoutTransfer = async (input: {
   };
 };
 
+/**
+ * Emits the effective accounting posting strategy exactly once per process.
+ *
+ * ACCOUNTING_POSTING_STRATEGY is supplied as a deployment secret, so without this line the
+ * only way to find out which strategy a running function app is using is to read the secret.
+ * The value is a strategy name, not a credential — no secret material is logged.
+ */
+let postingStrategyLogged = false;
+const logPostingStrategyOnce = (): void => {
+  if (postingStrategyLogged) {
+    return;
+  }
+  postingStrategyLogged = true;
+
+  const configured = env.accounting.postingStrategyConfigured ?? env.accounting.postingStrategy;
+  logger.info('[QBO] Accounting posting strategy in effect', {
+    strategy: env.accounting.postingStrategy,
+    configuredValue: configured,
+    alias: configured !== env.accounting.postingStrategy,
+    documents:
+      env.accounting.postingStrategy === 'sales-receipt'
+        ? 'SalesReceipt at gross + paired Dr Fees / Cr Stripe Clearing journal entry'
+        : 'single journal entry: Dr Clearing gross / Cr Revenue gross / Dr Fees / Cr Clearing',
+  });
+};
+
+/** Test seam: lets suites assert the once-per-process strategy log independently. */
+export const __resetPostingStrategyLogForTests = (): void => {
+  postingStrategyLogged = false;
+};
+
 export const postChargeToQbo = async ({
   gross,
   fee,
@@ -3758,6 +3821,7 @@ export const postChargeToQbo = async ({
   cleanupTag,
   options,
 }: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
+  logPostingStrategyOnce();
   const grossAmount = ensurePositiveAmount(gross, 'Gross amount');
   const feeAmount = ensurePositiveAmount(fee, 'Fee amount');
   const normalizedMemo = appendTestArtifactMarker(

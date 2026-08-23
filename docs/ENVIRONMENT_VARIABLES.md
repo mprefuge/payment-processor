@@ -51,7 +51,7 @@ QuickBooks becomes operationally required when `ACCOUNTING_SYNC_ENABLED=true`.
 | Variable | Fallbacks | Required | Notes |
 | --- | --- | --- | --- |
 | `ACCOUNTING_SYNC_ENABLED` | - | No | Defaults to `false`. Set `true` only when QuickBooks is configured. |
-| `ACCOUNTING_POSTING_STRATEGY` | - | No | `je-transfer` or `sales-receipt`. Defaults to `je-transfer`. |
+| `ACCOUNTING_POSTING_STRATEGY` | - | No | `je-transfer` or `sales-receipt`. Defaults to `je-transfer`. `journal-entry` is accepted as a legacy alias for `je-transfer`; any other value throws `EnvConfigError` at startup. Both strategies book revenue at gross and the processor fee as its own expense — see [QBO posting strategies](./QBO_POSTING_STRATEGIES.md). |
 | `QBO_ENV` | `QBO_ENVIRONMENT` | No | `sandbox` or `production`. Defaults to `sandbox`. |
 | `QBO_REALM_ID` | `QBO_COMPANY_ID` | Conditional | Required when accounting sync is enabled. |
 | `QBO_CLIENT_ID` | - | Conditional | Required when accounting sync is enabled. |

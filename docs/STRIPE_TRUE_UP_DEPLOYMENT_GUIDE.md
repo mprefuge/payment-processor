@@ -73,7 +73,7 @@ Configure these in your Azure Function App (Azure Portal → Function App → Co
 | Variable | Required | Description | Default |
 |----------|----------|-------------|---------|
 | `DISABLE_AZURE_TABLES` | No | Use in-memory store | `0` (disabled) |
-| `ACCOUNTING_POSTING_STRATEGY` | No | QBO posting method | `journal-entry` |
+| `ACCOUNTING_POSTING_STRATEGY` | No | QBO posting method: `je-transfer` or `sales-receipt` (`journal-entry` is accepted as a legacy alias for `je-transfer`) | `je-transfer` |
 
 ---
 
