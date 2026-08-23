@@ -19,12 +19,7 @@ const {
 const { createCrmConfigResolver } = require('./processTransaction/crmConfig');
 const { createCrmContactWorkflow } = require('./processTransaction/crmContactWorkflow');
 const { createCrmTransactionWorkflow } = require('./processTransaction/crmTransactionWorkflow');
-const {
-  buildCheckoutSessionParams,
-  calculateCoverFees,
-  formatStripeMetadata,
-  resolvePaymentMethodTypes,
-} = require('./processTransaction/checkoutSessionParams');
+const { buildCheckoutSessionParams } = require('./processTransaction/checkoutSessionParams');
 
 const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
 const FALSY_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
@@ -1021,9 +1016,6 @@ module.exports = async function (request, context) {
 
 module.exports.__internals = {
   buildCheckoutSessionParams,
-  calculateCoverFees,
-  formatStripeMetadata,
-  resolvePaymentMethodTypes,
   searchStripeCustomer,
   escapeStripeQueryValue,
   initializeServices,
