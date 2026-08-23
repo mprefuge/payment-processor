@@ -83,3 +83,59 @@ own duplicate-document error). Under `sales-receipt` the receipt is posted first
 second, so a retry after a partial failure completes the pair rather than double-posting either
 half. The charge path is additionally guarded by an idempotency lock keyed on the Stripe balance
 transaction id.
+
+## What the payout posts
+
+Charge postings leave Stripe Clearing holding **gross − per-charge fees**. A Stripe payout,
+however, pays **gross − per-charge fees − account-level fees ± adjustments**. The difference is
+everything Stripe bills the *account* rather than a charge: monthly billing, Radar, ACH/direct-debit
+failure, instant payout, currency conversion, and negative balance adjustments. Stripe reports each
+of those as its own balance transaction, with no charge behind it, so no per-charge posting can
+book them.
+
+`payout.paid` therefore writes up to two documents
+(`createPayoutAdapter`, `src/handlers/stripeWebhook.ts`):
+
+1. **JournalEntry `POFEE-YYYYMMDD-…`** — the account-level part
+   (`postPayoutAccountFeesToQbo`, `src/services/qboSvc.ts`):
+
+   | Line | Debit | Credit |
+   | --- | ---: | ---: |
+   | Stripe Fees (expense) | account fees + non-dispute adjustments | |
+   | Stripe Clearing | | same |
+
+   A positive adjustment (money returned to the balance) reverses the direction.
+
+2. **Transfer** — Stripe Clearing → Operating Bank for the net that actually landed
+   (`postPayoutToQbo`).
+
+Clearing then nets to zero for the payout.
+
+### Not double-counted
+
+Every payout line carries `postedAtSource` (`src/stripe/types.ts`), set once in
+`categorizeTransactions` (`src/stripe/handlers/payouts.ts`). It is `true` for anything another
+webhook already wrote to QuickBooks — charges and their **per-charge** processing fees
+(`postChargeToQbo`), refunds (`postRefundToQbo`), dispute adjustments (`postDisputeToQbo` /
+`postDisputeReversalToQbo`). Those lines are counted in the payout's reconciliation arithmetic and
+never posted from it. Only `postedAtSource: false` lines reach step 1.
+
+The distinction is structural, not heuristic: Stripe puts a charge's processing fee on the
+**charge's own** balance transaction (`amount` / `fee` / `net` on one object), while an
+account-level fee is a **separate** balance transaction of type `stripe_fee` / `fee` /
+`application_fee`. Step 1 only ever reads the second kind.
+
+### Reconciliation
+
+`categorizeTransactions` emits a charge line at `amount` (gross) **and** a `processing_fee` line at
+`−fee`, both read off the same balance transaction, so the lines sum to `net`. Summed over the
+payout that equals `payout.amount`, and the totals guard in `handlePayoutEvent` routes anything
+that does not balance to manual review instead of posting an unbalanced document.
+
+### Idempotency
+
+The `POFEE-` DocNumber is derived from the payout id, so `postToQbo`'s DocNumber pre-check returns
+the existing entry on a replayed `payout.paid` instead of writing a second one — the same guard the
+`FEE-` and `REF-` entries use. The fee entry is posted before the Transfer, so a failure part-way
+through leaves a state that a Stripe retry completes rather than duplicates. The payout-scoped
+`payout_<id>` idempotency marker is only written once both succeed.
