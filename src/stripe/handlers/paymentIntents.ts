@@ -1,6 +1,11 @@
 import Stripe from 'stripe';
 
 import env from '../../config/env';
+// Genuine failures log through `logger.error`, not `context.log`: `context.log`
+// maps to Information severity, so an App Insights query filtered on
+// severity >= Error -- the one you reach for when a gift has not posted -- could
+// not see them. Informational lines (the deferral notice, the "balance
+// transaction still pending" note) deliberately stay on `context.log`.
 import { logger } from '../../lib/logger';
 import {
   mapStripeToTransaction,
@@ -702,7 +707,7 @@ const recordAccountingDeferral = async (
       'stripe_payment_intent_id__c'
     );
   } catch (storeError) {
-    context.log('[StripeWebhook] Failed to store accounting deferral in Salesforce', {
+    logger.error('[StripeWebhook] Failed to store accounting deferral in Salesforce', {
       paymentIntentId: paymentIntent.id,
       error: storeError instanceof Error ? storeError.message : String(storeError),
     });
@@ -795,9 +800,6 @@ const postSuccessfulPaymentIntentToAccounting = async (
     const message = `Refusing to post charge: balance transaction ${resolvedBt.id} is missing finite amount/fee (amount=${String(
       resolvedBt.amount
     )}, fee=${String(resolvedBt.fee)})`;
-    // `context.log` lands at Information severity, which hides a genuine posting
-    // failure from any App Insights alert filtered on severity >= Error. Use the
-    // shared logger's error level so this surfaces where failures are looked for.
     logger.error('[StripeWebhook] ' + message, {
       paymentIntentId: paymentIntent.id,
       balanceTransactionId: resolvedBt.id,
@@ -813,7 +815,7 @@ const postSuccessfulPaymentIntentToAccounting = async (
         'stripe_payment_intent_id__c'
       );
     } catch (storeError) {
-      context.log('[StripeWebhook] Failed to store accounting guard error in Salesforce', {
+      logger.error('[StripeWebhook] Failed to store accounting guard error in Salesforce', {
         paymentIntentId: paymentIntent.id,
         error: storeError instanceof Error ? storeError.message : String(storeError),
       });
@@ -877,8 +879,6 @@ const postSuccessfulPaymentIntentToAccounting = async (
       await deps.idempotencyStore.markProcessed(btKey);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      // Error level, not `context.log`: this is a real posting failure and must be
-      // reachable by an App Insights filter on severity >= Error.
       logger.error('[StripeWebhook] Failed to post charge to accounting or update Salesforce', {
         paymentIntentId: paymentIntent.id,
         balanceTransactionId: balanceTransaction.id,
@@ -899,7 +899,7 @@ const postSuccessfulPaymentIntentToAccounting = async (
           'stripe_payment_intent_id__c'
         );
       } catch (storeError) {
-        context.log('[StripeWebhook] Failed to store accounting error in Salesforce', {
+        logger.error('[StripeWebhook] Failed to store accounting error in Salesforce', {
           paymentIntentId: paymentIntent.id,
           error: storeError instanceof Error ? storeError.message : String(storeError),
         });
@@ -1006,7 +1006,7 @@ export const handleChargeSettled = async (
   try {
     paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
   } catch (error) {
-    context.log('[StripeWebhook] Failed to retrieve payment intent for settled charge', {
+    logger.error('[StripeWebhook] Failed to retrieve payment intent for settled charge', {
       chargeId: charge.id,
       paymentIntentId,
       error: error instanceof Error ? error.message : String(error),
@@ -1594,7 +1594,7 @@ const reverseSettledPaymentInAccounting = async (
   );
 
   if (amounts.grossCents === 0) {
-    context.log('[StripeWebhook] Cannot determine reversal amount for failed payment; skipping', {
+    logger.error('[StripeWebhook] Cannot determine reversal amount for failed payment; skipping', {
       alert: 'payment_reversal_amount_unknown',
       paymentIntentId: paymentIntent.id,
       chargeId: charge?.id ?? null,
@@ -1646,7 +1646,7 @@ const reverseSettledPaymentInAccounting = async (
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      context.log('[StripeWebhook] Failed to reverse returned payment in QBO', {
+      logger.error('[StripeWebhook] Failed to reverse returned payment in QBO', {
         alert: 'payment_return_reversal_failed',
         paymentIntentId: paymentIntent.id,
         error: errorMessage,
@@ -1666,7 +1666,7 @@ const reverseSettledPaymentInAccounting = async (
           'stripe_payment_intent_id__c'
         );
       } catch (storeError) {
-        context.log('[StripeWebhook] Failed to store reversal error in Salesforce', {
+        logger.error('[StripeWebhook] Failed to store reversal error in Salesforce', {
           paymentIntentId: paymentIntent.id,
           error: storeError instanceof Error ? storeError.message : String(storeError),
         });
