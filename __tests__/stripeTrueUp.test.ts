@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'module';
 import Stripe from 'stripe';
 import {
@@ -910,4 +910,309 @@ describe('stripeTrueUp handler overrides', () => {
 
     internals.resetDependencies();
   });
+});
+
+/**
+ * The true-up's half of the ALLOW_TEST_MODE_ACCOUNTING gate.
+ *
+ * The webhook reads its mode off `event.livemode`; the true-up is TOLD its mode by the caller
+ * (`?mode=test`) and then reads test-mode Stripe objects with the test key. Both end up at the
+ * same single real QuickBooks company file, so the flag has to mean the same thing on both.
+ *
+ * The rest of this file runs with the flag ON (see __tests__/setup.ts) and with no `mode`
+ * parameter, which defaults to test mode -- so it already covers the flag-on direction
+ * incidentally. These cases drive the flag deliberately from both sides and assert the four
+ * things a skip has to get right: no QuickBooks call, no `Posted_to_QBO__c`, no `bt_<id>` /
+ * `payout_<id>` idempotency marker, and the skip recorded as a skip rather than a failure --
+ * plus the flag-on direction, where the posting must carry `options.testMode` (what
+ * `docNumberPrefix` turns into the `T` DocNumber prefix and `resolveCleanupTag` turns into the
+ * `[source_test_tag:...]` marker; both pinned in __tests__/qboDocNumber.test.ts).
+ */
+describe('stripeTrueUp test-mode accounting gate', () => {
+  const baseEnv = {
+    STRIPE_TEST_SECRET_KEY: 'sk_test_123',
+    STRIPE_LIVE_SECRET_KEY: 'sk_live_123',
+    SF_CLIENT_ID: 'sf_client',
+    SF_CLIENT_SECRET: 'sf_secret',
+    DISABLE_AZURE_TABLES: '1',
+    // Not bypassing QBO here -- that is the whole point -- so validateEnvironment needs these.
+    QBO_CLIENT_ID: 'client',
+    QBO_CLIENT_SECRET: 'secret',
+    QBO_REALM_ID: 'realm',
+  };
+
+  const createIdempotencyStore = () => ({
+    isProcessed: vi.fn().mockResolvedValue(false),
+    markProcessed: vi.fn().mockResolvedValue(undefined),
+    withLock: vi.fn().mockImplementation(async (_: string, fn: () => Promise<unknown>) => fn()),
+    flush: vi.fn().mockResolvedValue(undefined),
+  });
+
+  const createQueryRequest = (params: Record<string, string>) => ({
+    query: new URLSearchParams(params),
+    headers: { get: vi.fn().mockReturnValue(undefined) },
+  });
+
+  const salesforceMock = (upsertId: string) => ({
+    upsertTransactionByExternalId: vi.fn().mockResolvedValue({ id: upsertId, success: true }),
+    linkPayoutOnTransactions: vi.fn().mockResolvedValue([]),
+    markPostedToQbo: vi.fn().mockResolvedValue(undefined),
+    findTransactionIdByExternalId: vi.fn().mockResolvedValue(null),
+    findTransactionRecordByExternalId: vi.fn().mockResolvedValue(null),
+    upsertCustomerByStripeId: vi.fn(),
+    findContactIdById: vi.fn().mockResolvedValue(null),
+    findAccountIdById: vi.fn().mockResolvedValue(null),
+  });
+
+  // The refund path resolves the refunded charge (and its customer) to build the
+  // Transaction__c, so these have to answer for real or the record errors out before it ever
+  // reaches the gate.
+  const refundedCharge = {
+    id: 'ch_gate_refund_source',
+    status: 'succeeded',
+    customer: 'cus_gate_1',
+    currency: 'usd',
+    created: 1_700_000_000,
+    metadata: {},
+    billing_details: { name: 'Gate Donor', email: 'gate@example.com' },
+    payment_method_details: { type: 'card', card: { brand: 'visa', last4: '4242' } },
+    refunds: { data: [] },
+  };
+
+  const stripeClientMock = () => ({
+    charges: { retrieve: vi.fn().mockResolvedValue(refundedCharge) },
+    customers: {
+      retrieve: vi.fn().mockResolvedValue({
+        id: 'cus_gate_1',
+        deleted: false,
+        metadata: {},
+        email: 'gate@example.com',
+      }),
+    },
+    invoices: { retrieve: vi.fn() },
+    paymentIntents: { retrieve: vi.fn() },
+    subscriptions: { retrieve: vi.fn() },
+    products: { retrieve: vi.fn() },
+    prices: { retrieve: vi.fn() },
+  });
+
+  const chargeFixture = {
+    id: 'ch_gate_1',
+    status: 'succeeded',
+    customer: null,
+    currency: 'usd',
+    created: 1_700_000_000,
+    metadata: {},
+    balance_transaction: {
+      id: 'bt_gate_charge',
+      amount: 1234,
+      fee: 50,
+      type: 'charge',
+      currency: 'usd',
+      created: 1_700_000_000,
+    },
+  };
+
+  const refundFixture = {
+    id: 're_gate_1',
+    status: 'succeeded',
+    created: 1_700_000_500,
+    charge: 'ch_gate_refund_source',
+    balance_transaction: {
+      id: 'bt_gate_refund',
+      amount: -500,
+      fee: 0,
+      type: 'refund',
+      currency: 'usd',
+      created: 1_700_000_500,
+    },
+  };
+
+  const payoutFixture = {
+    id: 'po_gate_1',
+    status: 'paid',
+    amount: 9_700,
+    currency: 'usd',
+    automatic: false,
+    created: 1_700_000_000,
+    arrival_date: 1_700_259_200,
+  };
+
+  /**
+   * `env` reads ALLOW_TEST_MODE_ACCOUNTING once, at module load, so the only way to drive the
+   * flag is to load the handler again with the variable already set.
+   */
+  const loadHandlerWithFlag = async (allow: boolean) => {
+    vi.resetModules();
+    process.env.ALLOW_TEST_MODE_ACCOUNTING = allow ? 'true' : 'false';
+    const module = await import('../src/handlers/stripeTrueUp');
+    return module.default as any;
+  };
+
+  type RunOptions = {
+    allow: boolean;
+    mode: 'test' | 'live';
+    type: 'payments' | 'refunds' | 'payouts';
+  };
+
+  const run = async (options: RunOptions) => {
+    const handler = await loadHandlerWithFlag(options.allow);
+    const internals = handler.__internals;
+
+    const store = createIdempotencyStore();
+    const salesforce = salesforceMock('a01_gate');
+    const accounting = {
+      postChargeToQbo: vi.fn().mockResolvedValue({ qboId: 'qbo_1', type: 'journal-entry' }),
+      postRefundToQbo: vi.fn().mockResolvedValue({ qboId: 'qbo_2', type: 'journal-entry' }),
+      postPayoutToQbo: vi.fn().mockResolvedValue({ qboId: 'qbo_3', type: 'transfer' }),
+    };
+
+    internals.setDependencies({
+      stripe: { getClient: vi.fn().mockReturnValue(stripeClientMock()) },
+      fetchers: {
+        payments: vi.fn().mockResolvedValue([chargeFixture]),
+        refunds: vi.fn().mockResolvedValue([refundFixture]),
+        payouts: vi.fn().mockResolvedValue([payoutFixture]),
+        payoutBalance: vi.fn().mockResolvedValue([]),
+      },
+      idempotencyStore: store,
+      getSalesforceSvc: async () => salesforce as any,
+      accounting,
+    });
+
+    const { context } = createContext();
+    const response = await handler(
+      createQueryRequest({
+        from: '2023-11-01T00:00:00Z',
+        type: options.type,
+        mode: options.mode,
+      }),
+      context
+    );
+
+    internals.resetDependencies();
+
+    return { store, salesforce, accounting, response, body: JSON.parse(response.body) };
+  };
+
+  const skipNoteCalls = (salesforce: { upsertTransactionByExternalId: any }) =>
+    salesforce.upsertTransactionByExternalId.mock.calls.filter((call: any[]) =>
+      String(call[0]?.posting_error__c ?? '').startsWith('TEST MODE SKIPPED')
+    );
+
+  const postedInput = (mock: any) => mock.mock.calls[0][0];
+
+  beforeEach(() => {
+    for (const [key, value] of Object.entries(baseEnv)) {
+      process.env[key] = value;
+    }
+    delete process.env.STRIPE_TRUE_UP_BYPASS_QBO;
+    delete process.env.STRIPE_TRUE_UP_MODE;
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    // Restore the suite-wide default so nothing after this block inherits the override.
+    process.env.ALLOW_TEST_MODE_ACCOUNTING = 'true';
+    vi.resetModules();
+  });
+
+  const cases = [
+    {
+      type: 'payments' as const,
+      label: 'charge',
+      post: (a: any) => a.postChargeToQbo,
+      externalIdField: 'stripe_charge_id__c',
+      externalId: 'ch_gate_1',
+      idempotencyKey: 'bt_bt_gate_charge',
+    },
+    {
+      type: 'refunds' as const,
+      label: 'refund',
+      post: (a: any) => a.postRefundToQbo,
+      externalIdField: 'stripe_refund_id__c',
+      externalId: 're_gate_1',
+      idempotencyKey: 'bt_bt_gate_refund',
+    },
+    {
+      type: 'payouts' as const,
+      label: 'payout',
+      post: (a: any) => a.postPayoutToQbo,
+      externalIdField: 'stripe_payout_id__c',
+      externalId: 'po_gate_1',
+      idempotencyKey: 'payout_po_gate_1',
+    },
+  ];
+
+  for (const testCase of cases) {
+    describe(`a test-mode ${testCase.label}`, () => {
+      it('is not posted to QuickBooks while the flag is off', async () => {
+        const { accounting, salesforce, store, body, response } = await run({
+          allow: false,
+          mode: 'test',
+          type: testCase.type,
+        });
+
+        expect(response.status).toBe(200);
+        expect(testCase.post(accounting)).not.toHaveBeenCalled();
+        expect(body.counts.qboPosts).toBe(0);
+        // Posted_to_QBO__c must not be claimed with no document behind it.
+        expect(salesforce.markPostedToQbo).not.toHaveBeenCalled();
+        // The marker must stay unwritten, or a genuine posting for this record later would be
+        // permanently suppressed. This is the "turn the flag on and re-run" recovery flow.
+        expect(store.markProcessed).not.toHaveBeenCalled();
+      });
+
+      it('records the skip as a skip, not as a QuickBooks failure', async () => {
+        const { salesforce } = await run({
+          allow: false,
+          mode: 'test',
+          type: testCase.type,
+        });
+
+        const skips = skipNoteCalls(salesforce);
+        expect(skips).toHaveLength(1);
+        expect(skips[0][0]).toMatchObject({
+          [testCase.externalIdField]: testCase.externalId,
+          posted_to_qbo__c: false,
+        });
+        expect(skips[0][0].posting_error__c).toContain('ALLOW_TEST_MODE_ACCOUNTING');
+        expect(skips[0][0].posting_error__c).toContain('not a QuickBooks failure');
+        expect(skips[0][1]).toBe(testCase.externalIdField);
+      });
+
+      it('is posted, stamped as test mode, once the flag is on', async () => {
+        const { accounting, salesforce, store, body } = await run({
+          allow: true,
+          mode: 'test',
+          type: testCase.type,
+        });
+
+        const post = testCase.post(accounting);
+        expect(post).toHaveBeenCalledTimes(1);
+        // The one option that produces the `T` DocNumber prefix and the
+        // `[source_test_tag:...]` cleanup marker.
+        expect(postedInput(post).options).toMatchObject({ testMode: true });
+        expect(body.counts.qboPosts).toBe(1);
+        expect(skipNoteCalls(salesforce)).toHaveLength(0);
+        expect(store.markProcessed).toHaveBeenCalledWith(testCase.idempotencyKey);
+      });
+    });
+
+    it(`leaves a live-mode ${testCase.label} posting unstamped and ungated`, async () => {
+      const { accounting, salesforce, store, body } = await run({
+        allow: false,
+        mode: 'live',
+        type: testCase.type,
+      });
+
+      const post = testCase.post(accounting);
+      expect(post).toHaveBeenCalledTimes(1);
+      // Live postings must be byte-for-byte what they were: no `options` key at all.
+      expect(postedInput(post)).not.toHaveProperty('options');
+      expect(body.counts.qboPosts).toBe(1);
+      expect(skipNoteCalls(salesforce)).toHaveLength(0);
+      expect(store.markProcessed).toHaveBeenCalledWith(testCase.idempotencyKey);
+    });
+  }
 });

@@ -23,7 +23,13 @@ import {
   createSalesforceSvc,
   type SalesforceSvc,
   type QuickBooksDocumentReference,
+  type TransactionExternalIdField,
 } from '../services/salesforceSvc';
+import {
+  isTestModePostingBlocked,
+  recordTestModeAccountingSkip,
+  withTestModeOption,
+} from '../stripe/testModeAccounting';
 import {
   SalesforceService,
   buildSalesforceConfig,
@@ -1101,6 +1107,61 @@ const createSalesforceConnection = async (): Promise<any> => {
   return service.authenticate();
 };
 
+/**
+ * True-up's half of the `ALLOW_TEST_MODE_ACCOUNTING` gate.
+ *
+ * The webhook learns its mode from `event.livemode`. The true-up is *told* its mode by the
+ * caller -- `?mode=test` / `x-stripe-mode`, landing in `TrueUpRequestOptions.liveMode` -- and
+ * then reads TEST-mode Stripe objects with the TEST secret key. The destination is identical
+ * either way: the single real QuickBooks company file this integration is connected to, which
+ * has no sandbox. So the flag has to mean exactly the same thing on both paths, and it does
+ * so here by calling the same helpers `src/stripe/testModeAccounting.ts` gives the webhook:
+ *
+ *  - flag OFF -> do not post, and leave nothing behind that claims we did. Each call site
+ *    `continue`s from ABOVE its `markPosted` and above `idempotencyStore.markProcessed(key)`,
+ *    mirroring where the webhook's guard sits relative to its own marker writes. That is what
+ *    keeps the documented recovery flow working: `Posted_to_QBO__c` stays false and the
+ *    `bt_<id>`/`payout_<id>` key stays unwritten, so turning the flag on and re-running the
+ *    true-up posts the record for real (docs/OPERATIONS.md).
+ *  - flag ON -> post, but stamped. `options.testMode` is what gives the document its
+ *    `T`-prefixed DocNumber and its `[source_test_tag:...]` PrivateNote marker, so a
+ *    deliberately-allowed test posting is unmistakable and `POST /api/ops/test-artifact-cleanup`
+ *    can find it.
+ *
+ * A live-mode run reaches neither branch: `testMode` is false, `isTestModePostingBlocked`
+ * returns false and `stampTestMode` returns its input untouched.
+ *
+ * Note this asks `isTestModePostingBlocked` rather than the webhook's
+ * `isTestModeAccountingSkipped`: the latter is additionally conditioned on
+ * `env.accounting.syncEnabled`, which the true-up has never consulted (its switch is
+ * `?bypassQbo`). Reusing it would have made ACCOUNTING_SYNC_ENABLED=false the thing that let
+ * test-mode postings through.
+ */
+const trueUpSkipSubjectType = {
+  payments: 'stripe_true_up.payments',
+  refunds: 'stripe_true_up.refunds',
+  payouts: 'stripe_true_up.payouts',
+} as const;
+
+/** Records the skip against the record the true-up just upserted, and logs it. */
+const recordTrueUpTestModeSkip = async (
+  context: HttpContext,
+  salesforce: SalesforceSvc,
+  kind: keyof typeof trueUpSkipSubjectType,
+  recordId: string,
+  identity: { externalIdField: TransactionExternalIdField; transaction: TransactionUpsertDTO }
+): Promise<void> =>
+  recordTestModeAccountingSkip(
+    context,
+    salesforce,
+    { id: recordId, type: trueUpSkipSubjectType[kind], livemode: false },
+    identity
+  );
+
+/** Stamps `options.testMode` onto a posting that the flag has deliberately let through. */
+const stampTestMode = <T extends object>(input: T, testMode: boolean): T =>
+  testMode ? withTestModeOption(input) : input;
+
 const processPayments = async (
   context: HttpContext,
   stripe: Stripe,
@@ -1109,7 +1170,8 @@ const processPayments = async (
   dryRun: boolean,
   resubmit: boolean,
   bypassQbo: boolean,
-  limit: number | null
+  limit: number | null,
+  testMode: boolean
 ): Promise<ProcessSummary> => {
   const summary = buildProcessSummary();
   const params = buildFetchParams('created', to, context.log);
@@ -1512,7 +1574,17 @@ const processPayments = async (
             continue;
           }
 
-          const posting = await dependencies.accounting.postChargeToQbo({
+          if (isTestModePostingBlocked(testMode)) {
+            await recordTrueUpTestModeSkip(context, salesforce, 'payments', charge.id, {
+              externalIdField: 'stripe_charge_id__c',
+              transaction,
+            });
+            summary.skipped += 1;
+            // Before markPosted and before markProcessed(key), so the charge stays postable.
+            continue;
+          }
+
+          const chargePost = {
             gross: grossAmount,
             fee: Math.abs(balanceTransaction.fee ?? 0),
             memo: `Stripe charge ${charge.id}`,
@@ -1525,7 +1597,11 @@ const processPayments = async (
               customer: stripeCustomer,
               checkoutSession: checkoutSessionStub as Stripe.Checkout.Session | undefined,
             },
-          });
+          };
+
+          const posting = await dependencies.accounting.postChargeToQbo(
+            stampTestMode(chargePost, testMode)
+          );
           summary.qboPosts += 1;
 
           await markPosted(salesforce, upsertResult, posting);
@@ -1554,7 +1630,8 @@ const processRefunds = async (
   dryRun: boolean,
   resubmit: boolean,
   bypassQbo: boolean,
-  limit: number | null
+  limit: number | null,
+  testMode: boolean
 ): Promise<ProcessSummary> => {
   const summary = buildProcessSummary();
   const params = buildFetchParams('created', to, context.log);
@@ -1900,7 +1977,17 @@ const processRefunds = async (
             continue;
           }
 
-          const posting = await dependencies.accounting.postRefundToQbo({
+          if (isTestModePostingBlocked(testMode)) {
+            await recordTrueUpTestModeSkip(context, salesforce, 'refunds', refund.id, {
+              externalIdField: 'stripe_refund_id__c',
+              transaction,
+            });
+            summary.skipped += 1;
+            // Before markPosted and before markProcessed(key), so the refund stays postable.
+            continue;
+          }
+
+          const refundPost = {
             amount: refundAmount,
             feeAmount: Math.abs(balanceTransaction.fee ?? 0),
             memo: `Stripe refund ${refund.id}`,
@@ -1908,7 +1995,11 @@ const processRefunds = async (
               balanceTransaction.created ?? balanceTransaction.available_on ?? null
             ),
             refundId: refund.id,
-          });
+          };
+
+          const posting = await dependencies.accounting.postRefundToQbo(
+            stampTestMode(refundPost, testMode)
+          );
           summary.qboPosts += 1;
 
           await markPosted(salesforce, upsertResult, posting);
@@ -1954,7 +2045,8 @@ const processPayouts = async (
   dryRun: boolean,
   resubmit: boolean,
   bypassQbo: boolean,
-  limit: number | null
+  limit: number | null,
+  testMode: boolean
 ): Promise<ProcessSummary> => {
   const summary = buildProcessSummary();
   const params = buildFetchParams('arrival_date', to, context.log);
@@ -2110,7 +2202,17 @@ const processPayouts = async (
             payoutId: payout.id,
           });
         } else {
-          const posting = await dependencies.accounting.postPayoutToQbo({
+          if (isTestModePostingBlocked(testMode)) {
+            await recordTrueUpTestModeSkip(context, salesforce, 'payouts', payout.id, {
+              externalIdField: 'stripe_payout_id__c',
+              transaction: payoutTransaction,
+            });
+            summary.skipped += 1;
+            // Before markPostedToQbo and before markProcessed(key), so the payout stays postable.
+            continue;
+          }
+
+          const payoutPost = {
             amount: payoutAmount,
             memo: `Stripe payout ${payout.id}`,
             // Must match the webhook path's precedence (src/stripe/handlers/payouts.ts).
@@ -2119,7 +2221,11 @@ const processPayouts = async (
             // arrival_date and created are typically ~2 business days apart.
             date: timestampToDate(payout.arrival_date ?? payout.created ?? null),
             payoutId: payout.id,
-          });
+          };
+
+          const posting = await dependencies.accounting.postPayoutToQbo(
+            stampTestMode(payoutPost, testMode)
+          );
           summary.qboPosts += 1;
 
           if (posting && posting.qboId) {
@@ -2346,6 +2452,11 @@ const processRecordsByType = async (
   stripe: Stripe,
   options: TrueUpRequestOptions
 ): Promise<ProcessSummary> => {
+  // `liveMode` is the only thing that decides which Stripe key was used to read these
+  // objects, so it is also the only thing that decides whether their QuickBooks postings are
+  // test-mode postings.
+  const testMode = !options.liveMode;
+
   if (options.type === 'payments') {
     return await processPayments(
       context,
@@ -2355,7 +2466,8 @@ const processRecordsByType = async (
       options.dryRun,
       options.resubmit,
       options.bypassQbo,
-      options.limit
+      options.limit,
+      testMode
     );
   }
 
@@ -2368,7 +2480,8 @@ const processRecordsByType = async (
       options.dryRun,
       options.resubmit,
       options.bypassQbo,
-      options.limit
+      options.limit,
+      testMode
     );
   }
 
@@ -2380,7 +2493,8 @@ const processRecordsByType = async (
     options.dryRun,
     options.resubmit,
     options.bypassQbo,
-    options.limit
+    options.limit,
+    testMode
   );
 };
 

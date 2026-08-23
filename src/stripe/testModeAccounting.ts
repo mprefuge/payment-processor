@@ -69,6 +69,20 @@ export const TEST_MODE_ACCOUNTING_SKIP_NOTE =
   'QuickBooks posting was intentionally skipped because ALLOW_TEST_MODE_ACCOUNTING is off. ' +
   'This is not a QuickBooks failure and needs no action.';
 
+/**
+ * The minimum needed to name what was skipped, in the log line and in `posting_error__c`.
+ *
+ * Structurally satisfied by a real `Stripe.Event`, and by the synthetic descriptor
+ * `stripeTrueUp` builds for a record it declined to post: the true-up is a reconciliation
+ * sweep over Stripe objects and has no event to quote, but the skip it records has to look
+ * identical to the webhook's, because it is the same skip.
+ */
+export type TestModeAccountingSubject = {
+  id: string;
+  type: string;
+  livemode?: boolean;
+};
+
 /** True for an event Stripe generated in test mode. */
 export const isStripeTestModeEvent = (event: Pick<Stripe.Event, 'livemode'> | null): boolean =>
   event?.livemode === false;
@@ -90,6 +104,19 @@ export const isAccountingEnabledForEvent = (
 };
 
 /**
+ * True when a test-mode posting must not be allowed to reach QuickBooks.
+ *
+ * The bare test-mode question, deliberately with no `syncEnabled` term. Callers that own a
+ * separate accounting switch ask this directly -- `stripeTrueUp` gates on its own
+ * `?bypassQbo` and never consults `syncEnabled`, so folding `syncEnabled` in here would mean
+ * switching accounting sync OFF was what let a test-mode posting through. The webhook's
+ * `isTestModeAccountingSkipped` adds the `syncEnabled` term back, because for the webhook
+ * that is the switch.
+ */
+export const isTestModePostingBlocked = (testMode: boolean): boolean =>
+  testMode && !isTestModeAccountingAllowed();
+
+/**
  * True when accounting would otherwise have run and it is the test-mode gate that stopped it.
  *
  * Distinguishes "skipped because this is a test gift" from "skipped because accounting sync
@@ -97,8 +124,7 @@ export const isAccountingEnabledForEvent = (
  */
 export const isTestModeAccountingSkipped = (
   event: Pick<Stripe.Event, 'livemode'> | null
-): boolean =>
-  env.accounting.syncEnabled && isStripeTestModeEvent(event) && !isTestModeAccountingAllowed();
+): boolean => env.accounting.syncEnabled && isTestModePostingBlocked(isStripeTestModeEvent(event));
 
 /**
  * Log a deliberate test-mode skip.
@@ -108,7 +134,7 @@ export const isTestModeAccountingSkipped = (
  */
 export const logTestModeAccountingSkip = (
   context: HttpContext,
-  event: Pick<Stripe.Event, 'id' | 'type'>,
+  event: TestModeAccountingSubject,
   detail?: Record<string, unknown>
 ): void => {
   context.log('[StripeWebhook] Test-mode event: QuickBooks posting skipped', {
@@ -131,7 +157,7 @@ export const logTestModeAccountingSkip = (
 export const recordTestModeAccountingSkip = async (
   context: HttpContext,
   salesforce: SalesforceSvc | null,
-  event: Pick<Stripe.Event, 'id' | 'type' | 'livemode'>,
+  event: TestModeAccountingSubject,
   identity: { externalIdField: TransactionExternalIdField; transaction: TransactionUpsertDTO }
 ): Promise<void> => {
   logTestModeAccountingSkip(context, event, {
@@ -159,12 +185,23 @@ export const recordTestModeAccountingSkip = async (
   }
 };
 
-type PostInputWithOptions = { options?: { testMode?: boolean } };
+export type PostInputWithOptions = { options?: { testMode?: boolean } };
 
-/** Adds `options.testMode` to a qboSvc post input without disturbing anything else on it. */
-const withTestModeOption = <T extends PostInputWithOptions>(input: T): T => ({
+/**
+ * Adds `options.testMode` to a qboSvc post input without disturbing anything else on it.
+ *
+ * Exported because `stripeTrueUp` reaches `postChargeToQbo`/`postRefundToQbo`/
+ * `postPayoutToQbo` directly rather than through a wrapped `deps.accounting`, and must stamp
+ * the identical flag -- that one option is what produces the `T`-prefixed DocNumber and the
+ * `[source_test_tag:...]` cleanup marker.
+ */
+export const withTestModeOption = <T extends object>(input: T): T => ({
   ...input,
-  options: { ...(input.options ?? {}), testMode: true },
+  // `T extends object` rather than `T extends PostInputWithOptions`: the latter is a weak
+  // type (every property optional), so a caller passing a post input that declares no
+  // `options` of its own -- every one of stripeTrueUp's -- is rejected outright for having
+  // "no properties in common". The cast is the price of accepting those.
+  options: { ...((input as PostInputWithOptions).options ?? {}), testMode: true },
 });
 
 const wrapAccountingForTestMode = (accounting: AccountingServices): AccountingServices => {
