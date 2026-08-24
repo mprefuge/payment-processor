@@ -189,4 +189,85 @@ describe('SalesforceCrmService (JS)', () => {
     expect(upsertMock).toHaveBeenCalledWith(expect.any(Object), 'Stripe_Payment_Intent_Id__c');
     expect(result).toEqual({ success: true, id: 'new' });
   });
+
+  // Salesforce keeps the whole street in one multi-line MailingStreet field, so
+  // a second address line has to be appended to it. Before this it was dropped
+  // at the Salesforce boundary and every apartment number was lost.
+  describe('MailingStreet composition', () => {
+    const makeService = (conn) => {
+      const service = new SalesforceCrmService({});
+      service.conn = conn;
+      service.authenticate = async () => conn;
+      service._contactRecordTypeId = 'rt_contact';
+      return service;
+    };
+
+    it('appends line2 to MailingStreet when creating a contact', async () => {
+      const conn = makeMockConnection();
+      const createMock = vi.fn().mockResolvedValue({ success: true, id: 'contact_1' });
+      const retrieveMock = vi.fn().mockResolvedValue({ Id: 'contact_1' });
+      conn.sobject.mockReturnValue({ create: createMock, retrieve: retrieveMock });
+
+      const service = makeService(conn);
+
+      await service.createContact({
+        email: 'jane@example.com',
+        firstName: 'Jane',
+        lastName: 'Doe',
+        address: {
+          line1: '123 Main St',
+          line2: 'Apt 4B',
+          city: 'Springfield',
+          state: 'IL',
+          postal_code: '62701',
+          country: 'US',
+        },
+      });
+
+      expect(createMock).toHaveBeenCalledWith(
+        expect.objectContaining({ MailingStreet: '123 Main St\nApt 4B' })
+      );
+    });
+
+    it('leaves MailingStreet as line1 alone when there is no line2', async () => {
+      const conn = makeMockConnection();
+      const createMock = vi.fn().mockResolvedValue({ success: true, id: 'contact_2' });
+      const retrieveMock = vi.fn().mockResolvedValue({ Id: 'contact_2' });
+      conn.sobject.mockReturnValue({ create: createMock, retrieve: retrieveMock });
+
+      const service = makeService(conn);
+
+      await service.createContact({
+        email: 'jane@example.com',
+        firstName: 'Jane',
+        lastName: 'Doe',
+        address: { line1: '123 Main St', city: 'Springfield', state: 'IL' },
+      });
+
+      expect(createMock).toHaveBeenCalledWith(
+        expect.objectContaining({ MailingStreet: '123 Main St' })
+      );
+    });
+
+    it('appends line2 to MailingStreet when updating a contact', async () => {
+      const conn = makeMockConnection();
+      const updateMock = vi.fn().mockResolvedValue({ success: true, id: 'contact_3' });
+      const retrieveMock = vi.fn().mockResolvedValue({ Id: 'contact_3' });
+      conn.sobject.mockReturnValue({ update: updateMock, retrieve: retrieveMock });
+
+      const service = makeService(conn);
+
+      await service.updateContact('contact_3', {
+        address: {
+          line1: '77 Cedar Rd',
+          line2: 'Unit 12',
+          city: 'Springfield',
+        },
+      });
+
+      expect(updateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ MailingStreet: '77 Cedar Rd\nUnit 12' })
+      );
+    });
+  });
 });

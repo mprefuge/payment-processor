@@ -10,6 +10,7 @@ const createAddressData = (customerData) => {
   if (nestedAddress) {
     return {
       line1: nestedAddress.line1,
+      line2: nestedAddress.line2,
       city: nestedAddress.city,
       state: nestedAddress.state,
       postal_code: nestedAddress.postal_code,
@@ -19,6 +20,7 @@ const createAddressData = (customerData) => {
 
   return {
     line1: customerData?.address,
+    line2: customerData?.line2,
     city: customerData?.city,
     state: customerData?.state,
     postal_code: customerData?.zipcode,

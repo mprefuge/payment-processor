@@ -286,6 +286,7 @@ export interface EnsureCustomerInput {
   email?: string | null;
   givenName?: string | null;
   familyName?: string | null;
+  companyName?: string | null;
   phone?: string | null;
   billingAddress?: QuickBooksPhysicalAddress | null;
   shippingAddress?: QuickBooksPhysicalAddress | null;
@@ -550,6 +551,58 @@ const mapStripeAddress = (
   return hasAddressFields(mapped) ? mapped : null;
 };
 
+/**
+ * The fields that are merged across the candidate Stripe addresses.  `Line3`
+ * and `Line4` are deliberately excluded: `mapStripeAddress` never populates
+ * them because Stripe's address shape has no equivalent.
+ */
+const MERGEABLE_ADDRESS_FIELDS = [
+  'Line1',
+  'Line2',
+  'City',
+  'CountrySubDivisionCode',
+  'PostalCode',
+  'Country',
+] as const satisfies readonly (keyof QuickBooksPhysicalAddress)[];
+
+/**
+ * Build one address by taking each field from the first candidate that actually
+ * carries it, rather than picking a single candidate wholesale.
+ *
+ * Picking wholesale is what produced receipts with nothing but a ZIP code.  A
+ * Checkout Session that does not set `billing_address_collection` gives the
+ * charge a `billing_details.address` containing only `postal_code` and
+ * `country` — sparse, but truthy — so a `a || b || c` chain stopped there and
+ * never reached the complete address Stripe already holds on the Customer.
+ * Merging field by field keeps the precedence order the chain intended while
+ * letting a later source fill the gaps an earlier one leaves.
+ *
+ * Empty and whitespace-only values count as absent, and when every candidate is
+ * empty the result is `undefined` rather than `{}` — callers (`sanitizeAddress`
+ * before writing `BillAddr`/`ShipAddr`) treat a missing address as "leave the
+ * field off", and an empty object must not turn into an empty address block.
+ */
+const mergeAddressCandidates = (
+  candidates: Array<QuickBooksPhysicalAddress | null | undefined>
+): QuickBooksPhysicalAddress | undefined => {
+  const merged: QuickBooksPhysicalAddress = {};
+
+  for (const field of MERGEABLE_ADDRESS_FIELDS) {
+    for (const candidate of candidates) {
+      const value = candidate?.[field];
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.length > 0) {
+          merged[field] = trimmed;
+          break;
+        }
+      }
+    }
+  }
+
+  return hasAddressFields(merged) ? merged : undefined;
+};
+
 const sanitizeAddress = (
   address: QuickBooksPhysicalAddress | null | undefined
 ): QuickBooksPhysicalAddress | undefined => {
@@ -653,6 +706,18 @@ export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): Ensur
     toTrimmed(checkoutMetadata?.category as string | undefined) ||
     toTrimmed(checkoutMetadata?.Category as string | undefined);
 
+  // `donationType` is written into Stripe metadata by `formatStripeMetadata`
+  // ('individual' | 'organization', as posted by the donation form).  Without
+  // it an organization was stored in QuickBooks as a person, with `splitName`
+  // chopping the organization's name on the first space into a GivenName and a
+  // FamilyName -- "Redwood Community" / "Trust".
+  const donationType = (
+    toTrimmed(chargeMetadata?.donationType as string | undefined) ||
+    toTrimmed(checkoutMetadata?.donationType as string | undefined) ||
+    ''
+  ).toLowerCase();
+  const isOrganization = donationType === 'organization';
+
   const preferredName =
     toTrimmed(activeCustomer?.name) ||
     toTrimmed(checkoutDetails?.name) ||
@@ -676,16 +741,18 @@ export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): Ensur
     toTrimmed(activeCustomer?.shipping?.phone) ||
     toTrimmed(checkoutDetails?.phone);
 
-  const billingAddress =
-    mapStripeAddress(billingDetails?.address) ||
-    mapStripeAddress(activeCustomer?.address) ||
-    mapStripeAddress(checkoutDetails?.address);
+  const billingAddress = mergeAddressCandidates([
+    mapStripeAddress(billingDetails?.address),
+    mapStripeAddress(activeCustomer?.address),
+    mapStripeAddress(checkoutDetails?.address),
+  ]);
 
-  const shippingAddress =
-    mapStripeAddress(paymentShipping?.address) ||
-    mapStripeAddress(chargeShipping?.address) ||
-    mapStripeAddress(activeCustomer?.shipping?.address) ||
-    mapStripeAddress(checkoutDetails?.address);
+  const shippingAddress = mergeAddressCandidates([
+    mapStripeAddress(paymentShipping?.address),
+    mapStripeAddress(chargeShipping?.address),
+    mapStripeAddress(activeCustomer?.shipping?.address),
+    mapStripeAddress(checkoutDetails?.address),
+  ]);
 
   const fallbackName =
     preferredName ||
@@ -695,7 +762,12 @@ export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): Ensur
     (source.paymentIntent?.id ? `Stripe Payment ${source.paymentIntent.id}` : null) ||
     'Stripe Customer';
 
-  const { givenName, familyName } = splitName(preferredName ?? fallbackName);
+  // An organization has no first/last name to split out.  QuickBooks caps
+  // CompanyName at 50 characters, shorter than the 99 it allows DisplayName.
+  const { givenName, familyName } = isOrganization
+    ? { givenName: null, familyName: null }
+    : splitName(preferredName ?? fallbackName);
+  const companyName = isOrganization ? truncate(preferredName ?? fallbackName, 50) : null;
 
   return {
     displayName: truncate(fallbackName, 99) ?? 'Stripe Customer',
@@ -703,6 +775,7 @@ export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): Ensur
     email,
     givenName,
     familyName,
+    companyName,
     phone,
     billingAddress,
     shippingAddress,
@@ -963,6 +1036,23 @@ const cacheCustomerReference = (
   }
 };
 
+/**
+ * Columns pulled back for an existing customer.  The detail fields are needed
+ * so `ensureSalesReceiptCustomer` can tell whether the values it derived from
+ * Stripe differ from what QuickBooks already holds, and only write when they do.
+ */
+const CUSTOMER_LOOKUP_COLUMNS =
+  'Id, DisplayName, PrimaryEmailAddr, GivenName, FamilyName, CompanyName, PrimaryPhone, BillAddr, ShipAddr';
+
+/**
+ * Marks a record synthesised from `customerLookupCache` rather than fetched.
+ * A cached hit carries only an Id, a DisplayName and an email, so the detail
+ * fields are unknown -- absent, not empty -- and must not be read as "QuickBooks
+ * holds nothing here", which would re-write the same details on every charge in
+ * a batch.
+ */
+const CUSTOMER_DETAILS_UNKNOWN = '__qboCustomerDetailsUnknown';
+
 const findCustomerByEmail = async (email: string, context: QuickBooksRequestContext) => {
   const normalizedEmail = email.trim().toLowerCase();
   const cached = customerLookupCache.get(buildCustomerCacheKey('email', normalizedEmail));
@@ -971,10 +1061,11 @@ const findCustomerByEmail = async (email: string, context: QuickBooksRequestCont
       Id: cached.value,
       DisplayName: cached.name,
       PrimaryEmailAddr: { Address: normalizedEmail },
+      [CUSTOMER_DETAILS_UNKNOWN]: true,
     } as Record<string, unknown>;
   }
 
-  const query = `select Id, DisplayName, PrimaryEmailAddr from Customer where PrimaryEmailAddr = '${escapeQueryValue(
+  const query = `select ${CUSTOMER_LOOKUP_COLUMNS} from Customer where PrimaryEmailAddr = '${escapeQueryValue(
     normalizedEmail
   )}'`;
   const customers = await queryQuickBooks<Record<string, unknown>>(query, context);
@@ -1006,10 +1097,11 @@ const findCustomerByDisplayName = async (
     return {
       Id: cached.value,
       DisplayName: cached.name ?? normalizedDisplayName,
+      [CUSTOMER_DETAILS_UNKNOWN]: true,
     } as Record<string, unknown>;
   }
 
-  const query = `select Id, DisplayName from Customer where DisplayName = '${escapeQueryValue(normalizedDisplayName)}'`;
+  const query = `select ${CUSTOMER_LOOKUP_COLUMNS} from Customer where DisplayName = '${escapeQueryValue(normalizedDisplayName)}'`;
   const customers = await queryQuickBooks<Record<string, unknown>>(query, context);
 
   const existing =
@@ -1245,6 +1337,35 @@ export const updateQuickBooksCustomerSalesforceId = async (
   );
 };
 
+/**
+ * Compare a value derived from Stripe against the value QuickBooks currently
+ * holds.  Strings are compared trimmed and case-insensitively -- a difference of
+ * casing alone is not worth an API write -- and objects (PrimaryEmailAddr,
+ * PrimaryPhone, BillAddr, ShipAddr) match when every field the derived value
+ * carries already matches.  A field QuickBooks holds but the derived value does
+ * not mention never counts as a difference, so enrichment never removes data.
+ */
+const quickBooksValueMatches = (current: unknown, desired: unknown): boolean => {
+  if (typeof desired === 'string') {
+    return (
+      typeof current === 'string' && current.trim().toLowerCase() === desired.trim().toLowerCase()
+    );
+  }
+
+  if (desired && typeof desired === 'object') {
+    if (!current || typeof current !== 'object') {
+      return false;
+    }
+
+    const currentRecord = current as Record<string, unknown>;
+    return Object.entries(desired as Record<string, unknown>).every(([key, value]) =>
+      quickBooksValueMatches(currentRecord[key], value)
+    );
+  }
+
+  return false;
+};
+
 const ensureSalesReceiptCustomer = async (
   input: EnsureCustomerInput,
   context: QuickBooksRequestContext
@@ -1253,6 +1374,7 @@ const ensureSalesReceiptCustomer = async (
   const email = input.email ? normalizeEmail(input.email) : null;
   const givenName = truncate(input.givenName ?? null, 100);
   const familyName = truncate(input.familyName ?? null, 100);
+  const companyName = truncate(input.companyName ?? null, 50);
   const phone = truncate(input.phone ?? null, 30);
   const billingAddress = sanitizeAddress(input.billingAddress);
   const shippingAddress = sanitizeAddress(input.shippingAddress);
@@ -1292,36 +1414,64 @@ const ensureSalesReceiptCustomer = async (
         let resolvedDisplayName =
           typeof existing.DisplayName === 'string' ? existing.DisplayName : displayName;
 
-        if (preferredDisplayName && !equalsIgnoreCase(resolvedDisplayName, preferredDisplayName)) {
-          const updatePayload: Record<string, unknown> = {
-            DisplayName: preferredDisplayName,
-          };
+        // Renaming a customer and enriching a customer are two unrelated
+        // decisions.  They used to be fused: every detail field was written
+        // only inside the "the display name changed" branch, so a repeat
+        // individual donor -- whose name is the same every time -- was never
+        // enriched, and the billing address Stripe held for them never reached
+        // QuickBooks.  They are now decided separately.
+        const desiredDetails: Record<string, unknown> = {};
 
-          if (givenName) {
-            updatePayload.GivenName = givenName;
-          }
-          if (familyName) {
-            updatePayload.FamilyName = familyName;
-          }
-          if (email) {
-            updatePayload.PrimaryEmailAddr = {
-              Address: email,
-            } satisfies QuickBooksEmailAddress;
-          }
-          if (phone) {
-            updatePayload.PrimaryPhone = { FreeFormNumber: phone };
-          }
-          if (billingAddress) {
-            updatePayload.BillAddr = billingAddress;
-          }
-          if (shippingAddress) {
-            updatePayload.ShipAddr = shippingAddress;
+        if (givenName) {
+          desiredDetails.GivenName = givenName;
+        }
+        if (familyName) {
+          desiredDetails.FamilyName = familyName;
+        }
+        if (companyName) {
+          desiredDetails.CompanyName = companyName;
+        }
+        if (email) {
+          desiredDetails.PrimaryEmailAddr = { Address: email } satisfies QuickBooksEmailAddress;
+        }
+        if (phone) {
+          desiredDetails.PrimaryPhone = { FreeFormNumber: phone };
+        }
+        if (billingAddress) {
+          desiredDetails.BillAddr = billingAddress;
+        }
+        if (shippingAddress) {
+          desiredDetails.ShipAddr = shippingAddress;
+        }
+
+        // Only non-empty derived values ever reach `desiredDetails`, so a field
+        // QuickBooks has populated is never overwritten with a blank.
+        const detailsKnown = existing[CUSTOMER_DETAILS_UNKNOWN] !== true;
+        const detailsDiffer =
+          detailsKnown &&
+          Object.entries(desiredDetails).some(
+            ([field, value]) => !quickBooksValueMatches(existing?.[field], value)
+          );
+
+        const needsRename = Boolean(
+          preferredDisplayName && !equalsIgnoreCase(resolvedDisplayName, preferredDisplayName)
+        );
+
+        if (needsRename || detailsDiffer) {
+          const updatePayload: Record<string, unknown> = { ...desiredDetails };
+
+          if (needsRename) {
+            updatePayload.DisplayName = preferredDisplayName;
           }
 
           try {
             const updated = await updateQuickBooksCustomer(value, updatePayload, context);
             const updatedName =
-              typeof updated.DisplayName === 'string' ? updated.DisplayName : preferredDisplayName;
+              typeof updated.DisplayName === 'string'
+                ? updated.DisplayName
+                : needsRename
+                  ? preferredDisplayName
+                  : resolvedDisplayName;
             if (updatedName) {
               resolvedDisplayName = updatedName;
             }
@@ -1362,6 +1512,9 @@ const ensureSalesReceiptCustomer = async (
   }
   if (familyName) {
     payload.FamilyName = familyName;
+  }
+  if (companyName) {
+    payload.CompanyName = companyName;
   }
   if (phone) {
     payload.PrimaryPhone = { FreeFormNumber: phone };

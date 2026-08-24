@@ -89,6 +89,33 @@ describe('createAddressData', () => {
     const addr = createAddressData({});
     expect(addr.country).toBe('US');
   });
+
+  // The Stripe half of this was fixed in PR #186; the Salesforce half was not,
+  // so `line2` was dropped by this allowlist and the apartment or suite number
+  // never reached MailingStreet.
+  it('carries line2 through from a nested address object', () => {
+    const addr = createAddressData({
+      address: {
+        line1: '123 Main St',
+        line2: 'Apt 4B',
+        city: 'Springfield',
+        state: 'IL',
+        postal_code: '62701',
+      },
+    });
+    expect(addr.line2).toBe('Apt 4B');
+  });
+
+  it('carries line2 through from flat customer fields', () => {
+    const addr = createAddressData({
+      address: '456 Oak Ave',
+      line2: 'Suite 210',
+      city: 'Portland',
+      state: 'OR',
+      zipcode: '97201',
+    });
+    expect(addr.line2).toBe('Suite 210');
+  });
 });
 
 // ── describeContact ────────────────────────────────────────────────────────────

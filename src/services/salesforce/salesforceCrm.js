@@ -3,6 +3,21 @@ const BaseCrmService = require('./baseCrm');
 
 const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
+/**
+ * Salesforce keeps the whole street in one multi-line MailingStreet field, so a
+ * second address line ("Apt 4B", "Suite 100") is appended as its own line -- the
+ * same newline join `qboCustomersSync` uses when it maps a QuickBooks address
+ * the other way.  Before this, `line2` was carried all the way to the Salesforce
+ * boundary and then dropped, and every apartment number was lost.
+ */
+const buildMailingStreet = (address) => {
+  const lines = [address?.line1, address?.line2]
+    .map((line) => (typeof line === 'string' ? line.trim() : ''))
+    .filter((line) => line.length > 0);
+
+  return lines.length > 0 ? lines.join('\n') : null;
+};
+
 class SalesforceCrmService extends BaseCrmService {
   constructor(config) {
     super(config);
@@ -378,7 +393,7 @@ class SalesforceCrmService extends BaseCrmService {
       LastName: lastName,
       Email: email,
       Phone: phone || null,
-      MailingStreet: address?.line1 || null,
+      MailingStreet: buildMailingStreet(address),
       MailingCity: address?.city || null,
       MailingState: address?.state || null,
       MailingPostalCode: address?.postalCode || address?.postal_code || null,
@@ -493,7 +508,8 @@ class SalesforceCrmService extends BaseCrmService {
     const updateRecord = {};
 
     if (address) {
-      if (address.line1) updateRecord.MailingStreet = address.line1;
+      const mailingStreet = buildMailingStreet(address);
+      if (mailingStreet) updateRecord.MailingStreet = mailingStreet;
       if (address.city) updateRecord.MailingCity = address.city;
       if (address.state) updateRecord.MailingState = address.state;
       if (address.postalCode || address.postal_code) {
