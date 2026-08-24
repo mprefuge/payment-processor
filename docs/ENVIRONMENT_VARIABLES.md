@@ -64,6 +64,7 @@ QuickBooks becomes operationally required when `ACCOUNTING_SYNC_ENABLED=true`.
 | `QBO_ACCOUNT_REFUNDS` | `ACCOUNTING_REFUNDS_ACCOUNT` | Recommended | Defaults to `Refunds`. |
 | `QBO_ACCOUNT_DISPUTES` | `ACCOUNTING_DISPUTE_LOSS_ACCOUNT` | Recommended | Defaults to `Dispute Losses`. |
 | `QBO_DEFAULT_SALES_ITEM` | `ACCOUNTING_DEFAULT_SALES_ITEM` | No | Defaults to `Stripe Transaction`. Prefer an explicit `Name|Id` item reference in production. |
+| `QBO_FEE_ITEM` | `ACCOUNTING_STRIPE_FEE_ITEM` | No | Defaults to `Stripe Fees`. Product/Service carrying the negative processor-fee line on a sales receipt. The item must exist and its own `IncomeAccountRef` must be `QBO_ACCOUNT_FEES` — the lookup never creates it, and on any mismatch the fee is posted as the paired `FEE-` journal entry instead. See `docs/QBO_POSTING_STRATEGIES.md`. |
 | `ACCOUNTING_AUTOCREATE_ACCOUNTS` | - | No | Defaults to `false`. Keep this disabled in production so missing mappings fail closed instead of creating new ledger accounts implicitly. |
 
 Advanced accounting account-type defaults can also be overridden with:

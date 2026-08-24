@@ -28,6 +28,11 @@ const baseEnv = {
     syncEnabled: true,
     defaultSalesItem: 'Stripe Transaction',
     feeCoverageItem: 'Stripe Fee Coverage',
+    // Explicitly EMPTY, not merely unset: with no QBO_FEE_ITEM configured the receipt can
+    // never carry the negative processor-fee line, so every test below that does not opt in
+    // exercises the paired FEE- journal-entry shape. The tests that do opt in set this
+    // themselves (see 'processor fee on the receipt (QBO_FEE_ITEM)').
+    feeItem: '',
     companyTimeZone: 'America/Los_Angeles',
     accounts: {
       autoCreate: true,
@@ -276,6 +281,7 @@ afterEach(() => {
   baseEnv.accounting.postingStrategy = 'sales-receipt';
   baseEnv.accounting.defaultSalesItem = 'Stripe Transaction';
   baseEnv.accounting.feeCoverageItem = 'Stripe Fee Coverage';
+  baseEnv.accounting.feeItem = '';
   baseEnv.accounting.companyTimeZone = 'America/Los_Angeles';
   baseEnv.accounting.refundAccount = {
     autoCreate: true,
@@ -3207,6 +3213,465 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
     // Both strategies leave the clearing account holding exactly the Stripe payout.
     expect(Number((receiptRevenue + clearingMovement(feeJe)).toFixed(2))).toBe(NET_PAYOUT);
     expect(clearingMovement(singleJe)).toBe(NET_PAYOUT);
+  });
+
+  /**
+   * The processor fee AS A LINE ON THE RECEIPT — the shape Acodei posted, and the shape
+   * Micah's reporting is built around: gross revenue line(s), a negative "Stripe Fee" line,
+   * and a receipt that totals to the NET Stripe deposited.
+   *
+   * The invariant every test here defends: the receipt fee line and the paired `FEE-` journal
+   * entry are MUTUALLY EXCLUSIVE. One resolved-or-null fee item gates both, so the fee expense
+   * is booked exactly once per charge under every configuration.
+   */
+  describe('processor fee on the receipt (QBO_FEE_ITEM)', () => {
+    const FEE_ITEM_NAME = 'Stripe Fees';
+
+    /** The fee item as QuickBooks returns it when it is set up correctly. */
+    const feeItemFound = {
+      QueryResponse: {
+        Item: {
+          Id: 'QBO_ITEM_STRIPE_FEE',
+          Name: 'Stripe Fees',
+          Type: 'Service',
+          // The whole design hinges on THIS: the item's own income account is the fee
+          // EXPENSE account, which is what routes the negative line to the P&L. A
+          // line-level ItemAccountRef would be ignored by QuickBooks.
+          IncomeAccountRef: { value: 'QBO_ACCOUNT_FEES', name: 'Stripe Fees' },
+        },
+      },
+    };
+
+    /** Same item, but pointed at revenue — the contra-revenue trap. */
+    const feeItemWrongAccount = {
+      QueryResponse: {
+        Item: {
+          Id: 'QBO_ITEM_STRIPE_FEE',
+          Name: 'Stripe Fees',
+          IncomeAccountRef: { value: 'QBO_ACCOUNT_REVENUE', name: 'Revenue' },
+        },
+      },
+    };
+
+    const enableFeeItem = () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      baseEnv.accounting.feeItem = FEE_ITEM_NAME;
+    };
+
+    const postedDocNumbers = (requests: RequestRecord[]): string[] =>
+      requests
+        .filter((request) => (request.init?.method ?? 'GET') === 'POST')
+        .map((request) => {
+          try {
+            return JSON.parse((request.init?.body ?? '{}') as string).DocNumber ?? '';
+          } catch {
+            return '';
+          }
+        })
+        .filter((docNumber: string) => docNumber.length > 0);
+
+    const documentPosts = (requests: RequestRecord[]): RequestRecord[] =>
+      requests.filter(
+        (request) =>
+          (request.init?.method ?? 'GET') === 'POST' &&
+          (request.url.includes('/salesreceipt') || request.url.includes('/journalentry'))
+      );
+
+    /**
+     * How many times the fee EXPENSE account is debited for this charge, across every
+     * document posted: once per negative receipt line on the fee item, plus once per journal
+     * debit to the fees account. The answer must always be exactly 1.
+     */
+    const feeExpenseDebits = (requests: RequestRecord[]): number => {
+      let debits = 0;
+      for (const request of documentPosts(requests)) {
+        const body = JSON.parse((request.init?.body ?? '{}') as string);
+        for (const line of body.Line ?? []) {
+          if (line.SalesItemLineDetail && Number(line.Amount) < 0) debits += 1;
+          if (line.JournalEntryLineDetail?.PostingType === 'Debit') {
+            if (line.JournalEntryLineDetail.AccountRef?.value === 'QBO_ACCOUNT_FEES') debits += 1;
+          }
+        }
+      }
+      return debits;
+    };
+
+    it('appends a negative fee line on the dedicated item and posts NO paired FEE- entry', async () => {
+      enableFeeItem();
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        feeItemFound, // fee item lookup
+        { QueryResponse: {} }, // receipt duplicate check
+        { SalesReceipt: { Id: 'sr-fee-line' } }
+        // Deliberately NO further mocks: a FEE- journal entry would throw
+        // "No mock response available for fetch call."
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      const result = await postChargeToQbo(chargeArgs(fetcher));
+      expect(result).toEqual({ qboId: 'sr-fee-line', type: 'sales-receipt' });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+
+      // Three lines, in this order. The gross revenue line MUST stay first:
+      // patchQboSalesReceiptFields only ever patches the first SalesItemLineDetail.
+      expect(receipt.Line.map((line: any) => [line.Description, line.Amount])).toEqual([
+        ['Stripe Sales Item', 100],
+        ['Processing Fee Coverage', 2.5],
+        ['Stripe Fee', -2.56],
+      ]);
+
+      const feeLine = receipt.Line[2];
+      expect(feeLine.DetailType).toBe('SalesItemLineDetail');
+      // Acodei's row: Qty 1, Rate -2.56, Amount -2.56, on its own dedicated item.
+      expect(feeLine.SalesItemLineDetail).toMatchObject({
+        ItemRef: { value: 'QBO_ITEM_STRIPE_FEE', name: 'Stripe Fees' },
+        Qty: 1,
+        UnitPrice: -2.56,
+      });
+      // NEVER an ItemAccountRef: QuickBooks ignores it on a sales form, which is exactly how
+      // the previous attempt turned the fee into contra-revenue.
+      expect(feeLine.SalesItemLineDetail.ItemAccountRef).toBeUndefined();
+      // The class is mirrored from the gross line, as Acodei did on 232/232 receipts.
+      expect(feeLine.SalesItemLineDetail.ClassRef).toEqual(
+        receipt.Line[0].SalesItemLineDetail.ClassRef
+      );
+
+      // The receipt now totals to the NET Stripe deposited.
+      const receiptTotal = receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0);
+      expect(Number(receiptTotal.toFixed(2))).toBe(NET_PAYOUT);
+
+      // Exactly ONE document was POSTed, and nothing carries a FEE- DocNumber.
+      expect(documentPosts(requests)).toHaveLength(1);
+      expect(postedDocNumbers(requests)).toEqual(['CHG-20240301-test']);
+      expect(postedDocNumbers(requests).some((doc) => doc.startsWith('FEE-'))).toBe(false);
+      expect(feeExpenseDebits(requests)).toBe(1);
+
+      // The lookup is `select *` on purpose — a curated column list is how PR #202's
+      // customer queries broke, and IncomeAccountRef is only visible this way.
+      const itemQuery = requests
+        .map((request) => decodeURIComponent(request.url))
+        .find((url) => /from Item where Name = 'Stripe Fees'/.test(url));
+      expect(itemQuery).toBeDefined();
+      expect(itemQuery).toContain('select * from Item');
+    });
+
+    it('degrades to the paired FEE- journal entry when the fee item is missing, creating nothing', async () => {
+      enableFeeItem();
+      vi.resetModules();
+      const warn = vi.fn();
+      vi.doMock('../src/config/env', () => ({ env: baseEnv, default: baseEnv }));
+      vi.doMock('../src/lib/logger', () => ({
+        logger: { log: vi.fn(), info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+        withCorrelationId: (_id: string, fn: () => unknown) => fn(),
+      }));
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // fee item lookup: not in the company file
+        { QueryResponse: {} }, // receipt duplicate check
+        { SalesReceipt: { Id: 'sr-no-fee-item' } },
+        { QueryResponse: {} }, // fee JE duplicate check
+        { JournalEntry: { Id: 'je-no-fee-item' } }
+      );
+      const { postChargeToQbo } = await import('../src/services/qboSvc');
+
+      await postChargeToQbo(chargeArgs(fetcher));
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      // Today's exact shape: two positive lines, receipt at GROSS, no negative line.
+      expect(receipt.Line.map((line: any) => line.Amount)).toEqual([100, 2.5]);
+      expect(receipt.Line.every((line: any) => line.Amount > 0)).toBe(true);
+
+      const feeJe = postedBody(requests, '/journalentry');
+      expect(feeJe.DocNumber).toBe('FEE-20240301-test');
+      expect(journalTotals(feeJe)).toEqual({ debits: 2.56, credits: 2.56 });
+      expect(feeExpenseDebits(requests)).toBe(1);
+
+      // A missing item is never created: creating it would point it at the generic revenue
+      // account and silently reintroduce the contra-revenue bug.
+      expect(
+        requests.filter(
+          (request) => request.url.includes('/item') && (request.init?.method ?? 'GET') === 'POST'
+        )
+      ).toEqual([]);
+      expect(
+        warn.mock.calls.filter((call: unknown[]) =>
+          String(call[0]).includes('Processor-fee product/service unavailable')
+        )
+      ).toHaveLength(1);
+
+      vi.doUnmock('../src/lib/logger');
+    });
+
+    it('degrades to the paired FEE- journal entry when the fee item books to the wrong account', async () => {
+      // The item exists but its IncomeAccountRef is revenue, so a negative line on it would
+      // land as contra-revenue. Refuse it and warn, naming both accounts.
+      enableFeeItem();
+      vi.resetModules();
+      const warn = vi.fn();
+      vi.doMock('../src/config/env', () => ({ env: baseEnv, default: baseEnv }));
+      vi.doMock('../src/lib/logger', () => ({
+        logger: { log: vi.fn(), info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+        withCorrelationId: (_id: string, fn: () => unknown) => fn(),
+      }));
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        feeItemWrongAccount, // fee item lookup: exists, wrong income account
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-wrong-account' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-wrong-account' } }
+      );
+      const { postChargeToQbo } = await import('../src/services/qboSvc');
+
+      await postChargeToQbo(chargeArgs(fetcher));
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line.some((line: any) => Number(line.Amount) < 0)).toBe(false);
+      expect(postedBody(requests, '/journalentry').DocNumber).toBe('FEE-20240301-test');
+      expect(feeExpenseDebits(requests)).toBe(1);
+
+      const mismatchWarnings = warn.mock.calls.filter((call: unknown[]) =>
+        String(call[0]).includes('does not post to the configured fee account')
+      );
+      expect(mismatchWarnings).toHaveLength(1);
+      expect(mismatchWarnings[0][1]).toMatchObject({
+        itemIncomeAccountId: 'QBO_ACCOUNT_REVENUE',
+        expectedFeesAccountId: 'QBO_ACCOUNT_FEES',
+      });
+
+      vi.doUnmock('../src/lib/logger');
+    });
+
+    it('books the fee expense exactly once, never twice, under BOTH fee-item configurations', async () => {
+      // The whole point of routing one resolved-or-null value into both branches: there is no
+      // configuration that produces a receipt fee line AND a FEE- journal entry.
+      enableFeeItem();
+      const withItem = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        feeItemFound,
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-once-a' } }
+      );
+      const withItemSvc = await importQboSvc();
+      await withItemSvc.postChargeToQbo(chargeArgs(withItem.fetcher));
+
+      enableFeeItem();
+      const withoutItem = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // fee item lookup misses
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-once-b' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-once-b' } }
+      );
+      const withoutItemSvc = await importQboSvc();
+      await withoutItemSvc.postChargeToQbo(chargeArgs(withoutItem.fetcher));
+
+      expect(feeExpenseDebits(withItem.requests)).toBe(1);
+      expect(feeExpenseDebits(withoutItem.requests)).toBe(1);
+
+      // And the two shapes leave the clearing account in the same place: the Stripe payout.
+      const inlineReceipt = postedBody(withItem.requests, '/salesreceipt');
+      const inlineClearing = inlineReceipt.Line.reduce(
+        (sum: number, line: any) => sum + line.Amount,
+        0
+      );
+      const pairedReceipt = postedBody(withoutItem.requests, '/salesreceipt');
+      const pairedClearing =
+        pairedReceipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0) +
+        clearingMovement(postedBody(withoutItem.requests, '/journalentry'));
+      expect(Number(inlineClearing.toFixed(2))).toBe(NET_PAYOUT);
+      expect(Number(pairedClearing.toFixed(2))).toBe(NET_PAYOUT);
+    });
+
+    it('posts neither a fee line nor a FEE- entry when the charge carries no processor fee', async () => {
+      enableFeeItem();
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        // No fee item lookup mock at all: with fee 0 the lookup must never be issued.
+        { QueryResponse: {} }, // receipt duplicate check
+        { SalesReceipt: { Id: 'sr-no-fee' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({ ...chargeArgs(fetcher), fee: 0 });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line.some((line: any) => Number(line.Amount) < 0)).toBe(false);
+      expect(documentPosts(requests)).toHaveLength(1);
+      expect(postedDocNumbers(requests).some((doc) => doc.startsWith('FEE-'))).toBe(false);
+      expect(feeExpenseDebits(requests)).toBe(0);
+      expect(
+        requests
+          .map((request) => decodeURIComponent(request.url))
+          .some((url) => /from Item where Name = 'Stripe Fees'/.test(url))
+      ).toBe(false);
+    });
+
+    it('keeps the donor-covered fee line and the processor fee line as three distinct items', async () => {
+      // Coexistence: the donor's coverage is POSITIVE revenue on the coverage item; Stripe's
+      // cut is NEGATIVE expense on the fee item. Different items, opposite signs, both on the
+      // same receipt, which totals to net.
+      enableFeeItem();
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        feeItemFound,
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-three-lines' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo(chargeArgs(fetcher));
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line).toHaveLength(3);
+      const itemIds = receipt.Line.map((line: any) => line.SalesItemLineDetail.ItemRef.value);
+      expect(itemIds).toEqual(['QBO_ITEM_REVENUE', 'QBO_ITEM_FEE_COVERAGE', 'QBO_ITEM_STRIPE_FEE']);
+      expect(new Set(itemIds).size).toBe(3);
+      expect(receipt.Line.map((line: any) => Math.sign(line.Amount))).toEqual([1, 1, -1]);
+      expect(
+        Number(receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0).toFixed(2))
+      ).toBe(NET_PAYOUT);
+    });
+
+    /**
+     * The returned-ACH reversal (CHGREV-) is the other side of this design, and it is why
+     * findFeeItemReference validates the income account rather than trusting the item.
+     *
+     * The reversal debits `accounts.revenue` at GROSS and credits `accounts.fees` for the
+     * processing fee Stripe hands back. Against an inline-fee receipt that still lines up
+     * exactly: the receipt booked revenue at gross (the negative line posts to the FEE
+     * EXPENSE account, not to revenue) and debited `accounts.fees` for the fee — the same
+     * account this credits back.
+     */
+    it('reverses revenue at GROSS against a receipt that booked the fee to the fee account', async () => {
+      enableFeeItem();
+      const receiptMock = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        feeItemFound,
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-reversed' } }
+      );
+      const svc = await importQboSvc();
+      await svc.postChargeToQbo(chargeArgs(receiptMock.fetcher));
+
+      const receipt = postedBody(receiptMock.requests, '/salesreceipt');
+      const receiptRevenue = Number(
+        receipt.Line.filter((line: any) => line.Amount > 0)
+          .reduce((sum: number, line: any) => sum + line.Amount, 0)
+          .toFixed(2)
+      );
+      // Revenue was recognised at GROSS even though the receipt totals to net.
+      expect(receiptRevenue).toBe(GROSS_CENTS / 100);
+      const receiptFeeLine = receipt.Line.find((line: any) => line.Amount < 0);
+      expect(receiptFeeLine.SalesItemLineDetail.ItemRef.value).toBe('QBO_ITEM_STRIPE_FEE');
+
+      const reversalMock = createFetchMock(
+        { QueryResponse: {} }, // reversal duplicate check
+        { JournalEntry: { Id: 'chgrev-1' } }
+      );
+      await svc.postPaymentReversalToQbo({
+        grossAmount: GROSS_CENTS,
+        returnedProcessingFeeAmount: STRIPE_FEE_CENTS,
+        memo: 'ACH return',
+        date: new Date('2024-03-08'),
+        paymentIntentId: 'pi_test',
+        chargeId: 'ch_test',
+        options: { fetcher: reversalMock.fetcher, accessToken: 'token' },
+      });
+
+      const reversal = postedBody(reversalMock.requests, '/journalentry');
+      expect(reversal.DocNumber.startsWith('CHGREV-')).toBe(true);
+
+      const line = (posting: string, account: string) =>
+        reversal.Line.find(
+          (candidate: any) =>
+            candidate.JournalEntryLineDetail.PostingType === posting &&
+            candidate.JournalEntryLineDetail.AccountRef.value === account
+        );
+
+      // Revenue comes back out at the GROSS the receipt recognised, not at its net total.
+      expect(line('Debit', 'QBO_ACCOUNT_REVENUE').Amount).toBe(GROSS_CENTS / 100);
+      // And the returned processing fee credits the SAME account the receipt fee line
+      // debited — the linkage findFeeItemReference enforces.
+      expect(line('Credit', 'QBO_ACCOUNT_FEES').Amount).toBe(STRIPE_FEE_CENTS / 100);
+      expect(line('Credit', 'QBO_ACCOUNT_STRIPE_CLEARING').Amount).toBe(
+        Number(((GROSS_CENTS - STRIPE_FEE_CENTS) / 100).toFixed(2))
+      );
+    });
+
+    /**
+     * `patchQboDocClassRef` re-sends every SalesItemLineDetail with a ClassRef added. Acodei
+     * classed its fee line too, so classing a NEGATIVE line is the desired behaviour — this
+     * pins that it neither skips the line nor mangles its amount.
+     */
+    it('classes the negative fee line without touching its amount', async () => {
+      const receiptWithFeeLine = {
+        Id: '901',
+        SyncToken: '0',
+        DocNumber: 'CHG-20240301-test',
+        Line: [
+          {
+            Amount: 100,
+            DetailType: 'SalesItemLineDetail',
+            SalesItemLineDetail: { ItemRef: { value: 'QBO_ITEM_REVENUE' } },
+          },
+          {
+            Amount: -2.56,
+            DetailType: 'SalesItemLineDetail',
+            Description: 'Stripe Fee',
+            SalesItemLineDetail: { ItemRef: { value: 'QBO_ITEM_STRIPE_FEE' }, Qty: 1 },
+          },
+        ],
+      };
+      const { fetcher, requests } = createFetchMock(
+        { SalesReceipt: receiptWithFeeLine }, // fetchQboDocument
+        { SalesReceipt: { Id: '901' } } // sparse update
+      );
+      const { patchQboDocClassRef } = await importQboSvc();
+
+      const patched = await patchQboDocClassRef('SalesReceipt', '901', 'General|555', {
+        fetcher,
+        accessToken: 'token',
+      } as any);
+
+      expect(patched).toBe(true);
+      const update = JSON.parse(
+        (requests.find((request) => request.init?.method === 'POST')?.init?.body ?? '{}') as string
+      );
+      expect(update.Line.map((line: any) => line.Amount)).toEqual([100, -2.56]);
+      expect(update.Line.map((line: any) => line.SalesItemLineDetail.ClassRef)).toEqual([
+        { value: '555', name: 'General' },
+        { value: '555', name: 'General' },
+      ]);
+    });
+
+    it('leaves the je-transfer strategy byte-for-byte unchanged', async () => {
+      // je-transfer never builds a SalesReceipt, so QBO_FEE_ITEM must be invisible to it —
+      // not "equivalent", identical, and with no item lookup issued at all.
+      baseEnv.accounting.postingStrategy = 'je-transfer';
+      baseEnv.accounting.feeItem = '';
+      const before = createFetchMock({ QueryResponse: {} }, { JournalEntry: { Id: 'chgje-a' } });
+      const beforeSvc = await importQboSvc();
+      await beforeSvc.postChargeToQbo(chargeArgs(before.fetcher));
+
+      baseEnv.accounting.postingStrategy = 'je-transfer';
+      baseEnv.accounting.feeItem = FEE_ITEM_NAME;
+      const after = createFetchMock({ QueryResponse: {} }, { JournalEntry: { Id: 'chgje-b' } });
+      const afterSvc = await importQboSvc();
+      await afterSvc.postChargeToQbo(chargeArgs(after.fetcher));
+
+      const beforeBody = postedBody(before.requests, '/journalentry');
+      const afterBody = postedBody(after.requests, '/journalentry');
+      expect(afterBody).toEqual(beforeBody);
+      expect(afterBody.DocNumber).toBe('CHGJE-20240301-test');
+      expect(
+        after.requests
+          .map((request) => decodeURIComponent(request.url))
+          .some((url) => /from Item/.test(url))
+      ).toBe(false);
+    });
   });
 });
 

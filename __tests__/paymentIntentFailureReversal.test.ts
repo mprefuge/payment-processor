@@ -245,6 +245,31 @@ describe('handlePaymentIntentFailed — returned ACH reversal', () => {
     );
   });
 
+  /**
+   * The reversal gross is read off the ORIGINAL balance transaction, never off the
+   * QuickBooks receipt — so it is unaffected by whether that receipt carried the processor
+   * fee as a negative line (totalling to net) or paired with a FEE- journal entry (totalling
+   * to gross). Either way the receipt recognised revenue at GROSS, so gross is what comes
+   * back out. The ledger-level proof of that pairing lives in
+   * __tests__/qboSvc.test.ts — 'reverses revenue at GROSS against a receipt that booked the
+   * fee to the fee account'.
+   */
+  it('reverses the full gross, never the net Stripe actually deposited', async () => {
+    const { event } = makeFailedEvent();
+    // Stripe settled 5000 gross and kept 40 in fees, so the payout was 4960. The reversal
+    // must be 5000: the receipt booked 5000 of revenue whichever shape it used.
+    const deps = makeDeps(returnedAchScenario(), {
+      postPaymentReversalToQbo,
+      idempotencyStore: makeIdempotencyStore([ORIGINAL_POSTED_KEY]),
+    });
+
+    await handlePaymentIntentFailed(makeContext(), event, deps);
+
+    const [args] = postPaymentReversalToQbo.mock.calls[0] as [Record<string, unknown>];
+    expect(args.grossAmount).toBe(5000);
+    expect(args.grossAmount).not.toBe(4960);
+  });
+
   it('treats the Salesforce Posted_to_QBO__c flag as proof the charge was posted', async () => {
     const { event } = makeFailedEvent();
     const deps = makeDeps(returnedAchScenario(), {

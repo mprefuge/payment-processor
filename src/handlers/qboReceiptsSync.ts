@@ -11,6 +11,7 @@ import {
   normalizeReceiptClassRef,
   patchQboSalesReceiptFields,
   query as qboQuery,
+  summarizeSalesReceiptAmounts,
 } from '../services/qboSvc';
 import {
   buildSalesforceConfig,
@@ -65,12 +66,22 @@ type QboSalesReceipt = {
   CustomerRef?: { value?: string | null; name?: string | null } | null;
   ClassRef?: { value?: string | null; name?: string | null } | null;
   Line?: Array<{
+    Amount?: number | null;
     DetailType?: string | null;
     SalesItemLineDetail?: {
       ClassRef?: { value?: string | null; name?: string | null } | null;
     } | null;
   }> | null;
 };
+
+/**
+ * Gross / fee / net for a receipt, derived from its own lines.
+ *
+ * `TotalAmt` is the NET whenever the receipt carries the negative "Stripe Fee" line, so
+ * duplicate detection and the Salesforce write-back both key off the computed GROSS —
+ * `Transaction__c.Amount_Gross__c` is recorded at gross by the Stripe path.
+ */
+const receiptAmounts = (receipt: QboSalesReceipt) => summarizeSalesReceiptAmounts(receipt);
 
 type ReceiptSyncStatus =
   | 'synced'
@@ -596,10 +607,7 @@ const findPotentialExistingChargeMatches = async (
   receipt: QboSalesReceipt
 ): Promise<string[]> => {
   const recordId = toTrimmed(resolvedRecord.record.Id);
-  const receiptAmount =
-    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
-      ? receipt.TotalAmt
-      : null;
+  const receiptAmount = receiptAmounts(receipt)?.gross ?? null;
   const receiptDate = normalizeComparableDate(receipt.TxnDate);
 
   if (!recordId || receiptAmount === null || !receiptDate) {
@@ -646,10 +654,7 @@ const getPotentialExistingChargeMatches = (
   receipt: QboSalesReceipt
 ): string[] => {
   const recordId = toTrimmed(resolvedRecord.record.Id);
-  const receiptAmount =
-    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
-      ? receipt.TotalAmt
-      : null;
+  const receiptAmount = receiptAmounts(receipt)?.gross ?? null;
   const receiptDate = normalizeComparableDate(receipt.TxnDate);
 
   if (!recordId || receiptAmount === null || !receiptDate) {
@@ -679,10 +684,7 @@ const buildPotentialExistingChargeMatchIndex = async (
       const salesforceId = extractQboSalesforceId(customer);
       const resolvedRecord = salesforceId ? (sfRecordCache.get(salesforceId) ?? null) : null;
       const recordId = toTrimmed(resolvedRecord?.record.Id);
-      const amount =
-        typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
-          ? receipt.TotalAmt
-          : null;
+      const amount = receiptAmounts(receipt)?.gross ?? null;
       const receiptDate = normalizeComparableDate(receipt.TxnDate);
 
       if (
@@ -919,12 +921,12 @@ const buildTransactionDtoFromReceipt = (
   customer: QboCustomer
 ): TransactionUpsertDTO | null => {
   const qboDocId = normalizeQboId(receipt.Id);
-  const amountGross =
-    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
-      ? receipt.TotalAmt
-      : null;
+  // Gross / fee / net come off the lines, not off TotalAmt: a receipt carrying the negative
+  // "Stripe Fee" line totals to NET, and copying that into Amount_Gross__c would both
+  // understate the gift and break duplicate matching against the Stripe-written row.
+  const amounts = receiptAmounts(receipt);
 
-  if (!qboDocId || amountGross === null) return null;
+  if (!qboDocId || amounts === null) return null;
 
   const docNumber = toTrimmed(receipt.DocNumber);
   const note = toTrimmed(receipt.PrivateNote);
@@ -946,9 +948,9 @@ const buildTransactionDtoFromReceipt = (
   return {
     transaction_type__c: 'sales-receipt',
     status__c: 'paid',
-    amount_gross__c: amountGross,
-    amount_fee__c: 0,
-    amount_net__c: amountGross,
+    amount_gross__c: amounts.gross,
+    amount_fee__c: amounts.fee,
+    amount_net__c: amounts.net,
     currency_iso_code__c: currencyCode,
     memo__c: importMemo,
     contact__c: resolvedRecord.objectType === 'Contact' ? (resolvedRecord.record.Id ?? null) : null,

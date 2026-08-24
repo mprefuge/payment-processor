@@ -267,6 +267,16 @@ interface BuildSalesReceiptInput {
    * item does not exist in the company file.
    */
   coverFeesItemRef?: string;
+  /**
+   * Product/Service for the NEGATIVE processor-fee line, in the same shape as
+   * `revenueItemName`. Absent means "no fee line": the caller either found no fee amount, or
+   * could not resolve a dedicated fee item whose own IncomeAccountRef is the fee expense
+   * account, and is posting the paired `FEE-` journal entry instead. See the note beside the
+   * fee line below — the two are mutually exclusive by construction.
+   */
+  feeLineItemRef?: string;
+  /** Processor fee, in cents, to carry as the negative line. Only used with `feeLineItemRef`. */
+  feeLineAmountCents?: number;
   lineQuantity?: number;
   lineRate?: number;
   lineAmountCents?: number;
@@ -507,6 +517,69 @@ export const normalizeReceiptClassRef = (
     ...(value ? { value } : {}),
     ...(name ? { name } : {}),
   };
+};
+
+/** The minimum shape of a QBO SalesReceipt needed to derive gross / fee / net. */
+export type SalesReceiptAmountSource = {
+  TotalAmt?: number | null;
+  Line?: Array<{
+    Amount?: number | null;
+    DetailType?: string | null;
+    SalesItemLineDetail?: unknown;
+  } | null> | null;
+};
+
+export type SalesReceiptAmounts = {
+  /** Sum of the POSITIVE item lines — what the donor actually paid. */
+  gross: number;
+  /** Absolute sum of the NEGATIVE item lines — the processor fee carried inline. */
+  fee: number;
+  /** `TotalAmt` — net when the receipt carries a fee line, equal to gross when it does not. */
+  net: number;
+};
+
+/**
+ * Splits a QBO SalesReceipt's TotalAmt into gross / fee / net using its own lines.
+ *
+ * Under the sales-receipt strategy a receipt may carry a NEGATIVE "Stripe Fee" item line, in
+ * which case `TotalAmt` is the NET Stripe deposited, not the gross the donor paid. Anything
+ * that copies `TotalAmt` into `Amount_Gross__c` would understate the gift and, worse, stop
+ * matching the `Transaction__c` row recorded at gross — so every such reader derives gross
+ * from the lines instead.
+ *
+ * A receipt with no negative line (every receipt posted before this shape existed, and every
+ * receipt that still pairs with a `FEE-` journal entry) yields gross === net === TotalAmt and
+ * fee 0, which is exactly the old behaviour. Same for a receipt whose lines are unreadable.
+ */
+export const summarizeSalesReceiptAmounts = (
+  receipt: SalesReceiptAmountSource | null | undefined
+): SalesReceiptAmounts | null => {
+  const total =
+    typeof receipt?.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
+      ? receipt.TotalAmt
+      : null;
+  if (total === null) return null;
+
+  const lines = Array.isArray(receipt?.Line) ? receipt.Line : [];
+  let positiveCents = 0;
+  let negativeCents = 0;
+  for (const line of lines) {
+    if (!line) continue;
+    if (line.DetailType !== 'SalesItemLineDetail' && !line.SalesItemLineDetail) continue;
+    const amount = line.Amount;
+    if (typeof amount !== 'number' || !Number.isFinite(amount)) continue;
+    const cents = Math.round(amount * 100);
+    if (cents >= 0) positiveCents += cents;
+    else negativeCents += Math.abs(cents);
+  }
+
+  // No negative line means nothing to split: keep TotalAmt authoritative rather than
+  // re-deriving gross from lines that may not sum to it (discounts, shipping, rounding).
+  if (negativeCents === 0) {
+    return { gross: total, fee: 0, net: total };
+  }
+
+  return { gross: positiveCents / 100, fee: negativeCents / 100, net: total };
 };
 
 const truncate = (value: string | null | undefined, length: number): string | null => {
@@ -2222,6 +2295,8 @@ export const buildSalesReceipt = ({
   description,
   coverFeesAmountCents = 0,
   coverFeesItemRef,
+  feeLineItemRef,
+  feeLineAmountCents = 0,
   lineQuantity,
   lineRate,
   lineAmountCents,
@@ -2338,20 +2413,75 @@ export const buildSalesReceipt = ({
     });
   }
 
-  // NOTE: the processor fee is deliberately NOT a line on this receipt.
+  // The processor fee, as a NEGATIVE line — but ONLY when the caller resolved a dedicated fee
+  // Product/Service. This mirrors the shape Acodei posted: gross revenue line(s), a negative
+  // "Stripe Fee" line, and a receipt that totals to the NET Stripe actually deposited.
   //
-  // A SalesReceipt is the donor-facing document and must state what the donor actually
-  // paid — the gross. The earlier implementation appended a negative SalesItemLine for the
-  // Stripe fee, carrying the *revenue* ItemRef with an ItemAccountRef pointed at the fees
-  // account. QuickBooks posts a sales line to the income account configured on the Item
-  // itself; ItemAccountRef on the line does not redirect it. That negative line therefore
-  // landed as contra-revenue: revenue was booked net and no processor-fee expense ever
-  // reached the P&L.
+  // WHY A DEDICATED ITEM, AND WHY THE CALLER RESOLVES IT (keep this — it is the whole design):
+  // QuickBooks posts a sales line to the income account configured on the ITEM itself; an
+  // `ItemAccountRef` on the line does NOT redirect it. An earlier implementation appended this
+  // negative line carrying the *revenue* ItemRef with `ItemAccountRef` pointed at the fees
+  // account, and QuickBooks ignored that ref: the line landed as contra-revenue, revenue was
+  // booked net, and no processor-fee expense ever reached the P&L. That is why there is NO
+  // `ItemAccountRef` below, and why `feeLineItemRef` must be an item whose OWN IncomeAccountRef
+  // is the fee expense account — `findFeeItemReference` refuses to hand over anything else.
   //
-  // The fee is now posted as its own paired journal entry (Dr Fees / Cr Stripe Clearing) by
-  // postChargeAsSalesReceipt, which is the correct nonprofit treatment: revenue at gross,
-  // fee as its own expense, and the clearing account netting to the Stripe payout. The fee
-  // is still reported to the donor through CustomerMemo below.
+  // MUTUALLY EXCLUSIVE WITH THE `FEE-` JOURNAL ENTRY: `postChargeAsSalesReceipt` derives one
+  // resolved-or-null fee item and that single value gates both outcomes — this line, or the
+  // paired `FEE-` entry (Dr Fees / Cr Stripe Clearing), never both. Either way revenue is
+  // booked at gross, the fee reaches the P&L exactly once, and Stripe Clearing nets to the
+  // payout. The fee is also reported to the donor through CustomerMemo below.
+  //
+  // Order matters: this goes LAST. `patchQboSalesReceiptFields` patches only the FIRST
+  // SalesItemLineDetail, so the gross revenue line has to stay at index 0.
+  const feeLineItem = toTrimmed(feeLineItemRef);
+  if (feeLineItem) {
+    const feeLineCents = ensurePositiveAmount(feeLineAmountCents, 'Sales receipt fee line amount');
+    const positiveTotalCents = lines.reduce(
+      (total, line) => total + Math.round((line.Amount ?? 0) * 100),
+      0
+    );
+
+    if (feeLineCents <= 0) {
+      logger.warn('[qboSvc] Fee item supplied with no fee amount; omitting the receipt fee line', {
+        docNumber,
+        feeLineAmountCents,
+      });
+    } else if (feeLineCents >= positiveTotalCents) {
+      // A receipt that totals to zero or less is not a receipt. Fall through with no fee line;
+      // the caller's guard posts the paired FEE- journal entry instead.
+      logger.warn(
+        '[qboSvc] Processor fee >= receipt total; omitting the receipt fee line so the receipt stays positive',
+        {
+          docNumber,
+          feeLineAmountCents: feeLineCents,
+          receiptTotalCents: positiveTotalCents,
+        }
+      );
+    } else {
+      const feeLineAmount = -centsToDollars(feeLineCents);
+      if (!Number.isFinite(feeLineAmount)) {
+        throw new Error(
+          `Invalid processor fee amount calculated for sales receipt: ${feeLineAmount} (from ${feeLineCents} cents)`
+        );
+      }
+
+      lines.push({
+        Amount: feeLineAmount,
+        DetailType: 'SalesItemLineDetail',
+        // Acodei's row reads exactly this; matching it keeps Micah's reporting unchanged.
+        Description: 'Stripe Fee',
+        SalesItemLineDetail: {
+          ItemRef: createItemRef(feeLineItem),
+          Qty: 1,
+          UnitPrice: feeLineAmount,
+          ...(resolvedServiceDate ? { ServiceDate: resolvedServiceDate } : {}),
+          // Acodei carried the gross line's class on the fee line on 232/232 receipts.
+          ...(classRef ? { ClassRef: classRef } : {}),
+        },
+      });
+    }
+  }
 
   const receipt: QuickBooksSalesReceipt = {
     DocNumber: docNumber,
@@ -3159,10 +3289,28 @@ const buildItemCacheKey = (name: string): string => {
   return `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:item:${name.trim().toLowerCase()}`;
 };
 
-const findItemReferenceByName = async (
+/** The raw Item record behind a resolved reference, cached alongside the id. */
+const itemRecordCache = new Map<string, Record<string, unknown>>();
+
+type ItemMatch = {
+  reference: QuickBooksReference;
+  /** The full Item record QuickBooks returned, so callers can inspect IncomeAccountRef. */
+  record: Record<string, unknown> | null;
+};
+
+/**
+ * Looks an Item up by name and returns both the reference and the raw record.
+ *
+ * The query is `select *` deliberately. A hand-curated column list is how the customer
+ * lookups broke before (PR #202): QuickBooks rejects the whole query when any one column is
+ * not selectable and names only the FIRST offending column, so the list has to be discovered
+ * one failure at a time. `select *` cannot develop that failure mode, and it is the only way
+ * `findFeeItemReference` can see `IncomeAccountRef` at all.
+ */
+const findItemMatchByName = async (
   name: string,
   context: QuickBooksRequestContext
-): Promise<QuickBooksReference | null> => {
+): Promise<ItemMatch | null> => {
   const normalizedName = name.trim();
   if (!normalizedName) {
     return null;
@@ -3171,10 +3319,13 @@ const findItemReferenceByName = async (
   const cacheKey = buildItemCacheKey(normalizedName);
   const cached = itemLookupCache.get(cacheKey);
   if (cached) {
-    return { value: cached, name: normalizedName };
+    return {
+      reference: { value: cached, name: normalizedName },
+      record: itemRecordCache.get(cacheKey) ?? null,
+    };
   }
 
-  const query = `select Id, Name from Item where Name = '${escapeQueryValue(normalizedName)}'`;
+  const query = `select * from Item where Name = '${escapeQueryValue(normalizedName)}'`;
   const url = buildQboQueryUrl(query);
   const response = await context.request(url, {
     method: 'GET',
@@ -3237,7 +3388,19 @@ const findItemReferenceByName = async (
       : normalizedName;
 
   itemLookupCache.set(cacheKey, id);
-  return { value: id, name: resolvedName };
+  itemRecordCache.set(cacheKey, match as Record<string, unknown>);
+  return {
+    reference: { value: id, name: resolvedName },
+    record: match as Record<string, unknown>,
+  };
+};
+
+const findItemReferenceByName = async (
+  name: string,
+  context: QuickBooksRequestContext
+): Promise<QuickBooksReference | null> => {
+  const match = await findItemMatchByName(name, context);
+  return match?.reference ?? null;
 };
 
 const resolveItemId = async (name: string, context: QuickBooksRequestContext): Promise<string> => {
@@ -3284,6 +3447,71 @@ const findCoverFeesItemReference = async (
   }
 
   return reference;
+};
+
+/**
+ * Non-creating, ACCOUNT-VALIDATED lookup of the dedicated Product/Service that carries the
+ * negative processor-fee line on a sales receipt (QBO_FEE_ITEM, default "Stripe Fees").
+ *
+ * Two guards, both load-bearing:
+ *
+ *  1. Non-creating. Routing this through `ensureSalesReceiptItem` / `resolveRevenueItemReference`
+ *     would silently CREATE the item pointed at the generic revenue account — which is exactly
+ *     the mis-post this design exists to avoid. And `findItemReferenceByName` falls back to
+ *     `itemList[0]` when its exact-name match misses, so the name is re-checked here (as
+ *     `findCoverFeesItemReference` does) and anything else is treated as a miss.
+ *
+ *  2. Income-account validated. QuickBooks books a sales line to the income account configured
+ *     on the ITEM; a line-level `ItemAccountRef` is ignored. So the fee line only books a real
+ *     expense when this item's own `IncomeAccountRef` is the configured fee account. If it
+ *     points anywhere else the line would land as contra-revenue, which is the failure the
+ *     previous attempt shipped — so a mismatch is a miss, loudly.
+ *
+ * A miss is never an error: it returns null and the caller posts the paired `FEE-` journal
+ * entry instead.
+ */
+const findFeeItemReference = async (
+  itemName: string,
+  feesAccountId: string,
+  context: QuickBooksRequestContext
+): Promise<QuickBooksReference | null> => {
+  const normalizedName = toTrimmed(itemName);
+  if (!normalizedName) {
+    return null;
+  }
+
+  const match = await findItemMatchByName(normalizedName, context);
+  if (!match) {
+    return null;
+  }
+
+  const resolvedFeeItemName = toTrimmed(match.reference.name);
+  if (!resolvedFeeItemName || resolvedFeeItemName.toLowerCase() !== normalizedName.toLowerCase()) {
+    return null;
+  }
+
+  const incomeAccountRef = match.record?.IncomeAccountRef;
+  const incomeAccountId =
+    incomeAccountRef && typeof incomeAccountRef === 'object'
+      ? toTrimmed(String((incomeAccountRef as Record<string, unknown>).value ?? ''))
+      : null;
+  const expectedAccountId = toTrimmed(feesAccountId);
+
+  if (!incomeAccountId || !expectedAccountId || incomeAccountId !== expectedAccountId) {
+    logger.warn(
+      '[QBO] Fee product/service does not post to the configured fee account; ' +
+        'skipping the receipt fee line and posting the paired FEE- journal entry instead',
+      {
+        feeItemName: normalizedName,
+        feeItemId: match.reference.value,
+        itemIncomeAccountId: incomeAccountId,
+        expectedFeesAccountId: expectedAccountId,
+      }
+    );
+    return null;
+  }
+
+  return match.reference;
 };
 
 const classPathLookupCache = new Map<string, QuickBooksReference>();
@@ -4094,6 +4322,46 @@ const postChargeAsSalesReceipt = async (input: {
   const feesAccountRef = createAccountRef(env.quickBooks.accounts.fees);
   await resolveAccountReferences([revenueAccountRef, depositAccountRef, feesAccountRef], context);
 
+  // THE fee decision. One resolved-or-null value gates BOTH outcomes below, so there is no
+  // configuration in which the receipt carries a fee line AND a `FEE-` journal entry is
+  // posted — the fee reaches the P&L exactly once, by construction rather than by two
+  // conditionals that could drift apart.
+  //
+  // Resolution is non-creating and validates that the item's OWN IncomeAccountRef is this
+  // same `feesAccountRef` — see findFeeItemReference. That linkage is also what keeps
+  // postPaymentReversalToQbo correct: a returned ACH credits `accounts.fees`, reversing what
+  // this line debited, only because both touch the same account.
+  let feeLineItemRef: string | undefined;
+  if (feeAmount > 0) {
+    const feeItemName = toTrimmed(env.accounting.feeItem);
+    if (feeItemName) {
+      let feeItem: QuickBooksReference | null = null;
+      try {
+        feeItem = await findFeeItemReference(feeItemName, feesAccountRef.value, context);
+      } catch (error) {
+        logger.warn(
+          '[QBO] Lookup of the processor-fee product/service failed; posting the paired FEE- journal entry instead',
+          {
+            feeItemName,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
+      }
+
+      if (feeItem?.value) {
+        feeLineItemRef = JSON.stringify({
+          value: feeItem.value,
+          name: feeItem.name ?? feeItemName,
+        });
+      } else {
+        logger.warn(
+          '[QBO] Processor-fee product/service unavailable in QuickBooks; posting the paired FEE- journal entry instead',
+          { feeItemName }
+        );
+      }
+    }
+  }
+
   const salesReceipt = buildSalesReceipt({
     docNumber: salesReceiptDocNumber,
     amountCents: grossAmount,
@@ -4116,6 +4384,8 @@ const postChargeAsSalesReceipt = async (input: {
     description,
     coverFeesAmountCents,
     coverFeesItemRef,
+    feeLineItemRef,
+    feeLineAmountCents: feeAmount,
     lineQuantity: lineOverrides.quantity,
     lineRate: lineOverrides.rate,
     lineAmountCents: lineOverrides.amountCents,
@@ -4123,13 +4393,22 @@ const postChargeAsSalesReceipt = async (input: {
     lineClassRef,
   });
 
+  // buildSalesReceipt drops the fee line if the fee would swallow the whole receipt, so the
+  // JE branch keys off what actually shipped, not off what was requested.
+  const receiptCarriesFeeLine = salesReceipt.Line.some(
+    (line) => typeof line.Amount === 'number' && line.Amount < 0
+  );
+
   const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
 
-  // Post the processor fee as its own paired journal entry (Dr Fees / Cr Stripe Clearing).
+  // Post the processor fee as its own paired journal entry (Dr Fees / Cr Stripe Clearing) —
+  // the fallback half of the mutually exclusive pair. It runs ONLY when the receipt did not
+  // carry the fee itself, so the fee is never booked twice.
   //
-  // The receipt deposits the GROSS into Stripe Clearing; this entry takes the fee back out,
-  // so Clearing nets to the Stripe payout while revenue stays at gross and the fee shows up
-  // as an expense in the P&L.
+  // When it runs the receipt deposited the GROSS into Stripe Clearing and this entry takes the
+  // fee back out, so Clearing nets to the Stripe payout while revenue stays at gross and the
+  // fee shows up as an expense in the P&L. When the receipt carries the negative fee line
+  // instead, the receipt already deposits the NET and books that same expense directly.
   //
   // Ordering matters for retry safety: the receipt is posted first, and the receipt and the
   // fee entry each carry their own DocNumber, so postToQbo's duplicate check short-circuits
@@ -4141,7 +4420,7 @@ const postChargeAsSalesReceipt = async (input: {
   // FEE-20240301-XXXXXXXX. That makes the pair findable from either side in QuickBooks.
   // A test-mode posting prefixes both halves identically ('TCHG' / 'TFEE', both 4 characters),
   // so the pairing survives -- TCHG-20240301-XXXXXXX pairs with FEE's TFEE-20240301-XXXXXXX.
-  if (feeAmount > 0) {
+  if (feeAmount > 0 && !receiptCarriesFeeLine) {
     const feeDocNumber = buildDocNumber(docNumberPrefix('FEE', options), date, feeAmount, chargeId);
     const feeJournalEntry = buildFeesJE({
       docNumber: feeDocNumber,
@@ -4163,6 +4442,14 @@ const postChargeAsSalesReceipt = async (input: {
       feeDocNumber,
       feeJournalEntryId: feeJournalResult.id,
       feeAmountCents: feeAmount,
+      feeShape: 'paired-fee-journal-entry',
+    });
+  } else if (receiptCarriesFeeLine) {
+    logger.info('[QBO] Sales receipt carries the processor fee inline; no paired FEE- entry', {
+      salesReceiptDocNumber,
+      salesReceiptId: salesReceiptResult.id,
+      feeAmountCents: feeAmount,
+      feeShape: 'receipt-fee-line',
     });
   }
 
@@ -5073,6 +5360,14 @@ export const postDisputeReversalToQbo = async ({
  * Revenue is debited rather than an expense account: the gift never arrived, so
  * the period's revenue is overstated until it is taken back out.  Routing it to
  * an expense account would leave both revenue and expense overstated.
+ *
+ * Debiting revenue at GROSS stays correct under either sales-receipt shape.  When the
+ * receipt carries the negative "Stripe Fee" line it totals to net, but that line posts to
+ * the FEE EXPENSE account (the dedicated fee item's own IncomeAccountRef), not to revenue —
+ * so revenue was still recognised at gross and gross is still what has to come back out.
+ * The returned-processing-fee credit lands on `accounts.fees`, reversing exactly what that
+ * receipt line debited, and it only lines up because `findFeeItemReference` refuses any fee
+ * item whose income account is not this same `accounts.fees`.
  *
  * The `CHGREV` DocNumber prefix keeps the reversal a separate, traceable
  * document alongside the original `CHG-…` / `CHGJE-…` entry, and QuickBooks'

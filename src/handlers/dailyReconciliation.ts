@@ -2079,8 +2079,12 @@ const emptyAmountSummary = (): QboDocAmountSummary => ({
 /**
  * Derives gross / fee / clearing movement from a QBO document's lines.
  *
- * SalesReceipt (qboSvc `buildSalesReceipt`): positive item lines are revenue, and the
- * Stripe fee is a single NEGATIVE item line, so TotalAmt is already net.
+ * SalesReceipt (qboSvc `buildSalesReceipt`): positive item lines are revenue. The processor
+ * fee is EITHER a single NEGATIVE item line on this receipt — in which case TotalAmt is
+ * already net and no paired `FEE-` entry exists — OR absent from the receipt entirely and
+ * carried by that paired `FEE-` journal entry. The two shapes are mutually exclusive
+ * (postChargeAsSalesReceipt resolves one fee item or none), so summing this across a
+ * charge's documents counts the fee exactly once either way.
  *
  * JournalEntry (qboSvc `buildSingleJE`): debit clearing gross / credit revenue gross,
  * then debit fees fee / credit clearing fee.
@@ -2325,10 +2329,37 @@ const resolveDocsForStripeIds = (ids: string[], lookup: QboDocLookup): QboDocWit
 };
 
 /**
+ * True when a SalesReceipt among `docs` already accounts for the processor fee on its own
+ * lines — the negative "Stripe Fee" item line.
+ *
+ * This is the "is a paired fee JE expected?" test, inverted. `postChargeAsSalesReceipt`
+ * emits the receipt fee line and the `FEE-` journal entry as mutually exclusive halves of
+ * one decision, so a receipt that carries the fee inline has no missing half to report and
+ * no `FEE-` DocNumber to send an operator looking for.
+ */
+const receiptAccountsForFeeInline = (docs: QboDocWithEntity[]): boolean =>
+  docs.some(
+    (doc) =>
+      doc.entityType === 'SalesReceipt' &&
+      (Array.isArray(doc.Line) ? doc.Line : []).some(
+        (line) =>
+          line &&
+          (line.DetailType === 'SalesItemLineDetail' || line.SalesItemLineDetail) &&
+          toCents(line.Amount) < 0
+      )
+  );
+
+/**
  * The DocNumber the paired fee journal entry would carry for a receipt — quoted in the
  * finding so an operator can search QuickBooks for the half that never posted.
+ *
+ * Null when the receipt carries the fee on its own lines: under that shape no `FEE-` entry
+ * is ever posted, so naming one would send the operator hunting for a document that is not
+ * supposed to exist.
  */
 const expectedPairedFeeDocNumber = (docs: QboDocWithEntity[]): string | null => {
+  if (receiptAccountsForFeeInline(docs)) return null;
+
   for (const doc of docs) {
     if (doc.entityType !== 'SalesReceipt') continue;
     const pairKey = docNumberPairKey(doc.DocNumber, 'CHG');
@@ -2384,8 +2415,10 @@ const findChargeAmountMismatches = (
     const piId = resolveExpandedId(charge.payment_intent);
     const btId = btObject.id ?? null;
     const ids = uniqueStrings([charge.id, piId, btId]);
-    // Includes the FEE- journal entry paired with a CHG- receipt: since the fee moved off
-    // the receipt, reading the receipt alone would report a missing fee on every gift.
+    // Includes the FEE- journal entry paired with a CHG- receipt, for the shape where the fee
+    // is NOT on the receipt: reading the receipt alone would report a missing fee on every
+    // gift. A receipt that carries the fee inline has no FEE- pair to pull in, so the fee is
+    // still counted exactly once.
     const docs = resolveDocsForStripeIds(ids, lookup);
     if (docs.length === 0) continue;
 
@@ -2451,8 +2484,11 @@ const findChargeAmountMismatches = (
     if (actualFeeCents !== expectedFeeCents) {
       const deltaCents = actualFeeCents - expectedFeeCents;
       const feeAbsent = actualFeeCents === 0 && expectedFeeCents > 0;
-      // Under the sales-receipt strategy the fee is its own paired entry, so an absent fee
-      // means that half never posted. Name the DocNumber it would carry.
+      // Under the sales-receipt strategy the fee is EITHER a negative line on the receipt or
+      // its own paired `FEE-` entry — never both, and never neither. An absent fee therefore
+      // means one specific half never posted; name its DocNumber only when that half is the
+      // journal entry (expectedPairedFeeDocNumber returns null for an inline-fee receipt, so a
+      // receipt that already books the fee is never reported as missing its FEE- half).
       const missingPairDocNumber = feeAbsent ? expectedPairedFeeDocNumber(docs) : null;
 
       items.push({
@@ -3921,6 +3957,8 @@ export const __internals = {
   findAccountFeesMissingQbo,
   buildQboDocLookup,
   resolveDocsForStripeIds,
+  expectedPairedFeeDocNumber,
+  receiptAccountsForFeeInline,
   isPayoutAccountFeeEntry,
   buildPayoutBalanceCheck,
   payoutCheckToDiscrepancy,
