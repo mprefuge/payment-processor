@@ -692,10 +692,6 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptRequest).toBeDefined();
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
-    expect(salesReceiptBody.ClassRef).toMatchObject({
-      value: 'QBO_CLASS_EVENTS',
-      name: 'Events',
-    });
     expect(salesReceiptBody.Line[0]).toMatchObject({
       Amount: 90.5,
       Description: 'Custom donation line',
@@ -2500,6 +2496,58 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
 
       // Cover-fee revenue is booked, not swallowed.
       expect(COVER_FEES_CENTS / 100).toBe(2.5);
+    });
+
+    it('classes the receipt on its lines only, with no header ClassRef, and mirrors the class onto the fee JE', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // receipt duplicate check
+        { SalesReceipt: { Id: 'sr-class' } },
+        { QueryResponse: {} }, // fee JE duplicate check
+        { JournalEntry: { Id: 'je-class' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext(
+          {},
+          {
+            metadata: {
+              transactionType: 'Stripe Sales Item',
+              cover_fees: 'true',
+              cover_fees_amount: '2.50',
+              qbo_class_ref: 'Events|QBO_CLASS_EVENTS',
+            },
+          }
+        ),
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const feeJe = postedBody(requests, '/journalentry');
+      const expectedClass = { value: 'QBO_CLASS_EVENTS', name: 'Events' };
+
+      // No header ClassRef. This company file tracks class per LINE
+      // (ClassTrackingPerTxnLine), which Intuit's Preferences reference makes mutually
+      // exclusive with ClassTrackingPerTxn, so a receipt-level ClassRef is inert here --
+      // and the docs are silent on what QBO does with it when the preference is off.
+      expect(receipt.ClassRef).toBeUndefined();
+      expect(Object.keys(receipt)).not.toContain('ClassRef');
+
+      // ...while the class stays where QuickBooks actually reads it: on each revenue line.
+      const [revenueLine, coverFeesLine] = receipt.Line;
+      expect(revenueLine.Description).toBe('Stripe Sales Item');
+      expect(revenueLine.SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+      expect(coverFeesLine.Description).toBe('Processing Fee Coverage');
+      expect(coverFeesLine.SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+
+      // The paired fee entry still carries its own line class on the fee debit.
+      const feeDebit = feeJe.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+      );
+      expect(feeDebit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_FEES');
+      expect(feeDebit.JournalEntryLineDetail.ClassRef).toMatchObject(expectedClass);
     });
 
     it('pairs the two DocNumbers on the same date and charge-id tail', async () => {

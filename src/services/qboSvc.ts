@@ -2340,10 +2340,6 @@ export const buildSalesReceipt = ({
     receipt.ShipAddr = shippingAddress;
   }
 
-  if (classRef) {
-    receipt.ClassRef = classRef;
-  }
-
   try {
     const origCents = ensurePositiveAmount(amountCents, 'Original charge amount');
     const feeCents = ensurePositiveAmount(stripeFeeAmountCents ?? 0, 'Stripe fee amount');
@@ -5306,7 +5302,10 @@ export const fetchQboDocument = async (
 /**
  * Patches the ClassRef on an existing QBO document if it is currently absent.
  *
- * - SalesReceipt: sparse-updates the top-level ClassRef field.
+ * - SalesReceipt: fetches the full document, adds ClassRef to every
+ *   SalesItemLineDetail that does not already have one, then posts the
+ *   full document back (the CLASS column is per-line, and QBO does not
+ *   support sparse Line updates).
  * - JournalEntry: fetches the full document, adds ClassRef to every
  *   JournalEntryLineDetail that does not already have one, then posts the
  *   full document back (QBO does not support sparse Line updates).
