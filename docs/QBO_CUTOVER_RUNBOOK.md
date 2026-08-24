@@ -4,7 +4,54 @@
 
 **Why this file exists.** The deploy-order warning below was written into PR #199's description and was meant to be pasted into its merge commit. It was not: #199 merged as `e232063` with the bare two-line GitHub default message, so the warning survived only in PR discussion on github.com. `e232063` is shared history and is deliberately **not** being amended or rewritten. The warning is recorded here instead, where `git log`, a deploy checklist, and anyone reading the repository will find it.
 
-**How to read the claims here.** Every statement is either (a) a code reference you can check in this tree, cited with file and line, or (b) explicitly labelled **[company-file observation]** — read directly from the live QuickBooks company file with a read-only token, not derived from code — or (c) labelled **[open question]** and left unanswered. Line numbers are as of the commit that added this file; if they have drifted, the symbol names are the durable anchor.
+**How to read the claims here.** Every statement is either (a) a code reference you can check in this tree, cited with file and line, or (b) explicitly labelled **[company-file observation]** — read directly from the live QuickBooks company file with a read-only token, not derived from code — or (c) labelled **[production observation]** — read from a production log line or the deploy run history, not derived from code — or (d) labelled **[open question]** and left unanswered. Line numbers are as of the commit that added this file; if they have drifted, the symbol names are the durable anchor.
+
+---
+
+## 0. Production state as of 2026-08-24 — our posting is live, and every charge webhook is failing
+
+**Read this before anything else in this file.** It settles one of the open questions in §10, corrects the framing in §2 and §6, and puts a deadline on the ordering decision in §1.
+
+**What is deployed.** Production is **run 519**, head `772ba44` — the merge of PR #200 — dispatched **2026-08-24T12:36:39Z** (§7).
+
+**Our webhook accounting path is enabled in production** — **[production observation]**. A live error at **13:26Z** reached the QuickBooks **customer-ensure** step. Nothing downstream of `isAccountingEnabledForEvent` (`src/stripe/testModeAccounting.ts:96`) executes when the flag is off, so `ACCOUNTING_SYNC_ENABLED` is **not** `false` on the deployed Function App. This retires the standing instruction to "look for a `CHG-` or `FEE-` document to find out whether our posting is live." **It is live.**
+
+**But every charge webhook is currently failing before any document is written.**
+
+Commit `c52680b` (PR #200 — an ancestor of `772ba44`, confirmed with `git merge-base --is-ancestor`) widened the customer-lookup column list at `src/services/qboSvc.ts:1044-1045`:
+
+```ts
+const CUSTOMER_LOOKUP_COLUMNS =
+  'Id, DisplayName, PrimaryEmailAddr, GivenName, FamilyName, CompanyName, PrimaryPhone, BillAddr, ShipAddr';
+```
+
+`BillAddr` and `ShipAddr` are complex nested types, and the QuickBooks query language rejects them in a `SELECT` column list. Both call sites — `findCustomerByEmail` (`src/services/qboSvc.ts:1068`) and `findCustomerByDisplayName` (`:1104`) — therefore come back `QueryValidationError: Property BillAddr not found for Entity Customer`, and `queryQuickBooks` (`:952-993`) throws on the non-OK response with **no retry and no fallback**.
+
+**The blast radius is 100% of charge webhooks, not a subset.** Each link verified in this tree:
+
+- `src/stripe/handlers/paymentIntents.ts:884-896` calls `postChargeToQbo` with **no** top-level `customer`, so `postChargeAsSalesReceipt` (`src/services/qboSvc.ts:3739`) always enters the `if (!receiptCustomer)` branch at `:3757` and calls `ensureSalesReceiptCustomer` at `:3762`.
+- `ensureSalesReceiptCustomer` **rethrows** on the email lookup (`:1385-1394`) instead of falling through to the display-name path at `:1396` — and that path queries the same constant anyway.
+- The only bypass, `customerLookupCache` (`:2583`), can never populate in a cold process: every write site (`cacheCustomerReference`, `:1025`, called from `:1082`, `:1121`, `:1491`, `:1560`, `:1602`, `:1613`, `:5422`, `:5444`, `:5493`) sits downstream of a lookup or a create that has already succeeded.
+
+Individual gifts and organisation gifts, address present or absent, new donors and repeat donors all fail identically. The manual path degrades instead of failing — `postManualEntryAsSalesReceipt` catches and warns at `src/services/qboSvc.ts:4165`, posting without a customer — but the webhook path has no such catch.
+
+**Nothing is marked posted.** The throw lands before `markPosted` (`src/stripe/handlers/paymentIntents.ts:898`) and before `markProcessed` (`:901`), so the affected charges carry no durable idempotency marker and remain **replayable via `stripeTrueUp`**.
+
+**The fix is owned by a separate work thread and is not part of this PR.** Line numbers above are as of `dc79089`; the symbol names are the durable anchor once the fix moves them.
+
+### Why this belongs in the cutover runbook
+
+Because the hard requirement in §1 is not currently being satisfied. It is being **masked**.
+
+No gift is being double-booked against Acodei right now, for exactly one reason: **nothing is being written at all.** That is an outage providing cover — not the ordering being met. Acodei is still posting (§2). Our side is switched on (above). The only thing standing between the two systems and a double-booked ledger is a failing `SELECT`.
+
+**The moment a fix deploys, posting resumes** — into a company file Acodei may still be writing to — and every duplicate check in this codebase is self-referential, unable to see an Acodei-authored document (§3). Nothing about the overlap risk has been reduced; the risk has only been postponed, by an accident.
+
+So the ordering advice everywhere else in this document is unchanged, and now carries a deadline:
+
+> **Acodei off first, or the same day. Ours after. Never both live.**
+>
+> The window to act is exactly the interval **before the charge-webhook fix deploys**. Settle the Acodei disconnect inside that window, not after it.
 
 ---
 
@@ -17,6 +64,8 @@ Micah is dropping the third-party integration **Acodei** and making this functio
 > There must be **no window in which both systems post the same Stripe charges** into the company file.
 
 Acodei is disconnected **first, or the same day**. Our posting is enabled **after**. Never the reverse, and never both live at once.
+
+**As of 2026-08-24 this requirement is not satisfied — see §0.** Our posting is already switched on in production; the only reason it is not double-booking is that it is failing before it writes.
 
 ---
 
@@ -34,7 +83,9 @@ Acodei is disconnected **first, or the same day**. Our posting is enabled **afte
 - Our entire footprint is **22 `CHG-MANUAL` receipts**, newest **2026-05-19**.
 - **Zero** `FEE-` / `POFEE-` / `DSP-` journal entries.
 
-So today Acodei owns these charges outright. If our side is switched on while Acodei is still connected, each charge is booked twice — once by each system — and no automated check in this repository reports it (§3).
+That absence is **not** evidence that our posting is switched off. As of 2026-08-24 the webhook accounting path is enabled in production and is failing before it writes a document (§0) — which is why the file still shows no `CHG-…` receipt from it.
+
+So today Acodei owns these charges outright. **This is no longer a hypothetical.** Our side is already switched on while Acodei is still connected (§0); the moment the charge-webhook failure is fixed, each charge is booked twice — once by each system — and no automated check in this repository reports it (§3).
 
 ---
 
@@ -123,7 +174,7 @@ And the service layer offers no backstop: **`src/services/qboSvc.ts` contains ze
 
 > **This is the strongest argument in this document for disconnecting Acodei rather than relying on the environment variable.** `ACCOUNTING_SYNC_ENABLED=false` is a webhook-level switch, not a company-file-level one. Holding our side off by flag alone means holding five separate doors closed by convention, and one wrong endpoint call or one dispatched true-up reopens it. **Disconnecting Acodei removes the other writer; the flag only removes some of ours.**
 
-> **Note on the default:** `ACCOUNTING_SYNC_ENABLED` defaults to `'false'` in code (`src/config/env.ts:251-255`). That is the *code* default only. **Confirm the value actually configured on the deployed Function App in Azure** — this repository cannot tell you what is set there.
+> **Note on the default:** `ACCOUNTING_SYNC_ENABLED` defaults to `'false'` in code (`src/config/env.ts:251-255`). That is the *code* default only, and it is **not** what production is running: a live error on 2026-08-24 reached the QuickBooks customer-ensure step, which sits downstream of this flag, so the deployed Function App does not have it set to `false` (§0). This repository still cannot tell you the exact configured value — **re-read it in the Azure Function App configuration before the cutover** rather than assuming either way.
 
 ---
 
@@ -142,6 +193,8 @@ And the service layer offers no backstop: **`src/services/qboSvc.ts` contains ze
 | **Current production baseline** | **run 519**, head `772ba44`, `workflow_dispatch`, dispatched 2026-08-24T12:36:39Z, **completed successfully** |
 | What that contains | PR #200 (head `f224886`, merged as `772ba44`) **and** PR #199 (`127e6a4`, merged as `e232063`) — verified: `e232063` is an ancestor of `772ba44` |
 | Previous baseline | **run 518**, head `585d44d` (merge of PR #197), 2026-08-23 — verified: `e232063` is **not** an ancestor of `585d44d` |
+
+> **What run 519 is actually doing in production:** see §0 — the webhook accounting path is enabled, and every charge webhook is failing at the QuickBooks customer lookup before it writes.
 
 > **Do not treat this table as current on a later date** — re-read the workflow run list for `main_payment-processing-function.yml` and take the newest completed successful run.
 
@@ -175,7 +228,7 @@ Perform in this order. Do not reorder steps 5 and 6.
 4. **Agree that nobody calls the write-mode paths during the window (§6).** No `POST /api/ops/daily-reconciliation?dryRun=false`. No `POST /api/qbo/manual-sync`. No `salesforceRecordQboSync` run. No `payoutSyncTrigger` run. No `stripeTrueUp` dispatched without `?bypassQbo=true` — its default is to post. `ACCOUNTING_SYNC_ENABLED=false` does **not** cover any of these.
 5. **Record the "before" state** of the company file: the newest Acodei receipt date and the running count, so a later duplicate is identifiable by comparison. **[requires a company-file read]**
 6. **Disconnect Acodei.** Before step 7, or at the earliest on the same day. Confirm no further Acodei-authored documents appear after the disconnect timestamp.
-7. **Enable our posting.** Set `ACCOUNTING_SYNC_ENABLED=true` and dispatch the deploy (`workflow_dispatch` on `main_payment-processing-function.yml`, §7).
+7. **Enable our posting.** `ACCOUNTING_SYNC_ENABLED` is already not `false` in production (§0), so this step is really *confirm the flag in Azure, then let the charge-webhook fix deploy.* **That deploy is the moment our posting actually starts writing, and it must not land before step 6.** Dispatch it as a `workflow_dispatch` on `main_payment-processing-function.yml` (§7).
 8. **Verify the first live charge end to end** before walking away: one Stripe charge → exactly one receipt in the company file, with a `CHG-…` DocNumber, against the correct item, hitting an income account.
 9. **Check for duplicates on the boundary day.** Any charge between step 6 and step 8 is the highest-risk set. Compare against the "before" state from step 5 — the automated checks will not do this for you (§3, §4).
 
@@ -194,4 +247,7 @@ Do not guess this one. Check the field history on a few Acodei-era `Transaction_
 **[open question] Does Acodei's per-payout Transfer carry the `po_…` id in `PrivateNote`?**
 If yes, `checkForPayoutMovement` (§3) blocks a duplicate Transfer for that payout. If no, payouts are exposed like everything else. Resolvable by reading one Acodei Transfer in the company file.
 
-**[open question] The production value of `ACCOUNTING_SYNC_ENABLED`** — and of the two reconciliation switches in §5. Only readable in the Azure Function App configuration.
+**[resolved 2026-08-24] The production value of `ACCOUNTING_SYNC_ENABLED`.**
+A live error reached the QuickBooks customer-ensure step, which this flag gates — so it is not `false` on the deployed Function App (§0). The exact configured string is still only readable in Azure, but the behaviour is settled: **the webhook accounting path is live in production.**
+
+**[open question] The production values of the two reconciliation switches in §5** (`ENABLE_DAILY_RECONCILIATION_TIMER`, `DAILY_RECONCILIATION_DRY_RUN`). Only readable in the Azure Function App configuration.
