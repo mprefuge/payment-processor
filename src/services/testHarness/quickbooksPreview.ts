@@ -151,6 +151,10 @@ const buildSalesReceiptDocuments = (input: {
   }
 
   const salesReceiptDocNumber = buildDocNumber('CHG', date, grossCents, chargeId);
+  // Computed up here so the previewed receipt's CustomerMemo names the same paired entry the
+  // preview renders below, exactly as the posting path does.
+  const feeDocNumber =
+    feeCents !== null && feeCents > 0 ? buildDocNumber('FEE', date, feeCents, chargeId) : null;
   const salesReceipt = buildSalesReceipt({
     docNumber: salesReceiptDocNumber,
     amountCents: grossCents,
@@ -160,6 +164,9 @@ const buildSalesReceiptDocuments = (input: {
     // 0 only affects the human-readable CustomerMemo, which states so explicitly when the
     // fee is unknown; the machine-readable `amounts.feeCents` stays null.
     stripeFeeAmountCents: feeCents ?? 0,
+    // This preview always renders the fallback shape (no fee item is resolved without a
+    // QuickBooks query), so the receipt carries no fee line and the memo points at this entry.
+    pairedFeeDocNumber: feeDocNumber,
     stripeChargeId: chargeId,
     stripeInvoiceId:
       typeof stripeContext.charge?.invoice === 'string' ? stripeContext.charge.invoice : null,
@@ -213,8 +220,7 @@ const buildSalesReceiptDocuments = (input: {
   // whose own IncomeAccountRef is the fee account — and settling that requires querying
   // QuickBooks, which this preview never does. So the pair below is what posts when the item
   // is missing or mis-pointed; `feeItemNote` in the warnings says so explicitly.
-  if (feeCents !== null && feeCents > 0) {
-    const feeDocNumber = buildDocNumber('FEE', date, feeCents, chargeId);
+  if (feeCents !== null && feeCents > 0 && feeDocNumber) {
     documents.push({
       order: 2,
       entity: 'JournalEntry',
