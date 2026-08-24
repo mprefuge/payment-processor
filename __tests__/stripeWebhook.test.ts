@@ -235,6 +235,14 @@ describe('stripeWebhook', () => {
         .mockImplementation(async (field: string) =>
           field === 'stripe_checkout_session_id__c' ? 'sf_existing' : null
         ),
+      // Class tracking lives in Salesforce, not in Stripe: the donation form never writes
+      // qbo_class metadata, so this read is the only way the live webhook gets a class onto
+      // the receipt lines.
+      findTransactionClassFields: vi.fn().mockResolvedValue({
+        qboClassId: null,
+        qboClassName: null,
+        campaignClass: 'UNRESTRICTED FUNDS:General',
+      }),
     };
 
     const stripe = {
@@ -290,6 +298,12 @@ describe('stripeWebhook', () => {
     const chargePostingArgs = accounting.postChargeToQbo.mock.calls[0]?.[0];
     expect(chargePostingArgs?.date).toBeInstanceOf(Date);
     expect(chargePostingArgs?.date?.toISOString()).toBe(new Date(1_700_000_000_000).toISOString());
+
+    // The class fields are read off the Transaction__c we just upserted and forwarded to the
+    // poster, which resolves the path against QuickBooks.
+    expect(salesforce.findTransactionClassFields).toHaveBeenCalledWith('sf_1');
+    expect(chargePostingArgs?.campaignClass).toBe('UNRESTRICTED FUNDS:General');
+    expect(chargePostingArgs?.classRef).toBeNull();
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_1', {
       id: '123',
       type: 'journal-entry',

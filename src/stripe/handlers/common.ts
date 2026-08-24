@@ -19,7 +19,7 @@ export const markPosted = async (
   doc: PostChargeToQboResult
 ): Promise<void> => markDocumentPosted(salesforce, upsertResult, doc);
 
-const resolveUpsertRecordId = (upsertResult: unknown): string | null => {
+export const resolveUpsertRecordId = (upsertResult: unknown): string | null => {
   const id =
     upsertResult && typeof upsertResult === 'object' && 'id' in upsertResult
       ? (upsertResult as { id?: string }).id

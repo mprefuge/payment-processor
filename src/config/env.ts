@@ -66,6 +66,19 @@ export interface EnvConfig {
      */
     allowTestModeAccounting: boolean;
     defaultSalesItem: string;
+    /**
+     * QuickBooks Product/Service used for the donor-covered processing-fee line on a sales
+     * receipt. Kept separate from `defaultSalesItem` so the coverage can be reported against
+     * its own income account instead of being folded into gift revenue. Resolution is
+     * non-creating: if the item does not exist in the company file the fee line silently
+     * falls back to the revenue item (see postChargeAsSalesReceipt).
+     */
+    feeCoverageItem: string;
+    /**
+     * IANA time zone of the QuickBooks company file. Used to stamp line-level ServiceDate on
+     * the calendar day the donor actually gave, rather than the UTC day.
+     */
+    companyTimeZone: string;
     accounts: {
       autoCreate: boolean;
       types: {
@@ -265,6 +278,16 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     defaultValue: 'Stripe Transaction',
   });
 
+  const feeCoverageItem = resolveEnv('QBO_FEE_COVERAGE_ITEM', {
+    fallbackNames: ['ACCOUNTING_FEE_COVERAGE_ITEM'],
+    defaultValue: 'Stripe Fee Coverage',
+  });
+
+  const companyTimeZone = resolveEnv('QBO_COMPANY_TIMEZONE', {
+    fallbackNames: ['ACCOUNTING_COMPANY_TIMEZONE'],
+    defaultValue: 'America/Los_Angeles',
+  });
+
   const autoCreate = parseBoolean(
     'ACCOUNTING_AUTOCREATE_ACCOUNTS',
     resolveEnv('ACCOUNTING_AUTOCREATE_ACCOUNTS', { defaultValue: 'false' }),
@@ -320,6 +343,8 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     syncEnabled,
     allowTestModeAccounting,
     defaultSalesItem,
+    feeCoverageItem,
+    companyTimeZone,
     accounts: {
       autoCreate,
       types,
