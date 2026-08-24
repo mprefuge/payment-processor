@@ -1,0 +1,26 @@
+# Subject line: one line, imperative mood, roughly 72 characters or less.
+
+
+# What changed and why. A few sentences is plenty — write for whoever is
+# bisecting this six months from now.
+
+
+# Operational notes — anything a human has to do before or after this deploys:
+#   - settings to change in QuickBooks, Stripe, or Salesforce
+#   - ordering constraints ("deploy this before/after X")
+#   - jobs, scripts, or backfills to run
+#   - "this does nothing until X exists"
+# Write "None." when there genuinely are none, so an empty section is
+# deliberate rather than forgotten.
+#
+# Never put a credential, token, or other secret value here. Commit messages
+# are permanent and readable by anyone with access to the repository.
+
+Operational notes:
+
+# Remember: the merge commit is what survives, not the pull request discussion.
+# GitHub's default merge commit records only "Merge pull request #N from
+# owner/branch" and keeps none of the above. Squash-merge instead, and keep the
+# PR body as the squash commit message so this text reaches the history.
+#
+# Lines starting with '#' are stripped by git.

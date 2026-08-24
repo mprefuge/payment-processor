@@ -127,6 +127,30 @@ npm run deployment:smoke
 npm run build
 ```
 
+### Commit messages and merging
+
+Operational warnings — deploy ordering, settings to change in QuickBooks, Stripe, or
+Salesforce, jobs to run, "this does nothing until the other change ships" — belong in the
+commit message, not only in the pull request discussion. The discussion is not part of the
+repository history. The commit message is.
+
+To keep that true at merge time:
+
+- **Squash-merge by default.** A plain merge commit records only
+  `Merge pull request #N from owner/branch` and drops everything the PR body said.
+- **Keep the PR body as the squash commit message.** GitHub pre-fills it; do not replace it
+  with the bare title.
+- **Give every commit an `Operational notes` section**, even when the honest answer is
+  `None.`, so an empty one is deliberate rather than accidental.
+
+The repo ships a commit template that prompts for all of this. Opt in once per clone:
+
+```bash
+git config commit.template .gitmessage
+```
+
+Never put a credential, token, or other secret value in a commit message.
+
 ## API Endpoints
 
 ### Health Check
