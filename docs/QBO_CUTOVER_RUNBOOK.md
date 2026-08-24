@@ -104,15 +104,15 @@ Every Stripe **webhook** accounting path consults it and returns before reaching
 - A second workflow, `.github/workflows/new-main_payment-processing-function.yml`, triggers on `push` to `New-Main`, plus `workflow_dispatch`.
 - Neither triggers on `claude/e2e-test-field-population-xwpz4e`, the branch these PRs merge into. Merging there is inert until someone dispatches a run.
 
-**Deploy state at the time this file was written (2026-08-24, ~12:37Z):**
+**Deploy state as of 2026-08-24 ~12:45Z:**
 
 | | |
 | --- | --- |
-| Last **completed successful** production deploy | **run 518**, head `585d44d` (merge of PR #197), 2026-08-23 |
-| Merged but **not** in run 518 | PR #199 (`127e6a4`, merged as `e232063`) **and** PR #200 (head `f224886`, merged as `772ba44`) — verified: `e232063` is not an ancestor of `585d44d` |
-| **run 519** | dispatched **2026-08-24T12:36:39Z** against `772ba44` (the merge of #200, which contains `e232063`) — **`in_progress` at the time of writing; its outcome was not observed** |
+| **Current production baseline** | **run 519**, head `772ba44`, `workflow_dispatch`, dispatched 2026-08-24T12:36:39Z, **completed successfully** |
+| What that contains | PR #200 (head `f224886`, merged as `772ba44`) **and** PR #199 (`127e6a4`, merged as `e232063`) — verified: `e232063` is an ancestor of `772ba44` |
+| Previous baseline | **run 518**, head `585d44d` (merge of PR #197), 2026-08-23 — verified: `e232063` is **not** an ancestor of `585d44d`, so neither #199 nor #200 was live under run 518 |
 
-> **Uncertainty, stated rather than smoothed over:** run 519 was still running when this was written. If it succeeded, the production baseline is `772ba44` and both #199 and #200 are live. If it failed, the baseline is still `585d44d`. **Check the run's conclusion before relying on either.** Do not treat this table as current on a later date — re-read the workflow run list.
+> **Both #199 and #200 are merged AND deployed.** This changed while this runbook was being written: run 519 was dispatched mid-task and was still `in_progress` at first check, then completed successfully. **Do not treat this table as current on a later date** — re-read the workflow run list for `main_payment-processing-function.yml` and take the newest completed successful run.
 
 ---
 
@@ -164,4 +164,3 @@ These are recorded as open rather than answered, because the answer is not in th
 
 - **How the daily reconciliation posting path is held off during the cutover.** §5 establishes that it has no `ACCOUNTING_SYNC_ENABLED` gate. This runbook does not invent one. Whether it is disabled by its schedule/trigger configuration in Azure, by not deploying it, or by some other means must be decided and confirmed before step 3 — **do not assume the flag covers it.**
 - **The production value of `ACCOUNTING_SYNC_ENABLED`.** Only readable in the Azure Function App configuration.
-- **The outcome of deploy run 519** (§6), which was in progress when this was written.
