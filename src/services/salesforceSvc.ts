@@ -5,6 +5,7 @@ import {
   type TransactionUpsertDTO,
   SF_RECORD_TYPE_STRIPE_TRANSACTION,
 } from '../domain/transactions';
+import { logger } from '../lib/logger';
 
 const PAYOUT_TRANSACTION_RECORD_TYPE_NAME = 'Payout';
 const SALES_RECEIPT_RECORD_TYPE_NAME = 'Sales Receipt';
@@ -301,6 +302,241 @@ const resolveFieldApiName = (field: keyof TransactionRecordInput): string => {
 
   const apiName = TRANSACTION_FIELD_API_NAMES[field as keyof TransactionUpsertDTO];
   return apiName ?? (field as string);
+};
+
+/**
+ * Reverse of `TRANSACTION_FIELD_API_NAMES`: Salesforce API name (lowercased) ->
+ * the internal DTO key the rest of the codebase writes.
+ *
+ * Salesforce speaks only API names -- `No such column 'Billing_Phone__c'` -- while every
+ * record we build is keyed by the lowercase internal name (`billing_phone__c`). Both
+ * directions are needed: internal -> API to build the DML record (`resolveFieldApiName`),
+ * API -> internal so a dropped-field log names the field the way the writers do.
+ */
+const TRANSACTION_FIELD_INTERNAL_NAMES: ReadonlyMap<string, keyof TransactionUpsertDTO> = new Map(
+  (Object.entries(TRANSACTION_FIELD_API_NAMES) as Array<[keyof TransactionUpsertDTO, string]>).map(
+    ([internalName, apiName]) => [apiName.toLowerCase(), internalName]
+  )
+);
+
+/**
+ * Map a Salesforce API field name back to the internal DTO key, or `null` when the API
+ * name is not one this service writes. Case-insensitive on purpose: Salesforce echoes the
+ * column name from the request, and our own map is not internally consistent about casing
+ * (`Stripe_Invoice_ID__c` vs `Stripe_Invoice_Id__c`).
+ */
+export const resolveTransactionInternalFieldName = (
+  apiFieldName: string
+): keyof TransactionUpsertDTO | null =>
+  TRANSACTION_FIELD_INTERNAL_NAMES.get(apiFieldName.trim().toLowerCase()) ?? null;
+
+/**
+ * Field names that must never be dropped from a `Transaction__c` DML record, whatever
+ * Salesforce says about them. `Id` and `RecordTypeId` are how the record is addressed and
+ * typed; shedding either turns a targeted update into a blind insert or a wrong-record-type
+ * insert. External id fields are added per call site (see `executeTransactionDmlWithFieldFallback`).
+ */
+const UNDROPPABLE_TRANSACTION_FIELDS: ReadonlySet<string> = new Set(['id', 'recordtypeid']);
+
+/**
+ * `Transaction__c` API field names (lowercased) this process has learned do not exist in
+ * the connected org.
+ *
+ * Module-level and deliberately never cleared: once the org has told us a column is not
+ * there, every later write in this process can skip it without spending a round trip to be
+ * told again. Mirrors `unsupportedContactFields` in `src/handlers/qboCustomersSync.ts`,
+ * which does the same thing for Contact queries and saves.
+ */
+const unsupportedTransactionFields = new Set<string>();
+
+export const isUnsupportedTransactionField = (apiFieldName: string): boolean =>
+  unsupportedTransactionFields.has(apiFieldName.trim().toLowerCase());
+
+/**
+ * Record a field as unsupported. Returns `true` only the first time a given field is
+ * marked, so the caller can log each dropped field exactly once.
+ */
+const markUnsupportedTransactionField = (apiFieldName: string): boolean => {
+  const normalized = apiFieldName.trim().toLowerCase();
+  if (!normalized || unsupportedTransactionFields.has(normalized)) {
+    return false;
+  }
+
+  unsupportedTransactionFields.add(normalized);
+  return true;
+};
+
+/**
+ * Clears the learned-unsupported cache. Test-only: the cache is process-lifetime state by
+ * design, and nothing in the running function has a reason to forget it.
+ */
+export const __resetUnsupportedTransactionFieldsForTests = (): void => {
+  unsupportedTransactionFields.clear();
+};
+
+const TRANSACTION_UNSUPPORTED_FIELD_PATTERNS: readonly RegExp[] = [
+  new RegExp(`No such column '([A-Za-z0-9_]+)' on sobject of type ${TRANSACTION_OBJECT}`, 'i'),
+  new RegExp(`No such column '([A-Za-z0-9_]+)' on entity '${TRANSACTION_OBJECT}'`, 'i'),
+];
+
+/**
+ * Pull the offending API field name out of a Salesforce `INVALID_FIELD` error.
+ *
+ * Accepts either a thrown error or an already-collected message string, because jsforce
+ * surfaces this failure both ways: as a rejection, and as `{ success: false, errors: [...] }`
+ * on the DML result. Modelled on `parseUnsupportedContactField`
+ * (`src/handlers/qboCustomersSync.ts`).
+ */
+const parseUnsupportedTransactionField = (error: unknown): string | null => {
+  const message = error instanceof Error ? error.message : String(error);
+
+  for (const pattern of TRANSACTION_UNSUPPORTED_FIELD_PATTERNS) {
+    const match = message.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+};
+
+/**
+ * How many unsupported fields a single DML call may shed before the failure is allowed to
+ * stand.
+ *
+ * Salesforce reports only the first invalid column per DML, so each dropped field costs one
+ * more round trip -- the cap bounds a pathological org at 11 calls instead of one per field
+ * on the record (~70). Ten comfortably covers the real case this was built for: a handful of
+ * fields from one undeployed commit (`Billing_Name__c`, `Billing_Email__c`, `Billing_Phone__c`,
+ * `Statement_Descriptor__c`). An org missing more than ten columns is misconfigured rather
+ * than slightly behind, and should fail loudly instead of being whittled down to a record
+ * that no longer resembles the gift.
+ */
+const MAX_UNSUPPORTED_TRANSACTION_FIELD_RETRIES = 10;
+
+const stripUnsupportedTransactionFields = (
+  records: TransactionRecord[],
+  protectedFields: ReadonlySet<string>
+): TransactionRecord[] =>
+  records.map((record) => {
+    const next: TransactionRecord = {};
+    for (const [key, value] of Object.entries(record)) {
+      if (!protectedFields.has(key.toLowerCase()) && isUnsupportedTransactionField(key)) {
+        continue;
+      }
+      next[key] = value as TransactionFieldValue;
+    }
+    return next;
+  });
+
+const removeTransactionField = (
+  records: TransactionRecord[],
+  apiFieldName: string
+): { records: TransactionRecord[]; removed: boolean } => {
+  const target = apiFieldName.trim().toLowerCase();
+  let removed = false;
+
+  const next = records.map((record) => {
+    const copy: TransactionRecord = {};
+    for (const [key, value] of Object.entries(record)) {
+      if (key.toLowerCase() === target) {
+        removed = true;
+        continue;
+      }
+      copy[key] = value as TransactionFieldValue;
+    }
+    return copy;
+  });
+
+  return { records: next, removed };
+};
+
+/**
+ * Run a `Transaction__c` DML call, dropping fields the org does not have and retrying.
+ *
+ * The failure this exists for: a `Transaction__c` upsert carrying a column that was never
+ * deployed to the org is rejected whole, because the DML runs `allOrNone: true` and
+ * `INVALID_FIELD` is not one of the retryable failures `resolveRetryableTransactionUpsertFailure`
+ * knows about. One missing column therefore costs the entire record -- the gift never leaves
+ * `Pending`, QuickBooks is never posted, the receipt never sends, and even the
+ * `posting_error__c` note that would have made it visible is itself a `Transaction__c` write
+ * that fails the same way. Stripe sees a 503 and redelivers for ~3 days.
+ *
+ * Salesforce names only the first offending column per DML, so this loops: parse the column
+ * out of the error, remove it, remember it, retry. The memo is module-level, so the second
+ * gift in the same process skips the field on the first attempt with no failed round trip.
+ *
+ * Every dropped field is logged once at `logger.error` -- not `context.log`. Dropping a field
+ * silently is exactly how this stayed hidden since April; an App Insights severity filter has
+ * to be able to find it.
+ */
+const executeTransactionDmlWithFieldFallback = async (
+  records: TransactionRecord[],
+  externalIdFields: readonly string[],
+  run: (records: TransactionRecord[]) => Promise<UpsertResult | UpsertResult[]>
+): Promise<UpsertResult[]> => {
+  const protectedFields = new Set<string>(UNDROPPABLE_TRANSACTION_FIELDS);
+  for (const field of externalIdFields) {
+    const normalized = field?.trim().toLowerCase();
+    if (normalized) {
+      protectedFields.add(normalized);
+    }
+  }
+
+  let working = stripUnsupportedTransactionFields(records, protectedFields);
+
+  for (let attempt = 0; ; attempt += 1) {
+    let results: UpsertResult[] | null = null;
+    let thrown: unknown = null;
+    let unsupportedField: string | null = null;
+
+    try {
+      results = toArray(await run(working));
+      const failures = results.filter(isFailedUpsertResult);
+      if (failures.length === 0) {
+        return results;
+      }
+      unsupportedField = parseUnsupportedTransactionField(collectErrorMessages(failures));
+    } catch (error) {
+      thrown = error;
+      unsupportedField = parseUnsupportedTransactionField(error);
+    }
+
+    const surfaceFailure = (): UpsertResult[] => {
+      if (thrown !== null) {
+        throw thrown;
+      }
+      return results as UpsertResult[];
+    };
+
+    // Not an unsupported-column failure, or one naming a field we must keep: leave the
+    // failure exactly as the existing recovery paths expect to see it.
+    if (!unsupportedField || protectedFields.has(unsupportedField.trim().toLowerCase())) {
+      return surfaceFailure();
+    }
+
+    const { records: reduced, removed } = removeTransactionField(working, unsupportedField);
+    if (!removed) {
+      return surfaceFailure();
+    }
+
+    if (markUnsupportedTransactionField(unsupportedField)) {
+      logger.error(
+        `[salesforceSvc] ${TRANSACTION_OBJECT} field does not exist in Salesforce; dropping it from this write and every later one`,
+        {
+          object: TRANSACTION_OBJECT,
+          apiField: unsupportedField,
+          internalField: resolveTransactionInternalFieldName(unsupportedField),
+        }
+      );
+    }
+
+    working = reduced;
+
+    if (attempt >= MAX_UNSUPPORTED_TRANSACTION_FIELD_RETRIES) {
+      return surfaceFailure();
+    }
+  }
 };
 
 /**
@@ -953,13 +1189,11 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     record: TransactionRecord,
     externalIdField: string
   ): Promise<UpsertResult> => {
-    const [result] = toArray(
-      await connection.upsert(
-        TRANSACTION_OBJECT,
-        [record],
-        externalIdField,
-        TRANSACTION_DML_OPTIONS
-      )
+    const [result] = await executeTransactionDmlWithFieldFallback(
+      [record],
+      [externalIdField],
+      (dmlRecords) =>
+        connection.upsert(TRANSACTION_OBJECT, dmlRecords, externalIdField, TRANSACTION_DML_OPTIONS)
     );
 
     return result;
@@ -969,8 +1203,17 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     record: TransactionRecord,
     errorMessage: string
   ): Promise<UpsertResult & { created: true }> => {
-    const [result] = toArray(
-      await connection.sobject(TRANSACTION_OBJECT).create(record, TRANSACTION_DML_OPTIONS)
+    const [result] = await executeTransactionDmlWithFieldFallback(
+      [record],
+      [],
+      async (dmlRecords) =>
+        // Kept a single-record `create`, not a one-element array: jsforce routes an array
+        // through the collections API, which is a different request shape. `create` reports
+        // the same INVALID_FIELD failure as `upsert`; jsforce just types it as SaveResult
+        // (no `created` flag), which the caller re-adds below.
+        (await connection
+          .sobject(TRANSACTION_OBJECT)
+          .create(dmlRecords[0], TRANSACTION_DML_OPTIONS)) as unknown as UpsertResult
     );
 
     if (!result.success) {
@@ -1135,8 +1378,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       Stripe_Payout_Id__c: normalizedPayoutId,
     }));
 
-    const results = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, records, 'Id', TRANSACTION_DML_OPTIONS)
+    const results = await executeTransactionDmlWithFieldFallback(records, ['Id'], (dmlRecords) =>
+      connection.upsert(TRANSACTION_OBJECT, dmlRecords, 'Id', TRANSACTION_DML_OPTIONS)
     );
     const failures = results.filter((result) => !result.success);
     if (failures.length > 0) {
@@ -1167,8 +1410,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       qbo_posted_at__c: normalizedPostedAt,
       posting_error__c: null,
     });
-    const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', TRANSACTION_DML_OPTIONS)
+    const [result] = await executeTransactionDmlWithFieldFallback([record], ['Id'], (dmlRecords) =>
+      connection.upsert(TRANSACTION_OBJECT, dmlRecords, 'Id', TRANSACTION_DML_OPTIONS)
     );
     if (!result.success) {
       const message =
@@ -1187,8 +1430,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       qbo_doc_id__c: null,
       posting_error__c: 'QBO document was deleted or voided; link cleared by reconciliation',
     });
-    const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', TRANSACTION_DML_OPTIONS)
+    const [result] = await executeTransactionDmlWithFieldFallback([record], ['Id'], (dmlRecords) =>
+      connection.upsert(TRANSACTION_OBJECT, dmlRecords, 'Id', TRANSACTION_DML_OPTIONS)
     );
     if (!result.success) {
       const message =
@@ -1208,8 +1451,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       Id: normalizedId,
       campaign__c: normalizedCampaignId,
     });
-    const [result] = toArray(
-      await connection.upsert(TRANSACTION_OBJECT, [record], 'Id', TRANSACTION_DML_OPTIONS)
+    const [result] = await executeTransactionDmlWithFieldFallback([record], ['Id'], (dmlRecords) =>
+      connection.upsert(TRANSACTION_OBJECT, dmlRecords, 'Id', TRANSACTION_DML_OPTIONS)
     );
     if (!result.success) {
       const message =
