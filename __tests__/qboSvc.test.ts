@@ -73,6 +73,46 @@ describe('buildSalesReceipt helper', () => {
     expect(receipt.Line.length).toBe(1);
     expect(receipt.Line[0].Amount).toBe(10.0);
   });
+
+  // The memo names the paired FEE- entry, so it has to stay sane when the caller could not
+  // supply that DocNumber: no dangling reference, and still no net the receipt contradicts.
+  it('degrades to an unnamed journal-entry reference when no paired DocNumber is supplied', async () => {
+    const { buildSalesReceipt } = await importQboSvc();
+    const receipt = buildSalesReceipt({
+      docNumber: 'CHG-20240101-abc',
+      amountCents: 1_000,
+      date: new Date('2024-01-01'),
+      revenueItemName: 'rev-item',
+      depositAccountName: 'acct-dep',
+      stripeFeeAmountCents: 59,
+      // No feeLineItemRef -> no fee line, and no pairedFeeDocNumber to point at.
+    });
+
+    const memo = receipt.CustomerMemo?.value ?? '';
+    expect(memo).toContain('Original Charge Amount: 10.00');
+    expect(memo).toContain('Stripe Fees: 0.59');
+    expect(memo).toContain('Stripe Fees Recorded Separately: on a paired journal entry');
+    expect(memo).not.toContain('Net Amount Received');
+    // Never a dangling "journal entry <nothing>".
+    expect(memo).not.toMatch(/journal entry\s*$/m);
+  });
+
+  // A charge with no processor fee nets trivially: the plain wording stays.
+  it('keeps the plain net wording when there is no processor fee at all', async () => {
+    const { buildSalesReceipt } = await importQboSvc();
+    const receipt = buildSalesReceipt({
+      docNumber: 'CHG-20240101-abd',
+      amountCents: 1_000,
+      date: new Date('2024-01-01'),
+      revenueItemName: 'rev-item',
+      depositAccountName: 'acct-dep',
+      stripeFeeAmountCents: 0,
+    });
+
+    const memo = receipt.CustomerMemo?.value ?? '';
+    expect(memo).toContain('Net Amount Received: 10.00');
+    expect(memo).not.toContain('Recorded Separately');
+  });
 });
 
 const resetAccounts = () => {
@@ -420,8 +460,17 @@ describe('postChargeToQbo', () => {
       expect(salesReceiptBody.CustomerMemo).toBeDefined();
       expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 100.00');
       expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 3.25');
-      expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 96.75');
       expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
+
+      // The receipt totals 100.00 with no fee line, so the memo must NOT claim a 96.75 net the
+      // document contradicts. It points at the entry the fee really landed on instead, by the
+      // same DocNumber that entry was posted under.
+      expect(salesReceiptBody.CustomerMemo.value).not.toContain('Net Amount Received');
+      expect(salesReceiptBody.CustomerMemo.value).not.toContain('96.75');
+      expect(salesReceiptBody.CustomerMemo.value).toContain(
+        `Stripe Fees Recorded Separately: journal entry ${feeJournalBody.DocNumber}`
+      );
+      expect(salesReceiptBody.CustomerMemo.value).toContain('FEE-20240301-test');
     }
   );
 
@@ -565,6 +614,14 @@ describe('postChargeToQbo', () => {
 
     expect(salesReceiptBody.PrivateNote).toContain('[source_test_tag:stripe-test-mode]');
     expect(feeJournalBody.PrivateNote).toContain('[source_test_tag:stripe-test-mode]');
+
+    // The receipt's memo names the fee entry, so in test mode it has to name the TEST one --
+    // character for character the DocNumber that entry was actually posted under.
+    expect(salesReceiptBody.CustomerMemo.value).toContain(
+      `Stripe Fees Recorded Separately: journal entry ${feeJournalBody.DocNumber}`
+    );
+    expect(salesReceiptBody.CustomerMemo.value).toContain('TFEE-20240301-_test_4');
+    expect(salesReceiptBody.CustomerMemo.value).not.toContain('Net Amount Received');
   });
 
   it('leaves a live charge with no test prefix and no cleanup tag', async () => {
@@ -945,7 +1002,11 @@ describe('postChargeToQbo', () => {
       expect(salesReceiptBody.CustomerMemo).toBeDefined();
       expect(salesReceiptBody.CustomerMemo.value).toContain('Original Charge Amount: 25.85');
       expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Fees: 0.87');
-      expect(salesReceiptBody.CustomerMemo.value).toContain('Net Amount Received: 24.98');
+      // No fee line on this receipt (the fee rides on the paired FEE- entry), so no net claim.
+      expect(salesReceiptBody.CustomerMemo.value).not.toContain('Net Amount Received');
+      expect(salesReceiptBody.CustomerMemo.value).toContain(
+        'Stripe Fees Recorded Separately: journal entry FEE-20240301-test'
+      );
       expect(salesReceiptBody.CustomerMemo.value).toContain('Stripe Charge ID: ch_test');
       expect(salesReceiptBody.CustomerMemo.value).toContain(
         'Stripe Invoice ID: in_1SlBuhBJf9YYVP9mdUcoaPkw'
@@ -3341,6 +3402,13 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       const receiptTotal = receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0);
       expect(Number(receiptTotal.toFixed(2))).toBe(NET_PAYOUT);
 
+      // The memo is unchanged in this shape, and it is TRUE here: the negative line is on the
+      // receipt, so the totals really do come to the 99.94 the memo states.
+      expect(receipt.CustomerMemo.value).toContain('Original Charge Amount: 102.50');
+      expect(receipt.CustomerMemo.value).toContain('Stripe Fees: 2.56');
+      expect(receipt.CustomerMemo.value).toContain(`Net Amount Received: ${NET_PAYOUT.toFixed(2)}`);
+      expect(receipt.CustomerMemo.value).not.toContain('Recorded Separately');
+
       // Exactly ONE document was POSTed, and nothing carries a FEE- DocNumber.
       expect(documentPosts(requests)).toHaveLength(1);
       expect(postedDocNumbers(requests)).toEqual(['CHG-20240301-test']);
@@ -3386,6 +3454,21 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       expect(feeJe.DocNumber).toBe('FEE-20240301-test');
       expect(journalTotals(feeJe)).toEqual({ debits: 2.56, credits: 2.56 });
       expect(feeExpenseDebits(requests)).toBe(1);
+
+      // The donor-facing memo must not contradict the document it is printed on. Every total
+      // on this receipt is the GROSS 102.50, so it cannot claim a 99.94 net -- it reports the
+      // fee and sends the reader to the entry that actually carries it.
+      const receiptTotal = Number(
+        receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0).toFixed(2)
+      );
+      expect(receiptTotal).toBe(GROSS_CENTS / 100);
+      expect(receipt.CustomerMemo.value).toContain('Original Charge Amount: 102.50');
+      expect(receipt.CustomerMemo.value).toContain('Stripe Fees: 2.56');
+      expect(receipt.CustomerMemo.value).not.toContain('Net Amount Received');
+      expect(receipt.CustomerMemo.value).not.toContain(NET_PAYOUT.toFixed(2));
+      expect(receipt.CustomerMemo.value).toContain(
+        `Stripe Fees Recorded Separately: journal entry ${feeJe.DocNumber}`
+      );
 
       // A missing item is never created: creating it would point it at the generic revenue
       // account and silently reintroduce the contra-revenue bug.

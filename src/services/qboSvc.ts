@@ -277,6 +277,13 @@ interface BuildSalesReceiptInput {
   feeLineItemRef?: string;
   /** Processor fee, in cents, to carry as the negative line. Only used with `feeLineItemRef`. */
   feeLineAmountCents?: number;
+  /**
+   * DocNumber of the paired `FEE-` journal entry that carries the processor fee when this
+   * receipt does NOT carry it as a line. Used for the CustomerMemo wording only: nothing here
+   * decides which shape is used and nothing here posts that entry. Absent means "not known",
+   * which degrades to wording that names no entry — it never claims the receipt nets.
+   */
+  pairedFeeDocNumber?: string | null;
   lineQuantity?: number;
   lineRate?: number;
   lineAmountCents?: number;
@@ -2297,6 +2304,7 @@ export const buildSalesReceipt = ({
   coverFeesItemRef,
   feeLineItemRef,
   feeLineAmountCents = 0,
+  pairedFeeDocNumber = null,
   lineQuantity,
   lineRate,
   lineAmountCents,
@@ -2434,6 +2442,12 @@ export const buildSalesReceipt = ({
   //
   // Order matters: this goes LAST. `patchQboSalesReceiptFields` patches only the FIRST
   // SalesItemLineDetail, so the gross revenue line has to stay at index 0.
+  //
+  // `receiptCarriesFeeLine` records whether the line actually SHIPPED, which is not the same
+  // as "a fee item was supplied" -- the guards below drop the line for a zero fee, or for one
+  // that would swallow the whole receipt. The CustomerMemo further down keys off that, so it
+  // can never describe a fee line that is not on the document.
+  let receiptCarriesFeeLine = false;
   const feeLineItem = toTrimmed(feeLineItemRef);
   if (feeLineItem) {
     const feeLineCents = ensurePositiveAmount(feeLineAmountCents, 'Sales receipt fee line amount');
@@ -2480,6 +2494,7 @@ export const buildSalesReceipt = ({
           ...(classRef ? { ClassRef: classRef } : {}),
         },
       });
+      receiptCarriesFeeLine = true;
     }
   }
 
@@ -2524,7 +2539,27 @@ export const buildSalesReceipt = ({
     const parts: string[] = [];
     parts.push(`Original Charge Amount: ${centsToDollars(origCents).toFixed(2)}`);
     parts.push(`Stripe Fees: ${centsToDollars(feeCents).toFixed(2)}`);
-    parts.push(`Net Amount Received: ${centsToDollars(netCents).toFixed(2)}`);
+
+    // The memo has to describe the document it is printed on, and only ONE of the two fee
+    // shapes nets. With the negative fee line above, Subtotal/Total/Amount received really are
+    // gross minus the fee, so "Net Amount Received" is a number the reader can add up off the
+    // page. With the paired `FEE-` journal entry instead there is no fee line anywhere and
+    // every total on the receipt reads GROSS -- the same sentence would then assert a net the
+    // document itself contradicts, which reads as though the fee had been dropped on the
+    // floor. So say where the fee actually went, and name the entry so it can be found.
+    // A zero fee nets trivially either way and keeps the plain wording.
+    const pairedFeeDoc = toTrimmed(pairedFeeDocNumber);
+    if (receiptCarriesFeeLine || feeCents === 0) {
+      parts.push(`Net Amount Received: ${centsToDollars(netCents).toFixed(2)}`);
+    } else {
+      // Never emit a dangling "journal entry " with nothing after it: without a DocNumber the
+      // sentence still has to be true, just less specific.
+      parts.push(
+        pairedFeeDoc
+          ? `Stripe Fees Recorded Separately: journal entry ${pairedFeeDoc} (this receipt shows the full charge amount, so the fee is not subtracted here)`
+          : 'Stripe Fees Recorded Separately: on a paired journal entry (this receipt shows the full charge amount, so the fee is not subtracted here)'
+      );
+    }
 
     const sc = toTrimmed(stripeChargeId ?? null);
     if (sc) parts.push(`Stripe Charge ID: ${sc}`);
@@ -4164,6 +4199,14 @@ const postChargeAsSalesReceipt = async (input: {
     grossAmount,
     chargeId
   );
+  // The paired FEE- entry's DocNumber is fully determined here, before either document is
+  // built, so the receipt's CustomerMemo can name the entry the fee lands on when the receipt
+  // does not carry it. The JE branch below posts under this exact value -- it is computed
+  // once, not derived twice, so the memo can never name a document that was never posted.
+  const pairedFeeDocNumber =
+    feeAmount > 0
+      ? buildDocNumber(docNumberPrefix('FEE', options), date, feeAmount, chargeId)
+      : null;
   const context = await createRequestContext(options);
   let receiptCustomer: SalesReceiptCustomerDetails | null = customer ?? null;
 
@@ -4386,6 +4429,7 @@ const postChargeAsSalesReceipt = async (input: {
     coverFeesItemRef,
     feeLineItemRef,
     feeLineAmountCents: feeAmount,
+    pairedFeeDocNumber,
     lineQuantity: lineOverrides.quantity,
     lineRate: lineOverrides.rate,
     lineAmountCents: lineOverrides.amountCents,
@@ -4421,7 +4465,11 @@ const postChargeAsSalesReceipt = async (input: {
   // A test-mode posting prefixes both halves identically ('TCHG' / 'TFEE', both 4 characters),
   // so the pairing survives -- TCHG-20240301-XXXXXXX pairs with FEE's TFEE-20240301-XXXXXXX.
   if (feeAmount > 0 && !receiptCarriesFeeLine) {
-    const feeDocNumber = buildDocNumber(docNumberPrefix('FEE', options), date, feeAmount, chargeId);
+    // Already computed above (and already named in the receipt's memo); the fallback only
+    // exists to satisfy the type, since feeAmount > 0 here guarantees a value.
+    const feeDocNumber =
+      pairedFeeDocNumber ??
+      buildDocNumber(docNumberPrefix('FEE', options), date, feeAmount, chargeId);
     const feeJournalEntry = buildFeesJE({
       docNumber: feeDocNumber,
       feeAmountCents: feeAmount,
