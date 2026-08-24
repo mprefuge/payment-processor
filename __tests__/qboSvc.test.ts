@@ -3366,3 +3366,208 @@ describe('organization gifts', () => {
     expect(customerBody).not.toHaveProperty('CompanyName');
   });
 });
+
+// The customer lookup is the first QuickBooks call every charge makes, and its
+// SELECT column list took the whole donation path down: QuickBooks answered
+// `Property BillAddr not found for Entity Customer` with a 400, `queryQuickBooks`
+// has no fallback, and nothing posted.  Nothing caught it, because the fetch mock
+// above answers `ok: true` to any query string whatsoever — no test had ever
+// looked at what the query actually said.  These tests decode it from the request
+// URL and read the column list.
+describe('the Customer lookup query QuickBooks actually receives', () => {
+  // Complex/nested Customer properties.  QuickBooks names only the FIRST one it
+  // objects to, so every field behind that one is untested — which is exactly why
+  // the projection is `*` and not a hand-picked list.
+  const COMPLEX_CUSTOMER_PROPERTIES = ['BillAddr', 'ShipAddr', 'PrimaryPhone'];
+
+  const decodeQuery = (url: string): string | null => {
+    const marker = '/query?query=';
+    const index = url.indexOf(marker);
+    return index === -1 ? null : decodeURIComponent(url.slice(index + marker.length));
+  };
+
+  /** The text between `select` and `from Customer`, or null for other entities. */
+  const customerProjection = (url: string): string | null => {
+    const query = decodeQuery(url);
+    const match = query?.match(/^\s*select\s+(.+?)\s+from\s+Customer\b/i);
+    return match ? (match[1] as string).trim() : null;
+  };
+
+  const customerLookups = (requests: RequestRecord[]) =>
+    requests
+      .map((request) => ({
+        projection: customerProjection(request.url),
+        query: decodeQuery(request.url),
+      }))
+      .filter(
+        (lookup): lookup is { projection: string; query: string } => lookup.projection !== null
+      );
+
+  it('asks for the whole record, naming no column, on both the email and the name lookup', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // customer email lookup — no match, so the name lookup runs too
+      { QueryResponse: {} }, // customer display name lookup
+      { Customer: { Id: 'cust-new', DisplayName: 'Donor Example' } }, // customer create
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // duplicate check
+      { SalesReceipt: { Id: 'sr-projection' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 7_500,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const lookups = customerLookups(requests);
+    // findCustomerByEmail, then findCustomerByDisplayName.
+    expect(lookups).toHaveLength(2);
+    expect(lookups[0]?.query).toMatch(/where\s+PrimaryEmailAddr\s*=/i);
+    expect(lookups[1]?.query).toMatch(/where\s+DisplayName\s*=/i);
+
+    for (const lookup of lookups) {
+      expect(lookup.projection).toBe('*');
+      for (const property of COMPLEX_CUSTOMER_PROPERTIES) {
+        expect(lookup.projection).not.toContain(property);
+      }
+    }
+  });
+
+  it('still posts when QuickBooks rejects every complex property named in a column list', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // customer email lookup
+      { QueryResponse: {} }, // customer display name lookup
+      { Customer: { Id: 'cust-new', DisplayName: 'Donor Example' } }, // customer create
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // duplicate check
+      { SalesReceipt: { Id: 'sr-validated' } }
+    );
+
+    // Stands in for QuickBooks' query validator, which is stricter than the mock
+    // above: a Customer projection that names a complex property is rejected
+    // outright, with the verbatim production fault body.
+    const validatingFetcher = vi.fn(async (url: string, init?: any) => {
+      const projection = customerProjection(url);
+      const offending = projection
+        ?.split(',')
+        .map((column) => column.trim())
+        .find((column) => COMPLEX_CUSTOMER_PROPERTIES.includes(column));
+
+      if (offending) {
+        return {
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+          async json() {
+            throw new Error('JSON parsing not implemented for this mock response.');
+          },
+          async text() {
+            return JSON.stringify({
+              Fault: {
+                Error: [
+                  {
+                    Message: 'Invalid query',
+                    Detail: `QueryValidationError: Property ${offending} not found for Entity Customer`,
+                    code: '4001',
+                  },
+                ],
+                type: 'ValidationFault',
+              },
+            });
+          },
+        } as any;
+      }
+
+      return fetcher(url, init);
+    });
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 7_500,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(),
+      options: { fetcher: validatingFetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-validated', type: 'sales-receipt' });
+    expect(requests.some((request) => request.url.includes('/salesreceipt'))).toBe(true);
+  });
+
+  it('reads a stale billing address off the record the wide lookup returns and corrects it', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    // `select *` brings BillAddr, ShipAddr and PrimaryPhone back on the record
+    // itself, which is what lets the compare-before-write decide anything at all.
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Customer: [
+            {
+              Id: 'cust-moved',
+              DisplayName: 'Donor Example',
+              PrimaryEmailAddr: { Address: 'donor@example.com' },
+              GivenName: 'Donor',
+              FamilyName: 'Example',
+              PrimaryPhone: { FreeFormNumber: '555-0100' },
+              BillAddr: {
+                Id: '42', // QuickBooks stamps its own id onto a stored address
+                Line1: '9 Old Street',
+                City: 'Previousville',
+                CountrySubDivisionCode: 'CA',
+                PostalCode: '90001',
+                Country: 'US',
+              },
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-moved',
+          DisplayName: 'Donor Example',
+          SyncToken: '7',
+        },
+      }, // customer GET for the SyncToken
+      {
+        Customer: {
+          Id: 'cust-moved',
+          DisplayName: 'Donor Example',
+          SyncToken: '8',
+        },
+      }, // update response
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // duplicate check
+      { SalesReceipt: { Id: 'sr-moved' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 7_500,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(customerLookups(requests)[0]?.projection).toBe('*');
+
+    const customerUpdate = requests.find((request) =>
+      request.url.includes('/customer?operation=update')
+    );
+    const updateBody = JSON.parse((customerUpdate?.init?.body ?? '{}') as string);
+    expect(updateBody.BillAddr).toMatchObject({
+      Line1: '123 Donation Ave',
+      City: 'Givington',
+      PostalCode: '94105',
+    });
+  });
+});

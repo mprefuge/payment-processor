@@ -1037,12 +1037,31 @@ const cacheCustomerReference = (
 };
 
 /**
- * Columns pulled back for an existing customer.  The detail fields are needed
- * so `ensureSalesReceiptCustomer` can tell whether the values it derived from
- * Stripe differ from what QuickBooks already holds, and only write when they do.
+ * The projection both customer lookups use.  It is `*`, and it must stay `*`.
+ *
+ * `ensureSalesReceiptCustomer` needs the detail fields -- GivenName, FamilyName,
+ * CompanyName, PrimaryPhone, BillAddr, ShipAddr -- so it can tell whether the
+ * values it derived from Stripe differ from what QuickBooks already holds, and
+ * only write when they do.  Naming those fields in the column list is what took
+ * the donation path down: QuickBooks rejected the whole query with
+ * `QueryValidationError: Property BillAddr not found for Entity Customer`, and
+ * because neither `queryQuickBooks` nor `ensureSalesReceiptCustomer` has a
+ * fallback, every charge stopped posting.
+ *
+ * Curating the list is not a fix, because we cannot know which properties a
+ * company file will accept.  Some complex properties clearly are selectable --
+ * `PrimaryEmailAddr` was in this projection for months without complaint -- and
+ * QuickBooks reports only the FIRST offending property, so every field behind
+ * the one it named is untested.  `ShipAddr` and `PrimaryPhone` were never
+ * reached.  Dropping only the field production happened to name would just move
+ * the same outage to the next deploy.  `queryQboCustomersWithFieldFallback` in
+ * `handlers/qboCustomersSync.ts` is the shape that copes with this: it selects
+ * broadly and strips whatever QuickBooks rejects, one round trip at a time.
+ *
+ * `*` names no property at all, so it cannot hit this fault class in any company
+ * file, and it returns strictly more than any list we could hand-pick.
  */
-const CUSTOMER_LOOKUP_COLUMNS =
-  'Id, DisplayName, PrimaryEmailAddr, GivenName, FamilyName, CompanyName, PrimaryPhone, BillAddr, ShipAddr';
+const CUSTOMER_LOOKUP_COLUMNS = '*';
 
 /**
  * Marks a record synthesised from `customerLookupCache` rather than fetched.
