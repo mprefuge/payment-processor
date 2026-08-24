@@ -166,6 +166,36 @@ const createFetchMock = (...payloads: unknown[]) => {
   return { fetcher, requests };
 };
 
+// The address the donor actually typed into the donation form.  Our own code
+// (`stripeCustomerWorkflow`) writes it onto the Stripe Customer before Checkout
+// runs, so this is the only place the complete address exists.
+const FULL_DONOR_ADDRESS = {
+  line1: '123 Donation Ave',
+  line2: 'Suite 100',
+  city: 'Givington',
+  state: 'CA',
+  postal_code: '94105',
+  country: 'US',
+} as const;
+
+// What Stripe actually puts on `charge.billing_details.address` for our Checkout
+// Sessions.  The session sets no `billing_address_collection`, so Checkout
+// collects nothing but the postal code the card network needs and leaves every
+// other field null.
+//
+// The fixture used to carry a full street address here, which production cannot
+// produce.  That impossible fixture is why the `||` chain in
+// `deriveSalesReceiptCustomer` looked correct for years: whichever source was
+// picked, the assertions passed.
+const CHECKOUT_COLLECTED_ADDRESS = {
+  line1: null,
+  line2: null,
+  city: null,
+  state: null,
+  postal_code: '94105',
+  country: 'US',
+} as const;
+
 const createStripeCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Charge => {
   const base: Partial<Stripe.Charge> = {
     id: 'ch_test',
@@ -173,26 +203,12 @@ const createStripeCharge = (overrides: Partial<Stripe.Charge> = {}): Stripe.Char
       name: 'Donor Example',
       email: 'donor@example.com',
       phone: '555-0100',
-      address: {
-        line1: '123 Donation Ave',
-        line2: 'Suite 100',
-        city: 'Givington',
-        state: 'CA',
-        postal_code: '94105',
-        country: 'US',
-      },
+      address: { ...CHECKOUT_COLLECTED_ADDRESS },
     },
     shipping: {
       name: 'Donor Example',
       phone: '555-0100',
-      address: {
-        line1: '123 Donation Ave',
-        line2: 'Suite 100',
-        city: 'Givington',
-        state: 'CA',
-        postal_code: '94105',
-        country: 'US',
-      },
+      address: { ...FULL_DONOR_ADDRESS },
     },
   };
 
@@ -205,6 +221,7 @@ const createStripeCustomer = (overrides: Partial<Stripe.Customer> = {}): Stripe.
     name: 'Donor Example',
     email: 'donor@example.com',
     phone: '555-0100',
+    address: { ...FULL_DONOR_ADDRESS },
   };
 
   return { ...base, ...overrides } as Stripe.Customer;
@@ -226,14 +243,7 @@ const createCheckoutSession = (
       email: 'donor@example.com',
       name: 'Donor Example',
       phone: '555-0100',
-      address: {
-        line1: '123 Donation Ave',
-        line2: 'Suite 100',
-        city: 'Givington',
-        state: 'CA',
-        postal_code: '94105',
-        country: 'US',
-      },
+      address: { ...CHECKOUT_COLLECTED_ADDRESS },
     },
     metadata: { ...baseMetadata, ...(overrideMetadata ?? {}) },
   };
@@ -245,14 +255,17 @@ const createCheckoutSession = (
   } as Stripe.Checkout.Session;
 };
 
+// Checkout always attaches a Stripe Customer for these donations, and that
+// Customer is where the complete address lives, so the default context has one.
+// Pass `null` explicitly for the charge-without-a-customer case.
 const buildStripeContext = (
   chargeOverrides: Partial<Stripe.Charge> = {},
   checkoutOverrides: Partial<Stripe.Checkout.Session> = {},
-  customer?: Stripe.Customer | null
+  customer: Stripe.Customer | null | undefined = undefined
 ) => ({
   charge: createStripeCharge(chargeOverrides),
   paymentIntent: null,
-  customer: customer ?? null,
+  customer: customer === undefined ? createStripeCustomer() : customer,
   checkoutSession: createCheckoutSession(checkoutOverrides),
 });
 
@@ -679,10 +692,6 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptRequest).toBeDefined();
 
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
-    expect(salesReceiptBody.ClassRef).toMatchObject({
-      value: 'QBO_CLASS_EVENTS',
-      name: 'Events',
-    });
     expect(salesReceiptBody.Line[0]).toMatchObject({
       Amount: 90.5,
       Description: 'Custom donation line',
@@ -2489,6 +2498,58 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       expect(COVER_FEES_CENTS / 100).toBe(2.5);
     });
 
+    it('classes the receipt on its lines only, with no header ClassRef, and mirrors the class onto the fee JE', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // receipt duplicate check
+        { SalesReceipt: { Id: 'sr-class' } },
+        { QueryResponse: {} }, // fee JE duplicate check
+        { JournalEntry: { Id: 'je-class' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext(
+          {},
+          {
+            metadata: {
+              transactionType: 'Stripe Sales Item',
+              cover_fees: 'true',
+              cover_fees_amount: '2.50',
+              qbo_class_ref: 'Events|QBO_CLASS_EVENTS',
+            },
+          }
+        ),
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const feeJe = postedBody(requests, '/journalentry');
+      const expectedClass = { value: 'QBO_CLASS_EVENTS', name: 'Events' };
+
+      // No header ClassRef. This company file tracks class per LINE
+      // (ClassTrackingPerTxnLine), which Intuit's Preferences reference makes mutually
+      // exclusive with ClassTrackingPerTxn, so a receipt-level ClassRef is inert here --
+      // and the docs are silent on what QBO does with it when the preference is off.
+      expect(receipt.ClassRef).toBeUndefined();
+      expect(Object.keys(receipt)).not.toContain('ClassRef');
+
+      // ...while the class stays where QuickBooks actually reads it: on each revenue line.
+      const [revenueLine, coverFeesLine] = receipt.Line;
+      expect(revenueLine.Description).toBe('Stripe Sales Item');
+      expect(revenueLine.SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+      expect(coverFeesLine.Description).toBe('Processing Fee Coverage');
+      expect(coverFeesLine.SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+
+      // The paired fee entry still carries its own line class on the fee debit.
+      const feeDebit = feeJe.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+      );
+      expect(feeDebit.JournalEntryLineDetail.AccountRef.value).toBe('QBO_ACCOUNT_FEES');
+      expect(feeDebit.JournalEntryLineDetail.ClassRef).toMatchObject(expectedClass);
+    });
+
     it('pairs the two DocNumbers on the same date and charge-id tail', async () => {
       baseEnv.accounting.postingStrategy = 'sales-receipt';
       const { fetcher, requests } = createFetchMock(
@@ -2778,5 +2839,530 @@ describe('posting strategy observability', () => {
     });
 
     delete baseEnv.accounting.postingStrategyConfigured;
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Billing address, customer enrichment and organization identity.
+//
+// These cover the defect where a QuickBooks sales receipt carried nothing but a
+// ZIP code. The fixtures above deliberately reproduce what production Stripe
+// actually returns: a Checkout Session that sets no `billing_address_collection`
+// leaves `charge.billing_details.address` holding only `postal_code` and
+// `country`, while the complete address lives on the Stripe Customer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('deriveSalesReceiptCustomer billing address', () => {
+  it('completes the sparse Checkout billing address from the Stripe Customer', async () => {
+    const { deriveSalesReceiptCustomer } = await importQboSvc();
+
+    const derived = deriveSalesReceiptCustomer(buildStripeContext() as any);
+
+    // `billing_details` supplied only the ZIP and country. Everything else has
+    // to come from the Customer, which is where the donation form put it.
+    expect(derived.billingAddress).toEqual({
+      Line1: '123 Donation Ave',
+      Line2: 'Suite 100',
+      City: 'Givington',
+      CountrySubDivisionCode: 'CA',
+      PostalCode: '94105',
+      Country: 'US',
+    });
+  });
+
+  it('takes each field from the first source that has it, in billing → customer → checkout order', async () => {
+    const { deriveSalesReceiptCustomer } = await importQboSvc();
+
+    const derived = deriveSalesReceiptCustomer({
+      charge: createStripeCharge({
+        billing_details: {
+          name: 'Donor Example',
+          email: 'donor@example.com',
+          phone: '555-0100',
+          // Only the postal code — exactly what Checkout collects for us.
+          address: {
+            line1: null,
+            line2: null,
+            city: null,
+            state: null,
+            postal_code: '10001',
+            country: 'US',
+          },
+        } as any,
+      }),
+      paymentIntent: null,
+      customer: createStripeCustomer({
+        address: {
+          line1: 'Customer St',
+          line2: null,
+          city: 'CustomerCity',
+          state: null,
+          postal_code: '20002',
+          country: 'US',
+        } as any,
+      }),
+      checkoutSession: createCheckoutSession({
+        customer_details: {
+          email: 'donor@example.com',
+          name: 'Donor Example',
+          phone: '555-0100',
+          address: {
+            line1: 'Checkout Ave',
+            line2: 'Unit 9',
+            city: 'CheckoutCity',
+            state: 'NY',
+            postal_code: '30003',
+            country: 'US',
+          },
+        } as any,
+      }),
+    } as any);
+
+    expect(derived.billingAddress).toEqual({
+      // billing_details holds it, so billing_details wins
+      PostalCode: '10001',
+      Country: 'US',
+      // billing_details is empty here, the customer holds it, so the customer wins
+      Line1: 'Customer St',
+      City: 'CustomerCity',
+      // only the checkout session holds these
+      Line2: 'Unit 9',
+      CountrySubDivisionCode: 'NY',
+    });
+  });
+
+  it('treats a whitespace-only field as absent and falls through to the next source', async () => {
+    const { deriveSalesReceiptCustomer } = await importQboSvc();
+
+    const derived = deriveSalesReceiptCustomer({
+      charge: createStripeCharge({
+        billing_details: {
+          name: 'Donor Example',
+          email: 'donor@example.com',
+          phone: '555-0100',
+          address: {
+            line1: '   ',
+            line2: '\t',
+            city: '  ',
+            state: null,
+            postal_code: '94105',
+            country: 'US',
+          },
+        } as any,
+      }),
+      paymentIntent: null,
+      customer: createStripeCustomer(),
+      checkoutSession: createCheckoutSession(),
+    } as any);
+
+    expect(derived.billingAddress).toMatchObject({
+      Line1: '123 Donation Ave',
+      Line2: 'Suite 100',
+      City: 'Givington',
+    });
+    expect(derived.billingAddress?.Line1).not.toMatch(/^\s+$/);
+  });
+
+  it('merges the shipping address field by field as well', async () => {
+    const { deriveSalesReceiptCustomer } = await importQboSvc();
+
+    const derived = deriveSalesReceiptCustomer({
+      charge: createStripeCharge({
+        shipping: {
+          name: 'Donor Example',
+          phone: '555-0100',
+          address: {
+            line1: null,
+            line2: null,
+            city: null,
+            state: null,
+            postal_code: '94105',
+            country: 'US',
+          },
+        } as any,
+      }),
+      paymentIntent: null,
+      customer: createStripeCustomer({
+        shipping: {
+          name: 'Donor Example',
+          address: {
+            line1: '9 Shipping Way',
+            city: 'Shipville',
+            state: 'CA',
+            postal_code: '99999',
+            country: 'US',
+          },
+        } as any,
+      }),
+      checkoutSession: createCheckoutSession(),
+    } as any);
+
+    expect(derived.shippingAddress).toMatchObject({
+      Line1: '9 Shipping Way',
+      City: 'Shipville',
+      CountrySubDivisionCode: 'CA',
+      // the charge's shipping address had the postal code, so it wins
+      PostalCode: '94105',
+    });
+  });
+
+  it('leaves the address undefined — never an empty object — when no source has one', async () => {
+    const { deriveSalesReceiptCustomer } = await importQboSvc();
+
+    const derived = deriveSalesReceiptCustomer({
+      charge: createStripeCharge({
+        billing_details: {
+          name: 'Donor Example',
+          email: 'donor@example.com',
+          phone: '555-0100',
+          address: null,
+        } as any,
+        shipping: null,
+      }),
+      paymentIntent: null,
+      customer: createStripeCustomer({ address: null as any }),
+      checkoutSession: createCheckoutSession({
+        customer_details: {
+          email: 'donor@example.com',
+          name: 'Donor Example',
+          phone: '555-0100',
+          address: null,
+        } as any,
+      }),
+    } as any);
+
+    expect(derived.billingAddress).toBeUndefined();
+    expect(derived.shippingAddress).toBeUndefined();
+  });
+
+  it('omits BillAddr from the sales receipt entirely when there is no address', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-noaddr', DisplayName: 'Donor Example' } }, // Customer create
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // Duplicate check
+      { SalesReceipt: { Id: 'sr-noaddr' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 5_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-03-01'),
+      stripe: {
+        charge: createStripeCharge({
+          billing_details: {
+            name: 'Donor Example',
+            email: 'donor@example.com',
+            phone: '555-0100',
+            address: null,
+          } as any,
+          shipping: null,
+        }),
+        paymentIntent: null,
+        customer: createStripeCustomer({ address: null as any }),
+        checkoutSession: createCheckoutSession({
+          customer_details: {
+            email: 'donor@example.com',
+            name: 'Donor Example',
+            phone: '555-0100',
+            address: null,
+          } as any,
+        }),
+      } as any,
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const customerCreate = requests.find(
+      (request) => request.url.includes('/customer') && request.init?.method === 'POST'
+    );
+    const customerBody = JSON.parse((customerCreate?.init?.body ?? '{}') as string);
+    expect(customerBody).not.toHaveProperty('BillAddr');
+    expect(customerBody).not.toHaveProperty('ShipAddr');
+
+    const salesReceiptRequest = requests.find((request) => request.url.includes('salesreceipt'));
+    const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
+    expect(salesReceiptBody).not.toHaveProperty('BillAddr');
+    expect(salesReceiptBody).not.toHaveProperty('ShipAddr');
+  });
+});
+
+describe('enriching an existing QuickBooks customer', () => {
+  // The repeat individual donor. Their display name never changes, so the old
+  // "only write details while renaming" gate meant they were never enriched and
+  // their address never arrived.
+  it('writes the billing address onto a repeat donor whose display name is unchanged', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Customer: [
+            {
+              Id: 'cust-repeat',
+              DisplayName: 'Donor Example', // identical to the derived name
+              PrimaryEmailAddr: { Address: 'donor@example.com' },
+              GivenName: 'Donor',
+              FamilyName: 'Example',
+              // no BillAddr, no phone — this is what needs enriching
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-repeat',
+          DisplayName: 'Donor Example',
+          SyncToken: '3',
+          PrimaryEmailAddr: { Address: 'donor@example.com' },
+        },
+      }, // customer GET for the SyncToken
+      {
+        Customer: {
+          Id: 'cust-repeat',
+          DisplayName: 'Donor Example',
+          SyncToken: '4',
+          PrimaryEmailAddr: { Address: 'donor@example.com' },
+        },
+      }, // update response
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // Duplicate check
+      { SalesReceipt: { Id: 'sr-repeat' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 7_500,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-repeat', type: 'sales-receipt' });
+
+    const customerUpdate = requests.find((request) =>
+      request.url.includes('/customer?operation=update')
+    );
+    expect(customerUpdate).toBeDefined();
+
+    const updateBody = JSON.parse((customerUpdate?.init?.body ?? '{}') as string);
+    expect(updateBody.BillAddr).toMatchObject({
+      Line1: '123 Donation Ave',
+      City: 'Givington',
+      PostalCode: '94105',
+    });
+    expect(updateBody.PrimaryPhone).toEqual({ FreeFormNumber: '555-0100' });
+    // The name did not change, so the customer must not be renamed.
+    expect(updateBody).not.toHaveProperty('DisplayName');
+  });
+
+  it('does not call the update endpoint when QuickBooks already holds every derived value', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Customer: [
+            {
+              Id: 'cust-current',
+              DisplayName: 'Donor Example',
+              PrimaryEmailAddr: { Address: 'donor@example.com' },
+              GivenName: 'Donor',
+              FamilyName: 'Example',
+              PrimaryPhone: { FreeFormNumber: '555-0100' },
+              BillAddr: {
+                Line1: '123 Donation Ave',
+                Line2: 'Suite 100',
+                City: 'Givington',
+                CountrySubDivisionCode: 'CA',
+                PostalCode: '94105',
+                Country: 'US',
+              },
+              ShipAddr: {
+                Line1: '123 Donation Ave',
+                Line2: 'Suite 100',
+                City: 'Givington',
+                CountrySubDivisionCode: 'CA',
+                PostalCode: '94105',
+                Country: 'US',
+              },
+            },
+          ],
+        },
+      },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // Duplicate check
+      { SalesReceipt: { Id: 'sr-current' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 7_500,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(requests.some((request) => request.url.includes('/customer?operation=update'))).toBe(
+      false
+    );
+  });
+
+  it('never overwrites a populated QuickBooks field with an empty derived value', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      {
+        QueryResponse: {
+          Customer: [
+            {
+              Id: 'cust-keep',
+              DisplayName: 'Donor Example',
+              PrimaryEmailAddr: { Address: 'donor@example.com' },
+              PrimaryPhone: { FreeFormNumber: '555-9999' },
+              BillAddr: { Line1: '5 Old Address Rd', City: 'Oldtown' },
+            },
+          ],
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-keep',
+          DisplayName: 'Donor Example',
+          SyncToken: '1',
+          PrimaryEmailAddr: { Address: 'donor@example.com' },
+        },
+      },
+      {
+        Customer: {
+          Id: 'cust-keep',
+          DisplayName: 'Donor Example',
+          SyncToken: '2',
+          PrimaryEmailAddr: { Address: 'donor@example.com' },
+        },
+      },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-keep' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 7_500,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: {
+        // Stripe knows the name and address but has no phone at all.
+        charge: createStripeCharge({
+          billing_details: {
+            name: 'Donor Example',
+            email: 'donor@example.com',
+            phone: null,
+            address: { ...CHECKOUT_COLLECTED_ADDRESS },
+          } as any,
+          shipping: null,
+        }),
+        paymentIntent: null,
+        customer: createStripeCustomer({ phone: null as any }),
+        checkoutSession: createCheckoutSession({
+          customer_details: {
+            email: 'donor@example.com',
+            name: 'Donor Example',
+            phone: null,
+            address: { ...CHECKOUT_COLLECTED_ADDRESS },
+          } as any,
+        }),
+      } as any,
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const customerUpdate = requests.find((request) =>
+      request.url.includes('/customer?operation=update')
+    );
+    expect(customerUpdate).toBeDefined();
+    const updateBody = JSON.parse((customerUpdate?.init?.body ?? '{}') as string);
+
+    // The address is genuinely new, so it is written.
+    expect(updateBody.BillAddr).toMatchObject({ Line1: '123 Donation Ave' });
+    // The phone is not derivable from Stripe, so the one QuickBooks holds is
+    // left alone rather than blanked.
+    expect(updateBody).not.toHaveProperty('PrimaryPhone');
+  });
+});
+
+describe('organization gifts', () => {
+  it('stores an organization as a company rather than splitting its name into a person', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Customer email lookup
+      { QueryResponse: {} }, // Customer name lookup
+      { Customer: { Id: 'cust-org', DisplayName: 'Redwood Community Trust' } },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // Duplicate check
+      { SalesReceipt: { Id: 'sr-org' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 50_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(
+        {},
+        { metadata: { transactionType: 'Stripe Sales Item', donationType: 'organization' } },
+        createStripeCustomer({ name: 'Redwood Community Trust' })
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const customerCreate = requests.find(
+      (request) => request.url.includes('/customer') && request.init?.method === 'POST'
+    );
+    const customerBody = JSON.parse((customerCreate?.init?.body ?? '{}') as string);
+
+    expect(customerBody.CompanyName).toBe('Redwood Community Trust');
+    expect(customerBody.DisplayName).toBe('Redwood Community Trust');
+    // "Redwood" / "Community Trust" is not a person and must not be recorded as one.
+    expect(customerBody).not.toHaveProperty('GivenName');
+    expect(customerBody).not.toHaveProperty('FamilyName');
+  });
+
+  it('still records an individual donor as a person', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} },
+      { QueryResponse: {} },
+      { Customer: { Id: 'cust-ind', DisplayName: 'Donor Example' } },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} },
+      { SalesReceipt: { Id: 'sr-ind' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 5_000,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2024-08-01'),
+      stripe: buildStripeContext(
+        {},
+        { metadata: { transactionType: 'Stripe Sales Item', donationType: 'individual' } }
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const customerCreate = requests.find(
+      (request) => request.url.includes('/customer') && request.init?.method === 'POST'
+    );
+    const customerBody = JSON.parse((customerCreate?.init?.body ?? '{}') as string);
+
+    expect(customerBody).toMatchObject({ GivenName: 'Donor', FamilyName: 'Example' });
+    expect(customerBody).not.toHaveProperty('CompanyName');
   });
 });
