@@ -75,6 +75,18 @@ export interface EnvConfig {
      */
     feeCoverageItem: string;
     /**
+     * QuickBooks Product/Service used for the NEGATIVE processor-fee line on a sales receipt,
+     * so the receipt itself totals to the net Stripe deposited (the shape Acodei posted).
+     *
+     * This item must be dedicated to Stripe fees and its OWN `IncomeAccountRef` must point at
+     * the fee expense account (`QBO_ACCOUNT_FEES`): QuickBooks routes a sales line to the
+     * income account configured on the Item and ignores a line-level `ItemAccountRef`.
+     * Resolution is non-creating AND account-validated — if the item is missing, or its income
+     * account is not the fee account, no fee line is emitted and the fee is posted as the
+     * paired `FEE-` journal entry instead (see postChargeAsSalesReceipt).
+     */
+    feeItem: string;
+    /**
      * IANA time zone of the QuickBooks company file. Used to stamp line-level ServiceDate on
      * the calendar day the donor actually gave, rather than the UTC day.
      */
@@ -283,6 +295,11 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     defaultValue: 'Stripe Fee Coverage',
   });
 
+  const feeItem = resolveEnv('QBO_FEE_ITEM', {
+    fallbackNames: ['ACCOUNTING_STRIPE_FEE_ITEM'],
+    defaultValue: 'Stripe Fees',
+  });
+
   const companyTimeZone = resolveEnv('QBO_COMPANY_TIMEZONE', {
     fallbackNames: ['ACCOUNTING_COMPANY_TIMEZONE'],
     defaultValue: 'America/Los_Angeles',
@@ -344,6 +361,7 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     allowTestModeAccounting,
     defaultSalesItem,
     feeCoverageItem,
+    feeItem,
     companyTimeZone,
     accounts: {
       autoCreate,

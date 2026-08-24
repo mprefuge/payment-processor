@@ -75,9 +75,12 @@ export interface PreviewStrategy {
 
 const STRATEGY_DESCRIPTIONS: Record<PostingStrategy, string> = {
   'sales-receipt':
-    'SalesReceipt at gross into Stripe Clearing, plus a paired FEE- journal entry ' +
-    '(Dr Fees / Cr Stripe Clearing). Revenue is booked gross and the processor fee lands ' +
-    'in the P&L as its own expense.',
+    'SalesReceipt into Stripe Clearing, with the processor fee booked ONE of two mutually ' +
+    'exclusive ways: as a negative "Stripe Fee" line on the receipt itself (so the receipt ' +
+    'totals to net) when the QBO_FEE_ITEM product/service resolves and its own ' +
+    'IncomeAccountRef is the fee account, otherwise as a paired FEE- journal entry ' +
+    '(Dr Fees / Cr Stripe Clearing) with the receipt at gross. Either way revenue is booked ' +
+    'gross and the processor fee lands in the P&L as its own expense exactly once.',
   'je-transfer':
     'One journal entry: Dr Stripe Clearing gross / Cr Revenue gross, plus Dr Fees / ' +
     'Cr Stripe Clearing for the processor fee when there is one.',
@@ -204,12 +207,22 @@ const buildSalesReceiptDocuments = (input: {
 
   // Mirrors postChargeAsSalesReceipt: the fee entry only exists when there is a fee, so a
   // charge with no resolvable fee produces a single document, not a pair.
+  //
+  // It also renders the FALLBACK half of the fee decision. The live path puts the fee on the
+  // receipt as a negative line INSTEAD of this entry whenever QBO_FEE_ITEM resolves to an item
+  // whose own IncomeAccountRef is the fee account — and settling that requires querying
+  // QuickBooks, which this preview never does. So the pair below is what posts when the item
+  // is missing or mis-pointed; `feeItemNote` in the warnings says so explicitly.
   if (feeCents !== null && feeCents > 0) {
     const feeDocNumber = buildDocNumber('FEE', date, feeCents, chargeId);
     documents.push({
       order: 2,
       entity: 'JournalEntry',
-      role: 'Paired processor fee — Dr Fees / Cr Stripe Clearing',
+      role:
+        'Paired processor fee — Dr Fees / Cr Stripe Clearing. Posted ONLY when the ' +
+        `QBO_FEE_ITEM product/service ("${env.accounting.feeItem?.trim() || 'unset'}") does ` +
+        'not resolve to an item booking to the fee account; otherwise the fee is a negative ' +
+        'line on the receipt above and this entry does not exist.',
       docNumber: feeDocNumber,
       payload: buildFeesJE({
         docNumber: feeDocNumber,
@@ -300,6 +313,11 @@ const CAVEATS = [
     'of creating a new one.',
   'Both strategies are rendered so the difference is visible, but only the one marked ' +
     '"active": true reflects ACCOUNTING_POSTING_STRATEGY on this deployment.',
+  'Under sales-receipt the processor fee is booked EITHER as a negative "Stripe Fee" line on ' +
+    'the receipt (when QBO_FEE_ITEM resolves to an item whose own IncomeAccountRef is ' +
+    'QBO_ACCOUNT_FEES) OR as the paired FEE- journal entry — never both. Settling which one ' +
+    'needs a QuickBooks item lookup, which this preview does not do, so it renders the ' +
+    'FEE- fallback and says so in the warnings.',
 ];
 
 const accountingSummary = () => ({
@@ -349,6 +367,19 @@ export const buildQuickBooksPreviewFromContext = (input: {
       'The processor fee is unknown, so the sales-receipt strategy renders WITHOUT the ' +
         'paired FEE- journal entry and the je-transfer strategy renders without its two fee ' +
         'lines. A settled charge would produce them.'
+    );
+  } else if (feeCents > 0) {
+    const feeItemName = env.accounting.feeItem?.trim() ?? '';
+    warnings.push(
+      feeItemName
+        ? `THE FEE SHAPE BELOW IS THE FALLBACK. QuickBooks is never called from here, so the ` +
+            `sales-receipt strategy cannot tell whether the "${feeItemName}" product/service ` +
+            `(QBO_FEE_ITEM) exists and books to QBO_ACCOUNT_FEES. If it does, the live path ` +
+            `puts the fee on the receipt as a negative "Stripe Fee" line — the receipt totals ` +
+            `to NET — and posts NO FEE- journal entry. If it does not, you get exactly the two ` +
+            `documents rendered below. Never both.`
+        : 'QBO_FEE_ITEM is unset, so the live path cannot put the fee on the receipt and ' +
+            'always posts the paired FEE- journal entry rendered below.'
     );
   }
 
@@ -532,8 +563,9 @@ export const buildQboPreviewForCharge = async (
         'posting_error__c on the Salesforce record and posts on settlement, provided ' +
         'charge.succeeded and charge.updated are enabled on the Stripe webhook endpoint; ' +
         '(2) the fee below is UNKNOWN, not zero — and under the sales-receipt strategy that ' +
-        'absence also suppresses the paired FEE- journal entry a settled charge would ' +
-        'produce. Do not read these amounts as final.'
+        'absence also suppresses the fee half a settled charge would produce (either the ' +
+        'negative receipt line or the paired FEE- journal entry). Do not read these amounts ' +
+        'as final.'
     );
   }
 

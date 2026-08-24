@@ -17,6 +17,7 @@ import {
   postPayoutToQbo,
   postRefundToQbo,
   query as qboQuery,
+  summarizeSalesReceiptAmounts,
   updateQuickBooksCustomerSalesforceId,
 } from '../services/qboSvc';
 import {
@@ -76,12 +77,22 @@ type QboSalesReceipt = {
   CustomerRef?: { value?: string | null; name?: string | null } | null;
   ClassRef?: { value?: string | null; name?: string | null } | null;
   Line?: Array<{
+    Amount?: number | null;
     DetailType?: string | null;
     SalesItemLineDetail?: {
       ClassRef?: { value?: string | null; name?: string | null } | null;
     } | null;
   }> | null;
 };
+
+/**
+ * Gross / fee / net for a receipt, derived from its own lines.
+ *
+ * `TotalAmt` is the NET whenever the receipt carries the negative "Stripe Fee" line, so both
+ * the Salesforce write-back and the duplicate match key use the computed GROSS —
+ * `Transaction__c.Amount_Gross__c` is recorded at gross by the Stripe path.
+ */
+const receiptAmounts = (receipt: QboSalesReceipt) => summarizeSalesReceiptAmounts(receipt);
 
 type SalesforceTransaction = {
   Id?: string;
@@ -829,12 +840,12 @@ const buildSalesforceTransactionFromQboSalesReceipt = (
   qboCustomer: QboCustomer
 ): TransactionUpsertDTO | null => {
   const qboDocId = normalizeQboCustomerId(receipt.Id);
-  const amountGross =
-    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
-      ? receipt.TotalAmt
-      : null;
+  // Derived from the lines, never straight off TotalAmt: a receipt carrying the negative
+  // "Stripe Fee" line totals to NET, and recording that as gross would both understate the
+  // gift and stop matching the Transaction__c row the Stripe path wrote at gross.
+  const amounts = receiptAmounts(receipt);
 
-  if (!qboDocId || amountGross === null) {
+  if (!qboDocId || amounts === null) {
     return null;
   }
 
@@ -860,9 +871,9 @@ const buildSalesforceTransactionFromQboSalesReceipt = (
   return {
     transaction_type__c: 'sales-receipt',
     status__c: 'paid',
-    amount_gross__c: amountGross,
-    amount_fee__c: 0,
-    amount_net__c: amountGross,
+    amount_gross__c: amounts.gross,
+    amount_fee__c: amounts.fee,
+    amount_net__c: amounts.net,
     currency_iso_code__c: currencyCode,
     memo__c: importMemo,
     contact__c: resolvedRecord.objectType === 'Contact' ? (resolvedRecord.record.Id ?? null) : null,
@@ -887,10 +898,7 @@ const findMatchingSalesforceTransactionForReceipt = (
   transactions: SalesforceTransaction[],
   receipt: QboSalesReceipt
 ): SalesforceTransaction | 'conflict' | null => {
-  const receiptAmount =
-    typeof receipt.TotalAmt === 'number' && Number.isFinite(receipt.TotalAmt)
-      ? receipt.TotalAmt
-      : null;
+  const receiptAmount = receiptAmounts(receipt)?.gross ?? null;
   const receiptDate = normalizeComparableDate(receipt.TxnDate);
   if (receiptAmount === null || !receiptDate) {
     return null;

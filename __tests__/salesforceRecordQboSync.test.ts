@@ -1367,6 +1367,258 @@ describe('salesforceRecordQboSync', () => {
     expect(body.summary.manualReviewItems).toEqual([]);
   });
 
+  /**
+   * A receipt posted in the new shape carries a NEGATIVE "Stripe Fee" line, so `TotalAmt` is
+   * the NET Stripe deposited. Gross, fee and net must all come off the lines — recording the
+   * net as gross would understate the gift AND break duplicate matching against the
+   * Transaction__c row the Stripe path wrote at gross.
+   */
+  it('splits gross, fee and net from the lines when a QBO receipt carries an inline Stripe fee', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003INLINEFEE'")) {
+        return {
+          records: [
+            {
+              Id: '003INLINEFEE',
+              FirstName: 'Inline',
+              LastName: 'Fee',
+              QuickBooks_ID__c: '517',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003INLINEFEE'")) {
+        return { records: [] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Class__c = 'UNRESTRICTED FUNDS:General'")) {
+        return { records: [{ Id: '701CLASSMATCH' }] };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GENERAL' }] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '517'")) {
+        return [{ Id: '517', DisplayName: 'QBO Import Contact' }];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '517'")) {
+        return [
+          {
+            Id: '7401',
+            DocNumber: '7401',
+            TxnDate: '2026-03-22',
+            // Gross 125.00 less a 4.65 Stripe fee: TotalAmt is the NET.
+            TotalAmt: 120.35,
+            PrivateNote: 'Imported from QBO',
+            ClassRef: { name: 'UNRESTRICTED FUNDS:General' },
+            Line: [
+              { Amount: 125, DetailType: 'SalesItemLineDetail', SalesItemLineDetail: {} },
+              {
+                Amount: -4.65,
+                DetailType: 'SalesItemLineDetail',
+                Description: 'Stripe Fee',
+                SalesItemLineDetail: {},
+              },
+            ],
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const upsertTransactionByExternalId = vi
+      .fn()
+      .mockResolvedValue({ success: true, id: 'a01InlineFee' });
+    const getQuickBooksCustomerById = vi.fn(async () => ({
+      Id: '517',
+      DisplayName: 'QBO Import Contact',
+      CurrencyRef: { value: 'USD' },
+      CustomField: [{ Name: 'Salesforce ID', StringValue: '003INLINEFEE' }],
+    }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () =>
+        ({ markPostedToQbo: vi.fn(), upsertTransactionByExternalId }) as any,
+      qboQuery,
+      getQuickBooksCustomerById,
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003INLINEFEE&dryRun=false&importQboReceipts=true',
+          query: new URLSearchParams({
+            salesforceId: '003INLINEFEE',
+            dryRun: 'false',
+            importQboReceipts: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+
+    expect(response.status).toBe(200);
+    expect(upsertTransactionByExternalId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount_gross__c: 125,
+        amount_fee__c: 4.65,
+        amount_net__c: 120.35,
+      }),
+      'qbo_doc_id__c'
+    );
+  });
+
+  /**
+   * The dedup consequence of the same change: an inline-fee receipt totalling to NET must
+   * still match the Transaction__c row recorded at GROSS. Keying on TotalAmt would miss it
+   * and re-import every gift as a duplicate.
+   */
+  it('matches an inline-fee receipt against a Salesforce transaction recorded at gross', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003GROSSMATCH'")) {
+        return {
+          records: [
+            {
+              Id: '003GROSSMATCH',
+              FirstName: 'Gross',
+              LastName: 'Match',
+              QuickBooks_ID__c: '517',
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Transaction__c WHERE Contact__c = '003GROSSMATCH'")) {
+        return {
+          records: [
+            {
+              Id: 'a01GrossRow',
+              Transaction_Type__c: 'charge',
+              // The Stripe path wrote this at GROSS, not at the receipt's net total.
+              Amount_Gross__c: 125,
+              Received_At__c: '2026-03-22T00:00:00.000Z',
+              QBO_Doc_Id__c: null,
+              QBO_Doc_Type__c: null,
+              Posted_to_QBO__c: false,
+            },
+          ],
+        };
+      }
+
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GENERAL' }] };
+      }
+
+      return { records: [] };
+    });
+
+    const qboQuery = vi.fn(async (query: string) => {
+      if (query.includes("FROM Customer WHERE Id = '517'")) {
+        return [
+          {
+            Id: '517',
+            DisplayName: 'QBO Gross Match Contact',
+            CustomField: [{ Name: 'Salesforce ID', StringValue: '003GROSSMATCH' }],
+          },
+        ];
+      }
+
+      if (query.includes("FROM SalesReceipt WHERE CustomerRef = '517'")) {
+        return [
+          {
+            Id: '7402',
+            DocNumber: '7402',
+            TxnDate: '2026-03-22',
+            TotalAmt: 120.35,
+            PrivateNote: 'Imported from QBO',
+            Line: [
+              { Amount: 125, DetailType: 'SalesItemLineDetail', SalesItemLineDetail: {} },
+              {
+                Amount: -4.65,
+                DetailType: 'SalesItemLineDetail',
+                Description: 'Stripe Fee',
+                SalesItemLineDetail: {},
+              },
+            ],
+          },
+        ];
+      }
+
+      if (query.includes('STARTPOSITION 1 MAXRESULTS 200')) {
+        return [];
+      }
+
+      return [];
+    });
+
+    const getQuickBooksCustomerById = vi.fn(async () => ({
+      Id: '517',
+      DisplayName: 'QBO Gross Match Contact',
+      CurrencyRef: { value: 'USD' },
+      CustomField: [{ Name: 'Salesforce ID', StringValue: '003GROSSMATCH' }],
+    }));
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => connection as any,
+      createSalesforceSvc: () =>
+        ({ markPostedToQbo: vi.fn(), upsertTransactionByExternalId: vi.fn() }) as any,
+      qboQuery,
+      getQuickBooksCustomerById,
+      updateQuickBooksCustomerSalesforceId: vi.fn(),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/salesforce-record-sync?salesforceId=003GROSSMATCH&dryRun=true&importQboReceipts=true',
+          query: new URLSearchParams({
+            salesforceId: '003GROSSMATCH',
+            dryRun: 'true',
+            importQboReceipts: 'true',
+          }),
+        } as any,
+        context
+      )
+    );
+    const body = JSON.parse(response.body);
+
+    expect(response.status).toBe(200);
+    // Matched at gross, so it is reviewed as a possible existing charge and NOT re-imported.
+    expect(body.summary.plannedCreates).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'create_salesforce_transaction_from_qbo_sales_receipt',
+        }),
+      ])
+    );
+    expect(body.summary.manualReviewItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'quickbooks_sales_receipt_possible_existing_salesforce_charge',
+          qboDocId: '7402',
+          salesforceTransactionId: 'a01GrossRow',
+        }),
+      ])
+    );
+  });
+
   it('imports QBO-only sales receipts using a line-level ClassRef when the receipt header has no class', async () => {
     const connection = createConnection(async (soql: string) => {
       if (soql.includes("FROM Contact WHERE Id = '003LINEIMPORT'")) {

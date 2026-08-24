@@ -111,6 +111,41 @@ const grossOnlyReceiptFixture = (grossDollars = 100) => ({
 });
 
 /**
+ * SHAPE 3 — the sales-receipt strategy when the dedicated `QBO_FEE_ITEM` product/service
+ * resolves: the processor fee is a NEGATIVE item line on the receipt itself, the receipt
+ * totals to the NET Stripe deposited, and NO paired FEE- journal entry is posted at all.
+ *
+ * Note the fee line carries NO `ItemAccountRef` — QuickBooks ignores it on a sales form, so
+ * the routing lives on the item. That is exactly why this differs from SHAPE 1 above.
+ */
+const inlineFeeReceiptFixture = ({
+  grossDollars = 100,
+  feeDollars = 3.2,
+}: { grossDollars?: number; feeDollars?: number } = {}) => ({
+  Id: '101',
+  DocNumber: RECEIPT_DOC_NUMBER,
+  TxnDate: DATE,
+  TotalAmt: grossDollars - feeDollars,
+  PrivateNote: `Original Charge Amount: ${grossDollars.toFixed(2)} | Stripe Charge ID: ${CHARGE_ID} | Stripe Payment Intent: ${PI_ID}`,
+  DepositToAccountRef: CLEARING_ACCOUNT,
+  Line: [
+    {
+      Amount: grossDollars,
+      DetailType: 'SalesItemLineDetail',
+      Description: 'Donation',
+      SalesItemLineDetail: { ItemRef: { value: '55', name: 'Stripe Transaction' } },
+    },
+    {
+      Amount: -feeDollars,
+      DetailType: 'SalesItemLineDetail',
+      Description: 'Stripe Fee',
+      SalesItemLineDetail: { ItemRef: { value: '16', name: 'Stripe Fees' }, Qty: 1 },
+    },
+    { Amount: grossDollars - feeDollars, DetailType: 'SubTotalLineDetail', SubTotalLineDetail: {} },
+  ],
+});
+
+/**
  * The paired fee entry for SHAPE 2. Its memo is the receipt's memo, which for anything
  * posted through the Salesforce sync paths is a donor and campaign name carrying NO Stripe
  * id — so the pair has to be found by its DocNumber, not by id matching.
@@ -519,6 +554,42 @@ describe('dailyReconciliation — amount-level reconciliation', () => {
     expect(report.summary.totalDiscrepancies).toBe(0);
   });
 
+  /**
+   * SHAPE 3 — the current sales-receipt strategy when a dedicated fee Product/Service
+   * resolves: the fee is a NEGATIVE line on the receipt itself (no ItemAccountRef — the
+   * routing is on the item) and there is NO paired FEE- journal entry at all.
+   *
+   * The trap this guards: `expectedPairedFeeDocNumber` can always construct a FEE- name from
+   * a CHG- receipt, so an inline-fee receipt must never be sent chasing a document that is
+   * not supposed to exist. And the fee must be counted once, not once per shape.
+   */
+  it('reconciles the inline-fee sales-receipt shape with no paired FEE- entry in existence', async () => {
+    const scenario = cleanScenario();
+    scenario.qbo!.SalesReceipt = [inlineFeeReceiptFixture()];
+    scenario.qbo!.JournalEntry = [];
+
+    const report = await runFor(scenario);
+
+    expect(report.discrepancies.amountMismatches).toEqual([]);
+    expect(report.discrepancies.payoutImbalances).toEqual([]);
+    expect(report.summary.totalDiscrepancies).toBe(0);
+  });
+
+  it('never reports an inline-fee receipt as missing its FEE- half', async () => {
+    const scenario = cleanScenario();
+    scenario.qbo!.SalesReceipt = [inlineFeeReceiptFixture()];
+    scenario.qbo!.JournalEntry = [];
+
+    const report = await runFor(scenario);
+
+    expect(
+      report.discrepancies.amountMismatches.filter((item) => item.type === 'qbo_fee_missing')
+    ).toEqual([]);
+    expect(
+      report.discrepancies.amountMismatches.filter((item) => item.type === 'qbo_fee_mismatch')
+    ).toEqual([]);
+  });
+
   it('detects the partial failure where the receipt posted but its fee entry did not', async () => {
     const scenario = cleanScenario();
     scenario.qbo!.SalesReceipt = [grossOnlyReceiptFixture()];
@@ -765,6 +836,79 @@ describe('dailyReconciliation — QBO document amount extraction', () => {
       RECEIPT_DOC_NUMBER,
       FEE_JE_DOC_NUMBER,
     ]);
+  });
+
+  /**
+   * Double-counting is the one way this check could silently pass while the books are wrong:
+   * if the fee were read off the receipt AND off a paired entry, a charge missing one of them
+   * would still total to the Stripe fee. It cannot happen, because the two shapes are
+   * mutually exclusive at post time — but assert it directly rather than trusting that.
+   */
+  it('counts the processor fee exactly once under every sales-receipt shape', () => {
+    const inline = [{ ...inlineFeeReceiptFixture(), entityType: 'SalesReceipt' as const }];
+    const paired = [
+      { ...grossOnlyReceiptFixture(), entityType: 'SalesReceipt' as const },
+      { ...pairedFeeJournalEntryFixture(), entityType: 'JournalEntry' as const },
+    ];
+
+    const totalFee = (docs: any[]) =>
+      internals
+        .resolveDocsForStripeIds([CHARGE_ID], internals.buildQboDocLookup(docs))
+        .map((doc: any) => internals.summarizeQboDocAmounts(doc, accounts))
+        .filter((summary: any) => summary.basis !== 'unknown')
+        .reduce((total: number, summary: any) => total + (summary.feeCents ?? 0), 0);
+
+    expect(totalFee(inline)).toBe(320);
+    expect(totalFee(paired)).toBe(320);
+
+    // The inline receipt pulls in no extra document; the paired receipt pulls in its FEE-.
+    expect(
+      internals.resolveDocsForStripeIds([CHARGE_ID], internals.buildQboDocLookup(inline))
+    ).toHaveLength(1);
+    expect(
+      internals.resolveDocsForStripeIds([CHARGE_ID], internals.buildQboDocLookup(paired))
+    ).toHaveLength(2);
+  });
+
+  it('names a FEE- DocNumber only when a paired fee entry is actually expected', () => {
+    // Gross-only receipt: the FEE- half genuinely should exist, so name it.
+    expect(
+      internals.expectedPairedFeeDocNumber([
+        { ...grossOnlyReceiptFixture(), entityType: 'SalesReceipt' },
+      ])
+    ).toBe(FEE_JE_DOC_NUMBER);
+
+    // Inline-fee receipt: no FEE- entry is ever posted for it, so there is nothing to name.
+    expect(
+      internals.expectedPairedFeeDocNumber([
+        { ...inlineFeeReceiptFixture(), entityType: 'SalesReceipt' },
+      ])
+    ).toBeNull();
+
+    expect(
+      internals.receiptAccountsForFeeInline([
+        { ...inlineFeeReceiptFixture(), entityType: 'SalesReceipt' },
+      ])
+    ).toBe(true);
+    expect(
+      internals.receiptAccountsForFeeInline([
+        { ...grossOnlyReceiptFixture(), entityType: 'SalesReceipt' },
+      ])
+    ).toBe(false);
+  });
+
+  it('reads gross and fee off an inline-fee receipt that carries no ItemAccountRef', () => {
+    expect(
+      internals.summarizeQboDocAmounts(
+        { ...inlineFeeReceiptFixture(), entityType: 'SalesReceipt' },
+        accounts
+      )
+    ).toEqual({
+      grossCents: 10000,
+      feeCents: 320,
+      clearingDeltaCents: 9680,
+      basis: 'sales-receipt-lines',
+    });
   });
 
   it('does not mistake a per-object entry for the payout account-fee entry', () => {

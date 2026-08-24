@@ -69,11 +69,14 @@ const baseEnv = {
   },
 } as any;
 
-const importQboSvc = async (postingStrategy: 'journal-entry' | 'sales-receipt') => {
+const importQboSvc = async (
+  postingStrategy: 'journal-entry' | 'sales-receipt',
+  accountingOverrides: Record<string, unknown> = {}
+) => {
   vi.resetModules();
   const env = {
     ...baseEnv,
-    accounting: { ...baseEnv.accounting, postingStrategy },
+    accounting: { ...baseEnv.accounting, postingStrategy, ...accountingOverrides },
   };
   vi.doMock('../src/config/env', () => ({ env, default: env }));
   vi.doMock('../src/lib/logger', () => ({
@@ -105,6 +108,22 @@ const createCapturingQbo = () => {
         });
       }
       if (/FROM\s+Item/i.test(decoded)) {
+        // The dedicated processor-fee item, answered only when it is asked for by name and
+        // always pointed at the fee EXPENSE account — the only configuration under which
+        // qboSvc will put a negative fee line on a receipt.
+        if (/Name = 'Stripe Fees'/.test(decoded)) {
+          return json({
+            QueryResponse: {
+              Item: [
+                {
+                  Id: 'ITEM_STRIPE_FEE',
+                  Name: 'Stripe Fees',
+                  IncomeAccountRef: { value: 'QBO_ACCOUNT_FEES', name: 'Stripe Fees' },
+                },
+              ],
+            },
+          });
+        }
         return json({ QueryResponse: { Item: [{ Id: 'ITEM_1', Name: 'Services' }] } });
       }
       // Everything else — notably the duplicate pre-checks — legitimately finds nothing.
@@ -288,6 +307,43 @@ describe('payload contracts — QuickBooks outbound', () => {
       receipt!.body.DepositToAccountRef?.value,
       'SalesReceipt needs a deposit account'
     ).toBeTruthy();
+  });
+
+  /**
+   * The negative-line case the per-amount contract was written to allow. A SalesReceipt that
+   * nets the Stripe fee out of the deposit carries a NEGATIVE SalesItemLine, and it must
+   * still satisfy every invariant: 2dp currency on each amount, and a document that nets
+   * POSITIVE overall. A receipt that totalled to zero or below would be nonsense.
+   */
+  it('sales receipt carrying a negative processor-fee line is well formed and still nets positive', async () => {
+    const svc = await importQboSvc('sales-receipt', { feeItem: 'Stripe Fees' });
+    const { posted, options } = createCapturingQbo();
+
+    await svc.postChargeToQbo({
+      gross: 5000,
+      fee: 175,
+      memo: 'Contract test charge with inline fee',
+      date: CHARGE_DATE,
+      stripe: { charge: { id: 'ch_contract_00X' } as any },
+      options,
+    });
+
+    // The inline-fee shape is a SINGLE document: no paired FEE- journal entry exists.
+    expect(posted.map((p) => p.entity)).toEqual(['SalesReceipt']);
+
+    const receipt = posted[0];
+    assertQboDocumentContract('charge/sales-receipt-inline-fee', 'SalesReceipt', receipt.body);
+
+    const feeLine = receipt.body.Line.find((line: any) => line.Amount < 0);
+    expect(feeLine, 'expected a negative processor-fee line').toBeDefined();
+    expect(feeLine.Amount).toBe(-1.75);
+    expect(feeLine.SalesItemLineDetail.UnitPrice).toBe(-1.75);
+    // Net of the fee, the receipt still deposits real money.
+    const netCents = receipt.body.Line.reduce(
+      (sum: number, line: any) => sum + Math.round(line.Amount * 100),
+      0
+    );
+    expect(netCents).toBe(4825);
   });
 
   it('refund is well formed and balances', async () => {

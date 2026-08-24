@@ -209,7 +209,91 @@ describe('qboReceiptsSync', () => {
     expect(dto.contact__c).toBe('003CONTACT');
     expect(dto.account__c).toBeNull();
     expect(dto.amount_gross__c).toBe(150);
+    // No negative line on this receipt, so TotalAmt IS the gross: fee 0, net == gross.
+    // This is the exact shape every pre-existing receipt has, and it must not move.
+    expect(dto.amount_fee__c).toBe(0);
+    expect(dto.amount_net__c).toBe(150);
     expect(dto.posted_to_qbo__c).toBe(true);
+  });
+
+  /**
+   * A receipt posted in the new shape carries a NEGATIVE "Stripe Fee" line, so `TotalAmt` is
+   * the NET Stripe deposited — not the gross the donor paid. Copying TotalAmt into
+   * Amount_Gross__c would understate every gift and, worse, stop matching the Transaction__c
+   * row the Stripe path already wrote at gross.
+   */
+  it('derives gross and fee from the lines when the receipt carries an inline Stripe fee', async () => {
+    const connection = createConnection(async (soql: string) => {
+      if (soql.includes("FROM Contact WHERE Id = '003CONTACT'")) {
+        return { records: [{ Id: '003CONTACT', FirstName: 'Alice', LastName: 'Smith' }] };
+      }
+      if (soql.includes('FROM Transaction__c WHERE QBO_Doc_Id__c IN')) {
+        return { records: [] };
+      }
+      if (soql.includes("FROM Campaign WHERE Name = 'General Giving'")) {
+        return { records: [{ Id: '701GEN' }] };
+      }
+      return { records: [] };
+    });
+
+    const upsert = vi.fn(async () => ({ success: true, id: 'a01FEE', created: true }));
+    const soqlSeen: string[] = [];
+    const trackingConnection = {
+      ...connection,
+      query: vi.fn(async (soql: string) => {
+        soqlSeen.push(soql);
+        return connection.query(soql);
+      }),
+    };
+
+    internals.setDependencies({
+      getSalesforceConnection: async () => trackingConnection as any,
+      createSalesforceSvc: () => ({ upsertTransactionByExternalId: upsert }) as any,
+      qboQuery: vi.fn(async (query: string) => {
+        if (query.includes('FROM SalesReceipt STARTPOSITION 1')) {
+          return [
+            makeReceipt('502', '100', {
+              // Gross 150.00, Stripe fee 4.65 → TotalAmt is the NET.
+              TotalAmt: 145.35,
+              Line: [
+                { Amount: 150, DetailType: 'SalesItemLineDetail', SalesItemLineDetail: {} },
+                { Amount: -4.65, DetailType: 'SalesItemLineDetail', SalesItemLineDetail: {} },
+              ],
+            }),
+          ];
+        }
+        return [];
+      }),
+      getQuickBooksCustomerById: vi.fn(async (id: string) => {
+        if (id === '100') return makeCustomer('100', '003CONTACT');
+        throw new Error(`Unexpected customer ${id}`);
+      }),
+    });
+
+    const { context } = createContext();
+    const response = normalizeResponse(
+      await handler(
+        {
+          method: 'GET',
+          url: 'http://localhost/api/qbo/receipts-salesforce-sync?dryRun=false',
+          query: new URLSearchParams({ dryRun: 'false' }),
+        } as any,
+        context
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const [dto] = upsert.mock.calls[0] as unknown as [Record<string, any>, string];
+    expect(dto.amount_gross__c).toBe(150);
+    expect(dto.amount_fee__c).toBe(4.65);
+    expect(dto.amount_net__c).toBe(145.35);
+
+    // Duplicate detection keys on the computed GROSS, not on TotalAmt: Transaction__c rows
+    // are recorded at gross, so keying on the net would re-import every receipt.
+    const dedupSoql = soqlSeen.filter((soql) => soql.includes('Amount_Gross__c'));
+    expect(dedupSoql.length).toBeGreaterThan(0);
+    expect(dedupSoql.some((soql) => soql.includes('150'))).toBe(true);
+    expect(dedupSoql.some((soql) => soql.includes('145.35'))).toBe(false);
   });
 
   it('falls back to Account when the Salesforce ID resolves to an Account', async () => {
