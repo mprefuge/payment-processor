@@ -5,6 +5,7 @@ import type Stripe from 'stripe';
 
 import env from '../config/env';
 import { logger } from '../lib/logger';
+import { formatDateInTimeZone } from '../lib/qboDates';
 import {
   appendTestArtifactMarker,
   buildTestArtifactMarker,
@@ -259,6 +260,13 @@ interface BuildSalesReceiptInput {
   customer?: SalesReceiptCustomerDetails | null;
   description?: string;
   coverFeesAmountCents?: number;
+  /**
+   * Product/Service for the donor-covered processing-fee line, in the same shape as
+   * `revenueItemName`. Optional on purpose: when it is absent the fee line reuses the revenue
+   * item, which is the historic behaviour and the safe fallback when the dedicated coverage
+   * item does not exist in the company file.
+   */
+  coverFeesItemRef?: string;
   lineQuantity?: number;
   lineRate?: number;
   lineAmountCents?: number;
@@ -355,6 +363,18 @@ export interface PostChargeToQboInput {
   date: string | Date;
   stripe?: StripeCustomerContext;
   customer?: SalesReceiptCustomerDetails | null;
+  /**
+   * Pre-resolved QuickBooks class in `"Name|Id"` form — the explicit `QBO_Class_Id__c` /
+   * `QBO_Class_Name__c` an accountant has set on the Salesforce Transaction__c, or a class the
+   * reconciliation pass has already worked out. Wins over `campaignClass`.
+   */
+  classRef?: string | null;
+  /**
+   * The linked Campaign's `Class__c` — a QuickBooks FullyQualifiedName path such as
+   * `"UNRESTRICTED FUNDS:General"`. Resolved to an Id at post time; an unresolvable value
+   * posts the receipt unclassed rather than failing it.
+   */
+  campaignClass?: string | null;
   cleanupTag?: string;
   options?: PostOptions;
 }
@@ -2201,6 +2221,7 @@ export const buildSalesReceipt = ({
   customer = null,
   description,
   coverFeesAmountCents = 0,
+  coverFeesItemRef,
   lineQuantity,
   lineRate,
   lineAmountCents,
@@ -2298,14 +2319,20 @@ export const buildSalesReceipt = ({
       );
     }
 
+    // The coverage gets its own Product/Service when the caller resolved one, so the extra
+    // the donor chose to pay does not land in the same income account as the gift itself.
+    // Falling back to the revenue item keeps the receipt postable when that item is missing.
+    const coverFeesItem = toTrimmed(coverFeesItemRef) ?? itemReference;
+
     lines.push({
       Amount: coverFeesAmount,
       DetailType: 'SalesItemLineDetail',
       Description: 'Processing Fee Coverage',
       SalesItemLineDetail: {
-        ItemRef: createItemRef(itemReference),
+        ItemRef: createItemRef(coverFeesItem),
         Qty: 1,
         UnitPrice: coverFeesAmount,
+        ...(resolvedServiceDate ? { ServiceDate: resolvedServiceDate } : {}),
         ...(classRef ? { ClassRef: classRef } : {}),
       },
     });
@@ -3225,6 +3252,131 @@ const resolveItemId = async (name: string, context: QuickBooksRequestContext): P
   return reference.value;
 };
 
+/**
+ * Non-creating lookup of the Product/Service used for the donor-covered processing-fee line.
+ *
+ * Deliberately NOT routed through `ensureSalesReceiptItem` / `resolveRevenueItemReference`:
+ * those create a missing item and point it at the generic revenue account, which would both
+ * be a write against the company file and mis-post the coverage. A miss here is not an error
+ * — the caller falls the fee line back to the revenue item.
+ *
+ * `findItemReferenceByName` falls back to `itemList[0]` when its exact-name match misses, so
+ * a query that returned *something* unrelated would otherwise be accepted silently. This
+ * wrapper re-checks the name and treats anything else as a miss.
+ */
+const findCoverFeesItemReference = async (
+  itemName: string,
+  context: QuickBooksRequestContext
+): Promise<QuickBooksReference | null> => {
+  const normalizedName = toTrimmed(itemName);
+  if (!normalizedName) {
+    return null;
+  }
+
+  const reference = await findItemReferenceByName(normalizedName, context);
+  if (!reference) {
+    return null;
+  }
+
+  const resolvedName = toTrimmed(reference.name);
+  if (!resolvedName || resolvedName.toLowerCase() !== normalizedName.toLowerCase()) {
+    return null;
+  }
+
+  return reference;
+};
+
+const classPathLookupCache = new Map<string, QuickBooksReference>();
+
+const buildClassPathCacheKey = (value: string): string =>
+  `${env.quickBooks.environment}:${env.quickBooks.realmId ?? ''}:class-path:${value
+    .trim()
+    .toLowerCase()}`;
+
+const readStringField = (
+  record: Record<string, unknown> | null | undefined,
+  field: string
+): string | null => {
+  const value = record?.[field];
+  return typeof value === 'string' ? (toTrimmed(value) ?? null) : null;
+};
+
+/**
+ * Resolves a QuickBooks Class from the value Salesforce carries on `Campaign.Class__c`.
+ *
+ * `Campaign.Class__c` is free text holding a QuickBooks **FullyQualifiedName** — the full
+ * colon-delimited path, e.g. `"UNRESTRICTED FUNDS:General"`. QuickBooks' `Class.Name` is the
+ * LEAF only, so querying `where Name = 'UNRESTRICTED FUNDS:General'` never matches; the path
+ * has to be matched against `FullyQualifiedName`. We try that first and fall back to the leaf,
+ * which covers rows that were typed in without their parent.
+ *
+ * Never creates a class and never throws: an unresolvable value logs a warning and returns
+ * null, and the receipt posts unclassed. A missing class on a receipt is a bookkeeping
+ * annoyance that finance can patch (dailyReconciliation already does); a thrown error here
+ * would lose the gift entirely.
+ */
+const findClassReferenceByPath = async (
+  classPath: string,
+  context: QuickBooksRequestContext
+): Promise<QuickBooksReference | null> => {
+  const normalizedPath = toTrimmed(classPath);
+  if (!normalizedPath) {
+    return null;
+  }
+
+  const cacheKey = buildClassPathCacheKey(normalizedPath);
+  const cached = classPathLookupCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const leaf = normalizedPath.includes(':')
+    ? (toTrimmed(normalizedPath.split(':').pop() ?? '') ?? null)
+    : null;
+
+  const attempts: Array<{ field: 'FullyQualifiedName' | 'Name'; value: string }> = [
+    { field: 'FullyQualifiedName', value: normalizedPath },
+    ...(leaf ? [{ field: 'Name' as const, value: leaf }] : []),
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const records = await queryQuickBooks<Record<string, unknown>>(
+        `select Id, Name, FullyQualifiedName from Class where ${attempt.field} = '${escapeQueryValue(
+          attempt.value
+        )}'`,
+        context
+      );
+
+      const wanted = attempt.value.toLowerCase();
+      const match =
+        records.find((record) => {
+          const candidate = readStringField(record, attempt.field);
+          return candidate ? candidate.toLowerCase() === wanted : false;
+        }) ?? null;
+
+      const reference = extractReferenceFromRecord(match, 'Id', 'Name');
+      if (reference?.value) {
+        classPathLookupCache.set(cacheKey, reference);
+        return reference;
+      }
+    } catch (error) {
+      logger.warn('[QBO] Class lookup failed; continuing without a class', {
+        classPath: normalizedPath,
+        queriedField: attempt.field,
+        queriedValue: attempt.value,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  logger.warn('[QBO] Unable to resolve QuickBooks class; posting without one', {
+    classPath: normalizedPath,
+    leaf,
+  });
+  return null;
+};
+
 const resolveItemReferences = async (
   references: ItemRefWithMetadata[],
   context: QuickBooksRequestContext
@@ -3762,9 +3914,21 @@ const postChargeAsSalesReceipt = async (input: {
   date: string | Date;
   stripe?: StripeCustomerContext;
   customer?: SalesReceiptCustomerDetails | null;
+  classRef?: string | null;
+  campaignClass?: string | null;
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
-  const { grossAmount, feeAmount, normalizedMemo, date, stripe, customer, options } = input;
+  const {
+    grossAmount,
+    feeAmount,
+    normalizedMemo,
+    date,
+    stripe,
+    customer,
+    classRef,
+    campaignClass,
+    options,
+  } = input;
   const chargeId = stripe?.charge?.id ?? null;
   const salesReceiptDocNumber = buildDocNumber(
     docNumberPrefix('CHG', options),
@@ -3798,20 +3962,31 @@ const postChargeAsSalesReceipt = async (input: {
 
   const lineOverrides = getSalesReceiptLineOverrides(stripe);
 
-  const transactionTypeName =
-    lineOverrides.productService ?? getCheckoutTransactionType(stripe?.checkoutSession);
-  if (!transactionTypeName) {
+  // The Product/Service on the line is NOT the Checkout Session's `metadata.transactionType`.
+  //
+  // `transactionType` is a donation-form concept ("Payment", "Donation", ...), not the name of
+  // a QuickBooks item, and using it as one is exactly what put "Payment" on every receipt:
+  // formatStripeMetadata (src/handlers/processTransaction/checkoutSessionParams.ts) hardcodes
+  // `transactionType: ... || 'Payment'`, so on the donation-form path it always won this
+  // chain — and ensureSalesReceiptItem then created a "Payment" item to match.
+  //
+  // The item now comes from an explicit Stripe metadata override, else the configured default
+  // (QBO_DEFAULT_SALES_ITEM, "Stripe Transaction"). `transactionType` keeps its honest job of
+  // describing the line, below.
+  const revenueItemName =
+    lineOverrides.productService ?? toTrimmed(env.accounting.defaultSalesItem) ?? null;
+  if (!revenueItemName) {
     throw new Error(
-      'Stripe Checkout Session metadata.transactionType is required to determine the QuickBooks item for sales receipts.'
+      'A QuickBooks item is required for sales receipts: set QBO_DEFAULT_SALES_ITEM or supply a qbo_product_service override.'
     );
   }
 
   let revenueItemReference: QuickBooksReference;
   try {
-    revenueItemReference = await resolveRevenueItemReference(transactionTypeName, context);
+    revenueItemReference = await resolveRevenueItemReference(revenueItemName, context);
   } catch (error) {
     throw new Error(
-      `Failed to ensure QuickBooks item "${transactionTypeName}" for sales receipt: ${
+      `Failed to ensure QuickBooks item "${revenueItemName}" for sales receipt: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
@@ -3819,9 +3994,15 @@ const postChargeAsSalesReceipt = async (input: {
 
   const revenueItemPayload = JSON.stringify({
     value: revenueItemReference.value,
-    name: revenueItemReference.name ?? transactionTypeName,
+    name: revenueItemReference.name ?? revenueItemName,
   });
 
+  // Unchanged: the human-readable description still reflects what the donor picked on the
+  // form. Only the ItemRef stopped being derived from it.
+  const transactionTypeName =
+    lineOverrides.productService ??
+    getCheckoutTransactionType(stripe?.checkoutSession) ??
+    revenueItemName;
   const category = getCheckoutCategory(stripe?.checkoutSession);
   const stripeDescription = getStripeLineDescription(stripe);
   const description =
@@ -3837,6 +4018,75 @@ const postChargeAsSalesReceipt = async (input: {
       grossAmount,
     });
     coverFeesAmountCents = 0;
+  }
+
+  // Dedicated Product/Service for the donor-covered fee, resolved WITHOUT creating anything.
+  // `findCoverFeesItemReference` is non-creating on purpose: the item does not exist in every
+  // company file, and routing this through ensureSalesReceiptItem would write a new item
+  // pointed at the generic revenue account. A miss is expected and harmless — warn, and let
+  // the fee line keep sharing the revenue item exactly as it did before.
+  let coverFeesItemRef: string | undefined;
+  if (coverFeesAmountCents > 0) {
+    const feeCoverageItemName = toTrimmed(env.accounting.feeCoverageItem);
+    if (feeCoverageItemName) {
+      let feeCoverageItem: QuickBooksReference | null = null;
+      try {
+        feeCoverageItem = await findCoverFeesItemReference(feeCoverageItemName, context);
+      } catch (error) {
+        logger.warn(
+          '[QBO] Lookup of the fee-coverage product/service failed; fee line falls back to the revenue item',
+          {
+            feeCoverageItemName,
+            revenueItemName,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
+      }
+
+      if (feeCoverageItem?.value) {
+        coverFeesItemRef = JSON.stringify({
+          value: feeCoverageItem.value,
+          name: feeCoverageItem.name ?? feeCoverageItemName,
+        });
+      } else if (!coverFeesItemRef) {
+        logger.warn(
+          '[QBO] Fee-coverage product/service not found in QuickBooks; fee line falls back to the revenue item',
+          {
+            feeCoverageItemName,
+            revenueItemName,
+          }
+        );
+      }
+    }
+  }
+
+  // ServiceDate: the calendar day the donor actually gave, in the company file's own zone.
+  //
+  // The `date` argument is the BALANCE TRANSACTION's created time, which for ACH can be days
+  // after the gift, so it is only the last resort. charge.created / paymentIntent.created are
+  // the moment of the gift. QuickBooks reads a bare YYYY-MM-DD as a day in the company file's
+  // time zone, while every Stripe timestamp is a UTC instant — formatting with toISOString()
+  // (what normalizeDate does) pushes any gift after 4pm Pacific onto the next day. TxnDate and
+  // DocNumber deliberately keep using `date`: DocNumber feeds duplicate detection.
+  const lineServiceDate =
+    lineOverrides.serviceDate ??
+    formatDateInTimeZone(
+      stripe?.charge?.created ?? stripe?.paymentIntent?.created ?? date,
+      env.accounting.companyTimeZone
+    ) ??
+    undefined;
+
+  // Class precedence: explicit Stripe metadata override, then the explicit class fields on the
+  // Salesforce Transaction__c, then the linked Campaign's Class__c resolved against QuickBooks.
+  let lineClassRef = lineOverrides.classRef ?? toTrimmed(classRef) ?? undefined;
+  if (!lineClassRef) {
+    const campaignClassPath = toTrimmed(campaignClass);
+    if (campaignClassPath) {
+      const resolvedClass = await findClassReferenceByPath(campaignClassPath, context);
+      if (resolvedClass?.value) {
+        lineClassRef = `${resolvedClass.name ?? campaignClassPath}|${resolvedClass.value}`;
+      }
+    }
   }
 
   const revenueAccountRef = createAccountRef(env.quickBooks.accounts.revenue);
@@ -3865,11 +4115,12 @@ const postChargeAsSalesReceipt = async (input: {
     customer: receiptCustomer,
     description,
     coverFeesAmountCents,
+    coverFeesItemRef,
     lineQuantity: lineOverrides.quantity,
     lineRate: lineOverrides.rate,
     lineAmountCents: lineOverrides.amountCents,
-    lineServiceDate: lineOverrides.serviceDate,
-    lineClassRef: lineOverrides.classRef,
+    lineServiceDate,
+    lineClassRef,
   });
 
   const salesReceiptResult = await postSalesReceipt(salesReceipt, options);
@@ -3899,13 +4150,10 @@ const postChargeAsSalesReceipt = async (input: {
       date,
       feesAccountId: feesAccountRef.value,
       clearingAccountId: depositAccountRef.value,
-      // Mirrors the receipt's class when one is supplied. NOTE: the Stripe webhook forward
-      // path never writes qbo_class metadata (see formatStripeMetadata in
-      // src/handlers/processTransaction.js), so this is currently only exercised by the
-      // manual/Salesforce sync paths that do set it.
-      classRef: toTrimmed(lineOverrides.classRef ?? null)
-        ? createClassRef(lineOverrides.classRef!)
-        : null,
+      // Mirrors whatever class the receipt lines ended up with -- including one derived from
+      // the Salesforce Campaign, which is how the live webhook path now gets classed (the
+      // Stripe forward path never writes qbo_class metadata of its own).
+      classRef: toTrimmed(lineClassRef ?? null) ? createClassRef(lineClassRef!) : null,
     });
 
     const feeJournalResult = await postJournalEntry(feeJournalEntry, options);
@@ -4070,6 +4318,8 @@ export const postChargeToQbo = async ({
   date,
   stripe,
   customer,
+  classRef,
+  campaignClass,
   cleanupTag,
   options,
 }: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
@@ -4089,6 +4339,8 @@ export const postChargeToQbo = async ({
       date,
       stripe,
       customer,
+      classRef,
+      campaignClass,
       options,
     });
   }

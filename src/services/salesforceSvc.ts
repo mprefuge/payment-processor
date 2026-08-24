@@ -211,6 +211,27 @@ export interface SalesforceSvc {
    * does not have a Class__c field in this org.
    */
   findCampaignIdByClass?: (className: string) => Promise<string | null>;
+  /**
+   * Read-only lookup of the class-tracking fields on a Transaction__c, used to class the
+   * QuickBooks sales receipt the Stripe webhook is about to post.
+   *
+   * Returns null when the record cannot be read; the caller posts unclassed rather than
+   * failing the gift.
+   */
+  findTransactionClassFields?: (salesforceId: string) => Promise<TransactionClassFields | null>;
+}
+
+/**
+ * Class-tracking fields read off a Transaction__c.
+ *
+ * `qboClassId`/`qboClassName` are an explicit override an accountant has set on the record;
+ * `campaignClass` is the QuickBooks FullyQualifiedName path carried on the linked
+ * Campaign (`Campaign__r.Class__c`), which is populated for ~98% of transactions.
+ */
+export interface TransactionClassFields {
+  qboClassId: string | null;
+  qboClassName: string | null;
+  campaignClass: string | null;
 }
 
 export type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -221,6 +242,13 @@ export type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
 type TransactionRecord = Record<string, TransactionFieldValue>;
 
 type TransactionLookupRecord = { Id?: string };
+
+type TransactionClassRecord = {
+  Id?: string;
+  QBO_Class_Id__c?: string | null;
+  QBO_Class_Name__c?: string | null;
+  Campaign__r?: { Class__c?: string | null } | null;
+};
 
 type TransactionDateMatchRecord = {
   Id?: string;
@@ -1934,6 +1962,50 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     }
   };
 
+  const findTransactionClassFields = async (
+    salesforceId: string
+  ): Promise<TransactionClassFields | null> => {
+    const normalizedId = ensureNonEmpty(salesforceId, 'Transaction ID');
+    const escapedId = escapeForSoqlLiteral(normalizedId);
+
+    // Campaign__r.Class__c is not guaranteed to exist in every org, so the query degrades to
+    // the Transaction__c-local fields when the column is rejected -- the same treatment
+    // dailyReconciliation gives it.
+    const buildSoql = (includeCampaignClass: boolean): string =>
+      `SELECT Id, QBO_Class_Id__c, QBO_Class_Name__c` +
+      `${includeCampaignClass ? ', Campaign__r.Class__c' : ''} ` +
+      `FROM Transaction__c WHERE Id = '${escapedId}' LIMIT 1`;
+
+    const toFields = (record: TransactionClassRecord | null): TransactionClassFields | null => {
+      if (!record) {
+        return null;
+      }
+      return {
+        qboClassId: record.QBO_Class_Id__c?.trim() || null,
+        qboClassName: record.QBO_Class_Name__c?.trim() || null,
+        campaignClass: record.Campaign__r?.Class__c?.trim() || null,
+      };
+    };
+
+    try {
+      return toFields(
+        findFirstRecordWithId(await queryRecords<TransactionClassRecord>(buildSoql(true)))
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const looksLikeMissingCampaignClass =
+        message.includes('Campaign__r.Class__c') ||
+        (message.toLowerCase().includes('no such column') && message.includes('Class__c'));
+      if (!looksLikeMissingCampaignClass) {
+        throw error;
+      }
+
+      return toFields(
+        findFirstRecordWithId(await queryRecords<TransactionClassRecord>(buildSoql(false)))
+      );
+    }
+  };
+
   return {
     upsertTransactionByExternalId,
     linkPayoutOnTransactions,
@@ -1948,6 +2020,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     findContactIdById,
     findAccountIdById,
     findCampaignIdByClass,
+    findTransactionClassFields,
   };
 };
 

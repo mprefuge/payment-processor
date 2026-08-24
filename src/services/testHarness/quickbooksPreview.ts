@@ -2,6 +2,7 @@ import type Stripe from 'stripe';
 
 import env from '../../config/env';
 import { logger } from '../../lib/logger';
+import { formatDateInTimeZone } from '../../lib/qboDates';
 import {
   appendTestArtifactMarker,
   buildTestArtifactMarker,
@@ -116,15 +117,24 @@ const buildSalesReceiptDocuments = (input: {
   const { grossCents, feeCents, memo, date, chargeId, stripeContext } = input;
 
   const lineOverrides = getSalesReceiptLineOverrides(stripeContext);
-  const transactionTypeName =
-    lineOverrides.productService ?? getCheckoutTransactionType(stripeContext.checkoutSession);
-  if (!transactionTypeName) {
+
+  // Mirrors postChargeAsSalesReceipt: the item is the explicit metadata override or the
+  // configured default, never the Checkout Session's `metadata.transactionType` (a
+  // donation-form concept that is not a QuickBooks item name). transactionType still shapes
+  // the description below.
+  const revenueItemName =
+    lineOverrides.productService ?? env.accounting.defaultSalesItem?.trim() ?? '';
+  if (!revenueItemName) {
     throw new Error(
-      'No QuickBooks item could be determined: neither qbo_product_service metadata, ' +
-        'checkout session metadata.transactionType, nor QBO_DEFAULT_SALES_ITEM is set.'
+      'No QuickBooks item could be determined: neither qbo_product_service metadata ' +
+        'nor QBO_DEFAULT_SALES_ITEM is set.'
     );
   }
 
+  const transactionTypeName =
+    lineOverrides.productService ??
+    getCheckoutTransactionType(stripeContext.checkoutSession) ??
+    revenueItemName;
   const category = getCheckoutCategory(stripeContext.checkoutSession);
   const description =
     lineOverrides.description ??
@@ -143,7 +153,7 @@ const buildSalesReceiptDocuments = (input: {
     amountCents: grossCents,
     memo,
     date,
-    revenueItemName: transactionTypeName,
+    revenueItemName,
     // 0 only affects the human-readable CustomerMemo, which states so explicitly when the
     // fee is unknown; the machine-readable `amounts.feeCents` stays null.
     stripeFeeAmountCents: feeCents ?? 0,
@@ -170,7 +180,15 @@ const buildSalesReceiptDocuments = (input: {
     lineQuantity: lineOverrides.quantity,
     lineRate: lineOverrides.rate,
     lineAmountCents: lineOverrides.amountCents,
-    lineServiceDate: lineOverrides.serviceDate,
+    // Dry run: mirrors the posting path's timezone-aware ServiceDate, but cannot resolve a
+    // Class or the fee-coverage item without querying QuickBooks, so both stay as supplied.
+    lineServiceDate:
+      lineOverrides.serviceDate ??
+      formatDateInTimeZone(
+        stripeContext.charge?.created ?? stripeContext.paymentIntent?.created ?? date,
+        env.accounting.companyTimeZone
+      ) ??
+      undefined,
     lineClassRef: lineOverrides.classRef,
   });
 

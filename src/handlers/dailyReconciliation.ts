@@ -1694,6 +1694,11 @@ const repairMissingSfToQbo = async (
               : `Stripe charge ${charge.id}`,
             date: bt?.created ? new Date(bt.created * 1000) : date,
             stripe: { charge },
+            // The class was resolved above (explicit QBO_Class_* fields, else the Campaign's
+            // Class__c) but was never handed to the poster, so this repair path re-posted the
+            // very transactions it exists to fix -- unclassed. Same class, same line.
+            classRef: classRefStr,
+            campaignClass: sfRow.Campaign__r?.Class__c?.trim() || null,
           });
           context.log('[DailyReconciliation] Posted Stripe charge to QBO', {
             sfId,

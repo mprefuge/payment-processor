@@ -27,6 +27,8 @@ const baseEnv = {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
     defaultSalesItem: 'Stripe Transaction',
+    feeCoverageItem: 'Stripe Fee Coverage',
+    companyTimeZone: 'America/Los_Angeles',
     accounts: {
       autoCreate: true,
       types: {
@@ -273,6 +275,8 @@ afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
   baseEnv.accounting.defaultSalesItem = 'Stripe Transaction';
+  baseEnv.accounting.feeCoverageItem = 'Stripe Fee Coverage';
+  baseEnv.accounting.companyTimeZone = 'America/Los_Angeles';
   baseEnv.accounting.refundAccount = {
     autoCreate: true,
     accountType: 'Expense',
@@ -810,9 +814,14 @@ describe('postChargeToQbo', () => {
         { Customer: { Id: 'cust-meta', DisplayName: 'Meta Donor' } }, // Customer create
         {
           QueryResponse: {
-            Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' },
+            Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Transaction' },
           },
         }, // Item lookup
+        {
+          QueryResponse: {
+            Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' },
+          },
+        }, // Fee-coverage item lookup (this gift carries cover fees)
         { QueryResponse: {} }, // Duplicate check for sales receipt
         { SalesReceipt: { Id: 'sr-meta' } }, // Sales receipt create
         { QueryResponse: {} }, // Duplicate check for fee journal entry
@@ -1517,14 +1526,14 @@ describe('postChargeToQbo', () => {
     ).toMatchObject({ value: '999' });
   });
 
-  it('creates QuickBooks item when transaction type metadata does not exist', async () => {
+  it('itemises the line as the configured default item, ensuring it when it does not exist', async () => {
     baseEnv.accounting.postingStrategy = 'sales-receipt';
     const { fetcher, requests } = createFetchMock(
       { QueryResponse: {} }, // Customer lookup
       { QueryResponse: {} }, // Item lookup
       { Customer: { Id: 'cust-4', DisplayName: 'Donor Example' } }, // Customer create
       { QueryResponse: {} }, // Item lookup by name
-      { Item: { Id: '321', Name: 'New Donation' } }, // Item create
+      { Item: { Id: '321', Name: 'Stripe Transaction' } }, // Item create
       { QueryResponse: {} }, // Duplicate check for sales receipt
       { SalesReceipt: { Id: 'sr-3' } }, // Sales receipt create
       { QueryResponse: {} }, // Duplicate check for fee journal entry
@@ -1559,11 +1568,14 @@ describe('postChargeToQbo', () => {
     });
     expect(itemLookupRequest?.url).toContain('/query?query=');
 
+    // The item is QBO_DEFAULT_SALES_ITEM, NOT the checkout session's transactionType.
+    // transactionType is a donation-form concept; treating it as a QuickBooks item name is
+    // what stamped "Payment" on every live receipt.
     const itemCreateRequest = requests.find((request) => request.url.includes('/item'));
     expect(itemCreateRequest?.init?.method).toBe('POST');
     const itemCreateBody = JSON.parse((itemCreateRequest?.init?.body ?? '{}') as string);
     expect(itemCreateBody).toMatchObject({
-      Name: 'New Donation',
+      Name: 'Stripe Transaction',
       Type: 'Service',
       IncomeAccountRef: { value: 'QBO_ACCOUNT_REVENUE' },
     });
@@ -1572,8 +1584,11 @@ describe('postChargeToQbo', () => {
     const salesReceiptBody = JSON.parse((salesReceiptRequest?.init?.body ?? '{}') as string);
     expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
       value: '321',
-      name: 'New Donation',
+      name: 'Stripe Transaction',
     });
+
+    // ...while transactionType keeps describing the line, which is the job it can actually do.
+    expect(salesReceiptBody.Line[0].Description).toBe('New Donation');
 
     // The item's own IncomeAccountRef is what a sales line posts to (asserted above), which is
     // exactly why the fee can never ride on a sales line — it gets its own journal entry.
@@ -2414,11 +2429,22 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
     options: { fetcher, accessToken: 'token' },
   });
 
-  const salesReceiptCustomerMocks = () => [
+  /**
+   * The canned responses every sales-receipt posting consumes before it reaches the receipt
+   * itself. `createFetchMock` is queue-ordered and ignores the URL, so the order here is the
+   * order postChargeAsSalesReceipt issues the calls in.
+   *
+   * `feeCoverageItem` is the fee-coverage Product/Service lookup, which only happens when the
+   * gift carries cover fees. Pass `{ QueryResponse: {} }` for the not-yet-created case.
+   */
+  const salesReceiptCustomerMocks = (options: { feeCoverageItem?: unknown } = {}) => [
     { QueryResponse: {} }, // customer email lookup
     { QueryResponse: {} }, // customer name lookup
     { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } }, // customer create
-    { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } }, // item lookup
+    { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Transaction' } } }, // revenue item lookup
+    options.feeCoverageItem ?? {
+      QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' } },
+    }, // fee-coverage item lookup
   ];
 
   const postedBody = (requests: RequestRecord[], path: string) => {
@@ -2651,6 +2677,438 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
 
       expect(result).toEqual({ qboId: 'sr-no-fee', type: 'sales-receipt' });
       expect(requests.some((request) => request.url.includes('/journalentry'))).toBe(false);
+    });
+  });
+
+  /**
+   * The receipt-line fields Micah reported wrong on a live gift: the Product/Service read
+   * "Payment", nothing carried a ServiceDate, and nothing was classed.
+   */
+  describe('receipt line fields: product/service, service date, class', () => {
+    /** 2026-08-20T02:30:00Z — 7:30pm on 2026-08-19 in Pacific. */
+    const LATE_EVENING_PACIFIC_UNIX = 1_787_193_000;
+
+    const decodedQueries = (requests: RequestRecord[]): string[] =>
+      requests
+        .filter((request) => request.url.includes('/query?query='))
+        .map((request) => decodeURIComponent(request.url));
+
+    const itemCreatePosts = (requests: RequestRecord[]): RequestRecord[] =>
+      requests.filter(
+        (request) => request.url.includes('/item') && (request.init?.method ?? 'GET') === 'POST'
+      );
+
+    const coverFeeSession = (extra: Record<string, string> = {}) => ({
+      metadata: {
+        transactionType: 'Stripe Sales Item',
+        cover_fees: 'true',
+        cover_fees_amount: '2.50',
+        ...extra,
+      },
+    });
+
+    it('itemises the revenue line as the configured default even when transactionType is "Payment"', async () => {
+      // The regression as reported: formatStripeMetadata hardcodes transactionType to
+      // "Payment" on the donation-form path, and that string used to become the ItemRef.
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-item-default' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-item-default' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext({}, coverFeeSession({ transactionType: 'Payment' })),
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+        value: 'QBO_ITEM_REVENUE',
+        name: 'Stripe Transaction',
+      });
+      // The QuickBooks item query asked for the configured item, never for "Payment".
+      expect(
+        decodedQueries(requests).some((query) =>
+          /from Item where Name = 'Stripe Transaction'/.test(query)
+        )
+      ).toBe(true);
+      expect(decodedQueries(requests).some((query) => query.includes("'Payment'"))).toBe(false);
+      expect(itemCreatePosts(requests)).toEqual([]);
+
+      // transactionType keeps describing the line -- the description must not regress.
+      expect(receipt.Line[0].Description).toBe('Payment');
+    });
+
+    it('still lets an explicit Stripe metadata item override win', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        { QueryResponse: {} }, // customer email lookup
+        { QueryResponse: {} }, // customer name lookup
+        { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } },
+        { QueryResponse: { Item: { Id: 'QBO_ITEM_DESIGNATED', Name: 'Designated Gift' } } },
+        { QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' } } },
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-item-override' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-item-override' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext(
+          {},
+          coverFeeSession({ transactionType: 'Payment', qbo_product_service: 'Designated Gift' })
+        ),
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+        value: 'QBO_ITEM_DESIGNATED',
+        name: 'Designated Gift',
+      });
+    });
+
+    it('stamps ServiceDate on both lines as the charge-created day in the company time zone', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-service-date' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-service-date' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext({ created: LATE_EVENING_PACIFIC_UNIX }, coverFeeSession()),
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const [revenueLine, coverFeesLine] = receipt.Line;
+
+      // 2026-08-20T02:30:00Z is 7:30pm on the 19th in Pacific. The UTC rendering would say
+      // the 20th, which is exactly the off-by-one this change exists to remove.
+      expect(revenueLine.SalesItemLineDetail.ServiceDate).toBe('2026-08-19');
+      expect(coverFeesLine.SalesItemLineDetail.ServiceDate).toBe('2026-08-19');
+      expect(new Date(LATE_EVENING_PACIFIC_UNIX * 1000).toISOString().slice(0, 10)).toBe(
+        '2026-08-20'
+      );
+
+      // TxnDate and DocNumber still come from the balance-transaction date argument: DocNumber
+      // feeds duplicate detection and must not move.
+      expect(receipt.TxnDate).toBe('2024-03-01');
+      expect(receipt.DocNumber).toBe('CHG-20240301-test');
+    });
+
+    it('falls back to the payment intent when there is no charge', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-service-date-pi' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-service-date-pi' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: {
+          charge: null,
+          paymentIntent: { id: 'pi_test', created: LATE_EVENING_PACIFIC_UNIX, metadata: {} } as any,
+          customer: createStripeCustomer(),
+          checkoutSession: createCheckoutSession(coverFeeSession()),
+        },
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ServiceDate).toBe('2026-08-19');
+      expect(receipt.Line[1].SalesItemLineDetail.ServiceDate).toBe('2026-08-19');
+    });
+
+    it('falls back to the date argument when neither charge nor payment intent carries a timestamp', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-service-date-arg' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-service-date-arg' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        date: new Date('2024-03-01T18:00:00Z'),
+        stripe: buildStripeContext({}, coverFeeSession()),
+      });
+
+      // 6pm UTC is 10am Pacific on the same day.
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ServiceDate).toBe('2024-03-01');
+      expect(receipt.Line[1].SalesItemLineDetail.ServiceDate).toBe('2024-03-01');
+    });
+
+    it('gives the fee line its own product/service when the item exists in QuickBooks', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-fee-item' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-fee-item' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo(chargeArgs(fetcher));
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const [revenueLine, coverFeesLine] = receipt.Line;
+      expect(revenueLine.SalesItemLineDetail.ItemRef).toMatchObject({
+        value: 'QBO_ITEM_REVENUE',
+      });
+      expect(coverFeesLine.Description).toBe('Processing Fee Coverage');
+      expect(coverFeesLine.SalesItemLineDetail.ItemRef).toMatchObject({
+        value: 'QBO_ITEM_FEE_COVERAGE',
+        name: 'Stripe Fee Coverage',
+      });
+      expect(
+        decodedQueries(requests).some((query) =>
+          /from Item where Name = 'Stripe Fee Coverage'/.test(query)
+        )
+      ).toBe(true);
+    });
+
+    it('falls the fee line back to the revenue item and warns when the item is missing, creating nothing', async () => {
+      // The item does not exist in the company file yet. Creating it would be a QuickBooks
+      // write pointed at the wrong income account, so the lookup is non-creating and a miss is
+      // just a warning.
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      vi.resetModules();
+      const warn = vi.fn();
+      vi.doMock('../src/config/env', () => ({ env: baseEnv, default: baseEnv }));
+      vi.doMock('../src/lib/logger', () => ({
+        logger: { log: vi.fn(), info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+        withCorrelationId: (_id: string, fn: () => unknown) => fn(),
+      }));
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks({ feeCoverageItem: { QueryResponse: {} } }),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-fee-item-missing' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-fee-item-missing' } }
+      );
+      const { postChargeToQbo } = await import('../src/services/qboSvc');
+
+      const result = await postChargeToQbo(chargeArgs(fetcher));
+      expect(result).toEqual({ qboId: 'sr-fee-item-missing', type: 'sales-receipt' });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const [revenueLine, coverFeesLine] = receipt.Line;
+      expect(coverFeesLine.SalesItemLineDetail.ItemRef).toEqual(
+        revenueLine.SalesItemLineDetail.ItemRef
+      );
+
+      // Nothing was created. This is the assertion that matters most: an auto-created item
+      // would be a silent write into the live company file.
+      expect(itemCreatePosts(requests)).toEqual([]);
+      expect(
+        warn.mock.calls.filter((call: unknown[]) =>
+          String(call[0]).includes('Fee-coverage product/service not found')
+        )
+      ).toHaveLength(1);
+
+      vi.doUnmock('../src/lib/logger');
+    });
+
+    it('classes both lines from the Campaign class path via FullyQualifiedName', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        {
+          QueryResponse: {
+            Class: [
+              {
+                Id: '100000000001555323',
+                Name: 'General',
+                FullyQualifiedName: 'UNRESTRICTED FUNDS:General',
+              },
+            ],
+          },
+        }, // class lookup by FullyQualifiedName
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-class-path' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-class-path' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        campaignClass: 'UNRESTRICTED FUNDS:General',
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const expectedClass = { value: '100000000001555323', name: 'General' };
+
+      // Campaign.Class__c holds the QuickBooks FULL PATH; Class.Name is only the leaf, so the
+      // path has to be matched against FullyQualifiedName or it never resolves.
+      expect(
+        decodedQueries(requests).some((query) =>
+          query.includes("from Class where FullyQualifiedName = 'UNRESTRICTED FUNDS:General'")
+        )
+      ).toBe(true);
+
+      expect(receipt.Line[0].SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+      expect(receipt.Line[1].SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+      // Class tracking here is per-line; a header ClassRef is inert and stays off.
+      expect(receipt.ClassRef).toBeUndefined();
+      expect(Object.keys(receipt)).not.toContain('ClassRef');
+
+      // The paired fee entry mirrors it.
+      const feeJe = postedBody(requests, '/journalentry');
+      const feeDebit = feeJe.Line.find(
+        (line: any) => line.JournalEntryLineDetail.PostingType === 'Debit'
+      );
+      expect(feeDebit.JournalEntryLineDetail.ClassRef).toMatchObject(expectedClass);
+    });
+
+    it('retries on the leaf name when the full path matches nothing', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // FullyQualifiedName lookup finds nothing
+        {
+          QueryResponse: {
+            Class: [
+              {
+                Id: '100000000001934643',
+                Name: 'Afghan',
+                FullyQualifiedName: 'RESTRICTED FUNDS:Afghan',
+              },
+            ],
+          },
+        }, // leaf lookup by Name
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-class-leaf' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-class-leaf' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        campaignClass: 'RESTRICTED FUNDS:Afghan',
+      });
+
+      const queries = decodedQueries(requests);
+      expect(
+        queries.some((query) =>
+          query.includes("from Class where FullyQualifiedName = 'RESTRICTED FUNDS:Afghan'")
+        )
+      ).toBe(true);
+      expect(queries.some((query) => query.includes("from Class where Name = 'Afghan'"))).toBe(
+        true
+      );
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      const expectedClass = { value: '100000000001934643', name: 'Afghan' };
+      expect(receipt.Line[0].SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+      expect(receipt.Line[1].SalesItemLineDetail.ClassRef).toMatchObject(expectedClass);
+    });
+
+    it('posts the receipt unclassed, without throwing, when the class cannot be resolved', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} }, // FullyQualifiedName lookup: nothing
+        { QueryResponse: {} }, // leaf lookup: nothing
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-class-unresolved' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-class-unresolved' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      // A gift is worth far more than its class: an unmatched Campaign.Class__c must never
+      // cost us the posting.
+      const result = await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        campaignClass: 'Program Income:Volunteer App Processing',
+      });
+      expect(result).toEqual({ qboId: 'sr-class-unresolved', type: 'sales-receipt' });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ClassRef).toBeUndefined();
+      expect(receipt.Line[1].SalesItemLineDetail.ClassRef).toBeUndefined();
+      expect(receipt.ClassRef).toBeUndefined();
+      // No Class was created to paper over the miss.
+      expect(
+        requests.filter(
+          (request) => request.url.includes('/class') && (request.init?.method ?? 'GET') === 'POST'
+        )
+      ).toEqual([]);
+    });
+
+    it('prefers the transaction QBO_Class_Id__c/QBO_Class_Name__c over the Campaign class', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-class-explicit' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-class-explicit' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        classRef: 'General|100000000001555323',
+        campaignClass: 'RESTRICTED FUNDS:Afghan',
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ClassRef).toMatchObject({
+        value: '100000000001555323',
+        name: 'General',
+      });
+      // The explicit ids are already a ref: no Class lookup is issued at all.
+      expect(decodedQueries(requests).some((query) => query.includes('from Class'))).toBe(false);
+    });
+
+    it('lets the Stripe metadata class override beat both Salesforce sources', async () => {
+      baseEnv.accounting.postingStrategy = 'sales-receipt';
+      const { fetcher, requests } = createFetchMock(
+        ...salesReceiptCustomerMocks(),
+        { QueryResponse: {} },
+        { SalesReceipt: { Id: 'sr-class-metadata' } },
+        { QueryResponse: {} },
+        { JournalEntry: { Id: 'je-class-metadata' } }
+      );
+      const { postChargeToQbo } = await importQboSvc();
+
+      await postChargeToQbo({
+        ...chargeArgs(fetcher),
+        stripe: buildStripeContext(
+          {},
+          coverFeeSession({ qbo_class_ref: 'TNND|100000000002004608' })
+        ),
+        classRef: 'General|100000000001555323',
+        campaignClass: 'RESTRICTED FUNDS:Afghan',
+      });
+
+      const receipt = postedBody(requests, '/salesreceipt');
+      expect(receipt.Line[0].SalesItemLineDetail.ClassRef).toMatchObject({
+        value: '100000000002004608',
+        name: 'TNND',
+      });
+      expect(decodedQueries(requests).some((query) => query.includes('from Class'))).toBe(false);
     });
   });
 
