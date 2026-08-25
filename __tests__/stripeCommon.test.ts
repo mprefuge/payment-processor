@@ -185,3 +185,92 @@ describe('Salesforce Campaign ID pattern (via resolveCampaignId)', () => {
     expect(crm.findOrCreateCampaign).not.toHaveBeenCalled();
   });
 });
+
+// ─── checkout.session.completed status derivation ───────────────────────────
+
+/**
+ * `checkout.session.completed` merges onto the same Transaction__c that
+ * `payment_intent.succeeded` writes, and Stripe does not guarantee which of the
+ * two is delivered first. While this handler hard-coded 'processing', the
+ * checkout event arriving second overwrote the 'paid' the payment intent path
+ * had already written -- so a card gift that was captured and posted to
+ * QuickBooks sat in Salesforce showing as Processing.
+ */
+describe('handleCheckoutSessionCompleted status', () => {
+  const makeContext = () => ({ log: vi.fn(), invocationId: 'inv_status' });
+
+  const makeSession = (overrides: Record<string, unknown> = {}) => ({
+    id: 'cs_status',
+    payment_intent: 'pi_status',
+    customer: null,
+    subscription: null,
+    currency: 'usd',
+    amount_total: 5000,
+    amount_subtotal: 5000,
+    created: 1690000000,
+    customer_details: null,
+    metadata: {},
+    ...overrides,
+  });
+
+  const runHandler = async (session: Record<string, unknown>) => {
+    const { handleCheckoutSessionCompleted } = await import('../src/stripe/handlers/common');
+    const upsertTransactionByExternalId = vi.fn().mockResolvedValue({ id: 'sf_status' });
+    const deps = {
+      getCrmSvc: async () => ({ findOrCreateCampaign: vi.fn() }),
+      getSalesforceSvc: async () => ({ upsertTransactionByExternalId }),
+      accounting: { postChargeToQbo: vi.fn() },
+      stripe: { getClient: vi.fn() },
+    };
+    const event = { id: 'evt_status', livemode: false, data: { object: session } } as any;
+
+    await handleCheckoutSessionCompleted(makeContext() as any, event, deps as any);
+
+    return upsertTransactionByExternalId;
+  };
+
+  it('records a card session as paid, not processing', async () => {
+    const upsert = await runHandler(makeSession({ payment_status: 'paid' }));
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status__c: 'paid',
+        stripe_checkout_session_id__c: 'cs_status',
+        stripe_payment_intent_id__c: 'pi_status',
+      }),
+      'stripe_checkout_session_id__c'
+    );
+  });
+
+  it('records a zero-amount session as paid because nothing is owed', async () => {
+    const upsert = await runHandler(
+      makeSession({ payment_status: 'no_payment_required', amount_total: 0, amount_subtotal: 0 })
+    );
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ status__c: 'paid' }),
+      'stripe_checkout_session_id__c'
+    );
+  });
+
+  it('keeps a delayed-notification session on processing until it settles', async () => {
+    // ACH debit and bank transfers complete the session while the money is
+    // still clearing; checkout.session.async_payment_succeeded flips them to
+    // paid later.
+    const upsert = await runHandler(makeSession({ payment_status: 'unpaid' }));
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ status__c: 'processing' }),
+      'stripe_checkout_session_id__c'
+    );
+  });
+
+  it('falls back to processing when the session carries no payment_status', async () => {
+    const upsert = await runHandler(makeSession());
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ status__c: 'processing' }),
+      'stripe_checkout_session_id__c'
+    );
+  });
+});

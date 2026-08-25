@@ -202,6 +202,45 @@ const resolveCampaignId = async (
   }
 };
 
+/**
+ * The status a *completed* Checkout Session has already reached.
+ *
+ * This handler used to hard-code 'processing' for every completed session. That
+ * is only true of a delayed-notification payment method (ACH debit, bank
+ * transfer, OXXO): those complete the session while the money is still
+ * clearing, and settle later through `checkout.session.async_payment_succeeded`.
+ * A card gift is captured by the time `checkout.session.completed` fires --
+ * Stripe reports `payment_status: 'paid'` on it -- and no
+ * async_payment_succeeded event ever follows, so nothing came along afterwards
+ * to correct the status.
+ *
+ * That mattered because this upsert does not write its own row. The DTO carries
+ * both the checkout session id and the payment intent id, so
+ * `findExistingTransactionIdForDto` merges it onto the same Transaction__c that
+ * `payment_intent.succeeded` writes -- the one that path already set to 'paid'
+ * and posted to QuickBooks. Stripe does not guarantee the delivery order of the
+ * two events, so whenever the checkout event was handled second the hard-coded
+ * 'processing' overwrote that 'paid', leaving a settled, QuickBooks-posted gift
+ * showing as Processing.
+ */
+const resolveCompletedCheckoutSessionStatus = (
+  session: Stripe.Checkout.Session
+): TransactionUpsertDTO['status__c'] => {
+  switch (session.payment_status) {
+    case 'paid':
+    // A zero-amount session -- a fully discounted gift, or a setup-mode session
+    // that only stores a payment method -- owes nothing, so it is settled on
+    // arrival as well.
+    case 'no_payment_required':
+      return 'paid';
+    // 'unpaid' on a completed session is the delayed-notification case above.
+    // Anything else (a session from an API version that predates
+    // `payment_status`) keeps the old conservative reading.
+    default:
+      return 'processing';
+  }
+};
+
 export const handleCheckoutSessionCompleted = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -218,13 +257,17 @@ export const handleCheckoutSessionCompleted = async (
 
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
 
+  const status = resolveCompletedCheckoutSessionStatus(session);
+
   const transaction: TransactionUpsertDTO = {
-    ...buildCheckoutSessionTransaction(session, 'processing', undefined, event.id, event.livemode),
+    ...buildCheckoutSessionTransaction(session, status, undefined, event.id, event.livemode),
     ...(campaignId ? { campaign__c: campaignId } : {}),
   };
 
-  context.log('[StripeWebhook] Upserting pending transaction for checkout session', {
+  context.log('[StripeWebhook] Upserting transaction for checkout session', {
     sessionId: session.id,
+    paymentStatus: session.payment_status,
+    status,
   });
 
   await upsertCheckoutSessionTransaction(
