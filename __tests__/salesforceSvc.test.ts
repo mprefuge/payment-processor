@@ -1216,4 +1216,107 @@ describe('createSalesforceSvc — recurring subscription series must not collaps
 
     expect(attemptedLookups.some((soql) => soql.includes('Stripe_Subscription_Id__c'))).toBe(true);
   });
+
+  describe('payout transactions', () => {
+    const buildPayoutDto = (): TransactionUpsertDTO =>
+      ({
+        transaction_type__c: 'payout',
+        status__c: 'paid',
+        stripe_payout_id__c: 'po_1',
+        stripe_balance_transaction_id__c: 'txn_payout_1',
+        amount_gross__c: 488.3,
+        amount_fee__c: 0,
+        amount_net__c: 488.3,
+        currency_iso_code__c: 'USD',
+        memo__c: 'Stripe Payout po_1 - updated (automatic)',
+        received_at__c: '2026-08-27T00:00:00.000Z',
+      }) as unknown as TransactionUpsertDTO;
+
+    it('creates the payout row rather than keying the upsert on the shared payout id', async () => {
+      const { upsert, query, sobject } = createMockConnection();
+      const create = vi.fn().mockResolvedValue({ success: true, id: 'a1_payout', errors: [] });
+      sobject.mockImplementation(() => ({ create, upsert }));
+
+      const service: SalesforceSvc = createSalesforceSvc({
+        connection: { upsert, sobject, query } as unknown as Connection,
+      });
+
+      const result = await service.upsertTransactionByExternalId(
+        buildPayoutDto(),
+        'stripe_payout_id__c'
+      );
+
+      // `linkPayoutOnTransactions` puts this same payout id on every charge the payout
+      // paid out, so an external-id upsert would bind to a donation and overwrite it.
+      expect(upsert).not.toHaveBeenCalled();
+      expect(create).toHaveBeenCalledTimes(1);
+      const [record] = create.mock.calls[0];
+      expect(record).toMatchObject({
+        Stripe_Payout_Id__c: 'po_1',
+        transaction_type__c: 'payout',
+        RecordTypeId: '012000000000000BBB',
+      });
+      expect(record.Id).toBeUndefined();
+      expect(result).toMatchObject({ success: true, id: 'a1_payout' });
+    });
+
+    it('updates the payout row by Id once one exists', async () => {
+      const { upsert, query, sobject } = createMockConnection();
+      upsert.mockResolvedValue([{ success: true, id: 'a1_payout', errors: [] }]);
+      const create = vi.fn();
+      sobject.mockImplementation(() => ({ create, upsert }));
+      query.mockImplementation((soql: string) => {
+        if (soql.trim().toUpperCase().startsWith('SELECT ID FROM RECORDTYPE')) {
+          return Promise.resolve({ records: [{ Id: '012000000000000BBB' }] });
+        }
+        if (soql.includes('Stripe_Payout_Id__c')) {
+          return Promise.resolve({ records: [{ Id: 'a1_payout' }] });
+        }
+        return Promise.resolve({ records: [] });
+      });
+
+      const service: SalesforceSvc = createSalesforceSvc({
+        connection: { upsert, sobject, query } as unknown as Connection,
+      });
+
+      await service.upsertTransactionByExternalId(buildPayoutDto(), 'stripe_payout_id__c');
+
+      expect(create).not.toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalledTimes(1);
+      const [, records, externalIdField] = upsert.mock.calls[0];
+      expect(externalIdField).toBe('Id');
+      expect(records[0].Id).toBe('a1_payout');
+    });
+
+    it('only matches a payout row that is itself a payout', async () => {
+      const { upsert, query, sobject } = createMockConnection();
+      const create = vi.fn().mockResolvedValue({ success: true, id: 'a1_payout', errors: [] });
+      sobject.mockImplementation(() => ({ create, upsert }));
+      const payoutLookups: string[] = [];
+      query.mockImplementation((soql: string) => {
+        if (soql.trim().toUpperCase().startsWith('SELECT ID FROM RECORDTYPE')) {
+          return Promise.resolve({ records: [{ Id: '012000000000000BBB' }] });
+        }
+        if (soql.includes('Stripe_Payout_Id__c')) {
+          payoutLookups.push(soql);
+        }
+        return Promise.resolve({ records: [] });
+      });
+
+      const service: SalesforceSvc = createSalesforceSvc({
+        connection: { upsert, sobject, query } as unknown as Connection,
+      });
+
+      await service.upsertTransactionByExternalId(buildPayoutDto(), 'stripe_payout_id__c');
+
+      expect(payoutLookups.length).toBeGreaterThan(0);
+      // A charge row carrying the link must never satisfy the lookup, so every probe
+      // is narrowed by record type or by transaction_type__c.
+      for (const soql of payoutLookups) {
+        expect(
+          soql.includes('RecordTypeId') || soql.includes("transaction_type__c = 'payout'")
+        ).toBe(true);
+      }
+    });
+  });
 });

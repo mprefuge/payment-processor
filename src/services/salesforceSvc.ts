@@ -107,6 +107,26 @@ const TRANSACTION_EXTERNAL_ID_FIELDS: TransactionExternalIdField[] = [
   'qbo_doc_id__c',
 ];
 
+/**
+ * External-ID fields that identify a DIFFERENT record than the one being written,
+ * so Salesforce's `upsert(..., externalIdField)` must never be keyed on them.
+ *
+ * `linkPayoutOnTransactions` stamps `Stripe_Payout_Id__c` onto every charge
+ * Transaction__c the payout paid out -- that is the whole point of the link.  The
+ * field is an External ID but is NOT unique, so an upsert keyed on it binds to
+ * whichever row already holds the value.  When the link runs before the payout's own
+ * row exists (payout.created and payout.reconciliation_completed arrive in the same
+ * second), that row is a donation, and the payout's amounts, record type and memo
+ * overwrite the gift -- exactly what happened to the $500.00 Aug 25 donation that
+ * came back as payout po_1U8qsPBJf9YYVP9m9OW5GDcn.
+ *
+ * The payout row is therefore resolved with the record-type/transaction-type filtered
+ * SOQL in `findExistingTransactionIdForDto` and written by Id, or created outright.
+ */
+const NON_KEYABLE_EXTERNAL_ID_FIELDS: ReadonlySet<TransactionExternalIdField> = new Set([
+  'stripe_payout_id__c',
+]);
+
 export interface QuickBooksDocumentReference {
   type: string;
   id: string;
@@ -1352,6 +1372,16 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       recordTypeId,
       overrideId
     );
+    // A shared external ID names other records too, so with no row resolved by the
+    // filtered lookup above there is nothing to update: create.  Keying the upsert on
+    // the field instead would bind to whichever row happens to hold the value.
+    if (!resolvedOverrideId && NON_KEYABLE_EXTERNAL_ID_FIELDS.has(key)) {
+      return createSingleTransactionRecord(
+        buildTransactionUpsertRecord({ dto, key, normalizedExternalId, recordTypeId }),
+        `Failed to create transaction with ${key}=${normalizedExternalId}.`
+      );
+    }
+
     let result: UpsertResult;
     try {
       result = await upsertSingleTransactionRecord(
