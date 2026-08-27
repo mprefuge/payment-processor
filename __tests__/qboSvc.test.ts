@@ -1135,6 +1135,80 @@ describe('postChargeToQbo', () => {
     expect(salesReceiptBody.BillEmail).toEqual({ Address: 'donor@example.com' });
   });
 
+  it('keeps the QuickBooks display name when the rename collides, and still posts the receipt', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    // The donor exists twice in QuickBooks: once as the record her email resolves to, and
+    // once under the billing name Stripe sends. DisplayName is unique across customers,
+    // vendors and employees, so the rename can never succeed -- and a cosmetic rename must
+    // not be what stops the gift from reaching the books.
+    const existingCustomer = {
+      Id: 'cust-1151',
+      DisplayName: 'Alex Gerrish',
+      SyncToken: '0',
+      PrimaryEmailAddr: { Address: 'donor@example.com' },
+    };
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: { Customer: [existingCustomer] } }, // email lookup
+      { Customer: existingCustomer }, // GET before the rename
+      {
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            Fault: {
+              Error: [
+                {
+                  Message: 'Duplicate Name Exists Error',
+                  Detail: 'The name supplied already exists. : Another customer...',
+                  code: '6240',
+                },
+              ],
+            },
+          }),
+      },
+      { Customer: existingCustomer }, // GET before the details-only retry
+      { Customer: { ...existingCustomer, SyncToken: '1', GivenName: 'Donor' } },
+      { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Sales Item' } } },
+      { QueryResponse: {} }, // duplicate check
+      { SalesReceipt: { Id: 'sr-dup-name' } }
+    );
+
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 2_076,
+      fee: 0,
+      memo: 'Charge memo',
+      date: new Date('2026-08-27'),
+      stripe: buildStripeContext(),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-dup-name', type: 'sales-receipt' });
+
+    const customerUpdates = requests.filter((request) =>
+      request.url.includes('/customer?operation=update')
+    );
+    expect(customerUpdates).toHaveLength(2);
+
+    const [renameAttempt, detailsRetry] = customerUpdates.map(
+      (request) => JSON.parse((request.init?.body ?? '{}') as string) as Record<string, unknown>
+    );
+    expect(renameAttempt.DisplayName).toBe('Donor Example');
+    // The retry carries the enrichment alone -- no DisplayName, so no second collision.
+    expect(detailsRetry).not.toHaveProperty('DisplayName');
+    expect(detailsRetry).toMatchObject({ Id: 'cust-1151', sparse: true });
+
+    const salesReceiptPost = requests.find((request) => request.url.includes('/salesreceipt'));
+    expect(salesReceiptPost).toBeDefined();
+    const salesReceiptBody = JSON.parse((salesReceiptPost?.init?.body ?? '{}') as string);
+    // Booked against the customer the email resolved to, under the name QuickBooks holds.
+    expect(salesReceiptBody.CustomerRef).toMatchObject({
+      value: 'cust-1151',
+      name: 'Alex Gerrish',
+    });
+  });
+
   it('requests enhanced custom fields when loading a QuickBooks customer by id', async () => {
     const { fetcher, requests } = createFetchMock({
       Customer: {

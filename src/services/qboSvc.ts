@@ -1321,6 +1321,14 @@ export const getQuickBooksCustomerById = async (
   return fetchQuickBooksCustomer(id, context, options?.debugLogger);
 };
 
+/**
+ * QuickBooks answers a name collision with a 400 whose body names the error, on both
+ * create and update.  `updateQuickBooksCustomer` folds that body into the message it
+ * throws, so the failure is still recognisable to a caller holding only the Error.
+ */
+const isDuplicateNameError = (error: unknown): boolean =>
+  error instanceof Error && /Duplicate Name Exists Error/i.test(error.message);
+
 const updateQuickBooksCustomer = async (
   id: string,
   updates: Record<string, unknown>,
@@ -1576,6 +1584,11 @@ const ensureSalesReceiptCustomer = async (
           preferredDisplayName && !equalsIgnoreCase(resolvedDisplayName, preferredDisplayName)
         );
 
+        const describeCustomerUpdateFailure = (error: unknown): string =>
+          `Failed to update QuickBooks customer "${displayName}" (${value}) with Stripe contact details: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+
         if (needsRename || detailsDiffer) {
           const updatePayload: Record<string, unknown> = { ...desiredDetails };
 
@@ -1595,11 +1608,28 @@ const ensureSalesReceiptCustomer = async (
               resolvedDisplayName = updatedName;
             }
           } catch (error) {
-            throw new Error(
-              `Failed to update QuickBooks customer "${displayName}" (${value}) with Stripe contact details: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            );
+            // QuickBooks enforces DisplayName uniqueness across customers, vendors AND
+            // employees, so when another name record already holds `preferredDisplayName`
+            // the rename can never succeed -- retrying it is pointless.  Renaming is
+            // cosmetic; the sales receipt is not.  Letting the collision propagate is what
+            // stopped Alexandra Gerrish's Aug 27 gift from reaching QuickBooks: the donor
+            // exists twice there, once as customer 1151 "Alex Gerrish" (matched by email)
+            // and once under the billing name Stripe sent, so every receipt for her failed
+            // on a rename rather than posting.
+            //
+            // Keep the name QuickBooks already has and still apply the enrichment, which
+            // mirrors how the create path recovers from the same error further below.
+            if (!needsRename || !isDuplicateNameError(error)) {
+              throw new Error(describeCustomerUpdateFailure(error));
+            }
+
+            if (Object.keys(desiredDetails).length > 0) {
+              try {
+                await updateQuickBooksCustomer(value, desiredDetails, context);
+              } catch (detailsError) {
+                throw new Error(describeCustomerUpdateFailure(detailsError));
+              }
+            }
           }
         }
 
