@@ -581,6 +581,14 @@ const applyMetadataCampaignToTransaction = async (
   );
 };
 
+/**
+ * Resolves the Stripe product behind the charge and, unless the transaction already names
+ * its own category, uses it to pick the campaign.
+ *
+ * Returns the product name so the QuickBooks posting can put it on the receipt line. It is
+ * resolved before the `transaction.Name` check, not inside it: the campaign work is what
+ * that check is about, and the receipt line needs the product either way.
+ */
 const enrichTransactionWithProductCampaign = async (
   context: HttpContext,
   deps: StripeWebhookDependencies,
@@ -588,9 +596,9 @@ const enrichTransactionWithProductCampaign = async (
   charge: Stripe.Charge | null,
   paymentIntent: Stripe.PaymentIntent,
   transaction: TransactionUpsertDTO
-): Promise<void> => {
-  if (transaction.Name || !charge) {
-    return;
+): Promise<string | null> => {
+  if (!charge) {
+    return null;
   }
 
   let productName: string | null = null;
@@ -605,6 +613,10 @@ const enrichTransactionWithProductCampaign = async (
     });
   }
 
+  if (transaction.Name) {
+    return productName;
+  }
+
   await resolveCampaignAndMembership(
     context,
     deps,
@@ -613,6 +625,8 @@ const enrichTransactionWithProductCampaign = async (
     '[StripeWebhook] Failed to associate category with campaign; continuing without campaign',
     { category: productName, paymentIntentId: paymentIntent.id }
   );
+
+  return productName;
 };
 
 const upsertSuccessfulPaymentIntentTransaction = async (
@@ -812,7 +826,8 @@ const postSuccessfulPaymentIntentToAccounting = async (
   balanceTransaction: Stripe.BalanceTransaction | null,
   stripeCustomer: Stripe.Customer | Stripe.DeletedCustomer | null,
   checkoutSession: Stripe.Checkout.Session | null,
-  balanceTransactionAbsence: BalanceTransactionAbsenceReason | null = null
+  balanceTransactionAbsence: BalanceTransactionAbsenceReason | null = null,
+  productName: string | null = null
 ): Promise<void> => {
   if (!isAccountingEnabledForEvent(event)) {
     // A test gift with ALLOW_TEST_MODE_ACCOUNTING off stops here, ABOVE the `bt_<id>` lock
@@ -946,6 +961,7 @@ const postSuccessfulPaymentIntentToAccounting = async (
           paymentIntent,
           customer: stripeCustomer,
           checkoutSession: checkoutSession ?? undefined,
+          productName,
         },
         classRef: transactionClass?.classRef ?? null,
         campaignClass: transactionClass?.campaignClass ?? null,
@@ -1228,7 +1244,7 @@ const processSuccessfulPaymentIntent = async ({
     transaction
   );
 
-  await enrichTransactionWithProductCampaign(
+  const productName = await enrichTransactionWithProductCampaign(
     context,
     deps,
     stripe,
@@ -1259,7 +1275,8 @@ const processSuccessfulPaymentIntent = async ({
     balanceTransaction,
     stripeCustomer,
     checkoutSession,
-    balanceTransactionAbsence
+    balanceTransactionAbsence,
+    productName
   );
 
   await sendFirstTransactionNotifications(
