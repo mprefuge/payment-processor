@@ -266,7 +266,10 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_checkout_session_id__c',
       'cs_test',
-      'Stripe Transaction'
+      'Stripe Transaction',
+      // The gift's refund and dispute rows carry these same ids under this same record
+      // type, so the lookup has to say it wants the charge.
+      'charge'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -540,8 +543,18 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_charge_id__c',
       'ch_invoice',
-      'Stripe Transaction'
+      'Stripe Transaction',
+      'charge'
     );
+    // Asserted against the recorded calls rather than with `not.toHaveBeenCalledWith`:
+    // that matcher compares the whole argument list, so it passes for free the moment the
+    // call takes a different number of arguments -- which would hide the very probe this
+    // guards against.
+    expect(
+      (
+        salesforce.findTransactionIdByExternalId as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls.some((call) => call[0] === 'stripe_subscription_id__c')
+    ).toBe(false);
     expect(salesforce.findTransactionIdByExternalId).not.toHaveBeenCalledWith(
       'stripe_subscription_id__c',
       expect.anything(),
@@ -801,7 +814,9 @@ describe('stripeWebhook', () => {
     expect(salesforce.findTransactionIdByExternalId).toHaveBeenCalledWith(
       'stripe_charge_id__c',
       'ch_dispute',
-      'Stripe Transaction'
+      'Stripe Transaction',
+      // The dispute's parent is the gift, never a refund that names the same charge.
+      'charge'
     );
     expect(salesforce.upsertTransactionByExternalId).toHaveBeenCalledWith(
       expect.objectContaining({
