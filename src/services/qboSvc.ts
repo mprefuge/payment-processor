@@ -296,6 +296,13 @@ export type StripeCustomerContext = {
   paymentIntent?: Stripe.PaymentIntent | null;
   customer?: (Stripe.Customer | Stripe.DeletedCustomer) | null;
   checkoutSession?: Stripe.Checkout.Session | null;
+  /**
+   * The Stripe product behind the charge, already resolved by the caller via
+   * `getProductNameFromCharge` (invoice line -> price -> product). Preferred over
+   * `charge.description` when building the receipt line, because Stripe writes a
+   * generic description on invoice-backed charges. See `getStripeLineDescription`.
+   */
+  productName?: string | null;
 };
 
 interface SalesReceiptCustomerDetails {
@@ -308,6 +315,12 @@ interface SalesReceiptCustomerDetails {
 export interface EnsureCustomerInput {
   displayName: string;
   preferredDisplayName?: string | null;
+  /**
+   * True when `displayName` is not a name anybody chose — it was manufactured from a
+   * Stripe id because the charge carried no name and no email. See
+   * `deriveSalesReceiptCustomer`.
+   */
+  syntheticDisplayName?: boolean;
   email?: string | null;
   givenName?: string | null;
   familyName?: string | null;
@@ -854,13 +867,20 @@ export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): Ensur
     mapStripeAddress(checkoutDetails?.address),
   ]);
 
+  // A real name, or failing that the donor's email, is something a person can recognise
+  // on a receipt. Everything below it is manufactured from a Stripe id, and naming a
+  // QuickBooks customer after one mints a permanent record per anonymous Stripe customer
+  // ("Stripe Customer cus_VBAr3ap3rdtbIn"). Keep the fallbacks -- callers that must have a
+  // name still get one -- but flag them, so the sales-receipt path can leave CustomerRef
+  // off instead, which is what an unattributable gift should look like.
+  const realName = preferredName || email || null;
   const fallbackName =
-    preferredName ||
-    email ||
+    realName ||
     (stripeCustomerId ? `Stripe Customer ${stripeCustomerId}` : null) ||
     (source.charge?.id ? `Stripe Charge ${source.charge.id}` : null) ||
     (source.paymentIntent?.id ? `Stripe Payment ${source.paymentIntent.id}` : null) ||
     'Stripe Customer';
+  const syntheticDisplayName = !realName;
 
   // An organization has no first/last name to split out.  QuickBooks caps
   // CompanyName at 50 characters, shorter than the 99 it allows DisplayName.
@@ -871,6 +891,7 @@ export const deriveSalesReceiptCustomer = (source: StripeCustomerContext): Ensur
 
   return {
     displayName: truncate(fallbackName, 99) ?? 'Stripe Customer',
+    syntheticDisplayName,
     preferredDisplayName: truncate(preferredName ?? null, 99),
     email,
     givenName,
@@ -2137,6 +2158,30 @@ export const getSalesReceiptLineOverrides = (
   return overrides;
 };
 
+/**
+ * Descriptions Stripe writes itself on invoice-backed charges. They name no product, no
+ * fund and no campaign, so putting one on a receipt line loses the only thing the line was
+ * carrying: which programme the gift belongs to. Recurring gifts to General Giving all
+ * arrived in QuickBooks as "Subscription update".
+ */
+const STRIPE_GENERIC_DESCRIPTIONS = new Set([
+  'subscription update',
+  'subscription creation',
+  'subscription',
+]);
+
+const isGenericStripeDescription = (value: string | null): boolean =>
+  value !== null && STRIPE_GENERIC_DESCRIPTIONS.has(value.trim().toLowerCase());
+
+/**
+ * The human-readable description for the receipt line.
+ *
+ * `productName` — resolved by the caller from the invoice line's price and product — comes
+ * first, because for a subscription charge it is the only source that names the fund.
+ * Stripe's own description is used next, but its generic subscription strings are skipped
+ * so the caller's `category - transactionType` fallback gets a turn rather than being beaten
+ * by a placeholder.
+ */
 export const getStripeLineDescription = (
   stripeContext: StripeCustomerContext | null | undefined
 ): string | null => {
@@ -2144,11 +2189,22 @@ export const getStripeLineDescription = (
     return null;
   }
 
-  return (
-    toTrimmed(stripeContext.paymentIntent?.description) ??
-    toTrimmed(stripeContext.charge?.description) ??
-    null
-  );
+  const productName = toTrimmed(stripeContext.productName);
+  if (productName) {
+    return productName;
+  }
+
+  const paymentIntentDescription = toTrimmed(stripeContext.paymentIntent?.description) ?? null;
+  if (paymentIntentDescription && !isGenericStripeDescription(paymentIntentDescription)) {
+    return paymentIntentDescription;
+  }
+
+  const chargeDescription = toTrimmed(stripeContext.charge?.description) ?? null;
+  if (chargeDescription && !isGenericStripeDescription(chargeDescription)) {
+    return chargeDescription;
+  }
+
+  return null;
 };
 
 const resolveRevenueItemReference = async (
@@ -4243,7 +4299,19 @@ const postChargeAsSalesReceipt = async (input: {
   if (!receiptCustomer) {
     try {
       const derived = deriveSalesReceiptCustomer({ ...(stripe ?? {}) });
-      const ensured = await ensureSalesReceiptCustomer(derived, context);
+      // No name and no email means there is nothing to call this donor. Creating a
+      // customer here would name it after a Stripe id and leave that record in the
+      // customer list forever; leaving CustomerRef off records the gift without
+      // inventing an identity for it, which is what the incumbent sync does too.
+      const ensured = derived.syntheticDisplayName
+        ? null
+        : await ensureSalesReceiptCustomer(derived, context);
+      if (derived.syntheticDisplayName) {
+        context.log('[QuickBooks] Charge carries no donor name or email; omitting CustomerRef', {
+          chargeId: derived.chargeId ?? null,
+          stripeCustomerId: derived.stripeCustomerId ?? null,
+        });
+      }
       if (ensured) {
         receiptCustomer = {
           ref: ensured.ref,
