@@ -2994,10 +2994,16 @@ const NEXT_STEP_BY_CATEGORY: Record<string, string> = {
     'salesforceMissingStripe — Stripe-origin rows with no Stripe id; inspect them by hand.',
   qboMissingSalesforce:
     'qboMissingSalesforce — link the documents with /api/qbo/receipts-salesforce-sync.',
+  // Both hints name a `system` scope on purpose. That endpoint defaults to system=both, so
+  // the remediation for a Salesforce finding also swept QuickBooks -- and deletes there are
+  // permanent. Scope each hint to the system its finding is about, and leave dryRun at its
+  // default so the operator reads plannedActions before anything is removed.
   duplicatesInSalesforce:
-    'duplicatesInSalesforce — de-duplicate with /api/ops/stripe-duplicate-check?deleteDuplicates=true.',
+    'duplicatesInSalesforce — review with /api/ops/stripe-duplicate-check?system=salesforce, ' +
+    'then re-run with &deleteDuplicates=true&dryRun=false to remove them.',
   duplicatesInQbo:
-    'duplicatesInQbo — de-duplicate with /api/ops/stripe-duplicate-check?deleteDuplicates=true.',
+    'duplicatesInQbo — review with /api/ops/stripe-duplicate-check?system=qbo, ' +
+    'then re-run with &deleteDuplicates=true&dryRun=false to remove them.',
 };
 
 interface ReconciliationFinding {
