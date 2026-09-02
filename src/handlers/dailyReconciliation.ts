@@ -3330,9 +3330,17 @@ export const runReconciliation = async (
       r.Stripe_Refund_Id__c.trim().length > 0 &&
       r.transaction_type__c !== 'payout'
   );
+  // Only rows that are themselves a gift count as evidence that a Stripe charge reached
+  // Salesforce.  A refund row carries the refunded charge's ch_/pi_ ids and a dispute row
+  // carries the disputed charge's -- so counting either would report a gift whose own row
+  // was never written as already present, and `repairMissingCharges` would never create it.
+  // Rows with no transaction_type__c predate the field and are read as charges, which is
+  // what the Stripe_Refund_Id__c test below is for.
   const sfChargeRows = sfRows.filter(
     (r) =>
-      r.transaction_type__c !== 'payout' &&
+      (!r.transaction_type__c ||
+        r.transaction_type__c === 'charge' ||
+        r.transaction_type__c === 'sales-receipt') &&
       !(typeof r.Stripe_Refund_Id__c === 'string' && r.Stripe_Refund_Id__c.trim().length > 0)
   );
 

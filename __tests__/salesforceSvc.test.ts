@@ -317,7 +317,8 @@ describe('createSalesforceSvc', () => {
 
     // initial search for existing by the external ID should still have been made
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' AND RecordTypeId = 'a1' LIMIT 1"
+      "SELECT Id FROM Transaction__c WHERE Stripe_Charge_Id__c = 'ch_123' AND RecordTypeId = 'a1'" +
+        " AND (transaction_type__c = 'charge' OR transaction_type__c = null) LIMIT 1"
     );
 
     // The broader pre-search can now resolve the duplicate row before the
@@ -380,7 +381,8 @@ describe('createSalesforceSvc', () => {
       expectedTransactionDmlOptions
     );
     expect(query).toHaveBeenCalledWith(
-      "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '7764' AND RecordTypeId = '012000000000000CCC' LIMIT 1"
+      "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '7764' AND RecordTypeId = '012000000000000CCC'" +
+        " AND (transaction_type__c = 'charge' OR transaction_type__c = null) LIMIT 1"
     );
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ QBO_Doc_Id__c: '7764', RecordTypeId: '012000000000000CCC' }),
@@ -434,7 +436,8 @@ describe('createSalesforceSvc', () => {
     await service.upsertTransactionByExternalId(dto, 'qbo_doc_id__c');
 
     expect(query.mock.calls.map((call) => call[0])).toContain(
-      "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '9911' AND RecordTypeId = '012000000000000CCC' LIMIT 1"
+      "SELECT Id FROM Transaction__c WHERE QBO_Doc_Id__c = '9911' AND RecordTypeId = '012000000000000CCC'" +
+        " AND (transaction_type__c = 'charge' OR transaction_type__c = null) LIMIT 1"
     );
     expect(
       query.mock.calls.some(
@@ -759,7 +762,7 @@ describe('createSalesforceSvc', () => {
     const { upsert, query, sobject } = createMockConnection();
 
     query.mockImplementation((soql: string) => {
-      if (soql.includes('Stripe_Charge_Id__c')) {
+      if (soql.includes("Stripe_Charge_Id__c = 'ch_456'")) {
         return Promise.resolve({ records: [{ Id: 'existing_charge_123' }] });
       }
       if (soql.includes("Stripe_Refund_Id__c = 're_456'")) {
@@ -803,6 +806,150 @@ describe('createSalesforceSvc', () => {
     );
     expect(upsert.mock.calls[0][1][0]).not.toHaveProperty('Id');
     expect(result).toEqual({ success: true, id: 'refund_row_456', errors: [] });
+  });
+
+  it('does not resolve a charge onto the refund row that names the same charge', async () => {
+    // `mapStripeToTransaction` copies the charge's latest refund id onto a CHARGE dto, and
+    // `buildRefundTransaction` copies the charge and payment intent ids onto the REFUND row.
+    // Both rows are RecordType 'Stripe Transaction', so a probe narrowed only by record
+    // type could return the refund and the charge's amounts would be written over it.
+    const { upsert, query, sobject } = createMockConnection();
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('SELECT Id FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      // Salesforce holds one row for these ids and it is the REFUND, so it only comes back
+      // when the query does not insist on a charge.
+      const asksForCharge = soql.includes("transaction_type__c = 'charge'");
+      if (
+        !asksForCharge &&
+        (soql.includes("Stripe_Charge_Id__c = 'ch_1'") ||
+          soql.includes("Stripe_Payment_Intent_Id__c = 'pi_1'") ||
+          soql.includes("Stripe_Refund_Id__c = 're_1'"))
+      ) {
+        return Promise.resolve({ records: [{ Id: 'refund_row' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'charge_row', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.transaction_type__c = 'charge';
+    dto.status__c = 'refunded';
+    dto.stripe_payment_intent_id__c = 'pi_1';
+    dto.stripe_charge_id__c = 'ch_1';
+    dto.stripe_refund_id__c = 're_1';
+    dto.stripe_balance_transaction_id__c = null;
+    dto.stripe_checkout_session_id__c = null;
+    dto.contact__c = null;
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [, records, externalIdField] = upsert.mock.calls[0];
+    // Binding to the refund row would put its Id on the record and key the write on 'Id'.
+    expect(records[0].Id).toBeUndefined();
+    expect(externalIdField).toBe(TRANSACTION_FIELD_API_NAMES.stripe_payment_intent_id__c);
+  });
+
+  it("does not merge a second same-day gift onto the donor's first gift of the same amount", async () => {
+    // Two $50 gifts from one donor on one day: the second gift's own Stripe ids match
+    // nothing, so resolution reaches the contact/amount/date fallback.  Returning the first
+    // gift there wrote gift two over gift one and the day came up $50 short.
+    const { upsert, query, sobject } = createMockConnection();
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('SELECT Id FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes('Amount_Gross__c') && soql.includes('Received_At__c')) {
+        return Promise.resolve({
+          records: [
+            {
+              Id: 'first_gift',
+              Posted_to_QBO__c: true,
+              QBO_Doc_Id__c: '4001',
+              CreatedDate: '2024-01-01T12:00:00.000Z',
+              // The first gift is a Stripe transaction in its own right.
+              Stripe_Charge_Id__c: 'ch_first',
+              Stripe_Payment_Intent_Id__c: 'pi_first',
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'second_gift', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.contact__c = '003xx000000000AAA';
+    dto.amount_gross__c = 50;
+    dto.received_at__c = '2024-01-01T18:30:00.000Z';
+    dto.stripe_payment_intent_id__c = 'pi_second';
+    dto.stripe_charge_id__c = 'ch_second';
+    dto.stripe_balance_transaction_id__c = 'bt_second';
+    dto.stripe_checkout_session_id__c = null;
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [, records] = upsert.mock.calls[0];
+    expect(records[0].Id).toBeUndefined();
+    expect(records[0].Stripe_Payment_Intent_Id__c).toBe('pi_second');
+  });
+
+  it('still merges onto a QuickBooks-imported row that carries no Stripe ids', async () => {
+    // The guard above must not disable the case the fallback exists for: a sales receipt
+    // imported from QuickBooks has no Stripe identifiers, so it is still the same gift.
+    const { upsert, query, sobject } = createMockConnection();
+
+    query.mockImplementation((soql: string) => {
+      if (soql.includes('SELECT Id FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: '012000000000000AAA' }] });
+      }
+      if (soql.includes('Amount_Gross__c') && soql.includes('Received_At__c')) {
+        return Promise.resolve({
+          records: [
+            {
+              Id: 'qbo_imported',
+              Posted_to_QBO__c: true,
+              QBO_Doc_Id__c: '4002',
+              CreatedDate: '2024-01-01T12:00:00.000Z',
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    upsert.mockResolvedValue([{ success: true, id: 'qbo_imported', errors: [] }]);
+
+    const service: SalesforceSvc = createSalesforceSvc({
+      connection: { upsert, query, sobject } as unknown as Connection,
+    });
+
+    const dto = buildDto();
+    dto.contact__c = '003xx000000000AAA';
+    dto.amount_gross__c = 50;
+    dto.received_at__c = '2024-01-01T18:30:00.000Z';
+    dto.stripe_checkout_session_id__c = null;
+
+    await service.upsertTransactionByExternalId(dto, 'stripe_payment_intent_id__c');
+
+    const [, records, externalIdField] = upsert.mock.calls[0];
+    expect(records[0].Id).toBe('qbo_imported');
+    expect(externalIdField).toBe('Id');
   });
 
   it('does not treat payout id as unique for non-payout transactions', async () => {

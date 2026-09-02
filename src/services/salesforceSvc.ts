@@ -275,7 +275,51 @@ type TransactionDateMatchRecord = {
   Posted_to_QBO__c?: boolean | null;
   QBO_Doc_Id__c?: string | null;
   CreatedDate?: string | null;
+} & StripeIdentityFields;
+
+/**
+ * The Stripe ids that name the individual object a Transaction__c stands for.
+ *
+ * `Stripe_Payout_Id__c` is deliberately absent: `linkPayoutOnTransactions` stamps it onto
+ * every charge a payout swept, so it names a batch rather than this row.
+ */
+type StripeIdentityFields = {
+  Stripe_Charge_Id__c?: string | null;
+  Stripe_Payment_Intent_Id__c?: string | null;
+  Stripe_Balance_Transaction_Id__c?: string | null;
+  Stripe_Checkout_Session_Id__c?: string | null;
+  Stripe_Refund_Id__c?: string | null;
+  Stripe_Dispute_Id__c?: string | null;
+  Stripe_Invoice_ID__c?: string | null;
+  Stripe_Credit_Note_Id__c?: string | null;
 };
+
+const STRIPE_IDENTITY_API_FIELDS: readonly (keyof StripeIdentityFields)[] = [
+  'Stripe_Charge_Id__c',
+  'Stripe_Payment_Intent_Id__c',
+  'Stripe_Balance_Transaction_Id__c',
+  'Stripe_Checkout_Session_Id__c',
+  'Stripe_Refund_Id__c',
+  'Stripe_Dispute_Id__c',
+  'Stripe_Invoice_ID__c',
+  'Stripe_Credit_Note_Id__c',
+];
+
+/**
+ * True when the row already names a Stripe object of its own.
+ *
+ * `findExistingByCustomerAmountDate` is the last resort, reached only after every external
+ * id on the DTO has been probed and matched nothing.  So a candidate that carries any
+ * Stripe identity id necessarily carries a DIFFERENT one, and is a different transaction:
+ * the donor's second $50 gift of the day, not this one.  Merging onto it wrote the second
+ * gift over the first and the day's total came up one gift short.  The row this fallback
+ * exists to find -- a sales receipt imported from QuickBooks -- has no Stripe ids at all.
+ */
+const hasOwnStripeIdentity = (record: StripeIdentityFields): boolean =>
+  STRIPE_IDENTITY_API_FIELDS.some((field) => {
+    const value = record[field];
+    return typeof value === 'string' && value.trim().length > 0;
+  });
 
 type TransactionContactLookupRecord = {
   Id?: string;
@@ -877,7 +921,8 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     field: TransactionExternalIdField,
     value: string,
     recordTypeId?: string,
-    transactionType?: string
+    transactionType?: string,
+    options: { matchUntyped?: boolean } = {}
   ): Promise<string | null> => {
     const apiField = resolveExternalIdField(field);
     const escapedValue = escapeForSoqlLiteral(value);
@@ -890,7 +935,13 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
 
     if (transactionType && transactionType.trim().length > 0) {
       const escapedTransactionType = escapeForSoqlLiteral(transactionType.trim());
-      soql += ` AND transaction_type__c = '${escapedTransactionType}'`;
+      // `matchUntyped` also accepts a row whose transaction_type__c was never written --
+      // rows that predate the field being mandatory, which are charges. Without it,
+      // narrowing a lookup by type would stop those legacy rows from being found and the
+      // caller would create a second row for a gift that already has one.
+      soql += options.matchUntyped
+        ? ` AND (transaction_type__c = '${escapedTransactionType}' OR transaction_type__c = null)`
+        : ` AND transaction_type__c = '${escapedTransactionType}'`;
     }
 
     soql += ' LIMIT 1';
@@ -953,7 +1004,20 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     for (const field of fields) {
       const value = dto[field];
       if (typeof value === 'string' && value.trim().length > 0) {
-        const existingId = await resolveExistingTransactionId(field, value.trim(), recordTypeId);
+        // Narrowed by transaction type, not by record type alone.  A refund row carries the
+        // refunded charge's Stripe_Charge_Id__c and Stripe_Payment_Intent_Id__c, a dispute row
+        // the same, and all three share the 'Stripe Transaction' record type -- so an
+        // unnarrowed probe on a charge DTO could resolve to the gift's refund (the SOQL is
+        // `LIMIT 1` with no ORDER BY, so which one comes back is Salesforce's choice) and the
+        // charge's amounts and status would be written straight over it.  The refund is then
+        // gone from the ledger and the gift's positive total no longer nets out.
+        const existingId = await resolveExistingTransactionId(
+          field,
+          value.trim(),
+          recordTypeId,
+          dto.transaction_type__c,
+          { matchUntyped: true }
+        );
         if (existingId) {
           return existingId;
         }
@@ -969,6 +1033,46 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       }
     }
     return null;
+  };
+
+  /**
+   * Run a content-signature query that also selects the Stripe identity columns, dropping
+   * any column the org does not have and retrying.
+   *
+   * Without this, adding those columns to the SELECT would turn one undeployed field into a
+   * hard failure of the whole upsert -- the gift stays Pending, QuickBooks is never posted,
+   * and Stripe redelivers for days.  Losing a column only costs accuracy: a row whose
+   * identity we cannot see reads as having none, which is the behaviour this fallback had
+   * before the columns were selected at all.
+   */
+  const queryWithStripeIdentityColumns = async (
+    buildSoql: (identityColumns: string) => string
+  ): Promise<TransactionDateMatchRecord[]> => {
+    for (;;) {
+      const columns = STRIPE_IDENTITY_API_FIELDS.filter(
+        (field) => !isUnsupportedTransactionField(field)
+      );
+      const selectList = columns.length > 0 ? `, ${columns.join(', ')}` : '';
+
+      try {
+        return await queryRecords<TransactionDateMatchRecord>(buildSoql(selectList));
+      } catch (error) {
+        const missing = parseUnsupportedTransactionField(error);
+        const isIdentityColumn =
+          missing !== null &&
+          columns.some((field) => field.toLowerCase() === missing.trim().toLowerCase());
+
+        if (!isIdentityColumn || !markUnsupportedTransactionField(missing)) {
+          throw error;
+        }
+
+        logger.error('[SalesforceSvc] Dropping Transaction__c column the org does not have', {
+          alert: 'transaction_field_dropped',
+          field: missing,
+          context: 'content-signature lookup',
+        });
+      }
+    }
   };
 
   const findExistingByCustomerAmountDate = async (
@@ -993,34 +1097,35 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         return null;
       }
 
-      let soql =
-        `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
-        ` AND Amount_Gross__c = ${amount}` +
-        ` AND Received_At__c = ${receivedAtLiteral}`;
+      const buildExactSoql = (identityColumns: string, withRecordType: boolean): string => {
+        let exactSoql =
+          `SELECT Id${identityColumns} FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
+          ` AND Amount_Gross__c = ${amount}` +
+          ` AND Received_At__c = ${receivedAtLiteral}`;
 
-      if (recordTypeId) {
-        const escapedRecordTypeId = escapeForSoqlLiteral(recordTypeId);
-        soql += ` AND RecordTypeId = '${escapedRecordTypeId}'`;
-      }
+        if (withRecordType && recordTypeId) {
+          exactSoql += ` AND RecordTypeId = '${escapeForSoqlLiteral(recordTypeId)}'`;
+        }
 
-      soql += ' LIMIT 2';
+        return `${exactSoql} LIMIT 2`;
+      };
 
-      const result = await connection.query<TransactionLookupRecord>(soql);
-      const records = toLookupRecords(result);
-      if (records.length === 1 && records[0].Id) {
+      const records = await queryWithStripeIdentityColumns((identityColumns) =>
+        buildExactSoql(identityColumns, true)
+      );
+      if (records.length === 1 && records[0].Id && !hasOwnStripeIdentity(records[0])) {
         return records[0].Id;
       }
 
       if (recordTypeId) {
-        const fallbackSoql =
-          `SELECT Id FROM ${TRANSACTION_OBJECT} WHERE Contact__c = '${escapedContact}'` +
-          ` AND Amount_Gross__c = ${amount}` +
-          ` AND Received_At__c = ${receivedAtLiteral}` +
-          ' LIMIT 2';
-
-        const fallbackResult = await connection.query<TransactionLookupRecord>(fallbackSoql);
-        const fallbackRecords = toLookupRecords(fallbackResult);
-        if (fallbackRecords.length === 1 && fallbackRecords[0].Id) {
+        const fallbackRecords = await queryWithStripeIdentityColumns((identityColumns) =>
+          buildExactSoql(identityColumns, false)
+        );
+        if (
+          fallbackRecords.length === 1 &&
+          fallbackRecords[0].Id &&
+          !hasOwnStripeIdentity(fallbackRecords[0])
+        ) {
           return fallbackRecords[0].Id;
         }
       }
@@ -1030,19 +1135,21 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         return null;
       }
 
-      const sameDaySoql =
-        `SELECT Id, Posted_to_QBO__c, QBO_Doc_Id__c, CreatedDate FROM ${TRANSACTION_OBJECT} ` +
-        `WHERE Contact__c = '${escapedContact}'` +
-        ` AND Amount_Gross__c = ${amount}` +
-        ` AND Received_At__c >= ${dayRange.start}` +
-        ` AND Received_At__c < ${dayRange.end}` +
-        ' ORDER BY CreatedDate DESC LIMIT 10';
-
-      const sameDayRecords = await queryRecords<TransactionDateMatchRecord>(sameDaySoql);
+      const sameDayRecords = await queryWithStripeIdentityColumns(
+        (identityColumns) =>
+          `SELECT Id, Posted_to_QBO__c, QBO_Doc_Id__c, CreatedDate${identityColumns} FROM ${TRANSACTION_OBJECT} ` +
+          `WHERE Contact__c = '${escapedContact}'` +
+          ` AND Amount_Gross__c = ${amount}` +
+          ` AND Received_At__c >= ${dayRange.start}` +
+          ` AND Received_At__c < ${dayRange.end}` +
+          ' ORDER BY CreatedDate DESC LIMIT 10'
+      );
       const candidates = sameDayRecords
         .filter(
           (record): record is TransactionDateMatchRecord & { Id: string } =>
-            typeof record.Id === 'string' && record.Id.trim().length > 0
+            typeof record.Id === 'string' &&
+            record.Id.trim().length > 0 &&
+            !hasOwnStripeIdentity(record)
         )
         .map((record) => ({
           record,
@@ -1315,7 +1422,9 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const fallbackId = await resolveExistingTransactionId(
       options.key,
       options.normalizedExternalId,
-      options.recordTypeId
+      options.recordTypeId,
+      options.dto.transaction_type__c,
+      { matchUntyped: true }
     );
 
     if (fallbackId) {
@@ -1534,11 +1643,16 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       recordTypeId = await resolveRecordTypeId(recordTypeName);
     }
 
+    // Callers pass `transactionType` to say what KIND of row they are looking for -- the
+    // refund handler asks for the 'charge' its refund belongs to, so that it never adopts
+    // another refund as the parent.  Untyped rows match as well, so a legacy gift written
+    // before transaction_type__c was mandatory is still found.
     return resolveExistingTransactionId(
       normalizedKey as TransactionExternalIdField,
       normalizedValue,
       recordTypeId,
-      transactionType
+      transactionType,
+      { matchUntyped: true }
     );
   };
 

@@ -551,9 +551,64 @@ const STRIPE_ID_FIELDS = [
   'Stripe_Payout_Id__c',
 ] as const;
 
+type StripeIdField = (typeof STRIPE_ID_FIELDS)[number];
+
+/**
+ * The Stripe ID fields that identify a Transaction__c *of a given transaction type*, and
+ * therefore the only fields two rows of that type may be called duplicates over.
+ *
+ * A Transaction__c carries the Stripe IDs of the objects it relates to, not only of the
+ * object it IS. A refund row written by `buildRefundTransaction` carries the refunded
+ * charge's `Stripe_Charge_Id__c` and `Stripe_Payment_Intent_Id__c`; a dispute row carries
+ * the same. Grouping every row by every populated Stripe ID therefore put a gift, its
+ * refund and its dispute in one "duplicate" group -- and `deleteSalesforceDuplicates`
+ * keeps the oldest and destroys the rest, which is the gift's refund and dispute. Two
+ * partial refunds of one charge collapsed the same way. Scoping each row to the IDs that
+ * identify its own type keeps a refund comparable only with another row claiming to be
+ * the same refund.
+ *
+ * `Stripe_Subscription_Id__c` appears in no set: every gift in a recurring series carries
+ * the same one, so grouping on it made a donor's whole giving history one group and
+ * deleted all but the first gift. The QBO half of this handler already excludes `sub_`
+ * (and `in_`) from `STRIPE_ID_PATTERN` for exactly this reason; the Salesforce half did
+ * not.
+ */
+const IDENTITY_FIELDS_BY_TRANSACTION_TYPE: Record<string, readonly StripeIdField[]> = {
+  charge: [
+    'Stripe_Charge_Id__c',
+    'Stripe_Payment_Intent_Id__c',
+    'Stripe_Balance_Transaction_Id__c',
+    'Stripe_Checkout_Session_Id__c',
+    'Stripe_Invoice_ID__c',
+  ],
+  refund: ['Stripe_Refund_Id__c', 'Stripe_Balance_Transaction_Id__c'],
+  dispute: ['Stripe_Dispute_Id__c'],
+  payout: ['Stripe_Payout_Id__c', 'Stripe_Balance_Transaction_Id__c'],
+  'sales-receipt': ['Stripe_Charge_Id__c', 'Stripe_Payment_Intent_Id__c'],
+};
+
+/**
+ * Credit notes have no dedicated transaction type, so they are matched on the field alone
+ * and only against rows that also carry a credit note id.
+ */
+const CREDIT_NOTE_FIELD: StripeIdField = 'Stripe_Credit_Note_Id__c';
+
+/**
+ * Rows written before `transaction_type__c` became mandatory have no type to scope by.
+ * They are read as charges (the only type the pre-schema writers produced) but keyed
+ * separately from typed rows, so an untyped row is never called a duplicate of a typed
+ * one on the strength of a shared charge id.
+ */
+const UNTYPED_TRANSACTION_TYPE = '';
+
+const resolveIdentityFields = (transactionType: string): readonly StripeIdField[] =>
+  IDENTITY_FIELDS_BY_TRANSACTION_TYPE[transactionType] ??
+  IDENTITY_FIELDS_BY_TRANSACTION_TYPE.charge;
+
 type SalesforceTransactionRecord = {
   Id?: string | null;
   CreatedDate?: string | null;
+  transaction_type__c?: string | null;
   Stripe_Charge_Id__c?: string | null;
   Stripe_Payment_Intent_Id__c?: string | null;
   Stripe_Balance_Transaction_Id__c?: string | null;
@@ -578,7 +633,7 @@ const detectSalesforceDuplicates = async (
   startDate?: string,
   endDate?: string
 ): Promise<{ groups: DuplicateGroup[]; checked: number }> => {
-  const fields = ['Id', 'CreatedDate', ...STRIPE_ID_FIELDS].join(', ');
+  const fields = ['Id', 'CreatedDate', 'transaction_type__c', ...STRIPE_ID_FIELDS].join(', ');
   const conditions: string[] = [];
   if (startDate) conditions.push(`CreatedDate >= ${startDate}T00:00:00Z`);
   if (endDate) conditions.push(`CreatedDate <= ${endDate}T23:59:59Z`);
@@ -588,25 +643,29 @@ const detectSalesforceDuplicates = async (
   const result = await connection.query<SalesforceTransactionRecord>(soql);
   const records = result?.records ?? [];
 
-  // Group by Stripe ID field value
+  // Group by transaction type + Stripe ID field value.  The type is part of the key as
+  // well as choosing the fields, so a row that only claims to be a charge is never called
+  // a duplicate of a refund that happens to name the same charge.
   const byStripeId = new Map<string, DuplicateRecord[]>();
   for (const record of records) {
     const sfId = typeof record.Id === 'string' ? record.Id.trim() : null;
     if (!sfId) continue;
 
-    const populatedStripeIds = STRIPE_ID_FIELDS.map((field) => {
-      const value = record[field];
-      return typeof value === 'string' && value.trim() ? { field, value: value.trim() } : null;
-    }).filter(Boolean) as Array<{ field: (typeof STRIPE_ID_FIELDS)[number]; value: string }>;
+    const transactionType =
+      typeof record.transaction_type__c === 'string' && record.transaction_type__c.trim()
+        ? record.transaction_type__c.trim().toLowerCase()
+        : UNTYPED_TRANSACTION_TYPE;
 
-    const hasPayoutIdOnly =
-      populatedStripeIds.length === 1 && populatedStripeIds[0].field === 'Stripe_Payout_Id__c';
+    const identityFields = [...resolveIdentityFields(transactionType)];
+    // A credit note row is identified by its credit note id whatever type it carries.
+    if (typeof record[CREDIT_NOTE_FIELD] === 'string' && record[CREDIT_NOTE_FIELD]?.trim()) {
+      identityFields.push(CREDIT_NOTE_FIELD);
+    }
 
-    for (const field of STRIPE_ID_FIELDS) {
+    for (const field of identityFields) {
       const value = record[field];
       if (typeof value !== 'string' || !value.trim()) continue;
-      if (field === 'Stripe_Payout_Id__c' && !hasPayoutIdOnly) continue;
-      const key = `${field}:${value.trim()}`;
+      const key = `${transactionType}|${field}:${value.trim()}`;
       const existing = byStripeId.get(key) ?? [];
       existing.push({
         id: sfId,

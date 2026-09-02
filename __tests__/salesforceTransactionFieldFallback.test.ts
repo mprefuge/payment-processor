@@ -103,6 +103,47 @@ describe('Transaction__c unsupported-field fallback', () => {
     errorSpy.mockRestore();
   });
 
+  it('keeps the content-signature lookup working when an identity column is missing', async () => {
+    // The lookup selects the Stripe identity columns so it can tell the donor's second
+    // same-day gift from the row it is meant to reunite with.  An org missing one of those
+    // columns must cost accuracy, not the gift: the query drops the column and retries
+    // rather than throwing out of the upsert.
+    const connection = createMockConnection();
+    const attempted: string[] = [];
+
+    connection.query.mockImplementation((soql: string) => {
+      if (soql.includes('FROM RecordType')) {
+        return Promise.resolve({ records: [{ Id: RECORD_TYPE_ID }] });
+      }
+      if (!soql.includes('Contact__c')) {
+        return Promise.resolve({ records: [] });
+      }
+
+      attempted.push(soql);
+      if (soql.includes('Stripe_Credit_Note_Id__c')) {
+        return Promise.reject(new Error(noSuchColumn('Stripe_Credit_Note_Id__c')));
+      }
+      return Promise.resolve({ records: [{ Id: 'a0X_content_match' }] });
+    });
+
+    connection.upsert.mockResolvedValue(succeededUpsert('a0X_content_match'));
+
+    const service = createService(connection);
+    const result = await service.upsertTransactionByExternalId(
+      buildDto(),
+      'stripe_payment_intent_id__c'
+    );
+
+    expect(result.success).toBe(true);
+    // First attempt carried the column, the retry did not.
+    expect(attempted[0]).toContain('Stripe_Credit_Note_Id__c');
+    expect(attempted[1]).not.toContain('Stripe_Credit_Note_Id__c');
+    expect(attempted[1]).toContain('Stripe_Charge_Id__c');
+    expect(isUnsupportedTransactionField('Stripe_Credit_Note_Id__c')).toBe(true);
+    // The row still merges: nothing about it says it is a different Stripe transaction.
+    expect(recordsOf(connection, 0)[0].Id).toBe('a0X_content_match');
+  });
+
   it('drops the missing column and retries instead of losing the whole record', async () => {
     const connection = createMockConnection();
     connection.upsert

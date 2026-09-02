@@ -343,7 +343,11 @@ const findExistingTransactionId = async (
       const existingTransactionId = await salesforce.findTransactionIdByExternalId(
         lookupStep.fieldName,
         lookupStep.externalValue,
-        SF_RECORD_TYPE_STRIPE_TRANSACTION
+        SF_RECORD_TYPE_STRIPE_TRANSACTION,
+        // A refund or dispute row for this gift carries the same charge and payment
+        // intent ids under the same record type.  Returning one of those here would put
+        // its Id on the upsert and write the charge straight over the refund.
+        'charge'
       );
 
       if (existingTransactionId) {

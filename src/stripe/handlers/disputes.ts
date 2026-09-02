@@ -183,7 +183,10 @@ const findParentTransactionId = async (
     ? await salesforce.findTransactionIdByExternalId(
         'stripe_charge_id__c',
         chargeId,
-        SF_RECORD_TYPE_STRIPE_TRANSACTION
+        SF_RECORD_TYPE_STRIPE_TRANSACTION,
+        // The gift's refund row carries this same charge id.  Without the type the
+        // dispute could be parented to the refund instead of to the gift.
+        'charge'
       )
     : null;
 
