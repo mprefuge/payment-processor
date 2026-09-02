@@ -7,6 +7,7 @@ import type { StripeWebhookDependencies } from '../../stripe/types';
 import { logger } from '../../lib/logger';
 import { isRequestLimitExceeded } from '../../lib/salesforceErrors';
 import { checkReplayWindow } from '../../lib/replayProtection';
+import { resolveEventSubjectKey } from './eventSubject';
 
 export class StripeWebhookProcessor implements WebhookRequestHandler {
   private readonly eventRouter: StripeEventRouter;
@@ -66,6 +67,26 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
     }
   }
 
+  /**
+   * Run `fn` while holding a lock on the Stripe OBJECT the event is about, so that two
+   * different events for one gift cannot both read "no existing row" and both insert.
+   *
+   * Nested inside the per-event lock, always in that order, so no two callers can take the
+   * pair in opposite orders and deadlock. When the subject cannot be determined the event
+   * runs as before rather than being dropped.
+   */
+  private async withSubjectLock<T>(event: Stripe.Event, fn: () => Promise<T>): Promise<T> {
+    const subjectKey = resolveEventSubjectKey(event);
+    if (!subjectKey) {
+      logger.debug('[StripeWebhook] No subject key for event; running without object lock', {
+        eventId: event.id,
+        eventType: event.type,
+      });
+      return fn();
+    }
+    return this.dependencies.idempotencyStore.withLock(subjectKey, fn);
+  }
+
   private async processVerifiedEvent(event: Stripe.Event, context: HttpContext): Promise<any> {
     return this.dependencies.idempotencyStore.withLock(
       `stripe_webhook_evt_${event.id}`,
@@ -80,7 +101,9 @@ export class StripeWebhookProcessor implements WebhookRequestHandler {
         }
 
         try {
-          await this.eventRouter.route(event, this.dependencies, context);
+          await this.withSubjectLock(event, () =>
+            this.eventRouter.route(event, this.dependencies, context)
+          );
           await this.dependencies.idempotencyStore.markProcessed(event.id);
           return this.responseFormatter.success(event.type);
         } catch (error) {
