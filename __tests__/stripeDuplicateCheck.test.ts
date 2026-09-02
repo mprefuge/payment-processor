@@ -144,7 +144,7 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.status).toBe(200);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
-      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('sales-receipt:ch_abc123');
+      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('sales-receipt:CHG:ch_abc123');
       expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
     });
 
@@ -235,8 +235,8 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(2);
       const keys = result.jsonBody.qbo.duplicateGroups.map((g: any) => g.key);
-      expect(keys).toContain('sales-receipt:ch_abc123');
-      expect(keys).toContain('journal-entry:ch_abc123');
+      expect(keys).toContain('sales-receipt:CHG:ch_abc123');
+      expect(keys).toContain('journal-entry:CHGJE:ch_abc123');
     });
 
     it('detects duplicate payout deposits with Stripe payout ID in PrivateNote (different DocNumber formats)', async () => {
@@ -557,6 +557,154 @@ describe('stripeDuplicateCheck', () => {
 
       const result = await handler(req, context);
       // Each receipt has a unique ch_ ID — no duplicates despite sharing sub_ ID
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag a charge journal entry and a dispute journal entry that names it', async () => {
+      // The dispute memo is `Stripe dispute dp_x (charge ch_x)`, so the dispute JE landed in
+      // the same `journal-entry:ch_x` group as the charge's own CHGJE and was deleted.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:00:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag a dispute journal entry and the reversal that backs it out', async () => {
+      // DSP books the loss, DSPREV reverses it when the dispute is won -- the expected pair.
+      // Both memos name dp_x, so the sweeper deleted the reversal and left the loss booked.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:00:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'DSPREV-20240415-dis123',
+              '2024-04-15',
+              '2024-04-15T09:00:00Z',
+              'Stripe dispute won dp_dis123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
+    it('still detects two dispute journal entries for the same dispute', async () => {
+      // The guard must not blind the tool to an actual double-post of the same document.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:00:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:30:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      // Both entries name dp_dis123 and ch_abc123, so the pair surfaces under each key.
+      // What matters is that the double-post is caught and only the later copy is dropped.
+      const keys = result.jsonBody.qbo.duplicateGroups.map((g: any) => g.key);
+      expect(keys).toContain('journal-entry:DSP:dp_dis123');
+      const disputeGroup = result.jsonBody.qbo.duplicateGroups.find(
+        (g: any) => g.key === 'journal-entry:DSP:dp_dis123'
+      );
+      expect(disputeGroup.records).toHaveLength(2);
+
+      const planned = result.jsonBody.qbo.plannedActions.qbo as Array<{
+        keep: { id: string };
+        delete: Array<{ id: string }>;
+      }>;
+      const idsToDelete = new Set(planned.flatMap((group) => group.delete.map((doc) => doc.id)));
+      expect([...idsToDelete]).toEqual(['2']);
+    });
+
+    it('does NOT flag a charge journal entry and the payment-return entry that names it', async () => {
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'ACHRET-20240110-abc123',
+              '2024-01-10',
+              '2024-01-10T09:00:00Z',
+              'Stripe payment returned pi_abc123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
     });
 

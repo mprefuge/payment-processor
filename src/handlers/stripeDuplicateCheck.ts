@@ -78,9 +78,10 @@ type DuplicateRecord = {
 
 type DuplicateGroup = {
   /**
-   * For QBO (memo present):    '{entity}:{fullStripeId}'   e.g. 'bank-deposit:po_1TRLq7...'
-   * For QBO (memo absent):     '{entity}:{PREFIX}:{suffix}' e.g. 'sales-receipt:CHG:abc123'
-   * For Salesforce:            '{FieldName}:{StripeId}'
+   * For QBO (memo present):    '{entity}:{PREFIX}:{fullStripeId}' e.g. 'journal-entry:DSP:dp_1TR...'
+   *                            payout ids drop the prefix: 'bank-deposit:po_1TRLq7...'
+   * For QBO (memo absent):     '{entity}:{PREFIX}:{suffix}'       e.g. 'sales-receipt:CHG:abc123'
+   * For Salesforce:            '{transactionType}|{FieldName}:{StripeId}'
    */
   key: string;
   records: DuplicateRecord[];
@@ -380,6 +381,48 @@ const detectQboDuplicates = async (
     return entity;
   };
 
+  /**
+   * The document's own kind, read off its DocNumber prefix (`DSP-20240301-x` -> `DSP`).
+   *
+   * Deliberately not `parseDocNumberParts`, which only recognises the three prefixes whose
+   * suffix encodes a Stripe id.  Here every prefix counts, `DSP` and `DSPREV` above all.
+   */
+  const docNumberKindOf = (docNumber: string | null): string | null => {
+    if (!docNumber?.trim()) return null;
+    const trimmed = docNumber.trim();
+    const firstDash = trimmed.indexOf('-');
+    return firstDash > 0 ? trimmed.slice(0, firstDash) : null;
+  };
+
+  /**
+   * A memo names every Stripe object a document RELATES to, not only the one it IS.
+   * `Stripe dispute dp_1 (charge ch_1)` puts a dispute journal entry under `ch_1` beside
+   * the charge's own CHGJE, and the dispute's DSPREV reversal under `dp_1` beside the DSP
+   * it reverses -- so the sweeper called each pair a duplicate and deleted the later one.
+   * A deleted dispute reversal leaves the loss booked and never backed out.
+   *
+   * Adding the DocNumber kind to the key keeps a document comparable only with another
+   * document of the same kind, which is the reasoning the DocNumber fallback below already
+   * applies to keep CHG and CHGJE apart. Two DSP entries for one dispute -- an actual
+   * double-post -- still share a kind and are still caught.
+   *
+   * Payout ids are exempt: `entityKeyForStripe` deliberately folds transfers and journal
+   * entries into bank-deposit so a bank-feed entry groups with the payout deposit it
+   * duplicates, and those carry different DocNumber shapes by nature.
+   */
+  const groupKeyForStripeId = (
+    groupEntity: string,
+    docNumber: string | null,
+    stripeId: string
+  ): string => {
+    if (isPayoutId(stripeId)) {
+      return `${groupEntity}:${stripeId}`;
+    }
+
+    const kind = docNumberKindOf(docNumber);
+    return kind ? `${groupEntity}:${kind}:${stripeId}` : `${groupEntity}:${stripeId}`;
+  };
+
   // Primary source:  PrivateNote — extract full Stripe IDs via regex. This catches all
   //   DocNumber formats including the legacy 'payout_{id}' pattern because the memo
   //   always contains the untruncated Stripe ID.
@@ -403,7 +446,7 @@ const detectQboDuplicates = async (
           continue;
         }
         const groupEntity = entityKeyForStripe(doc.entity, stripeId);
-        addToGroup(`${groupEntity}:${stripeId}`, doc);
+        addToGroup(groupKeyForStripeId(groupEntity, doc.docNumber, stripeId), doc);
       }
     } else if (extractStripeIdsFromText(lineDescription).length > 0) {
       const lineIds = extractStripeIdsFromText(lineDescription);
@@ -413,7 +456,7 @@ const detectQboDuplicates = async (
           continue;
         }
         const groupEntity = entityKeyForStripe(doc.entity, stripeId);
-        addToGroup(`${groupEntity}:${stripeId}`, doc);
+        addToGroup(groupKeyForStripeId(groupEntity, doc.docNumber, stripeId), doc);
       }
     } else {
       // Fallback: use DocNumber prefix pattern
