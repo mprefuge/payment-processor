@@ -345,7 +345,8 @@ const findParentInvoiceTransactionId = async (
     return await salesforce.findTransactionIdByExternalId(
       'stripe_invoice_id__c',
       invoiceId,
-      SF_RECORD_TYPE_STRIPE_TRANSACTION
+      SF_RECORD_TYPE_STRIPE_TRANSACTION,
+      'charge'
     );
   } catch (error) {
     context.log('[StripeWebhook] Failed to locate invoice transaction for credit note', {

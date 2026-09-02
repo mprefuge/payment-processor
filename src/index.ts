@@ -3357,7 +3357,9 @@ registerFunction('dailyReconciliation', 'Cross-system daily reconciliation check
               },
               'duplicatesInSalesforce contains one entry: two Transaction__c records share ' +
                 'Stripe_Charge_Id__c = ch_3PfDUP. The id field lists both SF record IDs. ' +
-                'Fix: run /api/ops/stripe-duplicate-check?startDate=2026-05-28&deleteDuplicates=true&dryRun=false.'
+                'Fix: run /api/ops/stripe-duplicate-check?system=salesforce&startDate=2026-05-28' +
+                '&deleteDuplicates=true&dryRun=false. Scope with system= — it defaults to both, ' +
+                'and QuickBooks deletes are permanent.'
             ),
             foundMultipleDiscrepancies: asNamedExample(
               '11. Finding: multiple discrepancy types at once',

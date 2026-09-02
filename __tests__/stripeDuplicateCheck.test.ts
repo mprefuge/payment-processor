@@ -144,7 +144,7 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.status).toBe(200);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(1);
-      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('sales-receipt:ch_abc123');
+      expect(result.jsonBody.qbo.duplicateGroups[0].key).toBe('sales-receipt:CHG:ch_abc123');
       expect(result.jsonBody.qbo.duplicateGroups[0].records).toHaveLength(2);
     });
 
@@ -235,8 +235,8 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(2);
       const keys = result.jsonBody.qbo.duplicateGroups.map((g: any) => g.key);
-      expect(keys).toContain('sales-receipt:ch_abc123');
-      expect(keys).toContain('journal-entry:ch_abc123');
+      expect(keys).toContain('sales-receipt:CHG:ch_abc123');
+      expect(keys).toContain('journal-entry:CHGJE:ch_abc123');
     });
 
     it('detects duplicate payout deposits with Stripe payout ID in PrivateNote (different DocNumber formats)', async () => {
@@ -560,6 +560,154 @@ describe('stripeDuplicateCheck', () => {
       expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
     });
 
+    it('does NOT flag a charge journal entry and a dispute journal entry that names it', async () => {
+      // The dispute memo is `Stripe dispute dp_x (charge ch_x)`, so the dispute JE landed in
+      // the same `journal-entry:ch_x` group as the charge's own CHGJE and was deleted.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:00:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag a dispute journal entry and the reversal that backs it out', async () => {
+      // DSP books the loss, DSPREV reverses it when the dispute is won -- the expected pair.
+      // Both memos name dp_x, so the sweeper deleted the reversal and left the loss booked.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:00:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'DSPREV-20240415-dis123',
+              '2024-04-15',
+              '2024-04-15T09:00:00Z',
+              'Stripe dispute won dp_dis123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
+    it('still detects two dispute journal entries for the same dispute', async () => {
+      // The guard must not blind the tool to an actual double-post of the same document.
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:00:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'DSP-20240301-dis123',
+              '2024-03-01',
+              '2024-03-01T09:30:00Z',
+              'Stripe dispute dp_dis123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      // Both entries name dp_dis123 and ch_abc123, so the pair surfaces under each key.
+      // What matters is that the double-post is caught and only the later copy is dropped.
+      const keys = result.jsonBody.qbo.duplicateGroups.map((g: any) => g.key);
+      expect(keys).toContain('journal-entry:DSP:dp_dis123');
+      const disputeGroup = result.jsonBody.qbo.duplicateGroups.find(
+        (g: any) => g.key === 'journal-entry:DSP:dp_dis123'
+      );
+      expect(disputeGroup.records).toHaveLength(2);
+
+      const planned = result.jsonBody.qbo.plannedActions.qbo as Array<{
+        keep: { id: string };
+        delete: Array<{ id: string }>;
+      }>;
+      const idsToDelete = new Set(planned.flatMap((group) => group.delete.map((doc) => doc.id)));
+      expect([...idsToDelete]).toEqual(['2']);
+    });
+
+    it('does NOT flag a charge journal entry and the payment-return entry that names it', async () => {
+      mockQboQuery
+        .mockResolvedValueOnce(makeQueryResponse('SalesReceipt', []))
+        .mockResolvedValueOnce(
+          makeQueryResponse('JournalEntry', [
+            makeQboDoc(
+              '1',
+              '0',
+              'CHGJE-20240101-abc123',
+              '2024-01-01',
+              '2024-01-01T09:00:00Z',
+              'Stripe charge ch_abc123'
+            ),
+            makeQboDoc(
+              '2',
+              '0',
+              'ACHRET-20240110-abc123',
+              '2024-01-10',
+              '2024-01-10T09:00:00Z',
+              'Stripe payment returned pi_abc123 (charge ch_abc123)'
+            ),
+          ])
+        )
+        .mockResolvedValueOnce(makeQueryResponse('Deposit', []));
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'qbo' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.qbo.duplicateGroups).toHaveLength(0);
+    });
+
     it('applies date range to QBO queries', async () => {
       mockQboQuery.mockResolvedValue([]);
 
@@ -697,8 +845,18 @@ describe('stripeDuplicateCheck', () => {
     it('returns no duplicates when each Stripe ID is unique', async () => {
       mockSfConnection.query.mockResolvedValue({
         records: [
-          { Id: 'sf1', CreatedDate: '2024-01-01T10:00:00.000Z', Stripe_Charge_Id__c: 'ch_aaa' },
-          { Id: 'sf2', CreatedDate: '2024-01-02T10:00:00.000Z', Stripe_Charge_Id__c: 'ch_bbb' },
+          {
+            Id: 'sf1',
+            CreatedDate: '2024-01-01T10:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Charge_Id__c: 'ch_aaa',
+          },
+          {
+            Id: 'sf2',
+            CreatedDate: '2024-01-02T10:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Charge_Id__c: 'ch_bbb',
+          },
         ],
       });
 
@@ -717,11 +875,13 @@ describe('stripeDuplicateCheck', () => {
           {
             Id: 'sf1',
             CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
             Stripe_Charge_Id__c: 'ch_duplicate',
           },
           {
             Id: 'sf2',
             CreatedDate: '2024-01-01T09:00:00.000Z',
+            transaction_type__c: 'charge',
             Stripe_Charge_Id__c: 'ch_duplicate',
           },
         ],
@@ -733,7 +893,7 @@ describe('stripeDuplicateCheck', () => {
       const result = await handler(req, context);
       expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(1);
       expect(result.jsonBody.salesforce.duplicateGroups[0].key).toBe(
-        'Stripe_Charge_Id__c:ch_duplicate'
+        'charge|Stripe_Charge_Id__c:ch_duplicate'
       );
     });
 
@@ -743,11 +903,13 @@ describe('stripeDuplicateCheck', () => {
           {
             Id: 'sf1',
             CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
             Stripe_Payment_Intent_Id__c: 'pi_xyz',
           },
           {
             Id: 'sf2',
             CreatedDate: '2024-01-01T09:00:00.000Z',
+            transaction_type__c: 'charge',
             Stripe_Payment_Intent_Id__c: 'pi_xyz',
           },
         ],
@@ -766,12 +928,14 @@ describe('stripeDuplicateCheck', () => {
           {
             Id: 'sf1',
             CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
             Stripe_Payout_Id__c: 'po_shared',
             Stripe_Charge_Id__c: 'ch_unique_1',
           },
           {
             Id: 'sf2',
             CreatedDate: '2024-01-01T09:00:00.000Z',
+            transaction_type__c: 'charge',
             Stripe_Payout_Id__c: 'po_shared',
             Stripe_Charge_Id__c: 'ch_unique_2',
           },
@@ -792,11 +956,13 @@ describe('stripeDuplicateCheck', () => {
           {
             Id: 'sf1',
             CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'payout',
             Stripe_Payout_Id__c: 'po_only_shared',
           },
           {
             Id: 'sf2',
             CreatedDate: '2024-01-01T09:00:00.000Z',
+            transaction_type__c: 'payout',
             Stripe_Payout_Id__c: 'po_only_shared',
           },
         ],
@@ -809,8 +975,169 @@ describe('stripeDuplicateCheck', () => {
       expect(result.status).toBe(200);
       expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(1);
       expect(result.jsonBody.salesforce.duplicateGroups[0].key).toBe(
-        'Stripe_Payout_Id__c:po_only_shared'
+        'payout|Stripe_Payout_Id__c:po_only_shared'
       );
+    });
+
+    it('does NOT flag a charge and its refund that share a charge/payment-intent id', async () => {
+      // `buildRefundTransaction` copies the refunded charge's ids onto the refund row, so
+      // grouping on every populated Stripe id put the gift and its refund in one group and
+      // deleted the refund.
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_charge',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Charge_Id__c: 'ch_gift',
+            Stripe_Payment_Intent_Id__c: 'pi_gift',
+          },
+          {
+            Id: 'sf_refund',
+            CreatedDate: '2024-02-01T08:00:00.000Z',
+            transaction_type__c: 'refund',
+            Stripe_Refund_Id__c: 're_gift',
+            Stripe_Charge_Id__c: 'ch_gift',
+            Stripe_Payment_Intent_Id__c: 'pi_gift',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag two partial refunds of the same charge', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_refund_1',
+            CreatedDate: '2024-02-01T08:00:00.000Z',
+            transaction_type__c: 'refund',
+            Stripe_Refund_Id__c: 're_first',
+            Stripe_Charge_Id__c: 'ch_gift',
+          },
+          {
+            Id: 'sf_refund_2',
+            CreatedDate: '2024-02-02T08:00:00.000Z',
+            transaction_type__c: 'refund',
+            Stripe_Refund_Id__c: 're_second',
+            Stripe_Charge_Id__c: 'ch_gift',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag a charge and its dispute that share a charge id', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_charge',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Charge_Id__c: 'ch_gift',
+          },
+          {
+            Id: 'sf_dispute',
+            CreatedDate: '2024-03-01T08:00:00.000Z',
+            transaction_type__c: 'dispute',
+            Stripe_Dispute_Id__c: 'dp_gift',
+            Stripe_Charge_Id__c: 'ch_gift',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag the monthly gifts of one recurring series sharing a subscription id', async () => {
+      // Every renewal carries the same Stripe_Subscription_Id__c.  Grouping on it made a
+      // donor's whole giving history one "duplicate" group, and the sweeper keeps only the
+      // oldest gift.
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_month_1',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Subscription_Id__c: 'sub_shared',
+            Stripe_Charge_Id__c: 'ch_month_1',
+            Stripe_Invoice_ID__c: 'in_month_1',
+          },
+          {
+            Id: 'sf_month_2',
+            CreatedDate: '2024-02-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Subscription_Id__c: 'sub_shared',
+            Stripe_Charge_Id__c: 'ch_month_2',
+            Stripe_Invoice_ID__c: 'in_month_2',
+          },
+          {
+            Id: 'sf_month_3',
+            CreatedDate: '2024-03-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Subscription_Id__c: 'sub_shared',
+            Stripe_Charge_Id__c: 'ch_month_3',
+            Stripe_Invoice_ID__c: 'in_month_3',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+    });
+
+    it('never deletes a refund when the sweeper runs with deleteDuplicates=true', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_charge',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            transaction_type__c: 'charge',
+            Stripe_Charge_Id__c: 'ch_gift',
+            Stripe_Payment_Intent_Id__c: 'pi_gift',
+          },
+          {
+            Id: 'sf_refund',
+            CreatedDate: '2024-02-01T08:00:00.000Z',
+            transaction_type__c: 'refund',
+            Stripe_Refund_Id__c: 're_gift',
+            Stripe_Charge_Id__c: 'ch_gift',
+            Stripe_Payment_Intent_Id__c: 'pi_gift',
+          },
+        ],
+      });
+
+      const mockDestroy = vi.fn().mockResolvedValue([{ success: true }]);
+      mockSfConnection.sobject = vi.fn().mockReturnValue({ destroy: mockDestroy });
+
+      const { context } = createContext();
+      const req = createRequest({
+        system: 'salesforce',
+        deleteDuplicates: 'true',
+        dryRun: 'false',
+      });
+
+      await handler(req, context);
+      expect(mockDestroy).not.toHaveBeenCalled();
     });
 
     it('applies date range to Salesforce query', async () => {

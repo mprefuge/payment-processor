@@ -1263,7 +1263,10 @@ const processPayments = async (
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             charge.id,
-            SF_RECORD_TYPE_STRIPE_TRANSACTION
+            SF_RECORD_TYPE_STRIPE_TRANSACTION,
+            // Without the type, a refund row -- which carries the refunded charge's id --
+            // satisfies this check, and the true-up skips a charge it was meant to create.
+            'charge'
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping charge already in Salesforce', {
@@ -1676,7 +1679,8 @@ const processRefunds = async (
           const existingId = await salesforce.findTransactionIdByExternalId(
             'stripe_refund_id__c',
             refund.id,
-            SF_RECORD_TYPE_STRIPE_TRANSACTION
+            SF_RECORD_TYPE_STRIPE_TRANSACTION,
+            'refund'
           );
           if (existingId) {
             context.log('[StripeTrueUp] Skipping refund already in Salesforce', {
@@ -1707,7 +1711,8 @@ const processRefunds = async (
           parentId = await salesforce.findTransactionIdByExternalId(
             'stripe_charge_id__c',
             chargeId,
-            SF_RECORD_TYPE_STRIPE_TRANSACTION
+            SF_RECORD_TYPE_STRIPE_TRANSACTION,
+            'charge'
           );
         }
 

@@ -51,6 +51,81 @@ describe('SalesforceCrmService (JS)', () => {
     expect(result).toEqual({ success: true, id: 'sf_existing' });
   });
 
+  it('never resolves a recurring renewal by its shared subscription id', async () => {
+    // Every gift in a series carries the same Stripe_Subscription_Id__c.  Probing it made
+    // this month's renewal resolve to last month's Transaction__c and upsert over it.
+    const conn = makeMockConnection();
+
+    const transactionData = {
+      Status__c: 'paid',
+      Amount_Gross__c: 500,
+      transaction_type__c: 'charge',
+      Stripe_Payment_Intent_Id__c: 'pi_month_2',
+      Stripe_Charge_Id__c: 'ch_month_2',
+      Stripe_Subscription_Id__c: 'sub_shared',
+    };
+
+    const attempted = [];
+    conn.query.mockImplementation((soql) => {
+      attempted.push(soql);
+      if (soql.includes('Stripe_Subscription_Id__c')) {
+        return Promise.resolve({ records: [{ Id: 'sf_month_1' }] });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'sf_month_2' });
+    conn.sobject.mockReturnValue({ upsert: upsertMock });
+
+    const service = new SalesforceCrmService({});
+    service.conn = conn;
+    service.authenticate = async () => conn;
+
+    await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+
+    expect(attempted.some((soql) => soql.includes('Stripe_Subscription_Id__c'))).toBe(false);
+    const [record, externalIdField] = upsertMock.mock.calls[0];
+    expect(record.Id).toBeUndefined();
+    expect(externalIdField).toBe('Stripe_Payment_Intent_Id__c');
+  });
+
+  it('does not content-match onto a row that already names a different Stripe charge', async () => {
+    // Same donor, same amount, same instant, different gift: the content signature must not
+    // hand back a row that is plainly a different Stripe transaction.
+    const conn = makeMockConnection();
+
+    const transactionData = {
+      Status__c: 'paid',
+      Amount_Gross__c: 50,
+      Contact__c: '003abc',
+      Received_At__c: '2024-01-01T18:30:00.000Z',
+      Stripe_Payment_Intent_Id__c: 'pi_second',
+      Stripe_Charge_Id__c: 'ch_second',
+    };
+
+    conn.query.mockImplementation((soql) => {
+      if (soql.includes('Contact__c') && soql.includes('Amount_Gross__c')) {
+        return Promise.resolve({
+          records: [{ Id: 'sf_first_gift', Stripe_Charge_Id__c: 'ch_first' }],
+        });
+      }
+      return Promise.resolve({ records: [] });
+    });
+
+    const upsertMock = vi.fn().mockResolvedValue({ success: true, id: 'sf_second_gift' });
+    conn.sobject.mockReturnValue({ upsert: upsertMock });
+
+    const service = new SalesforceCrmService({});
+    service.conn = conn;
+    service.authenticate = async () => conn;
+
+    await service.upsertTransactionsRecord(transactionData, 'Stripe_Payment_Intent_Id__c');
+
+    const [record, externalIdField] = upsertMock.mock.calls[0];
+    expect(record.Id).toBeUndefined();
+    expect(externalIdField).toBe('Stripe_Payment_Intent_Id__c');
+  });
+
   it('falls back to content match when no unique ID is found', async () => {
     const conn = makeMockConnection();
 

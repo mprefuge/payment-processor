@@ -2994,10 +2994,16 @@ const NEXT_STEP_BY_CATEGORY: Record<string, string> = {
     'salesforceMissingStripe — Stripe-origin rows with no Stripe id; inspect them by hand.',
   qboMissingSalesforce:
     'qboMissingSalesforce — link the documents with /api/qbo/receipts-salesforce-sync.',
+  // Both hints name a `system` scope on purpose. That endpoint defaults to system=both, so
+  // the remediation for a Salesforce finding also swept QuickBooks -- and deletes there are
+  // permanent. Scope each hint to the system its finding is about, and leave dryRun at its
+  // default so the operator reads plannedActions before anything is removed.
   duplicatesInSalesforce:
-    'duplicatesInSalesforce — de-duplicate with /api/ops/stripe-duplicate-check?deleteDuplicates=true.',
+    'duplicatesInSalesforce — review with /api/ops/stripe-duplicate-check?system=salesforce, ' +
+    'then re-run with &deleteDuplicates=true&dryRun=false to remove them.',
   duplicatesInQbo:
-    'duplicatesInQbo — de-duplicate with /api/ops/stripe-duplicate-check?deleteDuplicates=true.',
+    'duplicatesInQbo — review with /api/ops/stripe-duplicate-check?system=qbo, ' +
+    'then re-run with &deleteDuplicates=true&dryRun=false to remove them.',
 };
 
 interface ReconciliationFinding {
@@ -3330,9 +3336,17 @@ export const runReconciliation = async (
       r.Stripe_Refund_Id__c.trim().length > 0 &&
       r.transaction_type__c !== 'payout'
   );
+  // Only rows that are themselves a gift count as evidence that a Stripe charge reached
+  // Salesforce.  A refund row carries the refunded charge's ch_/pi_ ids and a dispute row
+  // carries the disputed charge's -- so counting either would report a gift whose own row
+  // was never written as already present, and `repairMissingCharges` would never create it.
+  // Rows with no transaction_type__c predate the field and are read as charges, which is
+  // what the Stripe_Refund_Id__c test below is for.
   const sfChargeRows = sfRows.filter(
     (r) =>
-      r.transaction_type__c !== 'payout' &&
+      (!r.transaction_type__c ||
+        r.transaction_type__c === 'charge' ||
+        r.transaction_type__c === 'sales-receipt') &&
       !(typeof r.Stripe_Refund_Id__c === 'string' && r.Stripe_Refund_Id__c.trim().length > 0)
   );
 

@@ -4,6 +4,38 @@ const BaseCrmService = require('./baseCrm');
 const DEFAULT_SALESFORCE_CONTACT_LEAD_SOURCE = 'Online Transaction';
 
 /**
+ * The Stripe ids that name the individual object a Transaction__c stands for.
+ *
+ * Mirrors `STRIPE_IDENTITY_API_FIELDS` in `src/services/salesforceSvc.ts`.
+ * Stripe_Subscription_Id__c and Stripe_Payout_Id__c are absent because both are shared
+ * across many transactions -- a recurring series and a payout batch respectively.
+ */
+const STRIPE_IDENTITY_FIELDS = [
+  'Stripe_Charge_Id__c',
+  'Stripe_Payment_Intent_Id__c',
+  'Stripe_Balance_Transaction_Id__c',
+  'Stripe_Checkout_Session_Id__c',
+  'Stripe_Refund_Id__c',
+  'Stripe_Dispute_Id__c',
+  'Stripe_Invoice_ID__c',
+  'Stripe_Credit_Note_Id__c',
+];
+
+/**
+ * True when the row already names a Stripe object of its own.
+ *
+ * The content signature (contact + amount + received-at) is only consulted after every
+ * Stripe id on the incoming record has been probed and matched nothing, so a candidate
+ * carrying its own Stripe id necessarily carries a different one -- it is the donor's
+ * other gift of the same amount that day, not this one.
+ */
+const hasOwnStripeIdentity = (record) =>
+  STRIPE_IDENTITY_FIELDS.some((field) => {
+    const value = record?.[field];
+    return typeof value === 'string' && value.trim().length > 0;
+  });
+
+/**
  * Salesforce keeps the whole street in one multi-line MailingStreet field, so a
  * second address line ("Apt 4B", "Suite 100") is appended as its own line -- the
  * same newline join `qboCustomersSync` uses when it maps a QuickBooks address
@@ -85,7 +117,11 @@ class SalesforceCrmService extends BaseCrmService {
       'Stripe_Balance_Transaction_Id__c',
       'Stripe_Checkout_Session_Id__c',
       'Stripe_Charge_Id__c',
-      'Stripe_Subscription_Id__c',
+      // Stripe_Subscription_Id__c is NOT here: every gift in a recurring series carries the
+      // same subscription id, so matching on it resolved this month's renewal to last
+      // month's Transaction__c and upserted over it, collapsing a donor's giving history
+      // into one row.  `findExistingTransactionIdForDto` in salesforceSvc dropped it for
+      // that reason; this second, older lookup kept it.
       'Stripe_Invoice_ID__c',
       'Stripe_Credit_Note_Id__c',
     ];
@@ -149,7 +185,8 @@ class SalesforceCrmService extends BaseCrmService {
     }
 
     let soql =
-      `SELECT Id FROM Transaction__c WHERE Contact__c = '${this.escapeSoqlLiteral(contact)}'` +
+      `SELECT Id, ${STRIPE_IDENTITY_FIELDS.join(', ')} FROM Transaction__c ` +
+      `WHERE Contact__c = '${this.escapeSoqlLiteral(contact)}'` +
       ` AND Amount_Gross__c = ${amount}` +
       ` AND Received_At__c = ${receivedAtLiteral}`;
 
@@ -160,7 +197,7 @@ class SalesforceCrmService extends BaseCrmService {
     soql += ' LIMIT 2';
     const queryResult = await this.conn.query(soql);
     const records = this.getQueryRecords(queryResult);
-    if (records.length === 1 && records[0].Id) {
+    if (records.length === 1 && records[0].Id && !hasOwnStripeIdentity(records[0])) {
       return records[0].Id;
     }
 
