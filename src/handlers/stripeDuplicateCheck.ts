@@ -551,9 +551,47 @@ const STRIPE_ID_FIELDS = [
   'Stripe_Payout_Id__c',
 ] as const;
 
+type StripeIdField = (typeof STRIPE_ID_FIELDS)[number];
+
+/**
+ * Which Stripe id fields may identify a duplicate, per family of Transaction__c row.
+ *
+ * A Salesforce duplicate is two rows describing the SAME Stripe object. Several rows
+ * legitimately share an id without being duplicates, and grouping on those ids would
+ * hand real records to deleteSalesforceDuplicates:
+ *
+ *   - a refund, dispute or credit-note row carries the parent charge's ch_/pi_/bt_ ids
+ *     (refunds.ts, disputes.ts, creditNotes.ts stamp them for traceability), so it must
+ *     only be compared with other rows of its own family on its own re_/dp_/cn_ id;
+ *   - every renewal of a recurring gift carries the same sub_ id, and an invoice id is
+ *     shared by the charge row and any refund of that invoice — neither identifies one
+ *     transaction, so neither is a grouping key (the QBO side already excludes them,
+ *     see STRIPE_ID_PATTERN);
+ *   - every charge swept into a payout carries that po_ id, so only payout-type rows
+ *     group on it.
+ *
+ * This mirrors findSalesforceDuplicates in dailyReconciliation.ts, which partitions the
+ * same way.
+ */
+type SalesforceRowFamily = 'payout' | 'refund' | 'dispute' | 'credit_note' | 'charge';
+
+const DUPLICATE_KEY_FIELDS_BY_FAMILY: Record<SalesforceRowFamily, readonly StripeIdField[]> = {
+  payout: ['Stripe_Payout_Id__c'],
+  refund: ['Stripe_Refund_Id__c'],
+  dispute: ['Stripe_Dispute_Id__c'],
+  credit_note: ['Stripe_Credit_Note_Id__c'],
+  charge: [
+    'Stripe_Charge_Id__c',
+    'Stripe_Payment_Intent_Id__c',
+    'Stripe_Balance_Transaction_Id__c',
+    'Stripe_Checkout_Session_Id__c',
+  ],
+};
+
 type SalesforceTransactionRecord = {
   Id?: string | null;
   CreatedDate?: string | null;
+  Transaction_Type__c?: string | null;
   Stripe_Charge_Id__c?: string | null;
   Stripe_Payment_Intent_Id__c?: string | null;
   Stripe_Balance_Transaction_Id__c?: string | null;
@@ -573,12 +611,43 @@ type JsforceConnection = {
   };
 };
 
+const hasStripeId = (record: SalesforceTransactionRecord, field: StripeIdField): boolean => {
+  const value = record[field];
+  return typeof value === 'string' && value.trim().length > 0;
+};
+
+/**
+ * Classifies a Transaction__c row by the kind of Stripe object it records. The
+ * type field is authoritative when present; the family-specific id is the fallback
+ * for rows written before the type was populated consistently.
+ */
+const classifySalesforceRow = (record: SalesforceTransactionRecord): SalesforceRowFamily => {
+  const type =
+    typeof record.Transaction_Type__c === 'string'
+      ? record.Transaction_Type__c.trim().toLowerCase()
+      : '';
+
+  if (type === 'payout') return 'payout';
+  if (type === 'refund' || hasStripeId(record, 'Stripe_Refund_Id__c')) return 'refund';
+  if (type === 'dispute' || hasStripeId(record, 'Stripe_Dispute_Id__c')) return 'dispute';
+  if (type === 'credit_note' || hasStripeId(record, 'Stripe_Credit_Note_Id__c')) {
+    return 'credit_note';
+  }
+
+  // A row that carries nothing but a payout id is a legacy payout row whose type was
+  // never set; it must not be compared with charge rows.
+  const populated = STRIPE_ID_FIELDS.filter((field) => hasStripeId(record, field));
+  if (populated.length === 1 && populated[0] === 'Stripe_Payout_Id__c') return 'payout';
+
+  return 'charge';
+};
+
 const detectSalesforceDuplicates = async (
   connection: JsforceConnection,
   startDate?: string,
   endDate?: string
 ): Promise<{ groups: DuplicateGroup[]; checked: number }> => {
-  const fields = ['Id', 'CreatedDate', ...STRIPE_ID_FIELDS].join(', ');
+  const fields = ['Id', 'CreatedDate', 'Transaction_Type__c', ...STRIPE_ID_FIELDS].join(', ');
   const conditions: string[] = [];
   if (startDate) conditions.push(`CreatedDate >= ${startDate}T00:00:00Z`);
   if (endDate) conditions.push(`CreatedDate <= ${endDate}T23:59:59Z`);
@@ -588,24 +657,17 @@ const detectSalesforceDuplicates = async (
   const result = await connection.query<SalesforceTransactionRecord>(soql);
   const records = result?.records ?? [];
 
-  // Group by Stripe ID field value
+  // Group by Stripe ID field value, within each row's family only.
   const byStripeId = new Map<string, DuplicateRecord[]>();
   for (const record of records) {
     const sfId = typeof record.Id === 'string' ? record.Id.trim() : null;
     if (!sfId) continue;
 
-    const populatedStripeIds = STRIPE_ID_FIELDS.map((field) => {
-      const value = record[field];
-      return typeof value === 'string' && value.trim() ? { field, value: value.trim() } : null;
-    }).filter(Boolean) as Array<{ field: (typeof STRIPE_ID_FIELDS)[number]; value: string }>;
+    const family = classifySalesforceRow(record);
 
-    const hasPayoutIdOnly =
-      populatedStripeIds.length === 1 && populatedStripeIds[0].field === 'Stripe_Payout_Id__c';
-
-    for (const field of STRIPE_ID_FIELDS) {
+    for (const field of DUPLICATE_KEY_FIELDS_BY_FAMILY[family]) {
       const value = record[field];
       if (typeof value !== 'string' || !value.trim()) continue;
-      if (field === 'Stripe_Payout_Id__c' && !hasPayoutIdOnly) continue;
       const key = `${field}:${value.trim()}`;
       const existing = byStripeId.get(key) ?? [];
       existing.push({

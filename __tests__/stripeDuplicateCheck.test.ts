@@ -813,6 +813,153 @@ describe('stripeDuplicateCheck', () => {
       );
     });
 
+    it('does NOT flag a refund row that carries its parent charge id', async () => {
+      // refunds.ts stamps the parent charge's ch_/pi_ ids on the refund row for
+      // traceability. Grouping on them would delete the refund as a "duplicate" of
+      // the gift and leave a positive charge with no negative counterpart.
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_charge',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            Transaction_Type__c: 'charge',
+            Stripe_Charge_Id__c: 'ch_parent',
+            Stripe_Payment_Intent_Id__c: 'pi_parent',
+          },
+          {
+            Id: 'sf_refund',
+            CreatedDate: '2024-01-05T08:00:00.000Z',
+            Transaction_Type__c: 'refund',
+            Stripe_Refund_Id__c: 're_child',
+            Stripe_Charge_Id__c: 'ch_parent',
+            Stripe_Payment_Intent_Id__c: 'pi_parent',
+          },
+          {
+            Id: 'sf_dispute',
+            CreatedDate: '2024-01-06T08:00:00.000Z',
+            Transaction_Type__c: 'dispute',
+            Stripe_Dispute_Id__c: 'dp_child',
+            Stripe_Charge_Id__c: 'ch_parent',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({
+        system: 'salesforce',
+        deleteDuplicates: 'true',
+        dryRun: 'false',
+      });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+      expect(mockSfConnection.sobject).not.toHaveBeenCalled();
+    });
+
+    it('classifies a refund row by its refund id when the type field is missing', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_charge',
+            CreatedDate: '2024-01-01T08:00:00.000Z',
+            Stripe_Charge_Id__c: 'ch_parent',
+          },
+          {
+            Id: 'sf_refund',
+            CreatedDate: '2024-01-05T08:00:00.000Z',
+            Stripe_Refund_Id__c: 're_child',
+            Stripe_Charge_Id__c: 'ch_parent',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+    });
+
+    it('does NOT flag recurring renewals that share a subscription or invoice id', async () => {
+      // Every renewal of a recurring gift carries the same sub_ id; the invoice id is
+      // shared by the charge row and any refund of that invoice. Neither identifies one
+      // transaction, so neither may be a grouping key.
+      const renewals = Array.from({ length: 12 }, (_, month) => ({
+        Id: `sf_renewal_${month + 1}`,
+        CreatedDate: `2024-${String(month + 1).padStart(2, '0')}-01T08:00:00.000Z`,
+        Transaction_Type__c: 'charge',
+        Stripe_Charge_Id__c: `ch_month_${month + 1}`,
+        Stripe_Invoice_ID__c: month === 0 ? 'in_shared' : `in_month_${month + 1}`,
+        Stripe_Subscription_Id__c: 'sub_recurring',
+      }));
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          ...renewals,
+          {
+            Id: 'sf_refund_of_first',
+            CreatedDate: '2024-01-15T08:00:00.000Z',
+            Transaction_Type__c: 'refund',
+            Stripe_Refund_Id__c: 're_first',
+            Stripe_Invoice_ID__c: 'in_shared',
+            Stripe_Subscription_Id__c: 'sub_recurring',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({
+        system: 'salesforce',
+        deleteDuplicates: 'true',
+        dryRun: 'false',
+      });
+
+      const result = await handler(req, context);
+      expect(result.status).toBe(200);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(0);
+      expect(mockSfConnection.sobject).not.toHaveBeenCalled();
+    });
+
+    it('still flags two refund rows that share a refund id', async () => {
+      mockSfConnection.query.mockResolvedValue({
+        records: [
+          {
+            Id: 'sf_refund_a',
+            CreatedDate: '2024-01-05T08:00:00.000Z',
+            Transaction_Type__c: 'refund',
+            Stripe_Refund_Id__c: 're_twice',
+            Stripe_Charge_Id__c: 'ch_parent',
+          },
+          {
+            Id: 'sf_refund_b',
+            CreatedDate: '2024-01-05T09:00:00.000Z',
+            Transaction_Type__c: 'refund',
+            Stripe_Refund_Id__c: 're_twice',
+            Stripe_Charge_Id__c: 'ch_parent',
+          },
+        ],
+      });
+
+      const { context } = createContext();
+      const req = createRequest({ system: 'salesforce' });
+
+      const result = await handler(req, context);
+      expect(result.jsonBody.salesforce.duplicateGroups).toHaveLength(1);
+      expect(result.jsonBody.salesforce.duplicateGroups[0].key).toBe(
+        'Stripe_Refund_Id__c:re_twice'
+      );
+    });
+
+    it('selects Transaction_Type__c so rows can be classified', async () => {
+      mockSfConnection.query.mockResolvedValue({ records: [] });
+
+      const { context } = createContext();
+      await handler(createRequest({ system: 'salesforce' }), context);
+
+      const soql = mockSfConnection.query.mock.calls[0][0] as string;
+      expect(soql).toContain('Transaction_Type__c');
+    });
+
     it('applies date range to Salesforce query', async () => {
       mockSfConnection.query.mockResolvedValue({ records: [] });
 

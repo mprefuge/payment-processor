@@ -421,6 +421,20 @@ const createDefaultDependencies = (): StripeWebhookDependencies => {
     );
   }
 
+  // TEST_MODE=true replaces the Stripe client with a mock whose constructEvent
+  // JSON-parses the body without checking the signature (see src/stripe/mock.ts),
+  // which would let anyone holding the function URL post unverified events into
+  // the ledger. It exists for local development only; refuse it inside Azure the
+  // same way DISABLE_AZURE_TABLES is refused above.
+  if (env.testMode && process.env.WEBSITE_INSTANCE_ID) {
+    throw new Error(
+      'TEST_MODE=true cannot be used in Azure deployments. ' +
+        'It swaps in a mock Stripe client that skips webhook signature verification, ' +
+        'which is only safe for local development. Remove TEST_MODE from your ' +
+        'Azure Function App configuration.'
+    );
+  }
+
   return {
     stripe: createStripeServices(),
     idempotencyStore:
