@@ -241,6 +241,77 @@ const resolveCompletedCheckoutSessionStatus = (
   }
 };
 
+/**
+ * The payment intent behind a subscription checkout's FIRST instalment.
+ *
+ * A subscription-mode Checkout Session has `payment_intent: null` -- the intent belongs to
+ * the invoice Stripe raises for the first period, not to the session. So the row this
+ * handler writes carried a session id, a subscription id and nothing else identifying an
+ * instalment.
+ *
+ * Nothing could then reach that row. When the first instalment settled, `invoice.paid` ->
+ * `updatePaymentIntentStatus` upserts on `stripe_payment_intent_id__c`, and its probes look
+ * for a charge, payment intent, checkout session or balance transaction id; the row had
+ * none. The subscription id is deliberately never probed, because it is shared by every
+ * renewal and matching on it collapses a donor's whole giving history. The
+ * contact/amount/date fallback needs `Received_At__c`, which the row also lacked. So a
+ * SECOND Transaction__c was opened for month one: one row stuck on Pending, one paid.
+ *
+ * Reading the first invoice's payment intent here and stamping it on the row fixes that
+ * through the identity the rest of the system already uses, rather than by adding another
+ * matching rule. It cannot reopen the series collapse: month two carries a different
+ * payment intent, so it still gets its own row.
+ *
+ * Best effort on purpose -- if Stripe has not attached the invoice yet, the gift is still
+ * recorded exactly as it is today.
+ */
+const resolveSubscriptionFirstPaymentIntentId = async (
+  context: HttpContext,
+  event: Stripe.Event,
+  deps: StripeWebhookDependencies,
+  session: Stripe.Checkout.Session
+): Promise<string | null> => {
+  if (normalizeStripeId(session.payment_intent)) {
+    return null; // a payment-mode session already names its intent
+  }
+
+  const subscriptionId = normalizeStripeId(session.subscription);
+  if (!subscriptionId) {
+    return null;
+  }
+
+  try {
+    const stripe = ensureStripeClient(deps, event);
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ['latest_invoice.payment_intent'],
+    });
+    const invoice = subscription.latest_invoice;
+    if (invoice && typeof invoice === 'object') {
+      const paymentIntentId = normalizeStripeId((invoice as Stripe.Invoice).payment_intent ?? null);
+      if (paymentIntentId) {
+        context.log('[StripeWebhook] Linked subscription checkout to its first instalment', {
+          sessionId: session.id,
+          subscriptionId,
+          paymentIntentId,
+        });
+        return paymentIntentId;
+      }
+    }
+    context.log('[StripeWebhook] Subscription checkout has no payment intent yet', {
+      sessionId: session.id,
+      subscriptionId,
+    });
+  } catch (error) {
+    context.log('[StripeWebhook] Failed to resolve the subscription first payment intent', {
+      sessionId: session.id,
+      subscriptionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return null;
+};
+
 export const handleCheckoutSessionCompleted = async (
   context: HttpContext,
   event: Stripe.Event,
@@ -259,9 +330,19 @@ export const handleCheckoutSessionCompleted = async (
 
   const status = resolveCompletedCheckoutSessionStatus(session);
 
+  const subscriptionPaymentIntentId = await resolveSubscriptionFirstPaymentIntentId(
+    context,
+    event,
+    deps,
+    session
+  );
+
   const transaction: TransactionUpsertDTO = {
     ...buildCheckoutSessionTransaction(session, status, undefined, event.id, event.livemode),
     ...(campaignId ? { campaign__c: campaignId } : {}),
+    ...(subscriptionPaymentIntentId
+      ? { stripe_payment_intent_id__c: subscriptionPaymentIntentId }
+      : {}),
   };
 
   context.log('[StripeWebhook] Upserting transaction for checkout session', {

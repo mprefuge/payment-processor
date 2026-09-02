@@ -13,6 +13,7 @@ vi.mock('../src/config/env', () => ({
 }));
 
 import { handlePayoutEvent } from '../src/stripe/handlers/payouts';
+import { logger } from '../src/lib/logger';
 import type {
   HttpContext,
   PayoutAccountingAdapter,
@@ -626,6 +627,45 @@ describe('handlePayoutEvent', () => {
     );
 
     expect(upsertDeposit).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows a failed payout upsert so Stripe redelivers instead of losing it', async () => {
+    // The handler used to catch this, log it at Information severity and return normally.
+    // The webhook then answered 200, the event was marked processed, and the payout had
+    // no row and no second chance -- 32 of 94 payouts went missing that way.
+    const context = createContext();
+    const payout = createPayout({ amount: 9_480 });
+    const chargeTxn = createChargeTransaction({
+      id: 'txn_charge',
+      gross: 10_000,
+      fee: 320,
+      source: 'ch_123',
+    });
+    const { deps, salesforce } = createDeps({ transactionPages: [[chargeTxn]] });
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    salesforce.upsertTransactionByExternalId.mockRejectedValue(
+      new Error('UNABLE_TO_LOCK_ROW: unable to obtain exclusive access to this record')
+    );
+
+    const event = {
+      id: 'evt_lost_payout',
+      type: 'payout.paid',
+      data: { object: payout },
+    } as Stripe.Event;
+
+    await expect(handlePayoutEvent(context, event, deps)).rejects.toThrow('UNABLE_TO_LOCK_ROW');
+
+    // Raised at Error severity and tagged, so a severity >= Error query can find it.
+    expect(errorSpy).toHaveBeenCalled();
+    const [, meta] = errorSpy.mock.calls[0] as [string, Record<string, unknown>];
+    expect(meta.alert).toBe('payout_upsert_failed');
+    expect(meta.payoutId).toBe('po_123');
+
+    // The event must NOT be recorded as handled, or the redelivery would be skipped.
+    expect(deps.idempotencyStore.markProcessed).not.toHaveBeenCalledWith(
+      expect.stringContaining('evt_lost_payout')
+    );
+    errorSpy.mockRestore();
   });
 
   it('marks payout for review when canceled or failed', async () => {

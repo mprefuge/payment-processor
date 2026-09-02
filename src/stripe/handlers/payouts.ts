@@ -9,6 +9,9 @@ import type {
   UpsertPayoutDepositInput,
 } from '../types';
 import { normalizeStripeId, timestampToDate, toSafeInteger } from '../utils';
+// Genuine failures log through `logger.error`, not `context.log`: context.log maps to
+// Information severity, so a severity >= Error query cannot see them.
+import { logger } from '../../lib/logger';
 import { ensureStripeClient } from './common';
 import env from '../../config/env';
 import { isTestModeAccountingSkipped, recordTestModeAccountingSkip } from '../testModeAccounting';
@@ -102,6 +105,27 @@ const normalizeCurrency = (currency: unknown, fallback: string | null): string =
 const hasRequiredPayoutTransactionFields = (status: unknown, amountGross: unknown): boolean =>
   status != null && status !== '' && amountGross != null;
 
+/**
+ * Write the payout's Transaction__c, and let a failure be seen.
+ *
+ * This used to catch every error, write it to `context.log`, and return normally. Both
+ * halves of that lost payouts:
+ *
+ *   - Returning normally told the router the event had been handled, so the webhook
+ *     answered 200 and `markProcessed` recorded the event as done. Stripe never
+ *     redelivered, and the payout had no row and no second chance. A third of the
+ *     account's payouts -- 32 of 94 between March and August 2026, $8,282.03 -- were
+ *     missing from Salesforce, and nothing anywhere said so.
+ *   - `context.log` maps to Information severity, so an App Insights query filtered on
+ *     severity >= Error -- the one you reach for when money has not landed -- could not
+ *     see the failure even after the fact. `paymentIntents` documents this same trap.
+ *
+ * A Salesforce write that failed is exactly the transient case the webhook processor's
+ * 503-and-retry path exists for, so the error is rethrown: the lock releases, the event
+ * is NOT marked processed, and Stripe redelivers for ~3 days. `upsertTransactionByExternalId`
+ * resolves an existing payout row before writing, so a redelivery updates rather than
+ * duplicates.
+ */
 const upsertPayoutTransaction = async (
   context: HttpContext,
   salesforce: Awaited<ReturnType<StripeWebhookDependencies['getSalesforceSvc']>>,
@@ -112,30 +136,36 @@ const upsertPayoutTransaction = async (
   failureMessage: string,
   failurePayload: Record<string, unknown>
 ): Promise<void> => {
-  try {
-    if (
-      !hasRequiredPayoutTransactionFields(
-        payoutTransaction.status__c,
-        payoutTransaction.amount_gross__c
-      )
-    ) {
-      context.log('[StripeWebhook] Skipping transaction upsert due to missing required fields', {
-        payoutId,
-        status: payoutTransaction.status__c,
-        amountGross: payoutTransaction.amount_gross__c,
-        payoutTransaction,
-      });
-      return;
-    }
+  if (
+    !hasRequiredPayoutTransactionFields(
+      payoutTransaction.status__c,
+      payoutTransaction.amount_gross__c
+    )
+  ) {
+    // Loud, but deliberately not rethrown: a redelivery cannot supply an amount the
+    // payout never carried, so retrying for three days would only repeat the gap.
+    logger.error('[StripeWebhook] Payout is missing the fields needed to record it', {
+      alert: 'payout_missing_required_fields',
+      payoutId,
+      status: payoutTransaction.status__c,
+      amountGross: payoutTransaction.amount_gross__c,
+    });
+    return;
+  }
 
+  try {
     await salesforce.upsertTransactionByExternalId(payoutTransaction, 'stripe_payout_id__c');
-    context.log(successMessage, successPayload);
   } catch (error) {
-    context.log(failureMessage, {
+    logger.error(failureMessage, {
       ...failurePayload,
+      alert: 'payout_upsert_failed',
+      payoutId,
       error: error instanceof Error ? error.message : String(error),
     });
+    throw error instanceof Error ? error : new Error(String(error));
   }
+
+  context.log(successMessage, successPayload);
 };
 
 const listPayoutTransactions = async (
