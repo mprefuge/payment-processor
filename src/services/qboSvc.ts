@@ -13,6 +13,7 @@ import {
   TEST_MODE_CLEANUP_TAG,
 } from '../lib/testArtifactTagging';
 import { trimToNull as toTrimmed } from '../stripe/customerIdentity';
+import { resolveCategoryProductService } from './qbo/categoryProductService';
 import tokenManager from './qbo/qboTokenManager';
 
 const QBO_BASE_URL: Record<'sandbox' | 'production', string> = {
@@ -4330,6 +4331,7 @@ const postChargeAsSalesReceipt = async (input: {
   }
 
   const lineOverrides = getSalesReceiptLineOverrides(stripe);
+  const category = getCheckoutCategory(stripe?.checkoutSession);
 
   // The Product/Service on the line is NOT the Checkout Session's `metadata.transactionType`.
   //
@@ -4339,11 +4341,16 @@ const postChargeAsSalesReceipt = async (input: {
   // `transactionType: ... || 'Payment'`, so on the donation-form path it always won this
   // chain — and ensureSalesReceiptItem then created a "Payment" item to match.
   //
-  // The item now comes from an explicit Stripe metadata override, else the configured default
-  // (QBO_DEFAULT_SALES_ITEM, "Stripe Transaction"). `transactionType` keeps its honest job of
-  // describing the line, below.
+  // The item comes from an explicit Stripe metadata override, else the Category the donor
+  // picked on the donation form (`metadata.category`, mapped through an allowlist — see
+  // categoryProductService.ts for why it is an allowlist and not a passthrough), else the
+  // configured default (QBO_DEFAULT_SALES_ITEM, "Stripe Transaction"). `transactionType` keeps
+  // its honest job of describing the line, below.
   const revenueItemName =
-    lineOverrides.productService ?? toTrimmed(env.accounting.defaultSalesItem) ?? null;
+    lineOverrides.productService ??
+    resolveCategoryProductService(category) ??
+    toTrimmed(env.accounting.defaultSalesItem) ??
+    null;
   if (!revenueItemName) {
     throw new Error(
       'A QuickBooks item is required for sales receipts: set QBO_DEFAULT_SALES_ITEM or supply a qbo_product_service override.'
@@ -4367,12 +4374,13 @@ const postChargeAsSalesReceipt = async (input: {
   });
 
   // Unchanged: the human-readable description still reflects what the donor picked on the
-  // form. Only the ItemRef stopped being derived from it.
+  // form. Only the ItemRef stopped being derived from it. Note this deliberately does NOT
+  // consult the Category→item map: the description already names the Category itself, and
+  // routing the mapped item through here would restate it ("General Giving - General Giving").
   const transactionTypeName =
     lineOverrides.productService ??
     getCheckoutTransactionType(stripe?.checkoutSession) ??
     revenueItemName;
-  const category = getCheckoutCategory(stripe?.checkoutSession);
   const stripeDescription = getStripeLineDescription(stripe);
   const description =
     lineOverrides.description ??

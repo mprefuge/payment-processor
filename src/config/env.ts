@@ -72,6 +72,10 @@ export interface EnvConfig {
      * its own income account instead of being folded into gift revenue. Resolution is
      * non-creating: if the item does not exist in the company file the fee line silently
      * falls back to the revenue item (see postChargeAsSalesReceipt).
+     *
+     * Defaults to `Stripe Fee` — the item the books actually use for the "Processing Fee
+     * Coverage" line. Not to be confused with `feeItem` (`Stripe Fees`), which carries the
+     * negative processor-fee line and must book to the fee EXPENSE account.
      */
     feeCoverageItem: string;
     /**
@@ -292,7 +296,7 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
 
   const feeCoverageItem = resolveEnv('QBO_FEE_COVERAGE_ITEM', {
     fallbackNames: ['ACCOUNTING_FEE_COVERAGE_ITEM'],
-    defaultValue: 'Stripe Fee Coverage',
+    defaultValue: 'Stripe Fee',
   });
 
   const feeItem = resolveEnv('QBO_FEE_ITEM', {
