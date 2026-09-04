@@ -63,7 +63,8 @@ QuickBooks becomes operationally required when `ACCOUNTING_SYNC_ENABLED=true`.
 | `QBO_ACCOUNT_FEES` | `ACCOUNTING_STRIPE_FEE_ACCOUNT` | Recommended | Defaults to `Stripe Fees`. |
 | `QBO_ACCOUNT_REFUNDS` | `ACCOUNTING_REFUNDS_ACCOUNT` | Recommended | Defaults to `Refunds`. |
 | `QBO_ACCOUNT_DISPUTES` | `ACCOUNTING_DISPUTE_LOSS_ACCOUNT` | Recommended | Defaults to `Dispute Losses`. |
-| `QBO_DEFAULT_SALES_ITEM` | `ACCOUNTING_DEFAULT_SALES_ITEM` | No | Defaults to `Stripe Transaction`. Prefer an explicit `Name|Id` item reference in production. |
+| `QBO_DEFAULT_SALES_ITEM` | `ACCOUNTING_DEFAULT_SALES_ITEM` | No | Defaults to `Stripe Transaction`. Prefer an explicit `Name|Id` item reference in production. Only the **fallback**: the revenue line's Product/Service is a `qbo_product_service` override first, then the donation form's Category mapped through `src/services/qbo/categoryProductService.ts`, then this. |
+| `QBO_FEE_COVERAGE_ITEM` | `ACCOUNTING_FEE_COVERAGE_ITEM` | No | Defaults to `Stripe Fee`. Product/Service carrying the donor-covered "Processing Fee Coverage" line on a sales receipt. The lookup never creates it — if the item is missing, the coverage line falls back to the revenue item. Distinct from `QBO_FEE_ITEM`. |
 | `QBO_FEE_ITEM` | `ACCOUNTING_STRIPE_FEE_ITEM` | No | Defaults to `Stripe Fees`. Product/Service carrying the negative processor-fee line on a sales receipt. The item must exist and its own `IncomeAccountRef` must be `QBO_ACCOUNT_FEES` — the lookup never creates it, and on any mismatch the fee is posted as the paired `FEE-` journal entry instead. See `docs/QBO_POSTING_STRATEGIES.md`. |
 | `ACCOUNTING_AUTOCREATE_ACCOUNTS` | - | No | Defaults to `false`. Keep this disabled in production so missing mappings fail closed instead of creating new ledger accounts implicitly. |
 

@@ -22,6 +22,7 @@ import {
   getStripeLineDescription,
   type StripeCustomerContext,
 } from '../qboSvc';
+import { resolveCategoryProductService } from '../qbo/categoryProductService';
 import {
   findCheckoutSessionForPaymentIntent,
   normalizeStripeId,
@@ -120,13 +121,17 @@ const buildSalesReceiptDocuments = (input: {
   const { grossCents, feeCents, memo, date, chargeId, stripeContext } = input;
 
   const lineOverrides = getSalesReceiptLineOverrides(stripeContext);
+  const category = getCheckoutCategory(stripeContext.checkoutSession);
 
-  // Mirrors postChargeAsSalesReceipt: the item is the explicit metadata override or the
-  // configured default, never the Checkout Session's `metadata.transactionType` (a
-  // donation-form concept that is not a QuickBooks item name). transactionType still shapes
-  // the description below.
+  // Mirrors postChargeAsSalesReceipt: the item is the explicit metadata override, else the
+  // donor's Category mapped through the allowlist, else the configured default — never the
+  // Checkout Session's `metadata.transactionType` (a donation-form concept that is not a
+  // QuickBooks item name). transactionType still shapes the description below.
   const revenueItemName =
-    lineOverrides.productService ?? env.accounting.defaultSalesItem?.trim() ?? '';
+    lineOverrides.productService ??
+    resolveCategoryProductService(category) ??
+    env.accounting.defaultSalesItem?.trim() ??
+    '';
   if (!revenueItemName) {
     throw new Error(
       'No QuickBooks item could be determined: neither qbo_product_service metadata ' +
@@ -138,7 +143,6 @@ const buildSalesReceiptDocuments = (input: {
     lineOverrides.productService ??
     getCheckoutTransactionType(stripeContext.checkoutSession) ??
     revenueItemName;
-  const category = getCheckoutCategory(stripeContext.checkoutSession);
   const description =
     lineOverrides.description ??
     getStripeLineDescription(stripeContext) ??
