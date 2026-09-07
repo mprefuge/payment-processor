@@ -405,6 +405,13 @@ export interface PostChargeToQboInput {
    * posts the receipt unclassed rather than failing it.
    */
   campaignClass?: string | null;
+  /**
+   * The linked Campaign's `Product_Service_QBO__c` — the QuickBooks Product/Service the
+   * designation the donor picked maps to. Loses to an explicit `qbo_product_service` in Stripe
+   * metadata and wins over `QBO_DEFAULT_SALES_ITEM`. `"Uncategorized"` means the campaign has
+   * no mapping and is treated as absent, so the receipt falls back to the default item.
+   */
+  campaignProductService?: string | null;
   cleanupTag?: string;
   options?: PostOptions;
 }
@@ -2207,6 +2214,26 @@ export const getStripeLineDescription = (
   return null;
 };
 
+/**
+ * The Campaign picklist's "no mapping yet" value, and the field's default.
+ *
+ * It is a real selectable value in Salesforce on purpose — it lets the Financial campaign list
+ * distinguish "reviewed, nothing to map" from "never touched" — but it is NOT the name of a
+ * QuickBooks item. Handing it to `resolveRevenueItemReference` would create an "Uncategorized"
+ * service pointed at the generic revenue account, which is the exact failure that minted the
+ * "Payment" item. Every campaign-sourced item name goes through `toMappedProductService` first.
+ */
+export const UNMAPPED_PRODUCT_SERVICE = 'Uncategorized';
+
+/** A campaign's item mapping, or null when it has none. Case-insensitive on the sentinel. */
+const toMappedProductService = (value: string | null | undefined): string | null => {
+  const trimmed = toTrimmed(value ?? null);
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.toLowerCase() === UNMAPPED_PRODUCT_SERVICE.toLowerCase() ? null : trimmed;
+};
+
 const resolveRevenueItemReference = async (
   configuredValue: string,
   context: QuickBooksRequestContext
@@ -2490,7 +2517,9 @@ export const buildSalesReceipt = ({
 
     // The coverage gets its own Product/Service when the caller resolved one, so the extra
     // the donor chose to pay does not land in the same income account as the gift itself.
-    // Falling back to the revenue item keeps the receipt postable when that item is missing.
+    // Callers resolve a neutral default before giving up (see postChargeAsSalesReceipt); this
+    // last-resort share of the revenue item only keeps the receipt postable when even that
+    // could not be resolved.
     const coverFeesItem = toTrimmed(coverFeesItemRef) ?? itemReference;
 
     lines.push({
@@ -4265,6 +4294,7 @@ const postChargeAsSalesReceipt = async (input: {
   customer?: SalesReceiptCustomerDetails | null;
   classRef?: string | null;
   campaignClass?: string | null;
+  campaignProductService?: string | null;
   options?: PostOptions;
 }): Promise<PostChargeToQboResult> => {
   const {
@@ -4276,6 +4306,7 @@ const postChargeAsSalesReceipt = async (input: {
     customer,
     classRef,
     campaignClass,
+    campaignProductService,
     options,
   } = input;
   const chargeId = stripe?.charge?.id ?? null;
@@ -4339,11 +4370,19 @@ const postChargeAsSalesReceipt = async (input: {
   // `transactionType: ... || 'Payment'`, so on the donation-form path it always won this
   // chain — and ensureSalesReceiptItem then created a "Payment" item to match.
   //
-  // The item now comes from an explicit Stripe metadata override, else the configured default
-  // (QBO_DEFAULT_SALES_ITEM, "Stripe Transaction"). `transactionType` keeps its honest job of
-  // describing the line, below.
+  // The item comes from an explicit Stripe metadata override, else the linked Campaign's
+  // `Product_Service_QBO__c` — the designation the donor picked on the form, mapped to a
+  // QuickBooks item by an accountant — else the configured default (QBO_DEFAULT_SALES_ITEM,
+  // "Stripe Transaction"). `transactionType` keeps its honest job of describing the line, below.
+  //
+  // The campaign tier is what stops every receipt reading "Stripe Transaction". It sits BELOW
+  // the metadata override so a caller that names an item still wins, and ABOVE the default so
+  // an unmapped campaign degrades to exactly today's behaviour rather than failing the gift.
   const revenueItemName =
-    lineOverrides.productService ?? toTrimmed(env.accounting.defaultSalesItem) ?? null;
+    lineOverrides.productService ??
+    toMappedProductService(campaignProductService) ??
+    toTrimmed(env.accounting.defaultSalesItem) ??
+    null;
   if (!revenueItemName) {
     throw new Error(
       'A QuickBooks item is required for sales receipts: set QBO_DEFAULT_SALES_ITEM or supply a qbo_product_service override.'
@@ -4392,8 +4431,7 @@ const postChargeAsSalesReceipt = async (input: {
   // Dedicated Product/Service for the donor-covered fee, resolved WITHOUT creating anything.
   // `findCoverFeesItemReference` is non-creating on purpose: the item does not exist in every
   // company file, and routing this through ensureSalesReceiptItem would write a new item
-  // pointed at the generic revenue account. A miss is expected and harmless — warn, and let
-  // the fee line keep sharing the revenue item exactly as it did before.
+  // pointed at the generic revenue account. A miss is expected — warn, and fall back below.
   let coverFeesItemRef: string | undefined;
   if (coverFeesAmountCents > 0) {
     const feeCoverageItemName = toTrimmed(env.accounting.feeCoverageItem);
@@ -4419,12 +4457,45 @@ const postChargeAsSalesReceipt = async (input: {
         });
       } else if (!coverFeesItemRef) {
         logger.warn(
-          '[QBO] Fee-coverage product/service not found in QuickBooks; fee line falls back to the revenue item',
+          '[QBO] Fee-coverage product/service not found in QuickBooks; fee line falls back to the default item',
           {
             feeCoverageItemName,
             revenueItemName,
           }
         );
+      }
+    }
+
+    // A processing fee is not program revenue.
+    //
+    // buildSalesReceipt's own fallback is this receipt's revenue item, and that used to be
+    // harmless because the revenue item was always QBO_DEFAULT_SALES_ITEM — a generic bucket.
+    // Since the line takes the linked Campaign's mapping, it is a specific designation, and an
+    // unresolved coverage line riding it would overstate that program's income by the fee.
+    // Resolve the configured default explicitly instead: still a neutral bucket, still findable
+    // and reclassifiable, and it restores what the coverage line landed on before the campaign
+    // tier existed. Failing that — no default configured, or it will not resolve — the receipt
+    // still posts, sharing the revenue item as it always did; the gift is never worth losing
+    // over where its fee sits.
+    if (!coverFeesItemRef) {
+      const fallbackItemName = toTrimmed(env.accounting.defaultSalesItem);
+      if (fallbackItemName && fallbackItemName !== revenueItemName) {
+        try {
+          const fallbackItem = await resolveRevenueItemReference(fallbackItemName, context);
+          coverFeesItemRef = JSON.stringify({
+            value: fallbackItem.value,
+            name: fallbackItem.name ?? fallbackItemName,
+          });
+        } catch (error) {
+          logger.warn(
+            '[QBO] Default item could not be resolved for the fee-coverage line; it shares the revenue item',
+            {
+              fallbackItemName,
+              revenueItemName,
+              error: error instanceof Error ? error.message : String(error),
+            }
+          );
+        }
       }
     }
   }
@@ -4753,6 +4824,7 @@ export const postChargeToQbo = async ({
   customer,
   classRef,
   campaignClass,
+  campaignProductService,
   cleanupTag,
   options,
 }: PostChargeToQboInput): Promise<PostChargeToQboResult> => {
@@ -4774,6 +4846,7 @@ export const postChargeToQbo = async ({
       customer,
       classRef,
       campaignClass,
+      campaignProductService,
       options,
     });
   }

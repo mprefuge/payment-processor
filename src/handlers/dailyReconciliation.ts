@@ -454,8 +454,16 @@ type SfTransactionRow = {
   } | null;
   /** Related Account — used for QBO memo display name when Contact is absent */
   Account__r?: { Name?: string | null } | null;
-  /** Related Campaign — appended to QBO memo; Class__c is used to resolve QBO class */
-  Campaign__r?: { Name?: string | null; Class__c?: string | null } | null;
+  /**
+   * Related Campaign — appended to QBO memo; Class__c resolves the QBO class and
+   * Product_Service_QBO__c the QBO item for Stripe-sourced rows, which carry no item of
+   * their own (Transaction__c.Product_Service_QBO__c is the manual entry's field).
+   */
+  Campaign__r?: {
+    Name?: string | null;
+    Class__c?: string | null;
+    Product_Service_QBO__c?: string | null;
+  } | null;
   /** QBO class ID — used to set ClassRef on revenue lines for fund-based reporting */
   QBO_Class_Id__c?: string | null;
   /** QBO class name — paired with QBO_Class_Id__c to form "Name|Id" classRef string */
@@ -476,12 +484,12 @@ const queryTransactionsForRange = async (
 
   // Include records where Received_At__c is in range OR where it is null (manual entries)
   // and CreatedDate is in range — SOQL null comparisons use = null, not IS NULL.
-  const buildSoql = (includeCampaignClass: boolean): string =>
+  const buildSoql = (includeCampaignFields: boolean): string =>
     `SELECT Id, Name, Stripe_Charge_Id__c, Stripe_Payment_Intent_Id__c, ` +
     `Stripe_Balance_Transaction_Id__c, Stripe_Refund_Id__c, Stripe_Payout_Id__c, ` +
     `Stripe_Dispute_Id__c, Stripe_Customer_Id__c, Posted_to_QBO__c, QBO_Doc_Type__c, QBO_Doc_Id__c, ` +
     `Amount_Gross__c, Amount_Net__c, Received_At__c, transaction_type__c, Memo__c, Description__c, Product_Service_QBO__c, Reference_Number__c, CreatedDate, ` +
-    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name${includeCampaignClass ? ', Campaign__r.Class__c' : ''}, ` +
+    `Contact__r.FirstName, Contact__r.LastName, Contact__r.Email, Account__r.Name, Campaign__r.Name${includeCampaignFields ? ', Campaign__r.Class__c, Campaign__r.Product_Service_QBO__c' : ''}, ` +
     `QBO_Class_Id__c, QBO_Class_Name__c, Billing_Email__c ` +
     `FROM Transaction__c ` +
     `WHERE (` +
@@ -505,15 +513,18 @@ const queryTransactionsForRange = async (
     return normalizeResult(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const looksLikeMissingCampaignClass =
+    const looksLikeMissingCampaignField =
       message.includes('Campaign__r.Class__c') ||
-      (message.toLowerCase().includes('no such column') && message.includes('Class__c'));
-    if (!looksLikeMissingCampaignClass) {
+      message.includes('Campaign__r.Product_Service_QBO__c') ||
+      (message.toLowerCase().includes('no such column') &&
+        (message.includes('Class__c') || message.includes('Product_Service_QBO__c')));
+    if (!looksLikeMissingCampaignField) {
       throw error;
     }
 
     logger.warn(
-      '[DailyReconciliation] Campaign__r.Class__c unavailable; retrying query without class field',
+      '[DailyReconciliation] A Campaign__r mapping column is unavailable; retrying query ' +
+        'without the campaign class and product/service fields',
       {
         error: message,
       }
@@ -1699,6 +1710,11 @@ const repairMissingSfToQbo = async (
             // very transactions it exists to fix -- unclassed. Same class, same line.
             classRef: classRefStr,
             campaignClass: sfRow.Campaign__r?.Class__c?.trim() || null,
+            // Same omission the class had: the campaign's item was never handed to the poster,
+            // so this repair path re-posted the transactions it exists to fix onto the default
+            // item. `productServiceName` above is the MANUAL entry's own field and stays on the
+            // manual branches; a Stripe row takes its item from the campaign.
+            campaignProductService: sfRow.Campaign__r?.Product_Service_QBO__c?.trim() || null,
           });
           context.log('[DailyReconciliation] Posted Stripe charge to QBO', {
             sfId,

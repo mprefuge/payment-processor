@@ -1742,6 +1742,186 @@ describe('postChargeToQbo', () => {
     expect(feeJournalBody.Line.map((line: any) => line.Amount)).toEqual([3, 3]);
   });
 
+  it("itemises the line as the linked Campaign's Product/Service when one is mapped", async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.accounting.defaultSalesItem = 'Stripe Transaction';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: { Item: { Id: '77', Name: 'TNND Mission Experience' } } }, // Item lookup
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-campaign-item' } },
+      { QueryResponse: {} }, // Duplicate check for fee journal entry
+      { JournalEntry: { Id: 'fee-je-campaign-item' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    const result = await postChargeToQbo({
+      gross: 50_000,
+      fee: 300,
+      memo: 'TNND deposit',
+      date: new Date('2026-08-26'),
+      customer: { ref: { value: '200', name: 'Hope Hickory Church' } },
+      campaignProductService: 'TNND Mission Experience',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    expect(result).toEqual({ qboId: 'sr-campaign-item', type: 'sales-receipt' });
+
+    // The campaign's mapping is looked up by name, and found -- so nothing is created. An
+    // item POST here would mean a new QuickBooks service pointed at the generic revenue
+    // account, which is the failure mode this tier exists to avoid.
+    expect(
+      requests.some((request) => request.url.includes('/item') && request.init?.method === 'POST')
+    ).toBe(false);
+    const itemLookup = requests.find((request) => request.url.includes('/query?query='));
+    expect(decodeURIComponent(itemLookup?.url ?? '')).toContain(
+      "from Item where Name = 'TNND Mission Experience'"
+    );
+
+    const salesReceiptBody = JSON.parse(
+      (requests.find((request) => request.url.includes('salesreceipt'))?.init?.body ??
+        '{}') as string
+    );
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: '77',
+      name: 'TNND Mission Experience',
+    });
+  });
+
+  it('treats the campaign\'s "Uncategorized" as no mapping and falls back to the default item', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    // Carries its own Id, so a fallback to the default needs no lookup at all -- which is how
+    // this test proves "Uncategorized" never reached QuickBooks as a name.
+    baseEnv.accounting.defaultSalesItem = 'Stripe Transaction|QBO_ITEM_REVENUE';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-uncategorized' } },
+      { QueryResponse: {} }, // Duplicate check for fee journal entry
+      { JournalEntry: { Id: 'fee-je-uncategorized' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 300,
+      memo: 'Unmapped campaign',
+      date: new Date('2026-08-26'),
+      customer: { ref: { value: '200', name: 'Donor Example' } },
+      campaignProductService: 'Uncategorized',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    // Never looked up, never created: the sentinel is not a QuickBooks item name.
+    expect(
+      requests.some((request) => decodeURIComponent(request.url).includes('Uncategorized'))
+    ).toBe(false);
+
+    const salesReceiptBody = JSON.parse(
+      (requests.find((request) => request.url.includes('salesreceipt'))?.init?.body ??
+        '{}') as string
+    );
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: 'QBO_ITEM_REVENUE',
+    });
+  });
+
+  it('lets an explicit qbo_product_service in Stripe metadata beat the campaign mapping', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    baseEnv.accounting.defaultSalesItem = 'Stripe Transaction|QBO_ITEM_REVENUE';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-metadata-wins' } },
+      { QueryResponse: {} }, // Duplicate check for fee journal entry
+      { JournalEntry: { Id: 'fee-je-metadata-wins' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 300,
+      memo: 'Metadata override',
+      date: new Date('2026-08-26'),
+      customer: { ref: { value: '200', name: 'Donor Example' } },
+      stripe: buildStripeContext(
+        {},
+        { metadata: { qbo_product_service: 'Event Revenue|QBO_ITEM_EVENT' } }
+      ),
+      campaignProductService: 'TNND Mission Experience',
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    // The campaign name is never even looked up: the caller named an item, so it wins outright.
+    expect(
+      requests.some((request) =>
+        decodeURIComponent(request.url).includes('TNND Mission Experience')
+      )
+    ).toBe(false);
+
+    const salesReceiptBody = JSON.parse(
+      (requests.find((request) => request.url.includes('salesreceipt'))?.init?.body ??
+        '{}') as string
+    );
+    expect(salesReceiptBody.Line[0].SalesItemLineDetail.ItemRef).toMatchObject({
+      value: 'QBO_ITEM_EVENT',
+    });
+  });
+
+  it('lands an unresolvable fee-coverage line on the default item, never the campaign item', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    // Carries its own Id, so resolving the neutral fallback costs no lookup — which also makes
+    // the request list below an exact record of what was searched for.
+    baseEnv.accounting.defaultSalesItem = 'Stripe Transaction|QBO_ITEM_REVENUE';
+    baseEnv.accounting.feeCoverageItem = 'Stripe Fee';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: { Item: { Id: '77', Name: 'TNND Mission Experience' } } }, // Campaign item
+      { QueryResponse: {} }, // Fee-coverage lookup MISSES — "Stripe Fee" is not in this file
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-fee-fallback' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Covered fee on a mapped campaign',
+      date: new Date('2026-08-26'),
+      customer: { ref: { value: '200', name: 'Donor Example' } },
+      campaignProductService: 'TNND Mission Experience',
+      stripe: buildStripeContext(
+        {},
+        { metadata: { cover_fees: 'true', cover_fees_amount: '300' } }
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const salesReceiptBody = JSON.parse(
+      (requests.find((request) => request.url.includes('salesreceipt'))?.init?.body ??
+        '{}') as string
+    );
+    const [giftLine, coverageLine] = salesReceiptBody.Line;
+
+    // The gift keeps the campaign's designation...
+    expect(giftLine.SalesItemLineDetail.ItemRef).toMatchObject({
+      value: '77',
+      name: 'TNND Mission Experience',
+    });
+
+    // ...and the covered fee does NOT. Riding the campaign item here would overstate that
+    // program's income by the fee, which is what made this fallback worth pinning.
+    expect(coverageLine.Description).toBe('Processing Fee Coverage');
+    expect(coverageLine.Amount).toBe(3);
+    expect(coverageLine.SalesItemLineDetail.ItemRef).toMatchObject({ value: 'QBO_ITEM_REVENUE' });
+    expect(coverageLine.SalesItemLineDetail.ItemRef.value).not.toBe('77');
+
+    // The coverage item was looked up and missed; nothing was created to paper over it.
+    expect(
+      requests.some((request) => request.url.includes('/item') && request.init?.method === 'POST')
+    ).toBe(false);
+  });
+
   it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
     baseEnv.accounting.accounts.autoCreate = false;
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';

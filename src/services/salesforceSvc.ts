@@ -247,11 +247,19 @@ export interface SalesforceSvc {
  * `qboClassId`/`qboClassName` are an explicit override an accountant has set on the record;
  * `campaignClass` is the QuickBooks FullyQualifiedName path carried on the linked
  * Campaign (`Campaign__r.Class__c`), which is populated for ~98% of transactions.
+ *
+ * `campaignProductService` is the same idea one column over: the QuickBooks Product/Service
+ * the linked Campaign (`Campaign__r.Product_Service_QBO__c`) says its gifts belong on. The
+ * Campaign is the designation the donor picked on the form -- `resolveCampaignId` creates one
+ * per drop-down value -- so it, not the Transaction__c, is where the Stripe path reads the
+ * item from. `Transaction__c.Product_Service_QBO__c` stays what it always was: the manual
+ * entry's own item, read by the manual/reconciliation posting paths.
  */
 export interface TransactionClassFields {
   qboClassId: string | null;
   qboClassName: string | null;
   campaignClass: string | null;
+  campaignProductService: string | null;
 }
 
 export type TransactionRecordInput = Partial<TransactionUpsertDTO> & {
@@ -267,7 +275,7 @@ type TransactionClassRecord = {
   Id?: string;
   QBO_Class_Id__c?: string | null;
   QBO_Class_Name__c?: string | null;
-  Campaign__r?: { Class__c?: string | null } | null;
+  Campaign__r?: { Class__c?: string | null; Product_Service_QBO__c?: string | null } | null;
 };
 
 type TransactionDateMatchRecord = {
@@ -2112,12 +2120,15 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
     const normalizedId = ensureNonEmpty(salesforceId, 'Transaction ID');
     const escapedId = escapeForSoqlLiteral(normalizedId);
 
-    // Campaign__r.Class__c is not guaranteed to exist in every org, so the query degrades to
-    // the Transaction__c-local fields when the column is rejected -- the same treatment
-    // dailyReconciliation gives it.
-    const buildSoql = (includeCampaignClass: boolean): string =>
+    // Neither Campaign__r column is guaranteed to exist in every org, so the query degrades to
+    // the Transaction__c-local fields when either is rejected -- the same treatment
+    // dailyReconciliation gives it. They are dropped together rather than probed separately:
+    // one retry is worth more than a second round trip to learn which of the two was missing,
+    // and losing the class alongside the item only costs a receipt its class, which the
+    // reconciliation pass patches afterwards.
+    const buildSoql = (includeCampaignFields: boolean): string =>
       `SELECT Id, QBO_Class_Id__c, QBO_Class_Name__c` +
-      `${includeCampaignClass ? ', Campaign__r.Class__c' : ''} ` +
+      `${includeCampaignFields ? ', Campaign__r.Class__c, Campaign__r.Product_Service_QBO__c' : ''} ` +
       `FROM Transaction__c WHERE Id = '${escapedId}' LIMIT 1`;
 
     const toFields = (record: TransactionClassRecord | null): TransactionClassFields | null => {
@@ -2128,6 +2139,7 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
         qboClassId: record.QBO_Class_Id__c?.trim() || null,
         qboClassName: record.QBO_Class_Name__c?.trim() || null,
         campaignClass: record.Campaign__r?.Class__c?.trim() || null,
+        campaignProductService: record.Campaign__r?.Product_Service_QBO__c?.trim() || null,
       };
     };
 
@@ -2137,10 +2149,12 @@ export const createSalesforceSvc = ({ connection }: SalesforceSvcOptions): Sales
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const looksLikeMissingCampaignClass =
+      const looksLikeMissingCampaignField =
         message.includes('Campaign__r.Class__c') ||
-        (message.toLowerCase().includes('no such column') && message.includes('Class__c'));
-      if (!looksLikeMissingCampaignClass) {
+        message.includes('Campaign__r.Product_Service_QBO__c') ||
+        (message.toLowerCase().includes('no such column') &&
+          (message.includes('Class__c') || message.includes('Product_Service_QBO__c')));
+      if (!looksLikeMissingCampaignField) {
         throw error;
       }
 

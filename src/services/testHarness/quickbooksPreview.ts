@@ -125,6 +125,12 @@ const buildSalesReceiptDocuments = (input: {
   // configured default, never the Checkout Session's `metadata.transactionType` (a
   // donation-form concept that is not a QuickBooks item name). transactionType still shapes
   // the description below.
+  //
+  // The live path has a third tier between those two -- the linked Campaign's
+  // Product_Service_QBO__c -- which this preview deliberately cannot show: the preview renders
+  // from Stripe context alone and performs no Salesforce read, so there is no campaign to
+  // consult. A previewed receipt therefore shows the default item where the live posting would
+  // show the campaign's mapping.
   const revenueItemName =
     lineOverrides.productService ?? env.accounting.defaultSalesItem?.trim() ?? '';
   if (!revenueItemName) {

@@ -775,17 +775,22 @@ const describeBalanceTransactionAbsence = (
 };
 
 /**
- * Reads the class-tracking fields off the Transaction__c we just upserted.
+ * Reads the QuickBooks mapping fields off the Transaction__c we just upserted.
  *
  * Returns the explicit `QBO_Class_Id__c`/`QBO_Class_Name__c` pair as a ready-to-use
  * `"Name|Id"` ref when both are set, plus the linked Campaign's `Class__c` path for the
- * posting path to resolve against QuickBooks. Never throws: any failure yields null and the
- * receipt posts unclassed.
+ * posting path to resolve against QuickBooks, plus that Campaign's `Product_Service_QBO__c`
+ * so the receipt line lands on the item the donor's designation maps to. Never throws: any
+ * failure yields null and the receipt posts unclassed and on the default item.
  */
 const readTransactionClassFields = async (
   salesforce: SalesforceSvc,
   upsertResult: unknown
-): Promise<{ classRef: string | null; campaignClass: string | null } | null> => {
+): Promise<{
+  classRef: string | null;
+  campaignClass: string | null;
+  campaignProductService: string | null;
+} | null> => {
   const salesforceId = resolveUpsertRecordId(upsertResult);
   if (!salesforceId || typeof salesforce.findTransactionClassFields !== 'function') {
     return null;
@@ -802,10 +807,14 @@ const readTransactionClassFields = async (
         ? `${fields.qboClassName}|${fields.qboClassId}`
         : null;
 
-    return { classRef, campaignClass: fields.campaignClass ?? null };
+    return {
+      classRef,
+      campaignClass: fields.campaignClass ?? null,
+      campaignProductService: fields.campaignProductService ?? null,
+    };
   } catch (error) {
     logger.warn(
-      '[StripeWebhook] Could not read QBO class fields from Salesforce; posting unclassed',
+      '[StripeWebhook] Could not read QBO mapping fields from Salesforce; posting unclassed',
       {
         salesforceId,
         error: error instanceof Error ? error.message : String(error),
@@ -941,13 +950,14 @@ const postSuccessfulPaymentIntentToAccounting = async (
       );
     }
 
-    // Class tracking lives in Salesforce, not in Stripe: the donation form never writes
-    // qbo_class metadata, so without this read the live webhook posts every receipt unclassed.
-    // The Transaction__c we just upserted carries either explicit QBO_Class_* fields or a
-    // Campaign whose Class__c holds the QuickBooks FullyQualifiedName path. This is a
-    // read-only SOQL query and its failure must never cost us the gift — a warn and an
-    // unclassed receipt is the correct outcome, and dailyReconciliation patches the class
-    // afterwards.
+    // Class and item tracking live in Salesforce, not in Stripe: the donation form never
+    // writes qbo_class or qbo_product_service metadata, so without this read the live webhook
+    // posts every receipt unclassed and on the default item ("Stripe Transaction"). The
+    // Transaction__c we just upserted carries either explicit QBO_Class_* fields or a Campaign
+    // whose Class__c holds the QuickBooks FullyQualifiedName path and whose
+    // Product_Service_QBO__c names the item its designation belongs on. This is a read-only
+    // SOQL query and its failure must never cost us the gift — a warn, an unclassed receipt on
+    // the default item, is the correct outcome, and dailyReconciliation patches it afterwards.
     const transactionClass = await readTransactionClassFields(salesforce, upsertResult);
 
     try {
@@ -965,6 +975,7 @@ const postSuccessfulPaymentIntentToAccounting = async (
         },
         classRef: transactionClass?.classRef ?? null,
         campaignClass: transactionClass?.campaignClass ?? null,
+        campaignProductService: transactionClass?.campaignProductService ?? null,
       });
 
       await markPosted(salesforce, upsertResult, posting as PostChargeToQboResult);
