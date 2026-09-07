@@ -1467,3 +1467,68 @@ describe('createSalesforceSvc — recurring subscription series must not collaps
     });
   });
 });
+
+describe("createSalesforceSvc — the campaign's QuickBooks mapping reaches the poster", () => {
+  const buildService = (query: ReturnType<typeof vi.fn>): SalesforceSvc =>
+    createSalesforceSvc({
+      connection: { upsert: vi.fn(), sobject: vi.fn(), query } as unknown as Connection,
+    });
+
+  it("reads the linked Campaign's Product_Service_QBO__c alongside its class", async () => {
+    const soqls: string[] = [];
+    const query = vi.fn().mockImplementation((soql: string) => {
+      soqls.push(soql);
+      return Promise.resolve({
+        records: [
+          {
+            Id: 'a1a_1',
+            QBO_Class_Id__c: null,
+            QBO_Class_Name__c: null,
+            Campaign__r: {
+              Class__c: 'UNRESTRICTED FUNDS:TNND',
+              Product_Service_QBO__c: 'TNND Mission Experience',
+            },
+          },
+        ],
+      });
+    });
+
+    const fields = await buildService(query).findTransactionClassFields?.('a1a_1');
+
+    expect(soqls[0]).toContain('Campaign__r.Class__c');
+    expect(soqls[0]).toContain('Campaign__r.Product_Service_QBO__c');
+    expect(fields).toEqual({
+      qboClassId: null,
+      qboClassName: null,
+      campaignClass: 'UNRESTRICTED FUNDS:TNND',
+      campaignProductService: 'TNND Mission Experience',
+    });
+  });
+
+  it('degrades to the Transaction__c-local fields when the org has no such Campaign column', async () => {
+    const soqls: string[] = [];
+    const query = vi.fn().mockImplementation((soql: string) => {
+      soqls.push(soql);
+      if (soql.includes('Campaign__r.Product_Service_QBO__c')) {
+        // What an org that has not had the field created yet actually answers with. Before the
+        // retry recognised this column too, the whole read threw and the receipt lost its
+        // class as well as its item.
+        return Promise.reject(new Error("No such column 'Product_Service_QBO__c' on entity"));
+      }
+      return Promise.resolve({
+        records: [{ Id: 'a1a_2', QBO_Class_Id__c: '5', QBO_Class_Name__c: 'General' }],
+      });
+    });
+
+    const fields = await buildService(query).findTransactionClassFields?.('a1a_2');
+
+    expect(soqls).toHaveLength(2);
+    expect(soqls[1]).not.toContain('Campaign__r');
+    expect(fields).toEqual({
+      qboClassId: '5',
+      qboClassName: 'General',
+      campaignClass: null,
+      campaignProductService: null,
+    });
+  });
+});

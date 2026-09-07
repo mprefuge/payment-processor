@@ -12,6 +12,7 @@ import {
   patchQboSalesReceiptFields,
   query as qboQuery,
   summarizeSalesReceiptAmounts,
+  UNMAPPED_PRODUCT_SERVICE,
 } from '../services/qboSvc';
 import {
   buildSalesforceConfig,
@@ -386,6 +387,7 @@ type SalesforceTransactionForPatch = {
   Received_At__c?: string | null;
   product_service_qbo__c?: string | null;
   Product_Service_QBO__c?: string | null;
+  Campaign__r?: { Product_Service_QBO__c?: string | null } | null;
   Reference_Number__c?: string | null;
   transaction_type__c?: string | null;
   Transaction_Type__c?: string | null;
@@ -417,6 +419,7 @@ const fetchSalesforceTransactionsForQboDocIds = async (
     const records = toRecords(
       await connection.query<SalesforceTransactionForPatch>(
         'SELECT Id, QBO_Doc_Id__c, Memo__c, Description__c, Received_At__c, Product_Service_QBO__c, ' +
+          'Campaign__r.Product_Service_QBO__c, ' +
           'Reference_Number__c, transaction_type__c, payment_method__c ' +
           `FROM Transaction__c WHERE QBO_Doc_Id__c IN (${inClause}) ` +
           'ORDER BY LastModifiedDate DESC'
@@ -459,10 +462,32 @@ const getSalesforceServiceDate = (transaction: SalesforceTransactionForPatch): s
   return raw && raw.length >= 10 ? raw.slice(0, 10) : null;
 };
 
+/**
+ * The QuickBooks item this receipt's line should carry.
+ *
+ * The Transaction__c field wins because it is a deliberate per-record decision — it is how a
+ * manual entry names its own item, and how an accountant overrides one gift. Failing that, the
+ * linked Campaign's mapping applies: a Stripe-sourced row never carries its own item, so
+ * without this fallback every Stripe receipt is unpatchable and stays on "Stripe Transaction".
+ * `UNMAPPED_PRODUCT_SERVICE` ("Uncategorized") is the campaign picklist's "no mapping" value
+ * and must not reach QuickBooks, where it would be created as an item.
+ */
 const getSalesforceProductServiceName = (
   transaction: SalesforceTransactionForPatch
-): string | null =>
-  toTrimmed(transaction.Product_Service_QBO__c) ?? toTrimmed(transaction.product_service_qbo__c);
+): string | null => {
+  const explicit =
+    toTrimmed(transaction.Product_Service_QBO__c) ?? toTrimmed(transaction.product_service_qbo__c);
+  if (explicit) {
+    return explicit;
+  }
+
+  const fromCampaign = toTrimmed(transaction.Campaign__r?.Product_Service_QBO__c);
+  if (!fromCampaign || fromCampaign.toLowerCase() === UNMAPPED_PRODUCT_SERVICE.toLowerCase()) {
+    return null;
+  }
+
+  return fromCampaign;
+};
 
 const buildSalesReceiptPatchFields = (
   transaction: SalesforceTransactionForPatch

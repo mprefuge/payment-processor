@@ -235,13 +235,14 @@ describe('stripeWebhook', () => {
         .mockImplementation(async (field: string) =>
           field === 'stripe_checkout_session_id__c' ? 'sf_existing' : null
         ),
-      // Class tracking lives in Salesforce, not in Stripe: the donation form never writes
-      // qbo_class metadata, so this read is the only way the live webhook gets a class onto
-      // the receipt lines.
+      // Class and item tracking live in Salesforce, not in Stripe: the donation form never
+      // writes qbo_class or qbo_product_service metadata, so this read is the only way the
+      // live webhook gets a class -- and the campaign's QuickBooks item -- onto the receipt.
       findTransactionClassFields: vi.fn().mockResolvedValue({
         qboClassId: null,
         qboClassName: null,
         campaignClass: 'UNRESTRICTED FUNDS:General',
+        campaignProductService: 'TNND Mission Experience',
       }),
     };
 
@@ -302,10 +303,13 @@ describe('stripeWebhook', () => {
     expect(chargePostingArgs?.date).toBeInstanceOf(Date);
     expect(chargePostingArgs?.date?.toISOString()).toBe(new Date(1_700_000_000_000).toISOString());
 
-    // The class fields are read off the Transaction__c we just upserted and forwarded to the
-    // poster, which resolves the path against QuickBooks.
+    // The class and item fields are read off the Transaction__c we just upserted and forwarded
+    // to the poster, which resolves both against QuickBooks. Without the item forwarded here
+    // every live receipt lands on QBO_DEFAULT_SALES_ITEM ("Stripe Transaction"), which is the
+    // whole complaint the campaign mapping exists to answer.
     expect(salesforce.findTransactionClassFields).toHaveBeenCalledWith('sf_1');
     expect(chargePostingArgs?.campaignClass).toBe('UNRESTRICTED FUNDS:General');
+    expect(chargePostingArgs?.campaignProductService).toBe('TNND Mission Experience');
     expect(chargePostingArgs?.classRef).toBeNull();
     expect(salesforce.markPostedToQbo).toHaveBeenCalledWith('sf_1', {
       id: '123',
