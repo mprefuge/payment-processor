@@ -1868,6 +1868,60 @@ describe('postChargeToQbo', () => {
     });
   });
 
+  it('lands an unresolvable fee-coverage line on the default item, never the campaign item', async () => {
+    baseEnv.accounting.postingStrategy = 'sales-receipt';
+    // Carries its own Id, so resolving the neutral fallback costs no lookup — which also makes
+    // the request list below an exact record of what was searched for.
+    baseEnv.accounting.defaultSalesItem = 'Stripe Transaction|QBO_ITEM_REVENUE';
+    baseEnv.accounting.feeCoverageItem = 'Stripe Fee';
+
+    const { fetcher, requests } = createFetchMock(
+      { QueryResponse: { Item: { Id: '77', Name: 'TNND Mission Experience' } } }, // Campaign item
+      { QueryResponse: {} }, // Fee-coverage lookup MISSES — "Stripe Fee" is not in this file
+      { QueryResponse: {} }, // Duplicate check for sales receipt
+      { SalesReceipt: { Id: 'sr-fee-fallback' } }
+    );
+    const { postChargeToQbo } = await importQboSvc();
+
+    await postChargeToQbo({
+      gross: 10_000,
+      fee: 0,
+      memo: 'Covered fee on a mapped campaign',
+      date: new Date('2026-08-26'),
+      customer: { ref: { value: '200', name: 'Donor Example' } },
+      campaignProductService: 'TNND Mission Experience',
+      stripe: buildStripeContext(
+        {},
+        { metadata: { cover_fees: 'true', cover_fees_amount: '300' } }
+      ),
+      options: { fetcher, accessToken: 'token' },
+    });
+
+    const salesReceiptBody = JSON.parse(
+      (requests.find((request) => request.url.includes('salesreceipt'))?.init?.body ??
+        '{}') as string
+    );
+    const [giftLine, coverageLine] = salesReceiptBody.Line;
+
+    // The gift keeps the campaign's designation...
+    expect(giftLine.SalesItemLineDetail.ItemRef).toMatchObject({
+      value: '77',
+      name: 'TNND Mission Experience',
+    });
+
+    // ...and the covered fee does NOT. Riding the campaign item here would overstate that
+    // program's income by the fee, which is what made this fallback worth pinning.
+    expect(coverageLine.Description).toBe('Processing Fee Coverage');
+    expect(coverageLine.Amount).toBe(3);
+    expect(coverageLine.SalesItemLineDetail.ItemRef).toMatchObject({ value: 'QBO_ITEM_REVENUE' });
+    expect(coverageLine.SalesItemLineDetail.ItemRef.value).not.toBe('77');
+
+    // The coverage item was looked up and missed; nothing was created to paper over it.
+    expect(
+      requests.some((request) => request.url.includes('/item') && request.init?.method === 'POST')
+    ).toBe(false);
+  });
+
   it('throws a helpful error when QuickBooks cannot resolve the configured account name', async () => {
     baseEnv.accounting.accounts.autoCreate = false;
     baseEnv.quickBooks.accounts.stripeClearing = 'Stripe Clearing';

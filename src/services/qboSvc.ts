@@ -2517,7 +2517,9 @@ export const buildSalesReceipt = ({
 
     // The coverage gets its own Product/Service when the caller resolved one, so the extra
     // the donor chose to pay does not land in the same income account as the gift itself.
-    // Falling back to the revenue item keeps the receipt postable when that item is missing.
+    // Callers resolve a neutral default before giving up (see postChargeAsSalesReceipt); this
+    // last-resort share of the revenue item only keeps the receipt postable when even that
+    // could not be resolved.
     const coverFeesItem = toTrimmed(coverFeesItemRef) ?? itemReference;
 
     lines.push({
@@ -4429,8 +4431,7 @@ const postChargeAsSalesReceipt = async (input: {
   // Dedicated Product/Service for the donor-covered fee, resolved WITHOUT creating anything.
   // `findCoverFeesItemReference` is non-creating on purpose: the item does not exist in every
   // company file, and routing this through ensureSalesReceiptItem would write a new item
-  // pointed at the generic revenue account. A miss is expected and harmless — warn, and let
-  // the fee line keep sharing the revenue item exactly as it did before.
+  // pointed at the generic revenue account. A miss is expected — warn, and fall back below.
   let coverFeesItemRef: string | undefined;
   if (coverFeesAmountCents > 0) {
     const feeCoverageItemName = toTrimmed(env.accounting.feeCoverageItem);
@@ -4456,12 +4457,45 @@ const postChargeAsSalesReceipt = async (input: {
         });
       } else if (!coverFeesItemRef) {
         logger.warn(
-          '[QBO] Fee-coverage product/service not found in QuickBooks; fee line falls back to the revenue item',
+          '[QBO] Fee-coverage product/service not found in QuickBooks; fee line falls back to the default item',
           {
             feeCoverageItemName,
             revenueItemName,
           }
         );
+      }
+    }
+
+    // A processing fee is not program revenue.
+    //
+    // buildSalesReceipt's own fallback is this receipt's revenue item, and that used to be
+    // harmless because the revenue item was always QBO_DEFAULT_SALES_ITEM — a generic bucket.
+    // Since the line takes the linked Campaign's mapping, it is a specific designation, and an
+    // unresolved coverage line riding it would overstate that program's income by the fee.
+    // Resolve the configured default explicitly instead: still a neutral bucket, still findable
+    // and reclassifiable, and it restores what the coverage line landed on before the campaign
+    // tier existed. Failing that — no default configured, or it will not resolve — the receipt
+    // still posts, sharing the revenue item as it always did; the gift is never worth losing
+    // over where its fee sits.
+    if (!coverFeesItemRef) {
+      const fallbackItemName = toTrimmed(env.accounting.defaultSalesItem);
+      if (fallbackItemName && fallbackItemName !== revenueItemName) {
+        try {
+          const fallbackItem = await resolveRevenueItemReference(fallbackItemName, context);
+          coverFeesItemRef = JSON.stringify({
+            value: fallbackItem.value,
+            name: fallbackItem.name ?? fallbackItemName,
+          });
+        } catch (error) {
+          logger.warn(
+            '[QBO] Default item could not be resolved for the fee-coverage line; it shares the revenue item',
+            {
+              fallbackItemName,
+              revenueItemName,
+              error: error instanceof Error ? error.message : String(error),
+            }
+          );
+        }
       }
     }
   }
