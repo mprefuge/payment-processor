@@ -42,6 +42,12 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   discount_code__c: 'Discount_Code__c',
   discount_percent__c: 'Discount_Percent__c',
   discount_amount__c: 'Discount_Amount__c',
+  tax_base__c: 'Tax_Base__c',
+  tax_amount__c: 'Tax_Amount__c',
+  tax_rate__c: 'Tax_Rate__c',
+  tax_state__c: 'Tax_State__c',
+  tax_exemption_id__c: 'Tax_Exemption_Id__c',
+  tax_certificate_status__c: 'Tax_Certificate_Status__c',
   fund__c: 'Fund__c',
   designation__c: 'Designation__c',
   restriction__c: 'Restriction__c',
@@ -366,6 +372,12 @@ type StripeBackfillLookupRecord = {
   Discount_Code__c?: string | null;
   Discount_Percent__c?: number | null;
   Discount_Amount__c?: number | null;
+  Tax_Base__c?: number | null;
+  Tax_Amount__c?: number | null;
+  Tax_Rate__c?: number | null;
+  Tax_State__c?: string | null;
+  Tax_Exemption_Id__c?: string | null;
+  Tax_Certificate_Status__c?: string | null;
   Fund__c?: string | null;
   Designation__c?: string | null;
   Restriction__c?: string | null;

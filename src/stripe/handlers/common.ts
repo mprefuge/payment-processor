@@ -8,7 +8,7 @@ import type {
 import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
-import { readDiscountFromMetadata } from '../../domain/transactions';
+import { readDiscountFromMetadata, readTaxFromMetadata } from '../../domain/transactions';
 import { centsToMajorUnits, normalizeStripeId, timestampToIsoString } from '../utils';
 
 /** 15-character or 18-character Salesforce Campaign record ID (Record Type prefix 701). */
@@ -380,6 +380,9 @@ export const handleCheckoutSessionCompleted = async (
   // Read once. The figures stand on their own: an order keeps what it was
   // discounted even when the code record behind it cannot be resolved.
   const discount = readDiscountFromMetadata(session.metadata ?? null);
+  // Tax rides the same path. Recorded even when it is zero: "no tax was due"
+  // and "nobody worked the tax out" are different facts on a financial record.
+  const tax = readTaxFromMetadata(session.metadata ?? null);
 
   const status = resolveCompletedCheckoutSessionStatus(session);
 
@@ -399,6 +402,14 @@ export const handleCheckoutSessionCompleted = async (
       : {}),
     ...(discount.discount_amount__c !== null
       ? { discount_amount__c: discount.discount_amount__c }
+      : {}),
+    ...(tax.tax_base__c !== null ? { tax_base__c: tax.tax_base__c } : {}),
+    ...(tax.tax_amount__c !== null ? { tax_amount__c: tax.tax_amount__c } : {}),
+    ...(tax.tax_rate__c !== null ? { tax_rate__c: tax.tax_rate__c } : {}),
+    ...(tax.tax_state__c ? { tax_state__c: tax.tax_state__c } : {}),
+    ...(tax.tax_exemption_id__c ? { tax_exemption_id__c: tax.tax_exemption_id__c } : {}),
+    ...(tax.tax_certificate_status__c
+      ? { tax_certificate_status__c: tax.tax_certificate_status__c }
       : {}),
     ...(subscriptionPaymentIntentId
       ? { stripe_payment_intent_id__c: subscriptionPaymentIntentId }
