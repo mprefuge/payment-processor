@@ -60,6 +60,9 @@ export const transactionUpsertSchema = z
     attribution__c: stringOrNullSchema.optional(),
     cover_fees__c: booleanOrNullSchema.optional(),
     cover_fees_amount__c: numberOrNullSchema.optional(),
+    discount_code__c: stringOrNullSchema.optional(),
+    discount_percent__c: numberOrNullSchema.optional(),
+    discount_amount__c: numberOrNullSchema.optional(),
     payment_method__c: stringOrNullSchema.optional(),
     payment_brand__c: stringOrNullSchema.optional(),
     payment_last4__c: stringOrNullSchema.optional(),
@@ -643,6 +646,70 @@ export const readDonorIntentFromMetadata = (
   };
 };
 
+/**
+ * Pull the discount an order was given out of its Stripe metadata.
+ *
+ * `discount_amount_cents` is read, NOT the `discount_amount` beside it. That
+ * one is a currency-formatted string for whoever is reading the Stripe
+ * dashboard ("$285.00"), and a number that has been through a formatter has
+ * already lost the argument about what unit it is in. The same mistake with
+ * cover fees is what stored Cover_Fees_Amount__c 100x overstated on one of the
+ * two write paths - see coverFeesAmountToMajorUnits above.
+ *
+ * WHAT THE AMOUNT MEANS: revenue FORGONE, not revenue received. It is never
+ * added to gross, fee or net - Amount_Gross__c is what Stripe actually charged,
+ * after the discount came off. Summing this into an income figure overstates
+ * income.
+ */
+export const readDiscountFromMetadata = (
+  metadata: Record<string, unknown> | null | undefined
+): {
+  code: string | null;
+  discount_percent__c: number | null;
+  discount_amount__c: number | null;
+} => {
+  const source = metadata ?? undefined;
+
+  const rawCode = parseMetadataString(
+    source,
+    'discount_code__c',
+    'Discount_Code__c',
+    'discount_code'
+  );
+  // The order form writes the literal "none" when no code was used, so that a
+  // reader can tell "full price" from "this metadata predates discounts".
+  const code =
+    rawCode && rawCode.trim().toLowerCase() !== 'none' ? rawCode.trim().toUpperCase() : null;
+
+  const percent = parseMetadataNumber(
+    source,
+    'discount_percent__c',
+    'Discount_Percent__c',
+    'discount_percent'
+  );
+
+  const amountCents = parseMetadataNumber(
+    source,
+    'discount_amount_cents',
+    'Discount_Amount_Cents__c',
+    'discount_amount_cents'
+  );
+
+  return {
+    code,
+    // A percentage outside 1-100 is not a discount, it is a corrupt value, and
+    // recording it would put a nonsense number on a financial record.
+    discount_percent__c:
+      percent !== null && Number.isFinite(percent) && percent >= 1 && percent <= 100
+        ? Math.round(percent)
+        : null,
+    discount_amount__c:
+      amountCents !== null && Number.isFinite(amountCents) && amountCents > 0
+        ? centsToMajorUnits(amountCents)
+        : null,
+  };
+};
+
 export const mapStripeToTransaction = (
   input: MapStripeToTransactionInput
 ): TransactionUpsertDTO => {
@@ -662,6 +729,7 @@ export const mapStripeToTransaction = (
   }
 
   const combinedMetadata = buildCombinedMetadata(paymentIntent, charge, input.stripeCustomer);
+  const discount = readDiscountFromMetadata(combinedMetadata);
   const lookupIds = readLookupIdsFromMetadata(combinedMetadata);
 
   const transactionCandidate: TransactionUpsertDTO = {
@@ -735,6 +803,11 @@ export const mapStripeToTransaction = (
         'cover_fees_amount'
       )
     ),
+    // The discount percentage and amount come straight off metadata. The code
+    // itself becomes a lookup, which needs a Salesforce id, so it is resolved
+    // where there is a CRM connection to resolve it with.
+    discount_percent__c: discount.discount_percent__c,
+    discount_amount__c: discount.discount_amount__c,
     payment_method__c: derivePaymentMethod(paymentIntent, charge),
     payment_brand__c: derivePaymentBrand(charge),
     payment_last4__c: derivePaymentLast4(charge),

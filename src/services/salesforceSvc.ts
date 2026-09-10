@@ -39,6 +39,9 @@ export const TRANSACTION_FIELD_API_NAMES: Record<keyof TransactionUpsertDTO, str
   contact__c: 'Contact__c',
   account__c: 'Account__c',
   campaign__c: 'Campaign__c',
+  discount_code__c: 'Discount_Code__c',
+  discount_percent__c: 'Discount_Percent__c',
+  discount_amount__c: 'Discount_Amount__c',
   fund__c: 'Fund__c',
   designation__c: 'Designation__c',
   restriction__c: 'Restriction__c',
@@ -360,6 +363,9 @@ type StripeBackfillLookupRecord = {
   Contact__c?: string | null;
   Account__c?: string | null;
   Campaign__c?: string | null;
+  Discount_Code__c?: string | null;
+  Discount_Percent__c?: number | null;
+  Discount_Amount__c?: number | null;
   Fund__c?: string | null;
   Designation__c?: string | null;
   Restriction__c?: string | null;

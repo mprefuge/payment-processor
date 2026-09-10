@@ -593,6 +593,53 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
+  /**
+   * Resolve a discount code string to its Discount_Code__c record id.
+   *
+   * Returns null when the code is unknown, malformed, or the lookup fails.
+   * Deliberately never throws: this runs while a payment is being recorded, and
+   * a payment must not fail to be written because a bookkeeping lookup did.
+   * Losing the link is recoverable from the code string in Stripe metadata;
+   * losing the transaction record is not.
+   *
+   * The code is normalised to the same character set the order form and the
+   * forms service use before it reaches SOQL. That is not cosmetic - it is what
+   * makes the value safe to interpolate, since escapeSoqlLiteral escapes quotes
+   * but not a trailing backslash.
+   */
+  async findDiscountCodeIdByCode(code) {
+    if (!code || typeof code !== 'string') {
+      return null;
+    }
+
+    const normalized = code
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 40);
+    if (!normalized) {
+      return null;
+    }
+
+    try {
+      await this.authenticate();
+      const query = `SELECT Id FROM Discount_Code__c WHERE Code__c = '${this.escapeSoqlLiteral(normalized)}' LIMIT 1`;
+      const result = await this.conn.query(query);
+
+      if (result.records && result.records.length > 0) {
+        return result.records[0].Id;
+      }
+
+      logger.info('Discount code not found in Salesforce', { code: normalized });
+      return null;
+    } catch (error) {
+      logger.warn('Discount code lookup failed; transaction will be recorded without the link', {
+        code: normalized,
+        error: error && error.message ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
   async findOrCreateCampaign(campaignName) {
     await this.authenticate();
 
