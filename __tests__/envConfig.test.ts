@@ -58,6 +58,8 @@ const MINIMAL_ENV: Record<string, string | undefined> = {
   QBO_ACCOUNT_FEES: undefined,
   QBO_ACCOUNT_REFUNDS: undefined,
   QBO_ACCOUNT_DISPUTE_LOSSES: undefined,
+  QBO_ACCOUNT_SALES_TAX_LIABILITY: undefined,
+  QBO_ITEM_SALES_TAX: undefined,
 };
 
 describe('env config', () => {
@@ -273,6 +275,53 @@ describe('env config', () => {
       await expect(
         loadEnvWith({ ...MINIMAL_ENV, ACCOUNTING_SYNC_ENABLED: 'yes' })
       ).rejects.toThrow();
+    });
+  });
+
+  describe('sales tax routing', () => {
+    // Both have defaults so the common case needs no configuration, and both are
+    // overridable because not every company file names them the same way.
+    it('defaults the item to what the receipt line is called', async () => {
+      const { env } = await loadEnvWith(MINIMAL_ENV);
+      expect(env.accounting.salesTaxItem).toBe('Sales Tax Collected');
+    });
+
+    it("defaults the account to QuickBooks' own name for it", async () => {
+      const { env } = await loadEnvWith(MINIMAL_ENV);
+      expect(env.quickBooks.accounts.salesTaxLiability).toBe('Sales Tax Payable');
+    });
+
+    it('takes an override for each', async () => {
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        QBO_ITEM_SALES_TAX: 'KY Sales Tax',
+        QBO_ACCOUNT_SALES_TAX_LIABILITY: 'Sales Tax Held|250',
+      });
+      expect(env.accounting.salesTaxItem).toBe('KY Sales Tax');
+      expect(env.quickBooks.accounts.salesTaxLiability).toBe('Sales Tax Held|250');
+    });
+
+    it('is switched off by the literal "none", not by an empty value', async () => {
+      // An EMPTY variable cannot do this job: resolveEnv treats empty as unset and hands
+      // back the default, which is what every other variable here relies on. So switching
+      // a defaulted name off needs a value rather than the absence of one.
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        QBO_ITEM_SALES_TAX: 'none',
+        QBO_ACCOUNT_SALES_TAX_LIABILITY: 'NONE',
+      });
+      expect(env.accounting.salesTaxItem).toBe('');
+      expect(env.quickBooks.accounts.salesTaxLiability).toBe('');
+    });
+
+    it('still defaults when the variable is present but empty', async () => {
+      const { env } = await loadEnvWith({
+        ...MINIMAL_ENV,
+        QBO_ITEM_SALES_TAX: '',
+        QBO_ACCOUNT_SALES_TAX_LIABILITY: '',
+      });
+      expect(env.accounting.salesTaxItem).toBe('Sales Tax Collected');
+      expect(env.quickBooks.accounts.salesTaxLiability).toBe('Sales Tax Payable');
     });
   });
 

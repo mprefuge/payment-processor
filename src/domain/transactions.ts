@@ -63,6 +63,13 @@ export const transactionUpsertSchema = z
     discount_code__c: stringOrNullSchema.optional(),
     discount_percent__c: numberOrNullSchema.optional(),
     discount_amount__c: numberOrNullSchema.optional(),
+    tax_base__c: numberOrNullSchema.optional(),
+    tax_amount__c: numberOrNullSchema.optional(),
+    tax_rate__c: numberOrNullSchema.optional(),
+    tax_state__c: stringOrNullSchema.optional(),
+    tax_exemption_id__c: stringOrNullSchema.optional(),
+    tax_certificate_status__c: stringOrNullSchema.optional(),
+    tax_exemption_certificate__c: stringOrNullSchema.optional(),
     payment_method__c: stringOrNullSchema.optional(),
     payment_brand__c: stringOrNullSchema.optional(),
     payment_last4__c: stringOrNullSchema.optional(),
@@ -710,6 +717,75 @@ export const readDiscountFromMetadata = (
   };
 };
 
+/**
+ * Pull the sales tax an order carried out of its Stripe metadata.
+ *
+ * Read as COMPONENTS - base, rate, state, amount - never as a single figure.
+ * That is what makes the tax on a record checkable: base x rate should equal
+ * amount, and a row where it does not is a row worth looking at. Storing only
+ * the amount would leave nothing to check it against.
+ *
+ * WHAT THE AMOUNT IS: money held in trust for the state. It is part of
+ * Amount_Gross__c because the buyer paid it, but it is NOT income and must not
+ * be reported as revenue - it belongs in a liability account and gets remitted.
+ *
+ * Cents in, dollars out, for the same reason as the discount: the formatted
+ * `tax_amount` string beside it is for whoever is reading the Stripe dashboard,
+ * and a number that has been through a currency formatter has already lost the
+ * argument about what unit it is in.
+ */
+export const readTaxFromMetadata = (
+  metadata: Record<string, unknown> | null | undefined
+): {
+  tax_base__c: number | null;
+  tax_amount__c: number | null;
+  tax_rate__c: number | null;
+  tax_state__c: string | null;
+  tax_exemption_id__c: string | null;
+  tax_certificate_status__c: string | null;
+} => {
+  const source = metadata ?? undefined;
+
+  const baseCents = parseMetadataNumber(
+    source,
+    'tax_base_cents',
+    'Tax_Base_Cents__c',
+    'tax_base_cents'
+  );
+  const amountCents = parseMetadataNumber(
+    source,
+    'tax_amount_cents',
+    'Tax_Amount_Cents__c',
+    'tax_amount_cents'
+  );
+  const rate = parseMetadataNumber(source, 'tax_rate', 'Tax_Rate__c', 'tax_rate__c');
+  const state = parseMetadataString(source, 'tax_state', 'Tax_State__c', 'tax_state__c');
+  const exemptionId = parseMetadataString(source, 'tax_exemption_id', 'Tax_Exemption_Id__c');
+  const certificate = parseMetadataString(
+    source,
+    'tax_certificate_status',
+    'Tax_Certificate_Status__c',
+    'tax_certificate_status'
+  );
+
+  const nonNegative = (cents: number | null): number | null =>
+    cents !== null && Number.isFinite(cents) && cents >= 0 ? centsToMajorUnits(cents) : null;
+
+  return {
+    tax_base__c: nonNegative(baseCents),
+    // Zero is a real answer here and is recorded as zero, not dropped: "no tax
+    // was due on this order" and "nobody ever worked out the tax" are different
+    // facts, and only one of them is defensible in an audit.
+    tax_amount__c: nonNegative(amountCents),
+    // A rate outside 0-100 is corrupt rather than unusual, and a nonsense rate
+    // on a tax record is worse than an empty field.
+    tax_rate__c: rate !== null && Number.isFinite(rate) && rate >= 0 && rate <= 100 ? rate : null,
+    tax_state__c: state ? state.trim().toUpperCase().slice(0, 2) : null,
+    tax_exemption_id__c: exemptionId ? exemptionId.trim() : null,
+    tax_certificate_status__c: certificate ? certificate.trim() : null,
+  };
+};
+
 export const mapStripeToTransaction = (
   input: MapStripeToTransactionInput
 ): TransactionUpsertDTO => {
@@ -730,6 +806,7 @@ export const mapStripeToTransaction = (
 
   const combinedMetadata = buildCombinedMetadata(paymentIntent, charge, input.stripeCustomer);
   const discount = readDiscountFromMetadata(combinedMetadata);
+  const tax = readTaxFromMetadata(combinedMetadata);
   const lookupIds = readLookupIdsFromMetadata(combinedMetadata);
 
   const transactionCandidate: TransactionUpsertDTO = {
@@ -808,6 +885,12 @@ export const mapStripeToTransaction = (
     // where there is a CRM connection to resolve it with.
     discount_percent__c: discount.discount_percent__c,
     discount_amount__c: discount.discount_amount__c,
+    tax_base__c: tax.tax_base__c,
+    tax_amount__c: tax.tax_amount__c,
+    tax_rate__c: tax.tax_rate__c,
+    tax_state__c: tax.tax_state__c,
+    tax_exemption_id__c: tax.tax_exemption_id__c,
+    tax_certificate_status__c: tax.tax_certificate_status__c,
     payment_method__c: derivePaymentMethod(paymentIntent, charge),
     payment_brand__c: derivePaymentBrand(charge),
     payment_last4__c: derivePaymentLast4(charge),
