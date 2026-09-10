@@ -487,6 +487,52 @@ describe('runOrderPriceCheck', () => {
     expect(result.metadata.price_check_expected_cents).toBe('42400');
   });
 
+  it('gives up on a Salesforce that never answers, and lets the order through', async () => {
+    // Nothing on the Salesforce path in this codebase carries a timeout of its own -
+    // not the connection, not the queries. This check runs BEFORE the Checkout Session
+    // exists, so a hung org would otherwise hold a buyer on a spinner until the Function
+    // App gave up on the whole request.
+    vi.useFakeTimers();
+    vi.stubEnv('HOSPITALITY_GUIDE_PRICE_CHECK', 'enforce');
+    const { runOrderPriceCheck } = await loadCheck();
+
+    const pending = runOrderPriceCheck({
+      requestData: { amount: 100, metadata: { ...metadata, discount_code: 'RUSSELLMOORE' } },
+      getCrm: async () => ({
+        // Never settles. A hang, not a rejection.
+        findDiscountPercentByCode: () => new Promise<number | null>(() => {}),
+        findTaxCertificateStatusByExemptionId: async () => null,
+      }),
+    });
+
+    await vi.advanceTimersByTimeAsync(6000);
+    const result = await pending;
+
+    expect(result.verdict).toBe('unverifiable');
+    expect(result.refuse).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('does not wait for the timeout when the answer arrives quickly', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('HOSPITALITY_GUIDE_PRICE_CHECK', 'enforce');
+    const { runOrderPriceCheck } = await loadCheck();
+
+    const result = await runOrderPriceCheck({
+      requestData: { amount: 31_800, metadata: { ...metadata, discount_code: 'RUSSELLMOORE' } },
+      getCrm: async () => ({
+        findDiscountPercentByCode: async () => 25,
+        findTaxCertificateStatusByExemptionId: async () => null,
+      }),
+    });
+
+    // Resolved without any timer having to fire, and the pending timer was cleared -
+    // otherwise it would keep the Function alive for six seconds after every fast order.
+    expect(result.verdict).toBe('ok');
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+  });
+
   it('never refuses when the CRM cannot answer, even under enforce', async () => {
     vi.stubEnv('HOSPITALITY_GUIDE_PRICE_CHECK', 'enforce');
     const { runOrderPriceCheck } = await loadCheck();

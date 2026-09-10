@@ -41,7 +41,22 @@ export type PriceCheckCrmResolver = () => Promise<PriceCheckCrm | null>;
  * arithmetic still disagreed.
  */
 
-export const MODE_OFF = 'off';
+export /**
+ * How long the Salesforce lookups get before the check gives up on them.
+ *
+ * This runs BEFORE the Checkout Session exists, which is the right place to refuse a total
+ * nobody agreed to and the wrong place to wait indefinitely. Nothing on the Salesforce path
+ * in this codebase carries a timeout of its own - not the connection, not the queries - so
+ * a hung org would otherwise hold a buyer on a spinner until the Function App gave up on
+ * the whole request.
+ *
+ * Six seconds is comfortably more than a cold authenticate plus two indexed queries, and
+ * far less than a buyer's patience. Past it the verdict is `unverifiable` and the order goes
+ * through, which is the same answer every other failure gets here.
+ */
+const LOOKUP_TIMEOUT_MS = 6000;
+
+const MODE_OFF = 'off';
 export const MODE_REPORT = 'report';
 export const MODE_ENFORCE = 'enforce';
 
@@ -148,17 +163,39 @@ export const runOrderPriceCheck = async ({
     return { checked: false, verdict: null, refuse: false, metadata: {} };
   }
 
-  let facts: {
+  const unresolved = {
+    resolvedPercentOff: undefined,
+    certificateComplete: undefined,
+  } as {
     resolvedPercentOff: number | null | undefined;
     certificateComplete: boolean | undefined;
   };
+
+  let facts: typeof unresolved;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    facts = await resolveFacts(claim, getCrm);
+    // Raced rather than awaited. A rejection and a hang are the same answer here - the
+    // order is not price checked - but only one of them arrives on its own.
+    facts = await Promise.race([
+      resolveFacts(claim, getCrm),
+      new Promise<typeof unresolved>((resolve) => {
+        timer = setTimeout(() => {
+          logger.warn('[PriceCheck] CRM lookups timed out; order will not be price checked', {
+            timeoutMs: LOOKUP_TIMEOUT_MS,
+          });
+          resolve(unresolved);
+        }, LOOKUP_TIMEOUT_MS);
+      }),
+    ]);
   } catch (error) {
     logger.warn('[PriceCheck] Could not reach the CRM; order will not be price checked', {
       error: error instanceof Error ? error.message : String(error),
     });
-    facts = { resolvedPercentOff: undefined, certificateComplete: undefined };
+    facts = unresolved;
+  } finally {
+    // Otherwise the pending timer keeps the Function alive for six seconds after every
+    // order that resolved quickly, which is most of them.
+    if (timer) clearTimeout(timer);
   }
 
   const result = verifyHospitalityGuideOrder({
