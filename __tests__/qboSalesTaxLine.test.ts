@@ -233,3 +233,26 @@ describe('buildSalesReceipt sales tax line', () => {
     expect(receipt.Line[0].Amount).toBe(24.0);
   });
 });
+
+describe('remembering a routing miss', () => {
+  beforeEach(() => vi.unstubAllEnvs());
+
+  it('remembers a missing item or account', async () => {
+    // Both names have defaults now, so a company file that never made the item would
+    // otherwise pay for two lookups and a thrown error on every taxed order, forever.
+    const { isDurableRoutingMiss } = await importQboSvc();
+    expect(
+      isDurableRoutingMiss(new Error('QuickBooks account "Sales Tax Payable" could not be found.'))
+    ).toBe(true);
+  });
+
+  it('does not remember a bad ten seconds', async () => {
+    // Caching a timeout would route ten minutes of tax into revenue because one call
+    // went wrong, which is a far worse trade than one wasted lookup.
+    const { isDurableRoutingMiss } = await importQboSvc();
+    expect(isDurableRoutingMiss(new Error('ETIMEDOUT'))).toBe(false);
+    expect(isDurableRoutingMiss(new Error('Request failed with status 500'))).toBe(false);
+    expect(isDurableRoutingMiss('not even an error')).toBe(false);
+    expect(isDurableRoutingMiss(null)).toBe(false);
+  });
+});

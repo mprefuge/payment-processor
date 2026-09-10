@@ -39,10 +39,15 @@ export interface EnvConfig {
       revenue: string;
       fees: string;
       /**
-       * The liability account collected sales tax is held in until it is remitted. Empty
-       * means no tax routing: tax stays in revenue, as it did before this existed. Tax is
+       * The liability account collected sales tax is held in until it is remitted. Tax is
        * money held in trust for the state - it is inside what the buyer paid, but it is not
        * income and must never be reported as such.
+       *
+       * Defaults to `Sales Tax Payable`, which is what QuickBooks itself calls the account
+       * it creates for this. Nothing is created here - `ACCOUNTING_AUTOCREATE_ACCOUNTS` is
+       * false by default and this does not override it - so a name that matches nothing
+       * simply misses and leaves the tax in revenue. Set it to `none` to switch the
+       * routing off entirely.
        */
       salesTaxLiability: string;
       refunds: string;
@@ -84,12 +89,16 @@ export interface EnvConfig {
     /**
      * QuickBooks Product/Service used for the SALES TAX line on a sales receipt.
      *
-     * Empty means the feature is off and tax stays folded into the revenue line, which is
-     * exactly today's behaviour. When set, the item must be one whose OWN account is the
-     * sales tax liability account below - `findSalesTaxItemReference` verifies that and
-     * refuses anything else, for the same reason the fee item is verified: QuickBooks posts
-     * a sales line to the account on the ITEM, and an `ItemAccountRef` on the line is
+     * Defaults to `Sales Tax Collected`, so an org that has made an item by that name gets
+     * the tax routed without configuring anything. The item must be one whose OWN account
+     * is the sales tax liability account below - `findSalesTaxItemReference` verifies that
+     * and refuses anything else, for the same reason the fee item is verified: QuickBooks
+     * posts a sales line to the account on the ITEM, and an `ItemAccountRef` on the line is
      * ignored. Nothing here creates the item; a human makes it in QuickBooks once.
+     *
+     * A default name that matches nothing is harmless: the lookup misses, a warning names
+     * what to create, and the tax stays in the revenue line exactly as it did before any of
+     * this existed. Set it to `none` to switch the routing off entirely.
      */
     salesTaxItem: string;
     /**
@@ -216,8 +225,9 @@ function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
       operatingBank: z.string().min(1),
       revenue: z.string().min(1),
       fees: z.string().min(1),
-      // Optional, unlike its neighbours: an org that does not collect sales tax has no such
-      // account, and requiring one would fail startup for every deployment that never needs it.
+      // Optional, unlike its neighbours, and allowed to be empty: an org that does not
+      // collect sales tax has no such account, and requiring one would fail startup for
+      // every deployment that never needs it. `none` is how the routing is switched off.
       salesTaxLiability: z.string().default(''),
       refunds: z.string().min(1),
       disputeLosses: z.string().min(1),
@@ -247,9 +257,13 @@ function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
         fallbackNames: ['ACCOUNTING_STRIPE_FEE_ACCOUNT'],
         defaultValue: 'Stripe Fees',
       }),
-      // No default. An account name guessed here would be resolved, missed, and warned about
-      // on every receipt in every company file that has no such account.
-      salesTaxLiability: resolveEnv('QBO_ACCOUNT_SALES_TAX_LIABILITY', { defaultValue: '' }),
+      // QuickBooks' own name for the account it creates for collected sales tax, so the
+      // common case needs no configuration. A company file that calls it something else
+      // sets this; one that does not collect sales tax sets it to `none`, and a name that
+      // matches nothing costs a missed lookup and a warning, never a receipt.
+      salesTaxLiability: offIfDisabled(
+        resolveEnv('QBO_ACCOUNT_SALES_TAX_LIABILITY', { defaultValue: 'Sales Tax Payable' })
+      ),
       refunds: resolveEnv('QBO_ACCOUNT_REFUNDS', {
         fallbackNames: ['ACCOUNTING_REFUNDS_ACCOUNT'],
         defaultValue: 'Refunds',
@@ -262,6 +276,21 @@ function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
   });
 
   return { environment: environment ?? 'sandbox', ...parsed };
+}
+
+/**
+ * Turn an explicit "none" into the empty string that switches a name off.
+ *
+ * An EMPTY environment variable cannot do this job: `resolveEnv` treats empty as unset and
+ * hands back the default, which is the behaviour every other variable here relies on. So
+ * switching a defaulted name off needs a value rather than the absence of one, and `none`
+ * is that value.
+ *
+ * Downstream code already tests these names for truthiness, so an empty string means "do
+ * not route" without anything else having to learn a new spelling.
+ */
+function offIfDisabled(value: string): string {
+  return value.trim().toLowerCase() === 'none' ? '' : value;
 }
 
 /**
@@ -319,9 +348,11 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     defaultValue: 'Stripe Fee Coverage',
   });
 
-  // No default, so an unconfigured deployment behaves exactly as it did before sales tax
-  // existed: the tax line is simply not emitted and nothing is looked up.
-  const salesTaxItem = resolveEnv('QBO_ITEM_SALES_TAX', { defaultValue: '' });
+  // Named the same way the fee items are, so an org that has made the item gets the tax
+  // routed without configuring anything. A miss is not a failure - see findSalesTaxItemReference.
+  const salesTaxItem = offIfDisabled(
+    resolveEnv('QBO_ITEM_SALES_TAX', { defaultValue: 'Sales Tax Collected' })
+  );
 
   const feeItem = resolveEnv('QBO_FEE_ITEM', {
     fallbackNames: ['ACCOUNTING_STRIPE_FEE_ITEM'],

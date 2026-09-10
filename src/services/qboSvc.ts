@@ -3808,6 +3808,49 @@ const findSalesTaxItemReference = async (
   return match.reference;
 };
 
+/**
+ * When the tax routing last failed to resolve, per instance.
+ *
+ * Both the item name and the account name now have DEFAULTS, so every company file that
+ * has not made the item would otherwise pay for two QuickBooks lookups and a thrown error
+ * on every taxed order, forever. Neither miss is cached by the lookups themselves - they
+ * cache hits only.
+ *
+ * Ten minutes rather than for the life of the instance: an accountant who creates the
+ * item wants it to start working without waiting for the Function App to recycle, and a
+ * company file that will never have it pays one wasted lookup per ten minutes instead of
+ * one per order.
+ */
+const SALES_TAX_ROUTING_MISS_TTL_MS = 10 * 60 * 1000;
+let salesTaxRoutingMissedAt: number | null = null;
+
+const noteSalesTaxRoutingMiss = (): void => {
+  salesTaxRoutingMissedAt = Date.now();
+};
+
+const salesTaxRoutingRecentlyMissed = (): boolean =>
+  salesTaxRoutingMissedAt !== null &&
+  Date.now() - salesTaxRoutingMissedAt < SALES_TAX_ROUTING_MISS_TTL_MS;
+
+/** Exposed for tests, which need a clean slate between cases. */
+export const __resetSalesTaxRoutingCache = (): void => {
+  salesTaxRoutingMissedAt = null;
+};
+
+/**
+ * Is this failure worth remembering, or was it just a bad ten seconds?
+ *
+ * A missing item or account is a durable misconfiguration: it will still be missing on the
+ * next order, and there is no point paying for the lookup every time. A timeout or a 500
+ * from QuickBooks is not - and caching that would silently route ten minutes of tax into
+ * revenue because one call went wrong, which is a much worse trade than one wasted lookup.
+ *
+ * Matched on the message of an error this module throws itself (`resolveAccountId`), not on
+ * anything QuickBooks words.
+ */
+export const isDurableRoutingMiss = (error: unknown): boolean =>
+  error instanceof Error && /could not be found/i.test(error.message);
+
 const classPathLookupCache = new Map<string, QuickBooksReference>();
 
 const buildClassPathCacheKey = (value: string): string =>
@@ -4782,7 +4825,7 @@ const postChargeAsSalesReceipt = async (input: {
     const salesTaxItemName = toTrimmed(env.accounting.salesTaxItem);
     const salesTaxAccountName = toTrimmed(env.quickBooks.accounts.salesTaxLiability);
 
-    if (salesTaxItemName && salesTaxAccountName) {
+    if (salesTaxItemName && salesTaxAccountName && !salesTaxRoutingRecentlyMissed()) {
       try {
         const salesTaxAccountRef = createAccountRef(salesTaxAccountName);
         await resolveAccountReferences([salesTaxAccountRef], context);
@@ -4798,14 +4841,23 @@ const postChargeAsSalesReceipt = async (input: {
             name: salesTaxItem.name ?? salesTaxItemName,
           });
         } else {
+          noteSalesTaxRoutingMiss();
           logger.warn(
-            '[QBO] Sales tax product/service unavailable; the tax stays in the revenue line',
+            '[QBO] Sales tax product/service unavailable; the tax stays in the revenue line. ' +
+              'Create a Product/Service by this name in QuickBooks whose income account is the ' +
+              'liability account named here, or set QBO_ITEM_SALES_TAX to an empty string.',
             { salesTaxItemName, salesTaxAccountName, salesTaxAmountCents }
           );
         }
       } catch (error) {
         // Never fatal. A receipt that posts with the tax in revenue is recoverable with a
         // journal entry; a receipt that failed to post is a payment with no book entry.
+        //
+        // Only a DURABLE failure is remembered. A timeout cached for ten minutes would
+        // route ten minutes of tax into revenue because one call went wrong.
+        if (isDurableRoutingMiss(error)) {
+          noteSalesTaxRoutingMiss();
+        }
         logger.warn(
           '[QBO] Sales tax routing could not be resolved; leaving it in the revenue line',
           {
@@ -4815,7 +4867,7 @@ const postChargeAsSalesReceipt = async (input: {
           }
         );
       }
-    } else {
+    } else if (!salesTaxItemName || !salesTaxAccountName) {
       logger.warn(
         '[QBO] Order carries sales tax but no tax item/account is configured; it is being booked as revenue',
         { salesTaxAmountCents, salesTaxItemName, salesTaxAccountName }
