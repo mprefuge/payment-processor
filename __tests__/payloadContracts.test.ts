@@ -584,6 +584,7 @@ const EXPECTED_SALESFORCE_API_NAMES: Record<string, string> = {
   tax_state__c: 'Tax_State__c',
   tax_exemption_id__c: 'Tax_Exemption_Id__c',
   tax_certificate_status__c: 'Tax_Certificate_Status__c',
+  tax_exemption_certificate__c: 'Tax_Exemption_Certificate__c',
   fund__c: 'Fund__c',
   designation__c: 'Designation__c',
   restriction__c: 'Restriction__c',

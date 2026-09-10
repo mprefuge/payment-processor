@@ -69,6 +69,7 @@ export const transactionUpsertSchema = z
     tax_state__c: stringOrNullSchema.optional(),
     tax_exemption_id__c: stringOrNullSchema.optional(),
     tax_certificate_status__c: stringOrNullSchema.optional(),
+    tax_exemption_certificate__c: stringOrNullSchema.optional(),
     payment_method__c: stringOrNullSchema.optional(),
     payment_brand__c: stringOrNullSchema.optional(),
     payment_last4__c: stringOrNullSchema.optional(),

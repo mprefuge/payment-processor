@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { readTaxFromMetadata } from '../src/domain/transactions';
 import { TRANSACTION_FIELD_API_NAMES } from '../src/services/salesforceSvc';
@@ -111,6 +111,12 @@ describe('tax field mapping', () => {
     expect(TRANSACTION_FIELD_API_NAMES.tax_certificate_status__c).toBe('Tax_Certificate_Status__c');
   });
 
+  it('names the certificate lookup, without which the link never reaches Salesforce', () => {
+    expect(TRANSACTION_FIELD_API_NAMES.tax_exemption_certificate__c).toBe(
+      'Tax_Exemption_Certificate__c'
+    );
+  });
+
   it('keeps tax distinct from the revenue fields', () => {
     // Tax is held in trust for the state. It is part of what the buyer paid,
     // but it is not income and must never be conflated with gross or net.
@@ -120,5 +126,69 @@ describe('tax field mapping', () => {
     expect(TRANSACTION_FIELD_API_NAMES.tax_amount__c).not.toBe(
       TRANSACTION_FIELD_API_NAMES.amount_net__c
     );
+  });
+});
+
+describe('findTaxCertificateIdByExemptionId', () => {
+  const SalesforceCrmService = require('../src/services/salesforce/salesforceCrm');
+
+  const serviceWith = (query: any) => {
+    const conn = { query, sobject: vi.fn(), authenticate: vi.fn().mockResolvedValue(undefined) };
+    const service = new SalesforceCrmService({});
+    service.conn = conn;
+    service.authenticate = async () => conn;
+    return { service, conn };
+  };
+
+  it('resolves an exemption number to the certificate record', async () => {
+    const query = vi.fn().mockResolvedValue({ records: [{ Id: 'a1Y000000000009' }] });
+    const { service } = serviceWith(query);
+
+    await expect(service.findTaxCertificateIdByExemptionId('A-12345')).resolves.toBe(
+      'a1Y000000000009'
+    );
+    expect(query.mock.calls[0][0]).toContain("Exemption_Id__c = 'A-12345'");
+  });
+
+  it('normalises the number before it reaches SOQL', async () => {
+    // escapeSoqlLiteral escapes quotes but not a trailing backslash, so the
+    // alphabet is the boundary. An injected clause must not survive it.
+    const query = vi.fn().mockResolvedValue({ records: [] });
+    const { service } = serviceWith(query);
+
+    await service.findTaxCertificateIdByExemptionId("a-12345' OR Id != null--");
+
+    const soql = query.mock.calls[0][0];
+    expect(soql).toContain("Exemption_Id__c = 'A-12345ORIDNULL--'");
+    expect(soql).not.toContain('OR Id !=');
+  });
+
+  it('returns null rather than throwing when the lookup fails', async () => {
+    // This runs while a payment is being recorded. Losing the link is
+    // recoverable from the number in Stripe metadata; losing the transaction
+    // record is not.
+    const query = vi.fn().mockRejectedValue(new Error('INVALID_SESSION_ID'));
+    const { service } = serviceWith(query);
+
+    await expect(service.findTaxCertificateIdByExemptionId('A-12345')).resolves.toBeNull();
+  });
+
+  it('returns null for an empty or unusable number without querying', async () => {
+    const query = vi.fn();
+    const { service } = serviceWith(query);
+
+    await expect(service.findTaxCertificateIdByExemptionId('')).resolves.toBeNull();
+    await expect(service.findTaxCertificateIdByExemptionId(null)).resolves.toBeNull();
+    await expect(service.findTaxCertificateIdByExemptionId('!!!')).resolves.toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('returns null when no certificate carries that number', async () => {
+    // An untaxed order whose certificate cannot be found is a row worth
+    // finding, and a blank lookup is what makes it one.
+    const query = vi.fn().mockResolvedValue({ records: [] });
+    const { service } = serviceWith(query);
+
+    await expect(service.findTaxCertificateIdByExemptionId('A-99999')).resolves.toBeNull();
   });
 });

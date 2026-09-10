@@ -640,6 +640,64 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
+  /**
+   * The Salesforce id of the exemption certificate carrying this exemption
+   * number, or null.
+   *
+   * Resolved from the NUMBER rather than trusting the record id the browser
+   * sends alongside it. The number is what the buyer attested to and what the
+   * forms service keyed the record on; the id is a value that arrived from a
+   * public form and could name any certificate in the org. Costs one indexed
+   * query on a unique external id, and buys a link that cannot be pointed
+   * somewhere else by editing a payload.
+   *
+   * Never throws, for the same reason findDiscountCodeIdByCode does not: losing
+   * the link is recoverable from the number in Stripe metadata, losing the
+   * transaction record is not.
+   */
+  async findTaxCertificateIdByExemptionId(exemptionId) {
+    if (!exemptionId || typeof exemptionId !== 'string') {
+      return null;
+    }
+
+    // Normalised to the same alphabet the order form and the forms service use,
+    // which is what makes the value safe to interpolate: escapeSoqlLiteral
+    // escapes quotes but not a trailing backslash.
+    const normalized = exemptionId
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 40);
+    if (!normalized) {
+      return null;
+    }
+
+    try {
+      await this.authenticate();
+      const query = `SELECT Id, Status__c FROM Tax_Exemption_Certificate__c WHERE Exemption_Id__c = '${this.escapeSoqlLiteral(normalized)}' LIMIT 1`;
+      const result = await this.conn.query(query);
+
+      if (result.records && result.records.length > 0) {
+        return result.records[0].Id;
+      }
+
+      // Worth a log line rather than a shrug: an untaxed order whose
+      // certificate cannot be found is exactly the row an audit asks about.
+      logger.info('Tax exemption certificate not found in Salesforce', {
+        exemptionId: normalized,
+      });
+      return null;
+    } catch (error) {
+      logger.warn(
+        'Tax exemption certificate lookup failed; transaction will be recorded without the link',
+        {
+          exemptionId: normalized,
+          error: error && error.message ? error.message : String(error),
+        }
+      );
+      return null;
+    }
+  }
+
   async findOrCreateCampaign(campaignName) {
     await this.authenticate();
 
