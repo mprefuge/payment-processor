@@ -767,6 +767,63 @@ class SalesforceCrmService extends BaseCrmService {
     return record && typeof record.Status__c === 'string' ? record.Status__c : null;
   }
 
+  /**
+   * Upsert a transaction that no processor issued an id for - a cheque, or
+   * anything else settled outside Stripe.
+   *
+   * DELIBERATELY NOT upsertTransactionsRecord, and that is the whole reason
+   * this method exists rather than a parameter on that one.
+   *
+   * upsertTransactionsRecord looks for an existing record by the Stripe unique
+   * ids first, and when none matches - which is ALWAYS, here, because every
+   * Stripe id on a cheque is blank - it falls through to
+   * findExistingTransactionIdByContentSignature: contact plus Amount_Gross__c
+   * plus Received_At__c. For Stripe traffic that fallback is harmless, because
+   * the id lookup catches everything before it. For a cheque it would be the
+   * only duplicate check there is, and two $400 cheques from the same church
+   * recorded at the same moment would silently upsert onto one record. That is
+   * the sort of thing found three months later in a reconciliation, if at all.
+   *
+   * So this upserts on Manual_Reference__c and nothing else. The reference is
+   * unique and stable across resubmissions of the same order, which makes a
+   * retry idempotent and two genuinely different orders two records, by
+   * construction rather than by inference from what they happen to cost.
+   */
+  async upsertManualTransaction(transactionData) {
+    await this.authenticate();
+
+    const reference =
+      transactionData && typeof transactionData.Manual_Reference__c === 'string'
+        ? transactionData.Manual_Reference__c.trim()
+        : '';
+
+    if (!reference) {
+      throw new Error('Manual_Reference__c is required to upsert a manual transaction');
+    }
+
+    if (!this.hasRequiredTransactionFields(transactionData)) {
+      logger.warn('[SalesforceCrm] Skipping manual transaction upsert due to missing fields', {
+        reference,
+        status: transactionData.Status__c,
+        amountGross: transactionData.Amount_Gross__c,
+      });
+      return null;
+    }
+
+    const result = await this.conn
+      .sobject('Transaction__c')
+      .upsert({ ...transactionData, Manual_Reference__c: reference }, 'Manual_Reference__c');
+
+    const outcome = Array.isArray(result) ? result[0] : result;
+    if (!outcome || outcome.success === false) {
+      throw new Error(
+        `Manual transaction upsert failed: ${JSON.stringify(outcome?.errors || result)}`
+      );
+    }
+
+    return outcome;
+  }
+
   async findOrCreateCampaign(campaignName) {
     await this.authenticate();
 
