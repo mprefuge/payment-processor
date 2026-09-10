@@ -8,7 +8,7 @@ import type {
 import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
-import { readDiscountFromMetadata, readTaxFromMetadata } from '../../domain/transactions';
+import { readDiscountFromMetadata } from '../../domain/transactions';
 import { centsToMajorUnits, normalizeStripeId, timestampToIsoString } from '../utils';
 
 /** 15-character or 18-character Salesforce Campaign record ID (Record Type prefix 701). */
@@ -252,57 +252,6 @@ const resolveDiscountCodeId = async (
 };
 
 /**
- * The Salesforce id of the exemption certificate an untaxed order rests on.
- *
- * Resolved from the exemption NUMBER in metadata, never from the record id the
- * browser sends beside it. The number is what the buyer signed for and what the
- * forms service keyed the certificate on; the id arrived from a public form and
- * could name any certificate in the org. One indexed query on a unique external
- * id buys a link that cannot be repointed by editing a payload.
- *
- * Null is not a failure to record the order. The tax figures stand on their own
- * - base, rate, amount and the exemption number are all on the transaction
- * either way - and an untaxed order whose certificate could not be resolved is
- * a row worth finding, which is exactly what a blank lookup makes it.
- */
-const resolveTaxCertificateId = async (
-  metadata: Record<string, string | null> | null | undefined,
-  crm: any,
-  context: HttpContext
-): Promise<string | null> => {
-  const { tax_exemption_id__c: exemptionId } = readTaxFromMetadata(metadata ?? null);
-
-  if (!exemptionId) {
-    return null;
-  }
-
-  if (typeof crm?.findTaxCertificateIdByExemptionId !== 'function') {
-    context.log('[StripeWebhook] CRM cannot resolve exemption certificates; skipping the link', {
-      exemptionId,
-    });
-    return null;
-  }
-
-  try {
-    const id = await crm.findTaxCertificateIdByExemptionId(exemptionId);
-    context.log(
-      id
-        ? '[StripeWebhook] Exemption certificate resolved to Salesforce ID'
-        : '[StripeWebhook] Exemption certificate not found; transaction records the number only',
-      { exemptionId, certificateId: id ?? null }
-    );
-    return id ?? null;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    context.log('[StripeWebhook] Exemption certificate lookup failed, skipping the link', {
-      exemptionId,
-      error: errorMessage,
-    });
-    return null;
-  }
-};
-
-/**
  * The status a *completed* Checkout Session has already reached.
  *
  * This handler used to hard-code 'processing' for every completed session. That
@@ -428,13 +377,9 @@ export const handleCheckoutSessionCompleted = async (
 
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
   const discountCodeId = await resolveDiscountCodeId(session.metadata, crm, context);
-  const taxCertificateId = await resolveTaxCertificateId(session.metadata, crm, context);
   // Read once. The figures stand on their own: an order keeps what it was
   // discounted even when the code record behind it cannot be resolved.
   const discount = readDiscountFromMetadata(session.metadata ?? null);
-  // Tax rides the same path. Recorded even when it is zero: "no tax was due"
-  // and "nobody worked the tax out" are different facts on a financial record.
-  const tax = readTaxFromMetadata(session.metadata ?? null);
 
   const status = resolveCompletedCheckoutSessionStatus(session);
 
@@ -455,15 +400,6 @@ export const handleCheckoutSessionCompleted = async (
     ...(discount.discount_amount__c !== null
       ? { discount_amount__c: discount.discount_amount__c }
       : {}),
-    ...(tax.tax_base__c !== null ? { tax_base__c: tax.tax_base__c } : {}),
-    ...(tax.tax_amount__c !== null ? { tax_amount__c: tax.tax_amount__c } : {}),
-    ...(tax.tax_rate__c !== null ? { tax_rate__c: tax.tax_rate__c } : {}),
-    ...(tax.tax_state__c ? { tax_state__c: tax.tax_state__c } : {}),
-    ...(tax.tax_exemption_id__c ? { tax_exemption_id__c: tax.tax_exemption_id__c } : {}),
-    ...(tax.tax_certificate_status__c
-      ? { tax_certificate_status__c: tax.tax_certificate_status__c }
-      : {}),
-    ...(taxCertificateId ? { tax_exemption_certificate__c: taxCertificateId } : {}),
     ...(subscriptionPaymentIntentId
       ? { stripe_payment_intent_id__c: subscriptionPaymentIntentId }
       : {}),
