@@ -17,8 +17,6 @@ const {
   updateStripeCustomer,
 } = require('./processTransaction/stripeCustomerWorkflow');
 const { createCrmConfigResolver } = require('./processTransaction/crmConfig');
-const { runOrderPriceCheck } = require('./processTransaction/priceCheck');
-const { getCrmService } = require('./processTransaction/crmWorkflowCommon');
 const { createCrmContactWorkflow } = require('./processTransaction/crmContactWorkflow');
 const { createCrmTransactionWorkflow } = require('./processTransaction/crmTransactionWorkflow');
 const { buildCheckoutSessionParams } = require('./processTransaction/checkoutSessionParams');
@@ -961,58 +959,11 @@ module.exports = async function (request, context) {
     delete requestData.testKey;
     delete requestData.livemode;
 
-    // Does the amount asked for match what this order should cost?
-    //
-    // Runs BEFORE the Checkout Session exists, because the only useful place to
-    // refuse a total nobody agreed to is before a payment page is minted for it.
-    // It fails open by construction - an unresolvable input is `unverifiable`
-    // and goes through - and it refuses only in enforce mode on a definite
-    // mismatch. Everything that is not a Hospitality Guide order skips it
-    // entirely: a donation amount is chosen by the donor and there is no
-    // expected figure to check it against.
-    const priceCheck = await runOrderPriceCheck({
-      requestData,
-      getCrm: () =>
-        getCrmService({
-          CrmFactory,
-          getCrmConfig,
-          operationName: 'order price check',
-          requiredMethods: ['findDiscountPercentByCode', 'findTaxCertificateStatusByExemptionId'],
-          unsupportedCapabilityLabel: 'price verification lookups',
-        }),
-    });
-
-    if (priceCheck.refuse) {
-      log('Refusing an order whose amount does not match its price', {
-        expectedOrderCents: priceCheck.result?.expectedOrderCents,
-        claimedOrderCents: priceCheck.result?.claimedOrderCents,
-      });
-      return sendResponse({
-        status: 400,
-        jsonBody: {
-          // Deliberately vague to the caller and specific in the log. A buyer
-          // who mistyped nothing sees a message that tells them to start again;
-          // one who edited the total learns nothing about what was compared.
-          error: 'That order total does not match the current price. Please reload and try again.',
-        },
-      });
-    }
-
     requestData.metadata = applyTestArtifactMetadata(requestData.metadata, {
       headers: actualRequest?.headers,
       isLiveMode,
       requestId,
     });
-
-    // The verdict rides with the payment whatever the mode, so a mismatch that
-    // was let through in report mode is visible on the Stripe session itself
-    // rather than only in a log nobody is reading. It does NOT reach
-    // Transaction__c: TRANSACTION_FIELD_API_NAMES is an allowlist and there is
-    // no field for it, which is the next thing to add if report mode ever turns
-    // up a mismatch worth chasing in Salesforce.
-    if (priceCheck.checked) {
-      requestData.metadata = { ...requestData.metadata, ...priceCheck.metadata };
-    }
     const customerDetails = {
       ...requestData.customer,
       metadata: requestData.metadata,
