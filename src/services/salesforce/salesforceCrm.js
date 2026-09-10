@@ -698,6 +698,75 @@ class SalesforceCrmService extends BaseCrmService {
     }
   }
 
+  /**
+   * What a discount code is actually worth, per Salesforce - or null when no
+   * such code exists or it is switched off.
+   *
+   * Unlike findDiscountCodeIdByCode above, this one THROWS when the lookup
+   * fails, and that difference is deliberate. That method links a payment to a
+   * code for bookkeeping, where a failure costs a link. This one feeds the
+   * price check, where a failure and "no such code" lead to opposite
+   * conclusions: swallowing the first as the second would price the order at
+   * full price and refuse a buyer holding a perfectly good code. The caller
+   * turns a throw into "unverifiable" and lets the payment through.
+   */
+  async findDiscountPercentByCode(code) {
+    if (!code || typeof code !== 'string') {
+      return null;
+    }
+
+    const normalized = code
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 40);
+    if (!normalized) {
+      return null;
+    }
+
+    await this.authenticate();
+    const query =
+      `SELECT Percent_Off__c, Active__c FROM Discount_Code__c ` +
+      `WHERE Code__c = '${this.escapeSoqlLiteral(normalized)}' LIMIT 1`;
+    const result = await this.conn.query(query);
+    const record = result.records && result.records[0];
+
+    if (!record || record.Active__c !== true) {
+      return null;
+    }
+
+    const percent = Number(record.Percent_Off__c);
+    return Number.isFinite(percent) && percent >= 1 && percent <= 100 ? percent : null;
+  }
+
+  /**
+   * The status of the certificate carrying this exemption number, or null when
+   * there is none. Throws on a failed lookup, for the same reason as above:
+   * "there is no certificate" means tax is owed, and a Salesforce outage must
+   * not be read as that.
+   */
+  async findTaxCertificateStatusByExemptionId(exemptionId) {
+    if (!exemptionId || typeof exemptionId !== 'string') {
+      return null;
+    }
+
+    const normalized = exemptionId
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 40);
+    if (!normalized) {
+      return null;
+    }
+
+    await this.authenticate();
+    const query =
+      `SELECT Status__c FROM Tax_Exemption_Certificate__c ` +
+      `WHERE Exemption_Id__c = '${this.escapeSoqlLiteral(normalized)}' LIMIT 1`;
+    const result = await this.conn.query(query);
+    const record = result.records && result.records[0];
+
+    return record && typeof record.Status__c === 'string' ? record.Status__c : null;
+  }
+
   async findOrCreateCampaign(campaignName) {
     await this.authenticate();
 
