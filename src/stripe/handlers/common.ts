@@ -8,6 +8,7 @@ import type {
 import type { SalesforceSvc, QuickBooksDocumentReference } from '../../services/salesforceSvc';
 import type { PostChargeToQboResult } from '../../services/qboSvc';
 import type { TransactionUpsertDTO } from '../../domain/transactions';
+import { readDiscountFromMetadata } from '../../domain/transactions';
 import { centsToMajorUnits, normalizeStripeId, timestampToIsoString } from '../utils';
 
 /** 15-character or 18-character Salesforce Campaign record ID (Record Type prefix 701). */
@@ -203,6 +204,54 @@ const resolveCampaignId = async (
 };
 
 /**
+ * Resolve the discount code in metadata to its Discount_Code__c record.
+ *
+ * Mirrors resolveCampaignId above, including the part that matters most: it
+ * returns null instead of throwing. A payment must still be recorded when the
+ * code cannot be looked up - the code string is preserved in Stripe metadata
+ * either way, so the link can be repaired later, whereas a transaction that
+ * failed to write is gone.
+ *
+ * The percentage and amount are read separately in mapStripeToTransaction and
+ * do not depend on this: an order keeps its discount figures even if the code
+ * record was since deleted.
+ */
+const resolveDiscountCodeId = async (
+  metadata: Record<string, string | null> | null | undefined,
+  crm: any,
+  context: HttpContext
+): Promise<string | null> => {
+  const { code } = readDiscountFromMetadata(metadata ?? null);
+
+  if (!code) {
+    return null;
+  }
+
+  if (typeof crm?.findDiscountCodeIdByCode !== 'function') {
+    context.log('[StripeWebhook] CRM cannot resolve discount codes; skipping the link', { code });
+    return null;
+  }
+
+  try {
+    const id = await crm.findDiscountCodeIdByCode(code);
+    context.log(
+      id
+        ? '[StripeWebhook] Discount code resolved to Salesforce ID'
+        : '[StripeWebhook] Discount code not found; transaction records the amount only',
+      { code, discountCodeId: id ?? null }
+    );
+    return id ?? null;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    context.log('[StripeWebhook] Discount code lookup failed, skipping the link', {
+      code,
+      error: errorMessage,
+    });
+    return null;
+  }
+};
+
+/**
  * The status a *completed* Checkout Session has already reached.
  *
  * This handler used to hard-code 'processing' for every completed session. That
@@ -327,6 +376,10 @@ export const handleCheckoutSessionCompleted = async (
   );
 
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
+  const discountCodeId = await resolveDiscountCodeId(session.metadata, crm, context);
+  // Read once. The figures stand on their own: an order keeps what it was
+  // discounted even when the code record behind it cannot be resolved.
+  const discount = readDiscountFromMetadata(session.metadata ?? null);
 
   const status = resolveCompletedCheckoutSessionStatus(session);
 
@@ -340,6 +393,13 @@ export const handleCheckoutSessionCompleted = async (
   const transaction: TransactionUpsertDTO = {
     ...buildCheckoutSessionTransaction(session, status, undefined, event.id, event.livemode),
     ...(campaignId ? { campaign__c: campaignId } : {}),
+    ...(discountCodeId ? { discount_code__c: discountCodeId } : {}),
+    ...(discount.discount_percent__c !== null
+      ? { discount_percent__c: discount.discount_percent__c }
+      : {}),
+    ...(discount.discount_amount__c !== null
+      ? { discount_amount__c: discount.discount_amount__c }
+      : {}),
     ...(subscriptionPaymentIntentId
       ? { stripe_payment_intent_id__c: subscriptionPaymentIntentId }
       : {}),
