@@ -268,6 +268,19 @@ interface BuildSalesReceiptInput {
    */
   coverFeesItemRef?: string;
   /**
+   * Sales tax the buyer paid, in cents. Carved OUT of the revenue line rather than added on
+   * top: the buyer paid one total and it is already inside `amountCents`. Only ever acted on
+   * alongside `salesTaxItemRef` - see the line below.
+   */
+  salesTaxAmountCents?: number;
+  /**
+   * Product/Service for the sales tax line, in the same shape as `revenueItemName`. Absent
+   * means "no tax line": either no tax was collected, or no item could be resolved whose own
+   * account is the sales tax liability account. Tax then stays in the revenue line, which is
+   * where it was before any of this existed.
+   */
+  salesTaxItemRef?: string;
+  /**
    * Product/Service for the NEGATIVE processor-fee line, in the same shape as
    * `revenueItemName`. Absent means "no fee line": the caller either found no fee amount, or
    * could not resolve a dedicated fee item whose own IncomeAccountRef is the fee expense
@@ -2415,6 +2428,8 @@ export const buildSalesReceipt = ({
   description,
   coverFeesAmountCents = 0,
   coverFeesItemRef,
+  salesTaxAmountCents = 0,
+  salesTaxItemRef,
   feeLineItemRef,
   feeLineAmountCents = 0,
   pairedFeeDocNumber = null,
@@ -2435,7 +2450,29 @@ export const buildSalesReceipt = ({
   }
 
   let coverFees = ensurePositiveAmount(coverFeesAmountCents, 'Cover fees amount');
-  let baseAmount = amount - coverFees;
+
+  // Sales tax is money held in trust for the state. It is inside what the buyer paid, so it
+  // is inside `amount`, but it is NOT income and must not be booked as revenue.
+  //
+  // Carved out ONLY when the caller resolved an item that posts to the liability account.
+  // Without one there is nowhere for it to go that is not revenue, and splitting it onto a
+  // revenue-backed item would move the number around the receipt while changing nothing
+  // about where it lands - so it stays in the revenue line, exactly as it did before this
+  // existed. That is the honest degrade: no better than today, and never a broken receipt.
+  const salesTaxItem = toTrimmed(salesTaxItemRef);
+  let salesTax = salesTaxItem ? ensurePositiveAmount(salesTaxAmountCents, 'Sales tax amount') : 0;
+
+  if (salesTax > 0 && salesTax + coverFees >= amount) {
+    // Tax cannot be the whole receipt. Bad metadata, not a bad order.
+    logger.warn('[qboSvc] Sales tax amount leaves nothing for revenue; leaving it in the line', {
+      amountCents,
+      salesTaxAmountCents,
+      coverFeesAmountCents,
+    });
+    salesTax = 0;
+  }
+
+  let baseAmount = amount - coverFees - salesTax;
 
   if (baseAmount <= 0 && coverFees > 0) {
     // invalid metadata or calculation produced fees >= total.  don't crash the
@@ -2446,7 +2483,7 @@ export const buildSalesReceipt = ({
       computedBase: baseAmount,
     });
     coverFees = 0;
-    baseAmount = amount;
+    baseAmount = amount - salesTax;
   }
 
   const lineDescription = description || memo;
@@ -2479,6 +2516,18 @@ export const buildSalesReceipt = ({
   }
 
   const resolvedServiceDate = lineServiceDate ? normalizeDate(lineServiceDate) : undefined;
+
+  // An explicit line amount override says "the revenue line is exactly this", and honouring
+  // it while also adding a tax line would make the receipt total more than the buyer was
+  // charged. The override wins and the tax stays where it was.
+  if (salesTax > 0 && resolvedLineAmountCents !== null) {
+    logger.warn('[qboSvc] Explicit line amount override; leaving sales tax in the revenue line', {
+      salesTaxAmountCents,
+      lineAmountCents,
+    });
+    baseAmount += salesTax;
+    salesTax = 0;
+  }
 
   // Main line item (base amount if cover fees exist, otherwise full amount)
   const mainAmount = centsToDollars(
@@ -2530,6 +2579,40 @@ export const buildSalesReceipt = ({
         ItemRef: createItemRef(coverFeesItem),
         Qty: 1,
         UnitPrice: coverFeesAmount,
+        ...(resolvedServiceDate ? { ServiceDate: resolvedServiceDate } : {}),
+        ...(classRef ? { ClassRef: classRef } : {}),
+      },
+    });
+  }
+
+  // Sales tax, as its own POSITIVE line, against an item whose account is the sales tax
+  // liability account. `salesTax` is non-zero only when such an item was resolved (see the
+  // carve-out above), so reaching here means the tax has somewhere to land that is not
+  // income.
+  //
+  // Between the revenue lines and the fee line on purpose: the gross revenue line has to
+  // stay at index 0 because `patchQboSalesReceiptFields` patches only the FIRST
+  // SalesItemLineDetail, and the negative fee line has to stay last for the same reason it
+  // always did.
+  //
+  // The receipt still totals to what Stripe deposited. Nothing is added here - the tax was
+  // already inside `amount` and has been taken out of the revenue line to pay for it.
+  if (salesTax > 0 && salesTaxItem) {
+    const salesTaxAmount = centsToDollars(salesTax);
+    if (!Number.isFinite(salesTaxAmount)) {
+      throw new Error(
+        `Invalid sales tax amount calculated for sales receipt: ${salesTaxAmount} (from ${salesTax} cents)`
+      );
+    }
+
+    lines.push({
+      Amount: salesTaxAmount,
+      DetailType: 'SalesItemLineDetail',
+      Description: 'Sales Tax Collected',
+      SalesItemLineDetail: {
+        ItemRef: createItemRef(salesTaxItem),
+        Qty: 1,
+        UnitPrice: salesTaxAmount,
         ...(resolvedServiceDate ? { ServiceDate: resolvedServiceDate } : {}),
         ...(classRef ? { ClassRef: classRef } : {}),
       },
@@ -3664,6 +3747,67 @@ const findFeeItemReference = async (
   return match.reference;
 };
 
+/**
+ * The Product/Service the sales tax line posts through, or null.
+ *
+ * The same shape and the same verification as `findFeeItemReference` above, and for the
+ * same reason: QuickBooks posts a sales line to the account configured on the ITEM, and an
+ * `ItemAccountRef` on the line does NOT redirect it. So the item's own account has to BE
+ * the sales tax liability account, and this refuses to hand over anything else - an item
+ * pointed at revenue would book tax as income, which is precisely the thing this exists to
+ * stop.
+ *
+ * Non-creating, like the fee and fee-coverage lookups. An item whose account is a liability
+ * rather than income is not something to mint from a webhook; a person makes it once in
+ * QuickBooks and this finds it.
+ *
+ * Null on anything unexpected. The caller then leaves the tax in the revenue line, which is
+ * where it is today - no worse, and never a failed receipt.
+ */
+const findSalesTaxItemReference = async (
+  itemName: string,
+  liabilityAccountId: string,
+  context: QuickBooksRequestContext
+): Promise<QuickBooksReference | null> => {
+  const normalizedName = toTrimmed(itemName);
+  if (!normalizedName) {
+    return null;
+  }
+
+  const match = await findItemMatchByName(normalizedName, context);
+  if (!match) {
+    return null;
+  }
+
+  const resolvedName = toTrimmed(match.reference.name);
+  if (!resolvedName || resolvedName.toLowerCase() !== normalizedName.toLowerCase()) {
+    return null;
+  }
+
+  const incomeAccountRef = match.record?.IncomeAccountRef;
+  const incomeAccountId =
+    incomeAccountRef && typeof incomeAccountRef === 'object'
+      ? toTrimmed(String((incomeAccountRef as Record<string, unknown>).value ?? ''))
+      : null;
+  const expectedAccountId = toTrimmed(liabilityAccountId);
+
+  if (!incomeAccountId || !expectedAccountId || incomeAccountId !== expectedAccountId) {
+    logger.warn(
+      '[QBO] Sales tax product/service does not post to the configured liability account; ' +
+        'leaving the tax in the revenue line',
+      {
+        salesTaxItemName: normalizedName,
+        salesTaxItemId: match.reference.value,
+        itemAccountId: incomeAccountId,
+        expectedLiabilityAccountId: expectedAccountId,
+      }
+    );
+    return null;
+  }
+
+  return match.reference;
+};
+
 const classPathLookupCache = new Map<string, QuickBooksReference>();
 
 const buildClassPathCacheKey = (value: string): string =>
@@ -4285,6 +4429,56 @@ export const postTransfer = (
   options?: PostOptions
 ): Promise<PostResult> => postToQbo('transfer', transfer, options);
 
+/**
+ * The sales tax the buyer paid, in cents, from Stripe metadata.
+ *
+ * Reads `tax_amount_cents` - the integer the order form sends - and never the formatted
+ * `tax_amount` string beside it. A number that has been through a currency formatter has
+ * lost the argument about what unit it is in, which is how Cover_Fees_Amount__c came to be
+ * stored 100x overstated on one of the two write paths.
+ *
+ * Zero for every donation and every order outside Kentucky, which is the common case and
+ * costs nothing: a zero here means no tax line and no lookup.
+ */
+export const getSalesTaxAmountCents = (
+  stripeContext:
+    | {
+        checkoutSession?: Stripe.Checkout.Session | null;
+        paymentIntent?: Stripe.PaymentIntent | null;
+        charge?: Stripe.Charge | null;
+      }
+    | null
+    | undefined
+): number => {
+  const metadata: Record<string, unknown> = {};
+
+  if (stripeContext) {
+    const addMeta = (md: unknown) => {
+      if (md && typeof md === 'object') {
+        Object.assign(metadata, md as Record<string, unknown>);
+      }
+    };
+
+    addMeta(stripeContext.checkoutSession?.metadata);
+    addMeta(stripeContext.paymentIntent?.metadata);
+    addMeta(stripeContext.charge?.metadata);
+  }
+
+  const raw = metadata.tax_amount_cents ?? metadata.Tax_Amount_Cents__c;
+
+  let cents = 0;
+  if (typeof raw === 'number') {
+    cents = Math.round(raw);
+  } else if (typeof raw === 'string' && raw.trim() !== '') {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) {
+      cents = Math.round(parsed);
+    }
+  }
+
+  return cents > 0 ? cents : 0;
+};
+
 const postChargeAsSalesReceipt = async (input: {
   grossAmount: number;
   feeAmount: number;
@@ -4574,6 +4768,61 @@ const postChargeAsSalesReceipt = async (input: {
     }
   }
 
+  // THE tax decision, and the same shape as the fee decision above. One resolved-or-null
+  // value decides whether the tax gets its own line at all, so there is no configuration in
+  // which a tax line exists but posts somewhere other than the liability account.
+  //
+  // Everything is off by default: no QBO_ITEM_SALES_TAX or no QBO_ACCOUNT_SALES_TAX_LIABILITY
+  // means nothing is looked up and no line is emitted, which is byte-for-byte what receipts
+  // looked like before sales tax existed. Orders that carry no tax - every donation, every
+  // order shipping outside Kentucky - never reach the lookup either.
+  let salesTaxItemRef: string | undefined;
+  const salesTaxAmountCents = getSalesTaxAmountCents(stripe);
+  if (salesTaxAmountCents > 0) {
+    const salesTaxItemName = toTrimmed(env.accounting.salesTaxItem);
+    const salesTaxAccountName = toTrimmed(env.quickBooks.accounts.salesTaxLiability);
+
+    if (salesTaxItemName && salesTaxAccountName) {
+      try {
+        const salesTaxAccountRef = createAccountRef(salesTaxAccountName);
+        await resolveAccountReferences([salesTaxAccountRef], context);
+        const salesTaxItem = await findSalesTaxItemReference(
+          salesTaxItemName,
+          salesTaxAccountRef.value,
+          context
+        );
+
+        if (salesTaxItem?.value) {
+          salesTaxItemRef = JSON.stringify({
+            value: salesTaxItem.value,
+            name: salesTaxItem.name ?? salesTaxItemName,
+          });
+        } else {
+          logger.warn(
+            '[QBO] Sales tax product/service unavailable; the tax stays in the revenue line',
+            { salesTaxItemName, salesTaxAccountName, salesTaxAmountCents }
+          );
+        }
+      } catch (error) {
+        // Never fatal. A receipt that posts with the tax in revenue is recoverable with a
+        // journal entry; a receipt that failed to post is a payment with no book entry.
+        logger.warn(
+          '[QBO] Sales tax routing could not be resolved; leaving it in the revenue line',
+          {
+            salesTaxItemName,
+            salesTaxAccountName,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
+      }
+    } else {
+      logger.warn(
+        '[QBO] Order carries sales tax but no tax item/account is configured; it is being booked as revenue',
+        { salesTaxAmountCents, salesTaxItemName, salesTaxAccountName }
+      );
+    }
+  }
+
   const salesReceipt = buildSalesReceipt({
     docNumber: salesReceiptDocNumber,
     amountCents: grossAmount,
@@ -4596,6 +4845,8 @@ const postChargeAsSalesReceipt = async (input: {
     description,
     coverFeesAmountCents,
     coverFeesItemRef,
+    salesTaxAmountCents,
+    salesTaxItemRef,
     feeLineItemRef,
     feeLineAmountCents: feeAmount,
     pairedFeeDocNumber,

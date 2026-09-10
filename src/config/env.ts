@@ -38,6 +38,13 @@ export interface EnvConfig {
       operatingBank: string;
       revenue: string;
       fees: string;
+      /**
+       * The liability account collected sales tax is held in until it is remitted. Empty
+       * means no tax routing: tax stays in revenue, as it did before this existed. Tax is
+       * money held in trust for the state - it is inside what the buyer paid, but it is not
+       * income and must never be reported as such.
+       */
+      salesTaxLiability: string;
       refunds: string;
       disputeLosses: string;
     };
@@ -74,6 +81,17 @@ export interface EnvConfig {
      * falls back to the revenue item (see postChargeAsSalesReceipt).
      */
     feeCoverageItem: string;
+    /**
+     * QuickBooks Product/Service used for the SALES TAX line on a sales receipt.
+     *
+     * Empty means the feature is off and tax stays folded into the revenue line, which is
+     * exactly today's behaviour. When set, the item must be one whose OWN account is the
+     * sales tax liability account below - `findSalesTaxItemReference` verifies that and
+     * refuses anything else, for the same reason the fee item is verified: QuickBooks posts
+     * a sales line to the account on the ITEM, and an `ItemAccountRef` on the line is
+     * ignored. Nothing here creates the item; a human makes it in QuickBooks once.
+     */
+    salesTaxItem: string;
     /**
      * QuickBooks Product/Service used for the NEGATIVE processor-fee line on a sales receipt,
      * so the receipt itself totals to the net Stripe deposited (the shape Acodei posted).
@@ -198,6 +216,9 @@ function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
       operatingBank: z.string().min(1),
       revenue: z.string().min(1),
       fees: z.string().min(1),
+      // Optional, unlike its neighbours: an org that does not collect sales tax has no such
+      // account, and requiring one would fail startup for every deployment that never needs it.
+      salesTaxLiability: z.string().default(''),
       refunds: z.string().min(1),
       disputeLosses: z.string().min(1),
     }),
@@ -226,6 +247,9 @@ function loadQuickBooks(ctx: LoadContext): EnvConfig['quickBooks'] {
         fallbackNames: ['ACCOUNTING_STRIPE_FEE_ACCOUNT'],
         defaultValue: 'Stripe Fees',
       }),
+      // No default. An account name guessed here would be resolved, missed, and warned about
+      // on every receipt in every company file that has no such account.
+      salesTaxLiability: resolveEnv('QBO_ACCOUNT_SALES_TAX_LIABILITY', { defaultValue: '' }),
       refunds: resolveEnv('QBO_ACCOUNT_REFUNDS', {
         fallbackNames: ['ACCOUNTING_REFUNDS_ACCOUNT'],
         defaultValue: 'Refunds',
@@ -295,6 +319,10 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     defaultValue: 'Stripe Fee Coverage',
   });
 
+  // No default, so an unconfigured deployment behaves exactly as it did before sales tax
+  // existed: the tax line is simply not emitted and nothing is looked up.
+  const salesTaxItem = resolveEnv('QBO_ITEM_SALES_TAX', { defaultValue: '' });
+
   const feeItem = resolveEnv('QBO_FEE_ITEM', {
     fallbackNames: ['ACCOUNTING_STRIPE_FEE_ITEM'],
     defaultValue: 'Stripe Fees',
@@ -361,6 +389,7 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
     allowTestModeAccounting,
     defaultSalesItem,
     feeCoverageItem,
+    salesTaxItem,
     feeItem,
     companyTimeZone,
     accounts: {
