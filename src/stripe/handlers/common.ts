@@ -219,7 +219,14 @@ const resolveCampaignId = async (
 const resolveDiscountCodeId = async (
   metadata: Record<string, string | null> | null | undefined,
   crm: any,
-  context: HttpContext
+  context: HttpContext,
+  /**
+   * When the order was placed. A code is no longer unique - the same string can
+   * carry a different percentage in a different month - so the link has to be
+   * resolved against the order's own date, not the date this webhook happened to
+   * run. Usually the same; not always, when an event is replayed.
+   */
+  asOf?: Date
 ): Promise<string | null> => {
   const { code } = readDiscountFromMetadata(metadata ?? null);
 
@@ -233,7 +240,7 @@ const resolveDiscountCodeId = async (
   }
 
   try {
-    const id = await crm.findDiscountCodeIdByCode(code);
+    const id = await crm.findDiscountCodeIdByCode(code, asOf);
     context.log(
       id
         ? '[StripeWebhook] Discount code resolved to Salesforce ID'
@@ -376,7 +383,14 @@ export const handleCheckoutSessionCompleted = async (
   );
 
   const campaignId = await resolveCampaignId(session.metadata, crm, context);
-  const discountCodeId = await resolveDiscountCodeId(session.metadata, crm, context);
+  const discountCodeId = await resolveDiscountCodeId(
+    session.metadata,
+    crm,
+    context,
+    // Checkout stamps `created` in seconds; it is when the buyer started paying,
+    // which is the day whose discount window they were offered.
+    typeof session.created === 'number' ? new Date(session.created * 1000) : undefined
+  );
   // Read once. The figures stand on their own: an order keeps what it was
   // discounted even when the code record behind it cannot be resolved.
   const discount = readDiscountFromMetadata(session.metadata ?? null);

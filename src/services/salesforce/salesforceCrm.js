@@ -607,7 +607,25 @@ class SalesforceCrmService extends BaseCrmService {
    * makes the value safe to interpolate, since escapeSoqlLiteral escapes quotes
    * but not a trailing backslash.
    */
-  async findDiscountCodeIdByCode(code) {
+  /**
+   * The Discount_Code__c record this order actually redeemed.
+   *
+   * CODE__C IS NOT UNIQUE. The same code may exist several times with different
+   * dates and percentages, so a partner can keep their code while the offer
+   * behind it changes - RUSSELLMOORE at 25% through September, 15% through
+   * October. Taking the first row would link an order to whichever year's record
+   * Salesforce happened to return, and the discount reporting would then credit
+   * the wrong window.
+   *
+   * `asOf` is the moment the order was placed, not the moment this webhook ran.
+   * They are usually seconds apart and occasionally days, when an event is
+   * replayed or a bank payment settles late - and on those days the difference
+   * is the whole question.
+   *
+   * Falls back to the newest window when none contains that date, which is the
+   * same answer the old single-row query gave and is better than no link at all.
+   */
+  async findDiscountCodeIdByCode(code, asOf = new Date()) {
     if (!code || typeof code !== 'string') {
       return null;
     }
@@ -620,13 +638,39 @@ class SalesforceCrmService extends BaseCrmService {
       return null;
     }
 
+    // Compared as YYYY-MM-DD strings, because Start_Date__c and End_Date__c are
+    // Dates with no time or zone. Anything finer would be inventing precision
+    // the data does not have.
+    const when = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : new Date();
+    const onDate = when.toISOString().slice(0, 10);
+
     try {
       await this.authenticate();
-      const query = `SELECT Id FROM Discount_Code__c WHERE Code__c = '${this.escapeSoqlLiteral(normalized)}' LIMIT 1`;
+      const query =
+        `SELECT Id, Start_Date__c, End_Date__c FROM Discount_Code__c ` +
+        `WHERE Code__c = '${this.escapeSoqlLiteral(normalized)}' ` +
+        `ORDER BY Start_Date__c DESC NULLS LAST LIMIT 25`;
       const result = await this.conn.query(query);
+      const records = Array.isArray(result.records) ? result.records : [];
 
-      if (result.records && result.records.length > 0) {
-        return result.records[0].Id;
+      if (records.length > 0) {
+        const covering = records.find((record) => {
+          const start = record.Start_Date__c ? String(record.Start_Date__c).slice(0, 10) : '';
+          const end = record.End_Date__c ? String(record.End_Date__c).slice(0, 10) : '';
+          // An open-ended window counts as covering. End_Date__c is the last day
+          // the code works, so the comparison includes it.
+          return (!start || start <= onDate) && (!end || onDate <= end);
+        });
+
+        if (!covering) {
+          logger.info('No discount code window covers the order date; linking the newest', {
+            code: normalized,
+            onDate,
+            windows: records.length,
+          });
+        }
+
+        return (covering || records[0]).Id;
       }
 
       logger.info('Discount code not found in Salesforce', { code: normalized });
