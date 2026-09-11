@@ -26,6 +26,8 @@ const body = (overrides: Record<string, unknown> = {}) => ({
   lastname: 'Buyer',
   phone: '5025550123',
   category: 'Hospitality Guide',
+  organization: 'Grace Baptist Church',
+  address: { line1: '1 Main St', city: 'Louisville', state: 'KY', postal_code: '40202' },
   metadata,
   ...overrides,
 });
@@ -52,15 +54,15 @@ describe('buildCheckOrder', () => {
     expect(built.record).toEqual({
       Manual_Reference__c: 'HG-20260910-AB12CD',
       Status__c: 'pending',
+      transaction_type__c: 'Check',
       Payment_Method__c: 'Check',
-      Payment_Type__c: 'Check',
       Source_System__c: 'Manual',
       Amount_Gross__c: 400,
       Currency_ISO_Code__c: 'USD',
       Sync_to_Quickbooks__c: false,
       Quantity__c: 10,
       Description__c: '10 participants x $40 - Hospitality Guide',
-      Internal_Notes__c: 'Awaiting a check. Order reference HG-20260910-AB12CD.',
+      Internal_Notes__c: 'Waiting on a check for order HG-20260910-AB12CD.',
       Billing_Name__c: 'Pat Buyer',
       Billing_Email__c: 'buyer@example.org',
       Billing_Phone__c: '5025550123',
@@ -86,6 +88,15 @@ describe('buildCheckOrder', () => {
     expect(built.record).not.toHaveProperty('Amount_Fee__c');
     expect(built.record).not.toHaveProperty('Amount_Net__c');
     expect(built.record).not.toHaveProperty('Cover_Fees_Amount__c');
+  });
+
+  it('uses the transaction type this org already uses for a check', () => {
+    // Every one of the 131 manual transactions already in the org carries
+    // transaction_type__c 'Check', and not one of them uses Payment_Type__c.
+    const built = buildCheckOrder(body());
+    if (!built.ok) throw new Error('expected ok');
+    expect(built.record.transaction_type__c).toBe('Check');
+    expect(built.record).not.toHaveProperty('Payment_Type__c');
   });
 
   it('keeps a pending check away from QuickBooks', () => {
@@ -153,6 +164,9 @@ describe('handleCheckOrder', () => {
       findDiscountPercentByCode: vi.fn().mockResolvedValue(null),
       findContactIdByEmail: vi.fn().mockResolvedValue('0031234567890AB'),
       findCampaignIdByName: vi.fn().mockResolvedValue('7011234567890AB'),
+      findOrCreateAccount: vi.fn().mockResolvedValue('0011234567890AB'),
+      getRecordTypeIdByName: vi.fn().mockResolvedValue('0121234567890AB'),
+      createContact: vi.fn().mockResolvedValue({ Id: '003NEWCONTACT01' }),
     };
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -175,29 +189,89 @@ describe('handleCheckOrder', () => {
     expect(upsert.mock.calls[0][0].Status__c).toBe('pending');
   });
 
-  it('links the contact and campaign it finds', async () => {
+  it('files it as a Manual Transaction, not whatever the API user defaults to', async () => {
+    // Leaving RecordTypeId unset is how the first check order in this org came
+    // out as a Donation - the only Donation-typed record in 4,893.
+    await handleCheckOrder(body(), {}, deps());
+
+    expect(crm.getRecordTypeIdByName).toHaveBeenCalledWith('Transaction__c', 'Manual Transaction');
+    expect(upsert.mock.calls[0][0].RecordTypeId).toBe('0121234567890AB');
+  });
+
+  it('links the contact, account and campaign', async () => {
     await handleCheckOrder(body(), {}, deps());
 
     expect(crm.findContactIdByEmail).toHaveBeenCalledWith('buyer@example.org');
     expect(upsert.mock.calls[0][0].Contact__c).toBe('0031234567890AB');
+    expect(upsert.mock.calls[0][0].Account__c).toBe('0011234567890AB');
     expect(upsert.mock.calls[0][0].Campaign__c).toBe('7011234567890AB');
   });
 
-  it('records the order anyway when there is no contact to link', async () => {
-    // The forms service creates the contact moments earlier from the same
-    // submission. If that has not landed yet, an unlinked pending payment is a
-    // smaller problem than a buyer told their order failed.
+  it('creates the contact when there is not one already', async () => {
+    // The forms service does not create a contact for this form, so looking one
+    // up and giving up left the office with an order they could not trace to a
+    // person.
     crm.findContactIdByEmail.mockResolvedValue(null);
 
     const response = await handleCheckOrder(body(), {}, deps());
 
     expect(response.status).toBe(200);
+    expect(crm.createContact).toHaveBeenCalledOnce();
+    expect(crm.createContact.mock.calls[0][0]).toMatchObject({
+      email: 'buyer@example.org',
+      firstName: 'Pat',
+      lastName: 'Buyer',
+      phone: '5025550123',
+    });
+    expect(upsert.mock.calls[0][0].Contact__c).toBe('003NEWCONTACT01');
+  });
+
+  it('matches an existing contact on email alone, never on name', async () => {
+    // searchContact ORs its criteria together, so handing it a name widens the
+    // match - a common surname would resolve this order to somebody else.
+    crm.searchContact = vi.fn();
+
+    await handleCheckOrder(body(), {}, deps());
+
+    expect(crm.searchContact).not.toHaveBeenCalled();
+    expect(crm.createContact).not.toHaveBeenCalled();
+  });
+
+  it('will not create a contact with no last name', async () => {
+    crm.findContactIdByEmail.mockResolvedValue(null);
+
+    const response = await handleCheckOrder(body({ lastname: '' }), {}, deps());
+
+    expect(response.status).toBe(200);
+    expect(crm.createContact).not.toHaveBeenCalled();
     expect(upsert.mock.calls[0][0]).not.toHaveProperty('Contact__c');
   });
 
-  it('records the order anyway when the lookups throw', async () => {
+  it('sends the address on to a contact it creates', async () => {
+    crm.findContactIdByEmail.mockResolvedValue(null);
+
+    await handleCheckOrder(body(), {}, deps());
+
+    expect(crm.createContact.mock.calls[0][0].address).toMatchObject({
+      line1: '1 Main St',
+      city: 'Louisville',
+      state: 'KY',
+    });
+  });
+
+  it('links no account when the buyer is an individual', async () => {
+    const response = await handleCheckOrder(body({ organization: '' }), {}, deps());
+
+    expect(response.status).toBe(200);
+    expect(crm.findOrCreateAccount).not.toHaveBeenCalled();
+    expect(upsert.mock.calls[0][0]).not.toHaveProperty('Account__c');
+  });
+
+  it('records the order anyway when every lookup throws', async () => {
     crm.findContactIdByEmail.mockRejectedValue(new Error('INVALID_SESSION_ID'));
     crm.findCampaignIdByName.mockRejectedValue(new Error('INVALID_SESSION_ID'));
+    crm.findOrCreateAccount.mockRejectedValue(new Error('INVALID_SESSION_ID'));
+    crm.getRecordTypeIdByName.mockRejectedValue(new Error('INVALID_SESSION_ID'));
 
     const response = await handleCheckOrder(body(), {}, deps());
 
@@ -205,14 +279,15 @@ describe('handleCheckOrder', () => {
     expect(upsert).toHaveBeenCalledOnce();
   });
 
-  it('never creates a contact of its own', async () => {
-    // An anonymous endpoint that can mint Contacts on demand is a spam vector.
-    crm.createContact = vi.fn();
-    crm.findContactIdByEmail.mockResolvedValue(null);
+  it('creates nothing at all when the price check refuses', async () => {
+    // The order matters: this endpoint can create a Contact and an Account, so a
+    // request that fails the price check must not leave either behind.
+    const response = await handleCheckOrder(body({ amount: 100 }), {}, deps());
 
-    await handleCheckOrder(body(), {}, deps());
-
+    expect(response.status).toBe(400);
     expect(crm.createContact).not.toHaveBeenCalled();
+    expect(crm.findOrCreateAccount).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('refuses an order whose total does not match its price', async () => {

@@ -241,6 +241,9 @@ const CheckOrderRequestSchema = z
     phone: z.string().optional(),
     category: z.string().optional(),
     organization: z.string().optional(),
+    // Used only to fill in a Contact this endpoint has to create, never to
+    // decide anything about the order.
+    address: z.record(z.unknown()).optional(),
     metadata: z.record(z.unknown()),
   })
   .passthrough();
@@ -254,6 +257,13 @@ const checkOrderExample = {
   phone: '5025550123',
   category: 'Hospitality Guide',
   organization: 'Grace Baptist Church',
+  address: {
+    line1: '1 Main St',
+    city: 'Louisville',
+    state: 'KY',
+    postal_code: '40202',
+    country: 'US',
+  },
   metadata: {
     product: 'hospitality-guide',
     participants: 10,
@@ -2128,7 +2138,7 @@ registerFunction('stripeTrueUp', 'Stripe true-up support', {
 registerFunction('processCheckOrder', 'Record an order to be paid by check', {
   handler: processCheckOrder,
   description:
-    'Records a PENDING Transaction__c for an order the buyer is paying by check. No money moves and no Stripe session is created; a person reconciles the record when the check arrives. The amount is verified against the order price and a mismatch is refused outright - unlike the card path, this one enforces that check unconditionally.',
+    "Records a PENDING Transaction__c for an order the buyer is paying by check. No money moves and no Stripe session is created; a person reconciles the record when the check arrives. The record takes the Manual Transaction record type and transaction type Check, and is linked to the buyer's contact and, for an organisation, its account - creating either if it does not exist. The amount is verified against the order price FIRST, and a mismatch is refused outright, so a request that fails that check creates nothing anywhere.",
   tags: ['Transactions'],
   operationId: 'processCheckOrder',
   methods: ['POST'],

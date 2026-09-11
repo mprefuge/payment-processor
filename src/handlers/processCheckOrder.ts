@@ -42,11 +42,24 @@ import { readHospitalityGuideClaim } from '../domain/hospitalityGuideOrder';
  * a quantity outside the tier table - and that matters more here than anywhere
  * else: a refused check order is a buyer who posts nothing.
  *
- * NOTHING HERE CREATES A RECORD OTHER THAN THE TRANSACTION. The contact and
- * campaign are LOOKED UP and linked when they already exist - the forms service
- * creates the contact moments earlier, from the same submission - and left null
- * when they do not. An anonymous endpoint that can mint Contacts on demand is a
- * spam vector; an anonymous endpoint that can only point at one is not.
+ * IT SHAPES THE RECORD THE WAY THE ORG ALREADY SHAPES A CHECK, rather than
+ * inventing a convention. Every one of the 131 manual transactions already in
+ * this org carries the Manual Transaction record type and
+ * `transaction_type__c = 'Check'`, and none of them uses `Payment_Type__c`, so
+ * neither does this. Leaving the record type unset is how the first one came out
+ * as a Donation: Salesforce falls back to the running user's default, which for
+ * the API user is whatever its profile says.
+ *
+ * IT CREATES A CONTACT, AND AN ACCOUNT FOR AN ORGANISATION, when it cannot find
+ * them. That is a deliberate change from looking them up and giving up: an order
+ * the office cannot trace back to a person is one nobody can chase, and the
+ * forms service does not create a contact for this form. It is the same thing
+ * the Stripe path does at `payment_intent.succeeded`, through the same dedupe.
+ *
+ * That does make this an anonymous endpoint that can create records, so the
+ * order matters: the price check runs FIRST and a request that fails it creates
+ * nothing at all. Past that the guards are the rate limit and the fact that only
+ * an order this service can price gets this far.
  */
 
 /** Requests allowed per client per minute, per instance. */
@@ -60,7 +73,14 @@ const RATE_LIMIT_MAX_CLIENTS = 10000;
  * for existing is that somebody owes money; a slow org must not cost the buyer
  * the confirmation screen.
  */
-const LINK_LOOKUP_TIMEOUT_MS = 4000;
+const LINK_LOOKUP_TIMEOUT_MS = 6000;
+
+/**
+ * The record type every manual check in this org already uses. Named rather than
+ * hardcoded as an id so the same code works against a sandbox, and so a rename
+ * shows up as a missing record type in the log instead of a silent mis-filing.
+ */
+const MANUAL_TRANSACTION_RECORD_TYPE = 'Manual Transaction';
 
 const requestLog = new Map<string, number[]>();
 
@@ -136,6 +156,7 @@ export interface CheckOrderInput {
   lastname?: unknown;
   phone?: unknown;
   organization?: unknown;
+  address?: Record<string, unknown> | null;
   metadata?: Record<string, unknown> | null;
 }
 
@@ -146,6 +167,15 @@ export type CheckOrderAccepted = {
   amountCents: number;
   email: string;
   campaign: string;
+  /** Who ordered, kept aside so the contact can be found or created from it. */
+  buyer: {
+    email: string;
+    firstName: string;
+    lastName: string;
+    phone: string;
+    organization: string;
+    address: Record<string, unknown> | null;
+  };
   record: Record<string, unknown>;
 };
 
@@ -186,17 +216,21 @@ export const buildCheckOrder = (input: CheckOrderInput): CheckOrderRefusal | Che
   }
 
   const metadata = (input.metadata || {}) as Record<string, unknown>;
-  const buyerName = [trimTo(input.firstname, 40), trimTo(input.lastname, 40)]
-    .filter(Boolean)
-    .join(' ');
+  const firstName = trimTo(input.firstname, 40);
+  const lastName = trimTo(input.lastname, 40);
+  const buyerName = [firstName, lastName].filter(Boolean).join(' ');
 
   const record: Record<string, unknown> = {
     Manual_Reference__c: reference,
     // Pending, and it stays pending until a person says otherwise. Nothing here
     // has seen any money.
     Status__c: 'pending',
+    // The org's own convention for a check, taken from the 131 manual
+    // transactions already in it rather than invented here. Payment_Type__c is
+    // deliberately NOT set: not one of those records uses it, and two fields
+    // saying "Check" is a future disagreement waiting to happen.
+    transaction_type__c: 'Check',
     Payment_Method__c: 'Check',
-    Payment_Type__c: 'Check',
     Source_System__c: 'Manual',
     Amount_Gross__c: amountCents / 100,
     Currency_ISO_Code__c: 'USD',
@@ -218,7 +252,7 @@ export const buildCheckOrder = (input: CheckOrderInput): CheckOrderRefusal | Che
     Description__c:
       trimTo(metadata.order_summary, 255) ||
       `Hospitality Guide, ${claim.participants} participants`,
-    Internal_Notes__c: `Awaiting a check. Order reference ${reference}.`.slice(0, 255),
+    Internal_Notes__c: `Waiting on a check for order ${reference}.`.slice(0, 255),
     ...(buyerName ? { Billing_Name__c: buyerName } : {}),
     Billing_Email__c: email.slice(0, 80),
     ...(trimTo(input.phone, 40) ? { Billing_Phone__c: trimTo(input.phone, 40) } : {}),
@@ -230,6 +264,14 @@ export const buildCheckOrder = (input: CheckOrderInput): CheckOrderRefusal | Che
     amountCents,
     email,
     campaign: trimTo(input.category, 80),
+    buyer: {
+      email,
+      firstName,
+      lastName,
+      phone: trimTo(input.phone, 40),
+      organization: trimTo(input.organization, 200),
+      address: input.address && typeof input.address === 'object' ? input.address : null,
+    },
     record,
   };
 };
@@ -239,41 +281,93 @@ interface HandlerDeps {
 }
 
 /**
- * Point the record at the contact and campaign it belongs to, when they exist.
+ * Fill in everything the record needs that is not in the request body: the
+ * record type, the campaign, the buyer's contact, and their organisation's
+ * account.
  *
- * Best effort by design, and bounded: every failure here leaves the record
- * exactly as it was and the order is still written. A pending payment that is
- * missing a lookup is a smaller problem than a buyer told their order failed.
+ * BEST EFFORT, AND BOUNDED. Every failure in here leaves the record exactly as
+ * it was and the order is still written. A pending payment missing a lookup is a
+ * far smaller problem than a buyer told their order failed - they would simply
+ * not send the check.
+ *
+ * Contact and Account are found-or-created rather than looked up. The forms
+ * service does not create a contact for this form, so looking one up and giving
+ * up left the office with an order they could not trace to a person. Creation
+ * runs only after the price check has passed, so a request that fails it creates
+ * nothing anywhere.
  */
-const linkRelatedRecords = async (
+const resolveRelatedRecords = async (
   crm: any,
   built: CheckOrderAccepted,
   requestId: string
 ): Promise<void> => {
+  const attempt = async (what: string, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      logger.warn(`[CheckOrder] ${what} failed; recording without it`, {
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   const lookups = (async () => {
-    if (typeof crm.findContactIdByEmail === 'function') {
-      try {
-        const contactId = await crm.findContactIdByEmail(built.email);
-        if (contactId) built.record.Contact__c = contactId;
-      } catch (error) {
-        logger.warn('[CheckOrder] Contact lookup failed; recording without one', {
-          requestId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    // Without this the record takes the API user's default record type, which is
+    // how the first check order in this org came out as a Donation.
+    if (typeof crm.getRecordTypeIdByName === 'function') {
+      await attempt('Record type lookup', async () => {
+        const id = await crm.getRecordTypeIdByName(
+          'Transaction__c',
+          MANUAL_TRANSACTION_RECORD_TYPE
+        );
+        if (id) built.record.RecordTypeId = id;
+      });
     }
 
     if (built.campaign && typeof crm.findCampaignIdByName === 'function') {
-      try {
-        const campaignId = await crm.findCampaignIdByName(built.campaign);
-        if (campaignId) built.record.Campaign__c = campaignId;
-      } catch (error) {
-        logger.warn('[CheckOrder] Campaign lookup failed; recording without one', {
-          requestId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      await attempt('Campaign lookup', async () => {
+        const id = await crm.findCampaignIdByName(built.campaign);
+        if (id) built.record.Campaign__c = id;
+      });
     }
+
+    // A church or school ordering for its people. The account is who the order
+    // is really from, and it is what the office looks under when the check
+    // arrives on the organisation's own cheque book rather than the buyer's.
+    if (built.buyer.organization && typeof crm.findOrCreateAccount === 'function') {
+      await attempt('Account lookup', async () => {
+        const id = await crm.findOrCreateAccount(built.buyer.organization);
+        if (id) built.record.Account__c = id;
+      });
+    }
+
+    await attempt('Contact lookup', async () => {
+      let contactId: string | null = null;
+
+      // Matched on email alone, deliberately. `searchContact` ORs its criteria
+      // together, so handing it a name as well widens the match rather than
+      // narrowing it - a common surname would resolve this order to somebody
+      // else's contact record.
+      if (typeof crm.findContactIdByEmail === 'function') {
+        contactId = await crm.findContactIdByEmail(built.buyer.email);
+      }
+
+      // Salesforce will not take a Contact without a last name, and an order
+      // with no contact is better than a contact called "undefined".
+      if (!contactId && built.buyer.lastName && typeof crm.createContact === 'function') {
+        const created = await crm.createContact({
+          email: built.buyer.email,
+          firstName: built.buyer.firstName,
+          lastName: built.buyer.lastName,
+          phone: built.buyer.phone,
+          address: built.buyer.address,
+        });
+        contactId = (created && (created.Id || created.id)) || null;
+      }
+
+      if (contactId) built.record.Contact__c = contactId;
+    });
   })();
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -355,7 +449,7 @@ export const handleCheckOrder = async (
     };
   }
 
-  await linkRelatedRecords(crm, built, requestId);
+  await resolveRelatedRecords(crm, built, requestId);
 
   try {
     await crm.upsertManualTransaction(built.record);
@@ -377,6 +471,7 @@ export const handleCheckOrder = async (
     amountCents: built.amountCents,
     priceCheck: priceCheck.verdict,
     linkedContact: Boolean(built.record.Contact__c),
+    linkedAccount: Boolean(built.record.Account__c),
   });
 
   return {
