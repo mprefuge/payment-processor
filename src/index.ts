@@ -38,6 +38,7 @@ const loadHandler = (modulePath: string): any => {
 
 const healthCheck = loadHandler('./handlers/healthCheck');
 const processTransaction = loadHandler('./handlers/processTransaction');
+const processCheckOrder = loadHandler('./handlers/processCheckOrder');
 const stripeWebhook = loadHandler('./handlers/stripeWebhook');
 const payoutSyncTrigger = loadHandler('./handlers/payoutSyncTrigger');
 const stripeTrueUp = loadHandler('./handlers/stripeTrueUp');
@@ -224,6 +225,43 @@ const ProcessTransactionRequestSchema = z.union([
     })
     .passthrough(),
 ]);
+
+const CheckOrderRequestSchema = z
+  .object({
+    // Cents, integer, like `amount` everywhere else. The order total; there is
+    // no processing fee on a check, and none on a card order either - Refuge
+    // International absorbs it.
+    amount: AmountSchema,
+    // The record's only unique key. Stable across resubmissions of the same
+    // order, which is what makes a retry idempotent rather than a second row.
+    clientReferenceId: z.string().min(6),
+    email: z.string().email(),
+    firstname: z.string().optional(),
+    lastname: z.string().optional(),
+    phone: z.string().optional(),
+    category: z.string().optional(),
+    organization: z.string().optional(),
+    metadata: z.record(z.unknown()),
+  })
+  .passthrough();
+
+const checkOrderExample = {
+  amount: 40000,
+  clientReferenceId: 'HG-20260910-AB12CD',
+  email: 'buyer@example.org',
+  firstname: 'Pat',
+  lastname: 'Buyer',
+  phone: '5025550123',
+  category: 'Hospitality Guide',
+  organization: 'Grace Baptist Church',
+  metadata: {
+    product: 'hospitality-guide',
+    participants: 10,
+    discount_code: 'none',
+    discount_percent: 0,
+    order_summary: '10 participants x $40 - Hospitality Guide',
+  },
+};
 
 const StripeWebhookHeadersSchema = z
   .object({
@@ -2084,6 +2122,36 @@ registerFunction('stripeTrueUp', 'Stripe true-up support', {
         },
       },
     },
+  },
+});
+
+registerFunction('processCheckOrder', 'Record an order to be paid by check', {
+  handler: processCheckOrder,
+  description:
+    'Records a PENDING Transaction__c for an order the buyer is paying by check. No money moves and no Stripe session is created; a person reconciles the record when the check arrives. The amount is verified against the order price and a mismatch is refused outright - unlike the card path, this one enforces that check unconditionally.',
+  tags: ['Transactions'],
+  operationId: 'processCheckOrder',
+  methods: ['POST'],
+  ...withAnonymousAuth({}),
+  route: 'transaction/check',
+  request: {
+    body: {
+      content: {
+        'application/json': {
+          schema: CheckOrderRequestSchema,
+          example: checkOrderExample,
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: 'The order was recorded and is awaiting a check.' },
+    400: {
+      description:
+        'The request was incomplete, is not an order this service can price, or asked for an amount that does not match the order price.',
+    },
+    429: { description: 'Too many attempts from this client.' },
+    502: { description: 'The order could not be recorded. Nothing was written.' },
   },
 });
 
