@@ -68,10 +68,18 @@ export interface EnvConfig {
     defaultSalesItem: string;
     /**
      * QuickBooks Product/Service used for the donor-covered processing-fee line on a sales
-     * receipt. Kept separate from `defaultSalesItem` so the coverage can be reported against
-     * its own income account instead of being folded into gift revenue. Resolution is
-     * non-creating: if the item does not exist in the company file the fee line silently
-     * falls back to the revenue item (see postChargeAsSalesReceipt).
+     * receipt. Defaults to the `Stripe Fee` item, so the extra a donor chose to pay to cover
+     * processing is reported against processing rather than folded into gift revenue or the
+     * campaign's designation.
+     *
+     * Distinct from `feeItem` (`QBO_FEE_ITEM`, default `Stripe Fees`), which carries the
+     * NEGATIVE processor fee. Both may name the same item, in which case the coverage simply
+     * offsets the fee in that item's income account; the receipt still totals to the net.
+     *
+     * Resolution is non-creating and matches the item name exactly (case-insensitively): if
+     * the item does not exist in the company file the coverage line falls back to
+     * `defaultSalesItem`, and failing that shares the revenue item (see
+     * postChargeAsSalesReceipt).
      */
     feeCoverageItem: string;
     /**
@@ -292,7 +300,7 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
 
   const feeCoverageItem = resolveEnv('QBO_FEE_COVERAGE_ITEM', {
     fallbackNames: ['ACCOUNTING_FEE_COVERAGE_ITEM'],
-    defaultValue: 'Stripe Fee Coverage',
+    defaultValue: 'Stripe Fee',
   });
 
   const feeItem = resolveEnv('QBO_FEE_ITEM', {

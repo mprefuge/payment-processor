@@ -44,7 +44,7 @@ posted, so existing reporting is unchanged at cutover.
 | Line | Item | Qty | Rate | Amount |
 | --- | --- | ---: | ---: | ---: |
 | Donation | revenue item | 1 | 100.00 | +100.00 |
-| Processing Fee Coverage | fee-coverage item | 1 | 2.50 | +2.50 |
+| Processing Fee Coverage | **`Stripe Fee` item** (`QBO_FEE_COVERAGE_ITEM`) | 1 | 2.50 | +2.50 |
 | Stripe Fee | **`Stripe Fees` item** | 1 | −2.56 | **−2.56** |
 | **Total** | | | | **99.94** |
 
@@ -54,7 +54,18 @@ distinction is the entire design. `findFeeItemReference` refuses to use the item
 account is anything other than `QBO_ACCOUNT_FEES`, and refuses to create it if it is missing; in
 either case the posting degrades to Shape B.
 
-Net effect: revenue +102.50, fee expense 2.56, Stripe Clearing **99.94**. Identical to Shape B.
+The **coverage** line routes to `QBO_FEE_COVERAGE_ITEM` (default `Stripe Fee` — singular, not the
+plural `Stripe Fees` the negative line uses). Keeping the coverage on the Stripe fee
+Product/Service is what stops the $2.50 a donor added for processing from being reported as gift
+revenue against the campaign's designation. That lookup is non-creating and name-matched but, unlike
+the negative line's, **not** account-validated: it books wherever that item's own
+`IncomeAccountRef` points. If the item is missing the coverage falls back to
+`QBO_DEFAULT_SALES_ITEM`, and failing that shares the revenue item.
+
+Net effect on Stripe Clearing: **99.94**, whatever the coverage item is pointed at. Where the 2.50
+lands depends on that item: pointed at revenue it reads revenue +102.50 / fee expense 2.56; pointed
+at the fee account (the same place the negative line goes) it reads revenue +100.00 / fee expense
+0.06. Both reconcile to the same payout — pick the one the org reports on and configure it once.
 
 #### Shape B — paired fee journal entry (fallback)
 
@@ -67,7 +78,7 @@ posts when the `Stripe Fees` item does not exist, or exists but does not book to
 | Line | Amount |
 | --- | ---: |
 | Donation (revenue item) | +100.00 |
-| Processing Fee Coverage (fee-coverage item) | +2.50 |
+| Processing Fee Coverage (**`Stripe Fee` item**, `QBO_FEE_COVERAGE_ITEM`) | +2.50 |
 | **Total** | **102.50** |
 
 **JournalEntry `FEE-20240301-XXXXXXXX`**
@@ -77,7 +88,8 @@ posts when the `Stripe Fees` item does not exist, or exists but does not book to
 | Stripe Fees (expense) | 2.56 | |
 | Stripe Clearing | | 2.56 |
 
-Net effect: revenue +102.50, fee expense 2.56, Stripe Clearing 102.50 − 2.56 = **99.94**.
+Net effect: gross +102.50 split across the revenue and coverage items as above, fee expense
+2.56, Stripe Clearing 102.50 − 2.56 = **99.94**.
 
 Which shape a charge used is logged at info level on every post
 (`[QBO] Sales receipt carries the processor fee inline; no paired FEE- entry` for Shape A,

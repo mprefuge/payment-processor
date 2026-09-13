@@ -27,7 +27,7 @@ const baseEnv = {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
     defaultSalesItem: 'Stripe Transaction',
-    feeCoverageItem: 'Stripe Fee Coverage',
+    feeCoverageItem: 'Stripe Fee',
     // Explicitly EMPTY, not merely unset: with no QBO_FEE_ITEM configured the receipt can
     // never carry the negative processor-fee line, so every test below that does not opt in
     // exercises the paired FEE- journal-entry shape. The tests that do opt in set this
@@ -320,7 +320,7 @@ afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
   baseEnv.accounting.defaultSalesItem = 'Stripe Transaction';
-  baseEnv.accounting.feeCoverageItem = 'Stripe Fee Coverage';
+  baseEnv.accounting.feeCoverageItem = 'Stripe Fee';
   baseEnv.accounting.feeItem = '';
   baseEnv.accounting.companyTimeZone = 'America/Los_Angeles';
   baseEnv.accounting.refundAccount = {
@@ -882,7 +882,7 @@ describe('postChargeToQbo', () => {
         }, // Item lookup
         {
           QueryResponse: {
-            Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' },
+            Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee' },
           },
         }, // Fee-coverage item lookup (this gift carries cover fees)
         { QueryResponse: {} }, // Duplicate check for sales receipt
@@ -2764,7 +2764,7 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
     { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } }, // customer create
     { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Transaction' } } }, // revenue item lookup
     options.feeCoverageItem ?? {
-      QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' } },
+      QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee' } },
     }, // fee-coverage item lookup
   ];
 
@@ -3071,7 +3071,7 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
         { QueryResponse: {} }, // customer name lookup
         { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } },
         { QueryResponse: { Item: { Id: 'QBO_ITEM_DESIGNATED', Name: 'Designated Gift' } } },
-        { QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' } } },
+        { QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee' } } },
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-item-override' } },
         { QueryResponse: {} },
@@ -3197,12 +3197,10 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       expect(coverFeesLine.Description).toBe('Processing Fee Coverage');
       expect(coverFeesLine.SalesItemLineDetail.ItemRef).toMatchObject({
         value: 'QBO_ITEM_FEE_COVERAGE',
-        name: 'Stripe Fee Coverage',
+        name: 'Stripe Fee',
       });
       expect(
-        decodedQueries(requests).some((query) =>
-          /from Item where Name = 'Stripe Fee Coverage'/.test(query)
-        )
+        decodedQueries(requests).some((query) => /from Item where Name = 'Stripe Fee'/.test(query))
       ).toBe(true);
     });
 
@@ -3847,9 +3845,10 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
     });
 
     it('keeps the donor-covered fee line and the processor fee line as three distinct items', async () => {
-      // Coexistence: the donor's coverage is POSITIVE revenue on the coverage item; Stripe's
-      // cut is NEGATIVE expense on the fee item. Different items, opposite signs, both on the
-      // same receipt, which totals to net.
+      // Coexistence: the donor's coverage is a POSITIVE line on the coverage item ('Stripe
+      // Fee'); Stripe's cut is a NEGATIVE line on the fee item ('Stripe Fees'). Near-identical
+      // names, so this pins that they stay DIFFERENT items with opposite signs on the same
+      // receipt, which totals to net.
       enableFeeItem();
       const { fetcher, requests } = createFetchMock(
         ...salesReceiptCustomerMocks(),

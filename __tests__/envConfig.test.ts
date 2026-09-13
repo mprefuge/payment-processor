@@ -58,6 +58,12 @@ const MINIMAL_ENV: Record<string, string | undefined> = {
   QBO_ACCOUNT_FEES: undefined,
   QBO_ACCOUNT_REFUNDS: undefined,
   QBO_ACCOUNT_DISPUTE_LOSSES: undefined,
+  QBO_DEFAULT_SALES_ITEM: undefined,
+  ACCOUNTING_DEFAULT_SALES_ITEM: undefined,
+  QBO_FEE_COVERAGE_ITEM: undefined,
+  ACCOUNTING_FEE_COVERAGE_ITEM: undefined,
+  QBO_FEE_ITEM: undefined,
+  ACCOUNTING_STRIPE_FEE_ITEM: undefined,
 };
 
 describe('env config', () => {
@@ -105,6 +111,16 @@ describe('env config', () => {
       expect(env.quickBooks.accounts.fees).toBe('Stripe Fees');
       expect(env.quickBooks.accounts.refunds).toBe('Refunds');
       expect(env.quickBooks.accounts.disputeLosses).toBe('Dispute Losses');
+    });
+
+    it('defaults the product/service item names when not provided', async () => {
+      const { env } = await loadEnvWith(MINIMAL_ENV);
+      expect(env.accounting.defaultSalesItem).toBe('Stripe Transaction');
+      // The donor-covered processing fee rides the Stripe fee Product/Service, so the extra a
+      // donor added for processing is reported against processing rather than as gift revenue
+      // on the campaign's designation. Singular here; the negative fee line's item is plural.
+      expect(env.accounting.feeCoverageItem).toBe('Stripe Fee');
+      expect(env.accounting.feeItem).toBe('Stripe Fees');
     });
 
     it('uses fallback env vars for stripe secret', async () => {
