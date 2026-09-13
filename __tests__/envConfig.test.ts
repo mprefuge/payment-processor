@@ -116,11 +116,15 @@ describe('env config', () => {
     it('defaults the product/service item names when not provided', async () => {
       const { env } = await loadEnvWith(MINIMAL_ENV);
       expect(env.accounting.defaultSalesItem).toBe('Stripe Transaction');
-      // The donor-covered processing fee rides the Stripe fee Product/Service, so the extra a
-      // donor added for processing is reported against processing rather than as gift revenue
-      // on the campaign's designation. Singular here; the negative fee line's item is plural.
+      // The donor's coverage and the processor fee it covers ride the SAME product/service, so
+      // they net there instead of the top-up being reported as gift revenue on the campaign's
+      // designation. Pinned as one assertion because the equality is the design, not a
+      // coincidence of two independent defaults.
       expect(env.accounting.feeCoverageItem).toBe('Stripe Fee');
-      expect(env.accounting.feeItem).toBe('Stripe Fees');
+      expect(env.accounting.feeItem).toBe('Stripe Fee');
+      expect(env.accounting.feeCoverageItem).toBe(env.accounting.feeItem);
+      // The ITEM above is not the fee expense ACCOUNT below, despite the near-identical names.
+      expect(env.quickBooks.accounts.fees).toBe('Stripe Fees');
     });
 
     it('uses fallback env vars for stripe secret', async () => {

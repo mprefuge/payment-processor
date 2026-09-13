@@ -139,7 +139,7 @@ const inlineFeeReceiptFixture = ({
       Amount: -feeDollars,
       DetailType: 'SalesItemLineDetail',
       Description: 'Stripe Fee',
-      SalesItemLineDetail: { ItemRef: { value: '16', name: 'Stripe Fees' }, Qty: 1 },
+      SalesItemLineDetail: { ItemRef: { value: '16', name: 'Stripe Fee' }, Qty: 1 },
     },
     { Amount: grossDollars - feeDollars, DetailType: 'SubTotalLineDetail', SubTotalLineDetail: {} },
   ],

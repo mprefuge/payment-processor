@@ -41,7 +41,7 @@
     "ACCOUNTING_SYNC_ENABLED": "true",
     "ACCOUNTING_AUTOCREATE_ACCOUNTS": "false",
     "QBO_DEFAULT_SALES_ITEM": "Stripe Transaction|your_item_id",
-    "QBO_FEE_ITEM": "Stripe Fees",
+    "QBO_FEE_ITEM": "Stripe Fee",
     "QBO_FEE_COVERAGE_ITEM": "Stripe Fee",
     "IDEMPOTENCY_TABLE_NAME": "IdempotencyState",
     "TRANSACTION_IDEMPOTENCY_TABLE": "TransactionIdempotency",

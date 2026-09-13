@@ -2516,7 +2516,10 @@ export const buildSalesReceipt = ({
     }
 
     // The coverage gets its own Product/Service when the caller resolved one, so the extra
-    // the donor chose to pay does not land in the same income account as the gift itself.
+    // the donor chose to pay does not land in the same income account as the gift itself. By
+    // default that is the SAME item the negative fee line below uses (QBO_FEE_COVERAGE_ITEM and
+    // QBO_FEE_ITEM both default to "Stripe Fee"), so the two net against each other in the fee
+    // account; nothing here requires them to differ.
     // Callers resolve a neutral default before giving up (see postChargeAsSalesReceipt); this
     // last-resort share of the revenue item only keeps the receipt postable when even that
     // could not be resolved.
@@ -3601,7 +3604,15 @@ const findCoverFeesItemReference = async (
 
 /**
  * Non-creating, ACCOUNT-VALIDATED lookup of the dedicated Product/Service that carries the
- * negative processor-fee line on a sales receipt (QBO_FEE_ITEM, default "Stripe Fees").
+ * negative processor-fee line on a sales receipt (QBO_FEE_ITEM, default "Stripe Fee" — the
+ * ITEM; the fee expense ACCOUNT it must point at, QBO_ACCOUNT_FEES, is "Stripe Fees").
+ *
+ * QBO_FEE_COVERAGE_ITEM defaults to this same item, so the donor-covered fee nets against
+ * the processor fee here rather than being booked as gift revenue. That coverage lookup
+ * (`findCoverFeesItemReference`) does NOT share guard 2 below: if the item resolves but
+ * points at the wrong income account, the fee line is dropped for the FEE- journal entry
+ * while the coverage still rides the item. The receipt totals are unaffected, but the
+ * coverage is misfiled — which is why the warning below names both accounts.
  *
  * Two guards, both load-bearing:
  *

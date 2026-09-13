@@ -111,13 +111,13 @@ const createCapturingQbo = () => {
         // The dedicated processor-fee item, answered only when it is asked for by name and
         // always pointed at the fee EXPENSE account — the only configuration under which
         // qboSvc will put a negative fee line on a receipt.
-        if (/Name = 'Stripe Fees'/.test(decoded)) {
+        if (/Name = 'Stripe Fee'/.test(decoded)) {
           return json({
             QueryResponse: {
               Item: [
                 {
                   Id: 'ITEM_STRIPE_FEE',
-                  Name: 'Stripe Fees',
+                  Name: 'Stripe Fee',
                   IncomeAccountRef: { value: 'QBO_ACCOUNT_FEES', name: 'Stripe Fees' },
                 },
               ],
@@ -316,7 +316,7 @@ describe('payload contracts — QuickBooks outbound', () => {
    * POSITIVE overall. A receipt that totalled to zero or below would be nonsense.
    */
   it('sales receipt carrying a negative processor-fee line is well formed and still nets positive', async () => {
-    const svc = await importQboSvc('sales-receipt', { feeItem: 'Stripe Fees' });
+    const svc = await importQboSvc('sales-receipt', { feeItem: 'Stripe Fee' });
     const { posted, options } = createCapturingQbo();
 
     await svc.postChargeToQbo({

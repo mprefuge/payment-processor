@@ -31,8 +31,13 @@ balance transaction (`src/stripe/handlers/paymentIntents.ts:706-708`, guarded at
 
 The processor fee is booked in exactly one of two mutually exclusive shapes. Which one is decided
 per charge by a single non-creating lookup of the `QBO_FEE_ITEM` product/service (default
-`Stripe Fees`), in `postChargeAsSalesReceipt` — the same resolved-or-null value gates both
+`Stripe Fee`), in `postChargeAsSalesReceipt` — the same resolved-or-null value gates both
 branches, so the fee can never be booked twice or dropped.
+
+`QBO_FEE_COVERAGE_ITEM` defaults to that **same `Stripe Fee` item**, so the donor's coverage and
+the fee it covers net against each other on one product/service. Both settings exist separately
+only so the two lines can be split apart again without a code change. Mind the naming: the ITEM is
+`Stripe Fee`; the fee expense ACCOUNT it must point at (`QBO_ACCOUNT_FEES`) is `Stripe Fees`.
 
 #### Shape A — fee on the receipt (when `QBO_FEE_ITEM` resolves)
 
@@ -45,32 +50,40 @@ posted, so existing reporting is unchanged at cutover.
 | --- | --- | ---: | ---: | ---: |
 | Donation | revenue item | 1 | 100.00 | +100.00 |
 | Processing Fee Coverage | **`Stripe Fee` item** (`QBO_FEE_COVERAGE_ITEM`) | 1 | 2.50 | +2.50 |
-| Stripe Fee | **`Stripe Fees` item** | 1 | −2.56 | **−2.56** |
+| Stripe Fee | **`Stripe Fee` item** (`QBO_FEE_ITEM`) | 1 | −2.56 | **−2.56** |
 | **Total** | | | | **99.94** |
 
-The negative line carries **no `ItemAccountRef`**. It reaches the fee expense account because the
-`Stripe Fees` **item's own `IncomeAccountRef`** points there — see the section below for why that
-distinction is the entire design. `findFeeItemReference` refuses to use the item if its income
-account is anything other than `QBO_ACCOUNT_FEES`, and refuses to create it if it is missing; in
-either case the posting degrades to Shape B.
+Two lines, same item, opposite signs. The negative line carries **no `ItemAccountRef`**; it reaches
+the fee expense account because the `Stripe Fee` **item's own `IncomeAccountRef`** points there —
+see the section below for why that distinction is the entire design. `findFeeItemReference` refuses
+to use the item if its income account is anything other than `QBO_ACCOUNT_FEES`, and refuses to
+create it if it is missing; in either case the posting degrades to Shape B.
 
-The **coverage** line routes to `QBO_FEE_COVERAGE_ITEM` (default `Stripe Fee` — singular, not the
-plural `Stripe Fees` the negative line uses). Keeping the coverage on the Stripe fee
-Product/Service is what stops the $2.50 a donor added for processing from being reported as gift
-revenue against the campaign's designation. That lookup is non-creating and name-matched but, unlike
-the negative line's, **not** account-validated: it books wherever that item's own
-`IncomeAccountRef` points. If the item is missing the coverage falls back to
-`QBO_DEFAULT_SALES_ITEM`, and failing that shares the revenue item.
+The coverage line rides the same item, which is what stops the $2.50 a donor added for processing
+from being reported as gift revenue against the campaign's designation. Both amounts land in the
+fee account and net there.
 
-Net effect on Stripe Clearing: **99.94**, whatever the coverage item is pointed at. Where the 2.50
-lands depends on that item: pointed at revenue it reads revenue +102.50 / fee expense 2.56; pointed
-at the fee account (the same place the negative line goes) it reads revenue +100.00 / fee expense
-0.06. Both reconcile to the same payout — pick the one the org reports on and configure it once.
+Net effect: revenue **+100.00** (the gift alone), fee expense **2.56 − 2.50 = 0.06** (what the org
+actually bore), Stripe Clearing **99.94**. Item lookups are cached by name, so the second
+resolution costs no extra QuickBooks call.
+
+**The one asymmetry worth knowing.** `findCoverFeesItemReference` is non-creating and name-matched
+but, unlike the fee lookup, **not** income-account validated — the coverage books wherever the item
+points. With both settings on one item a single misconfiguration therefore splits the outcome
+rather than degrading cleanly, and only one of the two cases is clean:
+
+- **Item missing.** Both lookups miss. The fee degrades to Shape B and the coverage falls back to
+  `QBO_DEFAULT_SALES_ITEM` (then to the revenue item). Consistent, and the totals still reconcile.
+- **Item exists but points at the wrong income account.** The fee lookup rejects it and degrades to
+  Shape B; the coverage lookup accepts it and books the 2.50 into that wrong account. Stripe
+  Clearing still nets to 99.94, so reconciliation will not catch it — but the 2.50 is misfiled. The
+  warning `Fee product/service does not post to the configured fee account` names this case; treat
+  it as a configuration bug to fix, not noise.
 
 #### Shape B — paired fee journal entry (fallback)
 
 Two documents, DocNumbers deliberately paired on the same date and charge-id tail. This is what
-posts when the `Stripe Fees` item does not exist, or exists but does not book to
+posts when the `Stripe Fee` item does not exist, or exists but does not book to
 `QBO_ACCOUNT_FEES`.
 
 **SalesReceipt `CHG-20240301-XXXXXXXX`** — deposits to Stripe Clearing
@@ -78,7 +91,7 @@ posts when the `Stripe Fees` item does not exist, or exists but does not book to
 | Line | Amount |
 | --- | ---: |
 | Donation (revenue item) | +100.00 |
-| Processing Fee Coverage (**`Stripe Fee` item**, `QBO_FEE_COVERAGE_ITEM`) | +2.50 |
+| Processing Fee Coverage (`QBO_FEE_COVERAGE_ITEM`, or its fallback — see the asymmetry above) | +2.50 |
 | **Total** | **102.50** |
 
 **JournalEntry `FEE-20240301-XXXXXXXX`**
@@ -89,7 +102,8 @@ posts when the `Stripe Fees` item does not exist, or exists but does not book to
 | Stripe Clearing | | 2.56 |
 
 Net effect: gross +102.50 split across the revenue and coverage items as above, fee expense
-2.56, Stripe Clearing 102.50 − 2.56 = **99.94**.
+2.56, Stripe Clearing 102.50 − 2.56 = **99.94**. (Shape B is reached because the fee item did not
+resolve, so the coverage is on its fallback item rather than netting against the fee.)
 
 Which shape a charge used is logged at info level on every post
 (`[QBO] Sales receipt carries the processor fee inline; no paired FEE- entry` for Shape A,
@@ -132,9 +146,11 @@ that and falls back to Shape B rather than guessing:
 - its `IncomeAccountRef.value` must equal the resolved `QBO_ACCOUNT_FEES` id, or the lookup logs a
   warning naming both accounts and returns nothing.
 
-**Operationally:** a QuickBooks item named `Stripe Fees` (or whatever `QBO_FEE_ITEM` is set to)
+**Operationally:** a QuickBooks item named `Stripe Fee` (or whatever `QBO_FEE_ITEM` is set to)
 pointed at the Stripe fee expense account must exist in the company file, or every charge quietly
-posts in Shape B — correct books, but the pre-cutover document shape.
+posts in Shape B — correct books, but the pre-cutover document shape. Since `QBO_FEE_COVERAGE_ITEM`
+defaults to that same item, this one item carries both the processor's cut and the donor coverage
+that offsets it; keep it dedicated to that and nothing else.
 
 The fee is disclosed to the donor via the receipt's `CustomerMemo` under both shapes, which
 continues to state the original charge amount, the Stripe fees and the net amount received.

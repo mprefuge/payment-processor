@@ -68,27 +68,37 @@ export interface EnvConfig {
     defaultSalesItem: string;
     /**
      * QuickBooks Product/Service used for the donor-covered processing-fee line on a sales
-     * receipt. Defaults to the `Stripe Fee` item, so the extra a donor chose to pay to cover
-     * processing is reported against processing rather than folded into gift revenue or the
-     * campaign's designation.
+     * receipt. Defaults to the `Stripe Fee` item — the SAME item `feeItem` defaults to, which
+     * is the point: the positive coverage and the negative processor fee land on one
+     * Product/Service and net against each other there, instead of the donor's fee top-up
+     * being reported as gift revenue on the campaign's designation.
      *
-     * Distinct from `feeItem` (`QBO_FEE_ITEM`, default `Stripe Fees`), which carries the
-     * NEGATIVE processor fee. Both may name the same item, in which case the coverage simply
-     * offsets the fee in that item's income account; the receipt still totals to the net.
+     * On a $100 gift with $2.50 covered and a $2.56 Stripe fee that reads revenue +100.00 and
+     * fee expense 0.06, and the receipt still totals to the 99.94 Stripe deposited.
+     *
+     * Kept as its own setting rather than folded into `feeItem` so the two lines can be split
+     * back onto separate items without a code change.
      *
      * Resolution is non-creating and matches the item name exactly (case-insensitively): if
      * the item does not exist in the company file the coverage line falls back to
      * `defaultSalesItem`, and failing that shares the revenue item (see
-     * postChargeAsSalesReceipt).
+     * postChargeAsSalesReceipt). Note this lookup is NOT income-account validated the way
+     * `feeItem`'s is — the coverage books wherever the item points.
      */
     feeCoverageItem: string;
     /**
      * QuickBooks Product/Service used for the NEGATIVE processor-fee line on a sales receipt,
      * so the receipt itself totals to the net Stripe deposited (the shape Acodei posted).
      *
-     * This item must be dedicated to Stripe fees and its OWN `IncomeAccountRef` must point at
-     * the fee expense account (`QBO_ACCOUNT_FEES`): QuickBooks routes a sales line to the
-     * income account configured on the Item and ignores a line-level `ItemAccountRef`.
+     * Defaults to `Stripe Fee`, the same item `feeCoverageItem` defaults to, so a donor's
+     * coverage nets against the fee it covers on one Product/Service. Note the name: this is
+     * the ITEM, and it is no longer the same string as `accounts.fees` (`QBO_ACCOUNT_FEES`,
+     * the fee expense ACCOUNT, still `Stripe Fees`).
+     *
+     * This item must be dedicated to Stripe fees — the processor's cut and the donor coverage
+     * that offsets it, nothing else — and its OWN `IncomeAccountRef` must point at the fee
+     * expense account (`QBO_ACCOUNT_FEES`): QuickBooks routes a sales line to the income
+     * account configured on the Item and ignores a line-level `ItemAccountRef`.
      * Resolution is non-creating AND account-validated — if the item is missing, or its income
      * account is not the fee account, no fee line is emitted and the fee is posted as the
      * paired `FEE-` journal entry instead (see postChargeAsSalesReceipt).
@@ -305,7 +315,10 @@ function loadAccounting(ctx: LoadContext): EnvConfig['accounting'] {
 
   const feeItem = resolveEnv('QBO_FEE_ITEM', {
     fallbackNames: ['ACCOUNTING_STRIPE_FEE_ITEM'],
-    defaultValue: 'Stripe Fees',
+    // Same item as `feeCoverageItem` by default — see the field comments on both. Note this
+    // is the Product/Service, not `accounts.fees` (the fee EXPENSE ACCOUNT, still 'Stripe
+    // Fees'); the item's own IncomeAccountRef has to point at that account.
+    defaultValue: 'Stripe Fee',
   });
 
   const companyTimeZone = resolveEnv('QBO_COMPANY_TIMEZONE', {
