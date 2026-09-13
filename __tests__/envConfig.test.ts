@@ -58,6 +58,12 @@ const MINIMAL_ENV: Record<string, string | undefined> = {
   QBO_ACCOUNT_FEES: undefined,
   QBO_ACCOUNT_REFUNDS: undefined,
   QBO_ACCOUNT_DISPUTE_LOSSES: undefined,
+  QBO_DEFAULT_SALES_ITEM: undefined,
+  ACCOUNTING_DEFAULT_SALES_ITEM: undefined,
+  QBO_FEE_COVERAGE_ITEM: undefined,
+  ACCOUNTING_FEE_COVERAGE_ITEM: undefined,
+  QBO_FEE_ITEM: undefined,
+  ACCOUNTING_STRIPE_FEE_ITEM: undefined,
 };
 
 describe('env config', () => {
@@ -105,6 +111,20 @@ describe('env config', () => {
       expect(env.quickBooks.accounts.fees).toBe('Stripe Fees');
       expect(env.quickBooks.accounts.refunds).toBe('Refunds');
       expect(env.quickBooks.accounts.disputeLosses).toBe('Dispute Losses');
+    });
+
+    it('defaults the product/service item names when not provided', async () => {
+      const { env } = await loadEnvWith(MINIMAL_ENV);
+      expect(env.accounting.defaultSalesItem).toBe('Stripe Transaction');
+      // The donor's coverage and the processor fee it covers ride the SAME product/service, so
+      // they net there instead of the top-up being reported as gift revenue on the campaign's
+      // designation. Pinned as one assertion because the equality is the design, not a
+      // coincidence of two independent defaults.
+      expect(env.accounting.feeCoverageItem).toBe('Stripe Fee');
+      expect(env.accounting.feeItem).toBe('Stripe Fee');
+      expect(env.accounting.feeCoverageItem).toBe(env.accounting.feeItem);
+      // The ITEM above is not the fee expense ACCOUNT below, despite the near-identical names.
+      expect(env.quickBooks.accounts.fees).toBe('Stripe Fees');
     });
 
     it('uses fallback env vars for stripe secret', async () => {

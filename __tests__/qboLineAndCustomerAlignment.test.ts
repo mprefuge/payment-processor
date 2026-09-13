@@ -24,7 +24,7 @@ const baseEnv = {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
     defaultSalesItem: 'Stripe Transaction',
-    feeCoverageItem: 'Stripe Fee Coverage',
+    feeCoverageItem: 'Stripe Fee',
   },
 };
 

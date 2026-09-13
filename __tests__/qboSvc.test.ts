@@ -27,7 +27,7 @@ const baseEnv = {
     postingStrategy: 'sales-receipt',
     syncEnabled: true,
     defaultSalesItem: 'Stripe Transaction',
-    feeCoverageItem: 'Stripe Fee Coverage',
+    feeCoverageItem: 'Stripe Fee',
     // Explicitly EMPTY, not merely unset: with no QBO_FEE_ITEM configured the receipt can
     // never carry the negative processor-fee line, so every test below that does not opt in
     // exercises the paired FEE- journal-entry shape. The tests that do opt in set this
@@ -320,7 +320,7 @@ afterEach(() => {
   vi.clearAllMocks();
   baseEnv.accounting.postingStrategy = 'sales-receipt';
   baseEnv.accounting.defaultSalesItem = 'Stripe Transaction';
-  baseEnv.accounting.feeCoverageItem = 'Stripe Fee Coverage';
+  baseEnv.accounting.feeCoverageItem = 'Stripe Fee';
   baseEnv.accounting.feeItem = '';
   baseEnv.accounting.companyTimeZone = 'America/Los_Angeles';
   baseEnv.accounting.refundAccount = {
@@ -882,7 +882,7 @@ describe('postChargeToQbo', () => {
         }, // Item lookup
         {
           QueryResponse: {
-            Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' },
+            Item: { Id: 'QBO_ITEM_STRIPE_FEE', Name: 'Stripe Fee' },
           },
         }, // Fee-coverage item lookup (this gift carries cover fees)
         { QueryResponse: {} }, // Duplicate check for sales receipt
@@ -2751,21 +2751,37 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
   });
 
   /**
+   * QBO_FEE_ITEM and QBO_FEE_COVERAGE_ITEM both default to the SAME `Stripe Fee`
+   * product/service, so a covered gift issues ONE item query for it, not two: the coverage
+   * lookup runs first and populates qboSvc's by-name item cache, and the fee lookup that
+   * follows is a cache hit. Both receipt lines carry this one item with opposite signs, and
+   * they net in its income account.
+   *
+   * The `IncomeAccountRef` is load-bearing for the fee half — `findFeeItemReference` reads it
+   * off the cached record and drops the negative line unless it is `QBO_ACCOUNT_FEES`. Note
+   * that is the fee expense ACCOUNT, still named `Stripe Fees`; the ITEM is `Stripe Fee`.
+   */
+  const STRIPE_FEE_ITEM_RECORD = {
+    Id: 'QBO_ITEM_STRIPE_FEE',
+    Name: 'Stripe Fee',
+    Type: 'Service',
+    IncomeAccountRef: { value: 'QBO_ACCOUNT_FEES', name: 'Stripe Fees' },
+  };
+
+  /**
    * The canned responses every sales-receipt posting consumes before it reaches the receipt
    * itself. `createFetchMock` is queue-ordered and ignores the URL, so the order here is the
    * order postChargeAsSalesReceipt issues the calls in.
    *
-   * `feeCoverageItem` is the fee-coverage Product/Service lookup, which only happens when the
-   * gift carries cover fees. Pass `{ QueryResponse: {} }` for the not-yet-created case.
+   * `feeCoverageItem` is the single `Stripe Fee` item lookup, which only happens when the gift
+   * carries cover fees. Pass `{ QueryResponse: {} }` for the not-yet-created case.
    */
   const salesReceiptCustomerMocks = (options: { feeCoverageItem?: unknown } = {}) => [
     { QueryResponse: {} }, // customer email lookup
     { QueryResponse: {} }, // customer name lookup
     { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } }, // customer create
     { QueryResponse: { Item: { Id: 'QBO_ITEM_REVENUE', Name: 'Stripe Transaction' } } }, // revenue item lookup
-    options.feeCoverageItem ?? {
-      QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' } },
-    }, // fee-coverage item lookup
+    options.feeCoverageItem ?? { QueryResponse: { Item: STRIPE_FEE_ITEM_RECORD } }, // 'Stripe Fee' item lookup
   ];
 
   const postedBody = (requests: RequestRecord[], path: string) => {
@@ -3071,7 +3087,7 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
         { QueryResponse: {} }, // customer name lookup
         { Customer: { Id: 'cust-cf', DisplayName: 'Donor Example' } },
         { QueryResponse: { Item: { Id: 'QBO_ITEM_DESIGNATED', Name: 'Designated Gift' } } },
-        { QueryResponse: { Item: { Id: 'QBO_ITEM_FEE_COVERAGE', Name: 'Stripe Fee Coverage' } } },
+        { QueryResponse: { Item: { Id: 'QBO_ITEM_STRIPE_FEE', Name: 'Stripe Fee' } } },
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-item-override' } },
         { QueryResponse: {} },
@@ -3196,13 +3212,11 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       });
       expect(coverFeesLine.Description).toBe('Processing Fee Coverage');
       expect(coverFeesLine.SalesItemLineDetail.ItemRef).toMatchObject({
-        value: 'QBO_ITEM_FEE_COVERAGE',
-        name: 'Stripe Fee Coverage',
+        value: 'QBO_ITEM_STRIPE_FEE',
+        name: 'Stripe Fee',
       });
       expect(
-        decodedQueries(requests).some((query) =>
-          /from Item where Name = 'Stripe Fee Coverage'/.test(query)
-        )
+        decodedQueries(requests).some((query) => /from Item where Name = 'Stripe Fee'/.test(query))
       ).toBe(true);
     });
 
@@ -3540,37 +3554,33 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
    * is booked exactly once per charge under every configuration.
    */
   describe('processor fee on the receipt (QBO_FEE_ITEM)', () => {
-    const FEE_ITEM_NAME = 'Stripe Fees';
+    // The ITEM, which is also what QBO_FEE_COVERAGE_ITEM defaults to. Not to be confused with
+    // the fee expense ACCOUNT (QBO_ACCOUNT_FEES), which is still named 'Stripe Fees'.
+    const FEE_ITEM_NAME = 'Stripe Fee';
 
-    /** The fee item as QuickBooks returns it when it is set up correctly. */
-    const feeItemFound = {
-      QueryResponse: {
-        Item: {
-          Id: 'QBO_ITEM_STRIPE_FEE',
-          Name: 'Stripe Fees',
-          Type: 'Service',
-          // The whole design hinges on THIS: the item's own income account is the fee
-          // EXPENSE account, which is what routes the negative line to the P&L. A
-          // line-level ItemAccountRef would be ignored by QuickBooks.
-          IncomeAccountRef: { value: 'QBO_ACCOUNT_FEES', name: 'Stripe Fees' },
-        },
-      },
-    };
+    // Every gift in this block carries cover fees, so the COVERAGE lookup queries the
+    // 'Stripe Fee' name first and caches the record (STRIPE_FEE_ITEM_RECORD, served by
+    // `salesReceiptCustomerMocks`); the fee lookup that follows is a cache hit and reads the
+    // IncomeAccountRef straight off it. So the correctly-configured case needs no second item
+    // response. A MISS is not cached, though, so when the item is absent BOTH lookups query.
 
     /** Same item, but pointed at revenue — the contra-revenue trap. */
     const feeItemWrongAccount = {
       QueryResponse: {
         Item: {
           Id: 'QBO_ITEM_STRIPE_FEE',
-          Name: 'Stripe Fees',
+          Name: 'Stripe Fee',
           IncomeAccountRef: { value: 'QBO_ACCOUNT_REVENUE', name: 'Revenue' },
         },
       },
     };
 
+    // Shipped config: the fee line and the donor's coverage on ONE product/service.
+    // `feeCoverageItem` is left at its default, which is this same name.
     const enableFeeItem = () => {
       baseEnv.accounting.postingStrategy = 'sales-receipt';
       baseEnv.accounting.feeItem = FEE_ITEM_NAME;
+      expect(baseEnv.accounting.feeCoverageItem).toBe(FEE_ITEM_NAME);
     };
 
     const postedDocNumbers = (requests: RequestRecord[]): string[] =>
@@ -3614,8 +3624,8 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
     it('appends a negative fee line on the dedicated item and posts NO paired FEE- entry', async () => {
       enableFeeItem();
       const { fetcher, requests } = createFetchMock(
+        // One 'Stripe Fee' query serves both lines; the fee lookup hits the item cache.
         ...salesReceiptCustomerMocks(),
-        feeItemFound, // fee item lookup
         { QueryResponse: {} }, // receipt duplicate check
         { SalesReceipt: { Id: 'sr-fee-line' } }
         // Deliberately NO further mocks: a FEE- journal entry would throw
@@ -3640,7 +3650,7 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       expect(feeLine.DetailType).toBe('SalesItemLineDetail');
       // Acodei's row: Qty 1, Rate -2.56, Amount -2.56, on its own dedicated item.
       expect(feeLine.SalesItemLineDetail).toMatchObject({
-        ItemRef: { value: 'QBO_ITEM_STRIPE_FEE', name: 'Stripe Fees' },
+        ItemRef: { value: 'QBO_ITEM_STRIPE_FEE', name: 'Stripe Fee' },
         Qty: 1,
         UnitPrice: -2.56,
       });
@@ -3673,7 +3683,7 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       // customer queries broke, and IncomeAccountRef is only visible this way.
       const itemQuery = requests
         .map((request) => decodeURIComponent(request.url))
-        .find((url) => /from Item where Name = 'Stripe Fees'/.test(url));
+        .find((url) => /from Item where Name = 'Stripe Fee'/.test(url));
       expect(itemQuery).toBeDefined();
       expect(itemQuery).toContain('select * from Item');
     });
@@ -3688,8 +3698,10 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
         withCorrelationId: (_id: string, fn: () => unknown) => fn(),
       }));
       const { fetcher, requests } = createFetchMock(
-        ...salesReceiptCustomerMocks(),
-        { QueryResponse: {} }, // fee item lookup: not in the company file
+        // Absent from the company file, so both lookups of the name miss: a miss is not
+        // cached, so the coverage lookup does not spare the fee lookup its own query.
+        ...salesReceiptCustomerMocks({ feeCoverageItem: { QueryResponse: {} } }),
+        { QueryResponse: {} }, // fee item lookup: not in the company file either
         { QueryResponse: {} }, // receipt duplicate check
         { SalesReceipt: { Id: 'sr-no-fee-item' } },
         { QueryResponse: {} }, // fee JE duplicate check
@@ -3752,8 +3764,9 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
         withCorrelationId: (_id: string, fn: () => unknown) => fn(),
       }));
       const { fetcher, requests } = createFetchMock(
-        ...salesReceiptCustomerMocks(),
-        feeItemWrongAccount, // fee item lookup: exists, wrong income account
+        // The single 'Stripe Fee' query returns the mis-pointed item, so the coverage lookup
+        // caches it and the fee lookup rejects it off that same cached record.
+        ...salesReceiptCustomerMocks({ feeCoverageItem: feeItemWrongAccount }),
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-wrong-account' } },
         { QueryResponse: {} },
@@ -3786,7 +3799,6 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       enableFeeItem();
       const withItem = createFetchMock(
         ...salesReceiptCustomerMocks(),
-        feeItemFound,
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-once-a' } }
       );
@@ -3795,8 +3807,8 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
 
       enableFeeItem();
       const withoutItem = createFetchMock(
-        ...salesReceiptCustomerMocks(),
-        { QueryResponse: {} }, // fee item lookup misses
+        ...salesReceiptCustomerMocks({ feeCoverageItem: { QueryResponse: {} } }),
+        { QueryResponse: {} }, // fee item lookup misses too
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-once-b' } },
         { QueryResponse: {} },
@@ -3825,8 +3837,9 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
     it('posts neither a fee line nor a FEE- entry when the charge carries no processor fee', async () => {
       enableFeeItem();
       const { fetcher, requests } = createFetchMock(
+        // The queue is exact. The coverage lookup consumes the one 'Stripe Fee' response; any
+        // further lookup would fall off the end of the queue and throw.
         ...salesReceiptCustomerMocks(),
-        // No fee item lookup mock at all: with fee 0 the lookup must never be issued.
         { QueryResponse: {} }, // receipt duplicate check
         { SalesReceipt: { Id: 'sr-no-fee' } }
       );
@@ -3839,21 +3852,23 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       expect(documentPosts(requests)).toHaveLength(1);
       expect(postedDocNumbers(requests).some((doc) => doc.startsWith('FEE-'))).toBe(false);
       expect(feeExpenseDebits(requests)).toBe(0);
+      // Exactly one — the coverage lookup. Since the fee item shares the name, absence of a
+      // fee lookup cannot be proved by name; what it CAN prove is that nothing queried twice.
       expect(
         requests
           .map((request) => decodeURIComponent(request.url))
-          .some((url) => /from Item where Name = 'Stripe Fees'/.test(url))
-      ).toBe(false);
+          .filter((url) => /from Item where Name = 'Stripe Fee'/.test(url))
+      ).toHaveLength(1);
     });
 
-    it('keeps the donor-covered fee line and the processor fee line as three distinct items', async () => {
-      // Coexistence: the donor's coverage is POSITIVE revenue on the coverage item; Stripe's
-      // cut is NEGATIVE expense on the fee item. Different items, opposite signs, both on the
-      // same receipt, which totals to net.
+    it('nets the donor coverage against the processor fee on ONE Stripe Fee item', async () => {
+      // The shipped shape: QBO_FEE_COVERAGE_ITEM and QBO_FEE_ITEM both name 'Stripe Fee', so
+      // the gift keeps its own revenue item while the donor's coverage and Stripe's cut ride
+      // a single fee item with opposite signs. That is what keeps the $2.50 the donor added
+      // for processing out of the campaign's designation, and it nets in the fee account.
       enableFeeItem();
       const { fetcher, requests } = createFetchMock(
         ...salesReceiptCustomerMocks(),
-        feeItemFound,
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-three-lines' } }
       );
@@ -3864,12 +3879,30 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       const receipt = postedBody(requests, '/salesreceipt');
       expect(receipt.Line).toHaveLength(3);
       const itemIds = receipt.Line.map((line: any) => line.SalesItemLineDetail.ItemRef.value);
-      expect(itemIds).toEqual(['QBO_ITEM_REVENUE', 'QBO_ITEM_FEE_COVERAGE', 'QBO_ITEM_STRIPE_FEE']);
-      expect(new Set(itemIds).size).toBe(3);
+      expect(itemIds).toEqual(['QBO_ITEM_REVENUE', 'QBO_ITEM_STRIPE_FEE', 'QBO_ITEM_STRIPE_FEE']);
+      // The gift is NOT on the fee item, and the two fee lines are the same item.
+      expect(itemIds[0]).not.toBe(itemIds[1]);
+      expect(itemIds[1]).toBe(itemIds[2]);
       expect(receipt.Line.map((line: any) => Math.sign(line.Amount))).toEqual([1, 1, -1]);
+
+      // What the fee item is left carrying: the fee, less the coverage the donor paid for it.
+      const feeItemNet = receipt.Line.filter(
+        (line: any) => line.SalesItemLineDetail.ItemRef.value === 'QBO_ITEM_STRIPE_FEE'
+      ).reduce((sum: number, line: any) => sum + line.Amount, 0);
+      expect(Number(feeItemNet.toFixed(2))).toBe(
+        Number(((COVER_FEES_CENTS - STRIPE_FEE_CENTS) / 100).toFixed(2))
+      );
+
       expect(
         Number(receipt.Line.reduce((sum: number, line: any) => sum + line.Amount, 0).toFixed(2))
       ).toBe(NET_PAYOUT);
+
+      // One item, so one query for it — the fee lookup rides the coverage lookup's cache.
+      expect(
+        requests
+          .map((request) => decodeURIComponent(request.url))
+          .filter((url) => /from Item where Name = 'Stripe Fee'/.test(url))
+      ).toHaveLength(1);
     });
 
     /**
@@ -3886,7 +3919,6 @@ describe('posting strategies: $100 cover-fee gift, end to end', () => {
       enableFeeItem();
       const receiptMock = createFetchMock(
         ...salesReceiptCustomerMocks(),
-        feeItemFound,
         { QueryResponse: {} },
         { SalesReceipt: { Id: 'sr-reversed' } }
       );
